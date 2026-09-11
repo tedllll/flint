@@ -169,6 +169,23 @@ two parts that are easy to get wrong: SSE frames split across network chunks
 (handled with a carry-over buffer) and tool-call arguments arriving as string
 fragments that must be concatenated by index before they are valid JSON.
 
+### The bottom strip
+
+The input row is pinned to the last line of the screen, and the three rows above
+it are the answer strip, where a streamed answer is drawn. Above that, output is
+ordinary transcript that scrolls.
+
+Inserting a transcript line means narrowing the terminal's scroll region to the
+rows above the strip and writing at the bottom of it, so the newline scrolls the
+transcript up and the strip is never part of the scroll. That is Codex's inline
+viewport, and it is why the strip cannot disturb the transcript and the
+transcript cannot disturb the strip ([codex-rs/tui](https://github.com/openai/codex/tree/main/codex-rs/tui)
+uses the same idea through `insert_history_lines`).
+
+The strip is a fixed slice, so an answer taller than it is drawn
+bottom-anchored and its earlier lines are handed to the transcript in order as
+they leave the top. Nothing is lost, and the strip never moves.
+
 ### Testing the non-terminal paths
 
 The guarantee that pipes stay escape-free is easy to break and impossible to
@@ -182,6 +199,33 @@ node scripts/pipe-check.js ./flint cmds.txt out.bin  # a piped REPL session
 
 These capture raw bytes and count escape sequences; `scripts/interactive-check.js`
 drives a real Windows pseudo-console for the path that needs one.
+
+### Testing the bottom strip
+
+The strip's layout is a deterministic question -- escape sequences either put
+text where the user can see it or they do not -- so it is checked by replaying
+bytes through a screen model rather than by watching a terminal:
+
+```bash
+cargo test --test term_capture        # capture the real interactive byte stream
+node scripts/term-layout-test.js      # replay it, plus hand-written scenarios
+node scripts/layout-trace.js          # frame-by-frame trace, for diagnosing
+node scripts/vtscreen.js raw.bin 24 70  # one raw dump, as a screen
+```
+
+`tests/term_capture.rs` points stdout at `target/term-capture.bin`, drives `Term`
+the way the REPL does, and the layout test replays that file. A debug build
+honours `FLINT_TERM_CAPTURE` for this, which is the only way to reach the
+interactive branches from a test; release builds do not compile it.
+
+`examples/live_turn.rs` runs one turn against a real provider through the same
+layout, for checking that genuine model output — reasoning, tool calls, and all —
+lands where it should:
+
+```bash
+FLINT_TERM_CAPTURE=1 cargo run --example live_turn -- "your question" > live.bin
+node scripts/vtscreen.js live.bin 24 70
+```
 
 ## License
 

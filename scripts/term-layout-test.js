@@ -1,11 +1,18 @@
 // Replay the exact escape sequences `Term` emits, and check what the user ends up
 // seeing.
 //
-// This file mirrors src/term.rs: `setup` sets the scroll region, `place` puts the
-// cursor on its last row, `line` writes and newlines there, `stream` re-renders
-// the accumulated answer anchored one row above the margin, `redraw` paints the
-// reserved row. Keeping the bytes in one place means a change in term.rs that
-// breaks the layout fails here instead of on someone's screen.
+// This file mirrors src/term.rs, which follows Codex's inline-viewport model:
+//
+//   history region  rows 1..V-1. History is inserted here by narrowing the scroll
+//                   region to those rows and emitting Reverse Index, so the strip
+//                   below never moves.
+//   answer strip    rows V..V+3 (the "viewport"). The streamed answer is redrawn
+//                   into it in full on every fragment. Nothing here can disturb
+//                   the transcript above.
+//   input row       the last row on screen.
+//
+// Keeping the bytes in one place means a change in term.rs that breaks the layout
+// fails here instead of on someone's screen.
 //
 // Usage: node scripts/term-layout-test.js
 const { execFileSync } = require('child_process');
@@ -16,38 +23,41 @@ const path = require('path');
 const ESC = '\x1b';
 const ROWS = 24;
 const COLS = 70;
-const BOTTOM = ROWS - 1; // scroll region 1..23
-const INPUT = ROWS; // reserved row 24
+const ANSWER_ROWS = 4;
+const INPUT = ROWS; // last row
+const VIEWPORT_TOP = ROWS - ANSWER_ROWS; // 20
+const HISTORY_BOTTOM = VIEWPORT_TOP - 1; // 19
 
 const tmp = path.join(os.tmpdir(), 'term-layout.bin');
 
-// --- a stand-in for Term, emitting the same bytes -------------------------------
 class FakeTerm {
   constructor() {
-    this.s = `${ESC}[1;${BOTTOM}r${ESC}[1;1H`;
-    this.streamRow = BOTTOM;
-  }
-  outRow() {
-    return Math.max(this.streamRow, 1);
-  }
-  seek(row) {
-    this.s += `${ESC}[${row};1H\r${ESC}[2K`;
-  }
-  roll(row) {
-    this.s += `${ESC}[${row};1H\r\n`;
-    if (row >= BOTTOM) return BOTTOM;
-    return row + 1;
+    this.s = `${ESC}[1;${ROWS}r${ESC}[1;1H`;
+    this.viewportTop = VIEWPORT_TOP;
+    this.streamActive = false;
+    this.streamText = '';
+    this.committed = 0;
   }
   redraw(prefix = '> ') {
     this.s += `${ESC}[${INPUT};1H${ESC}[2K${ESC}[1m${prefix}${ESC}[0m`;
   }
-  line(text) {
-    const row = this.outRow();
-    this.seek(row);
-    this.s += text;
-    this.streamRow = this.roll(row);
+  // Mirrors Term::insert_history.
+  insertHistory(lines) {
+    for (const text of lines) {
+      const bottom = Math.max(this.viewportTop - 1, 1);
+      this.s += `${ESC}[1;${bottom}r`;
+      this.s += `${ESC}[${bottom};1H\r${ESC}[2K${text}\r\n`;
+      this.s += `${ESC}[r`;
+    }
     this.s += `${ESC}[?25l`;
     this.redraw();
+  }
+  emitHistory(text) {
+    this.insertHistory([text]);
+  }
+  line(text) {
+    this.closeStream();
+    this.emitHistory(text);
   }
   blank() {
     this.line('');
@@ -57,22 +67,65 @@ class FakeTerm {
       this.line(part.replace(/\r$/, ''));
     }
   }
-  // Mirrors Term::stream: re-render the whole accumulated answer, bottom-anchored,
-  // leaving one row free below it.
-  stream(text) {
-    const rows = text.split('\n');
-    const lowest = Math.max(BOTTOM - 1, 1);
-    const anchor = Math.max(this.streamRow, 1);
-    const over = Math.max(0, anchor + rows.length - (lowest + 1));
-    const start = Math.max(1, anchor - over);
-    let last = null;
-    for (let n = 0; n < rows.length; n++) {
-      const r = start + n;
-      if (r > lowest) break;
-      this.s += `${ESC}[${r};1H${ESC}[2K${rows[n]}`;
-      last = [r, [...rows[n]].length];
+  endStream() {
+    this.closeStream();
+  }
+  // Mirrors Term::scroll_history_down.
+  scrollHistoryDown(rows) {
+    if (rows === 0) return;
+    this.s += `${ESC}[1;${ROWS}r${ESC}[1;1H`;
+    for (let i = 0; i < rows; i++) this.s += `${ESC}M`;
+    this.s += `${ESC}[r`;
+  }
+  clearViewport() {
+    for (let row = this.viewportTop; row < INPUT; row++) {
+      this.s += `${ESC}[${row};1H${ESC}[2K`;
     }
-    if (last) this.s += `${ESC}[${last[0]};${Math.max(last[1], 1)}H`;
+  }
+  closeStream() {
+    if (!this.streamActive) return;
+    this.streamActive = false;
+    if (!this.streamText) return;
+    const lines = this.streamText.split('\n');
+    const top = VIEWPORT_TOP;
+    const last = INPUT - 1;
+    const capacity = last - top + 1;
+    const shown = Math.min(lines.length, capacity);
+    const left = lines.slice(lines.length - shown);
+    this.insertHistory(left);
+    for (let r = top; r <= last; r++) this.s += `${ESC}[${r};1H${ESC}[2K`;
+    this.s += `${ESC}[${top};${last}r${ESC}[${top};1H`;
+    for (let i = 0; i < shown; i++) this.s += '\r\n';
+    this.s += `${ESC}[r`;
+    this.committed = 0;
+    // A blank line separates the answer from whatever comes next.
+    this.emitHistory('');
+  }
+  // Mirrors Term::stream.
+  stream(text) {
+    this.streamActive = true;
+    this.streamText = text;
+    const rows = text.split('\n');
+    const height = rows.length;
+    const capacity = INPUT - 1 - VIEWPORT_TOP + 1;
+    if (height > capacity) {
+      const drop = height - capacity;
+      if (drop > this.committed) {
+        this.insertHistory(rows.slice(this.committed, drop));
+        this.committed = drop;
+      }
+    }
+    const first = Math.max(0, height - capacity);
+    const visible = rows.slice(first);
+    const start = VIEWPORT_TOP + (capacity - visible.length);
+    let cursor = null;
+    for (let n = 0; n < visible.length; n++) {
+      const r = start + n;
+      if (r > INPUT - 1) break;
+      this.s += `${ESC}[${r};1H${ESC}[2K${visible[n]}`;
+      cursor = [r, [...visible[n]].length];
+    }
+    if (cursor) this.s += `${ESC}[${cursor[0]};${Math.max(cursor[1], 1)}H`;
     this.s += `${ESC}[?25l`;
     this.redraw();
   }
@@ -100,49 +153,95 @@ function check(label, cond) {
   if (!cond) failures++;
 }
 
-// The reserved row is the last one on screen.
 function inputRow(s) {
   return s[s.length - 1];
 }
 
-// --- the case that looked broken: streamed text arriving in pieces --------------
+// --- the reported bug: the question scrolled away -------------------------------
 {
   const t = new FakeTerm();
   t.line('flint v0.1.0  deepseek/deepseek-flash');
   t.blank();
-  // Streamed in fragments, including splits mid-word.
+  t.line('> 你好，帮我看看磁盘');
+  let acc = '';
+  for (const frag of ['正在', '检查', '磁盘', '。']) {
+    acc += frag;
+    t.stream(acc);
+  }
+  t.endStream();
+  const s = screen('用户消息必须留在屏幕上', () => t);
+  const joined = s.join('\n');
+  console.log('  --- assertions ---');
+  check('用户的话还在', joined.includes('你好，帮我看看磁盘'));
+  check('模型的回答也在', joined.includes('正在检查磁盘。'));
+  check('回答在提问下方', joined.indexOf('你好') < joined.indexOf('正在检查'));
+  check('输入行固定在最后一行', inputRow(s).startsWith('>'));
+  check('回答没有盖住输入行', !inputRow(s).includes('正在检查'));
+}
+
+// --- streamed fragments split mid-word ------------------------------------------
+{
+  const t = new FakeTerm();
+  t.line('> question');
   let acc = '';
   for (const frag of ['The answer ', 'is 42', '.', ' Yes.']) {
     acc += frag;
     t.stream(acc);
   }
-  const s = screen('流式输出分片（单词中间断开）', () => t);
+  t.endStream();
+  const s = screen('流式分片（单词中间断开）', () => t);
   const joined = s.join('\n');
   console.log('  --- assertions ---');
   check('流式文本没有被拆散', joined.includes('The answer is 42. Yes.'));
-  check('前面的 banner 行还在', joined.includes('flint v0.1.0'));
+  check('提问还在', joined.includes('> question'));
+  check('回答只出现一次', joined.split('The answer is 42. Yes.').length === 2);
   check('输入行固定在最后一行', inputRow(s).startsWith('>'));
-  check('输入行没有被输出覆盖', !inputRow(s).includes('answer'));
 }
 
-// --- answer with newlines then end-of-turn blank --------------------------------
+// --- the reported bug: reasoning must not be left stranded ----------------------
 {
   const t = new FakeTerm();
+  t.line('> 问题');
+  let reasoning = '';
+  for (const frag of ['让我想想这个问题的', '关键点在哪里，', '可能需要先确认一些事。']) {
+    reasoning += frag;
+    t.stream(reasoning);
+  }
+  t.endStream();
   let acc = '';
-  for (const frag of ['Line one.\n', 'Line two.\n', 'Line three.']) {
+  for (const frag of ['好的', '。']) {
     acc += frag;
     t.stream(acc);
   }
-  t.blank();
-  const s = screen('多行回答 + 回合结束的空行', () => t);
+  t.endStream();
+  const s = screen('短回答不能留下长思考的残尾', () => t);
   const joined = s.join('\n');
   console.log('  --- assertions ---');
-  check('三行回答都还在', ['Line one.', 'Line two.', 'Line three.'].every((x) => joined.includes(x)));
-  check('行序正确', joined.indexOf('Line one.') < joined.indexOf('Line two.'));
+  check('回答可见', joined.includes('好的。'));
+  check('思考完整保留，没有被回答截断', joined.includes('可能需要先确认一些事。'));
+  check('回答在思考之后', joined.indexOf('可能需要先确认') < joined.indexOf('好的。'));
   check('输入行固定在最后一行', inputRow(s).startsWith('>'));
 }
 
-// --- output longer than the region: oldest lines must scroll away ---------------
+// --- a tool result mid-turn must not land on the answer -------------------------
+{
+  const t = new FakeTerm();
+  t.line('> 跑一下命令');
+  t.stream('我先看看。');
+  t.line('  ✓ TOOL_ROUND_OK');
+  t.stream('我先看看。输出是 TOOL_ROUND_OK。');
+  t.endStream();
+  const s = screen('工具结果不能盖住回答', () => t);
+  const joined = s.join('\n');
+  console.log('  --- assertions ---');
+  check('工具结果可见', joined.includes('✓ TOOL_ROUND_OK'));
+  check('最终回答可见', joined.includes('输出是 TOOL_ROUND_OK。'));
+  check('提问可见', joined.includes('跑一下命令'));
+  check('输入行没有被答案占用', !inputRow(s).includes('TOOL_ROUND_OK'));
+  check('输入行固定在最后一行', inputRow(s).startsWith('>'));
+}
+
+// --- output longer than the screen ----------------------------------------------
 {
   const t = new FakeTerm();
   for (let i = 1; i <= 40; i++) t.line(`line ${i}`);
@@ -154,7 +253,7 @@ function inputRow(s) {
   check('输入行固定在最后一行', inputRow(s).startsWith('>'));
 }
 
-// --- a multi-line write, which is what `!cmd` and `list` produce ----------------
+// --- multi-line write, which is what `!cmd` and `list` produce ------------------
 {
   const t = new FakeTerm();
   t.line('✓ list');
@@ -164,6 +263,57 @@ function inputRow(s) {
   console.log('  --- assertions ---');
   check('多行内容全部可见', ['a', 'b', 'c'].every((x) => joined.includes(x)));
   check('输入行固定在最后一行', inputRow(s).startsWith('>'));
+}
+
+// --- an answer longer than the strip: it must grow, not vanish ------------------
+{
+  const t = new FakeTerm();
+  t.line('> 讲故事');
+  let acc = '';
+  for (let i = 1; i <= 8; i++) {
+    acc += (i > 1 ? '\n' : '') + `第 ${i} 行回答`;
+    t.stream(acc);
+  }
+  t.endStream();
+  const s = screen('回答超过 4 行时视口不移动', () => t);
+  const joined = s.join('\n');
+  console.log('  --- assertions ---');
+  check('最后几行仍然可见', joined.includes('第 8 行回答'));
+  check('提问没有被回答挤掉', joined.includes('> 讲故事'));
+  check('输入行固定在最后一行', inputRow(s).startsWith('>'));
+  check('视口没有被内容溢出', !inputRow(s).includes('第'));
+  check('滚出视口的行也没有丢', joined.includes('第 1 行回答'));
+  check('八行齐全', [1, 2, 3, 4, 5, 6, 7, 8].every((i) => joined.includes(`第 ${i} 行回答`)));
+}
+
+// --- the real binary's bytes, captured by tests/term_capture.rs ------------------
+// The hand-written model above is only worth anything if it matches what `Term`
+// actually emits. `cargo test --test term_capture` writes that stream to
+// target/term-capture.bin; replaying it here is what ties the two together.
+{
+  const capturePath = path.join(__dirname, '..', 'target', 'term-capture.bin');
+  if (!fs.existsSync(capturePath)) {
+    console.log('\n===== 真实字节回放 =====');
+    console.log('  SKIP  没有 target/term-capture.bin（先跑 cargo test --test term_capture）');
+  } else {
+    fs.copyFileSync(capturePath, tmp);
+    const out = execFileSync('node', ['scripts/vtscreen.js', tmp, String(ROWS), String(COLS)], {
+      encoding: 'utf8',
+    });
+    const lines = out.trimEnd().split('\n').slice(1);
+    console.log('\n===== 真实字节回放 =====');
+    console.log(lines.join('\n'));
+    const s = lines.map((l) => l.slice(3).replace(/\s+$/, ''));
+    const joined = s.join('\n');
+    console.log('  --- assertions ---');
+    check('真字节里用户的话还在', joined.includes('你好，帮我看看磁盘'));
+    check('真字节里思考完整', joined.includes('可能需要先确认一些事。'));
+    check('真字节里工具结果在', joined.includes('TOOL_ROUND_OK'));
+    check('真字节里回答完整', joined.includes('磁盘占用正常。'));
+    check('真字节没有残留的思考文本', !joined.includes('让我想想') || joined.indexOf('让我想想') < joined.indexOf('TOOL_ROUND_OK'));
+    check('真字节里输入行固定在最后一行', inputRow(s).startsWith('>'));
+    check('真字节里回答没有盖住输入行', !inputRow(s).includes('磁盘占用正常'));
+  }
 }
 
 console.log(failures === 0 ? '\n全部通过' : `\n${failures} 项失败`);

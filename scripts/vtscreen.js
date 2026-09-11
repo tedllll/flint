@@ -31,6 +31,23 @@ function scrollUp() {
   screen.splice(bottom, 0, Array(COLS).fill(' '));
 }
 
+function scrollDown() {
+  screen.splice(bottom, 1);
+  screen.splice(top, 0, Array(COLS).fill(' '));
+}
+
+/// Reverse Index: move up one row, scrolling the region down if already at its top.
+/// If the cursor is above the region's top, it simply moves up.
+function reverseIndex() {
+  if (row > top && row > 0) {
+    row--;
+  } else if (row === top) {
+    scrollDown();
+  } else if (row > 0) {
+    row--;
+  }
+}
+
 function put(ch) {
   if (col >= COLS) {
     // Autowrap.
@@ -53,6 +70,13 @@ const bytes = fs.readFileSync(file);
 let i = 0;
 while (i < bytes.length) {
   const b = bytes[i];
+
+  if (b === 0x1b && bytes[i + 1] === 0x4d) {
+    // ESC M -- Reverse Index, which is what inserts history above the viewport.
+    reverseIndex();
+    i += 2;
+    continue;
+  }
 
   if (b === 0x1b && bytes[i + 1] === 0x5b) {
     // CSI
@@ -91,6 +115,12 @@ while (i < bytes.length) {
       case 'D':
         col = Math.max(0, col - (nums[0] || 1));
         break;
+      case 'S': {
+        // Scroll the region up by n rows.
+        const n = nums[0] || 1;
+        for (let k = 0; k < n; k++) scrollUp();
+        break;
+      }
       case 'K': {
         const mode = nums[0] || 0;
         if (mode === 0) for (let c = col; c < COLS; c++) screen[row][c] = ' ';

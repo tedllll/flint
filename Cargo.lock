@@ -340,6 +340,7 @@ dependencies = [
  "crossterm",
  "dirs",
  "futures-util",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",

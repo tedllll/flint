@@ -18,7 +18,7 @@ use display::{Printer, BOLD, CHATTY, DIM, GREEN, NORMAL, QUIET, RED, RESET, YELL
 use display::Palette;
 use event::Event;
 use std::collections::HashMap;
-use std::io::{IsTerminal, Write};
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use term::Term;
 
@@ -456,6 +456,14 @@ async fn interactive(
                 }
             }
         }
+
+        // Echo the message into the transcript. The input row is cleared as soon
+        // as Enter is pressed, so without this the conversation above shows only
+        // the answers and the questions scroll away unread.
+        printer.term().line(format_args!(
+            "{bold}> {reset}{}",
+            printer.style(BOLD, &input)
+        ));
 
         match run_turn(agent, provider_cfg, &input, printer, input_rx).await {
             Ok(()) => {}
@@ -1146,9 +1154,20 @@ async fn run_turn(
                 Event::Reasoning(t) => {
                     // The model thinking out loud. Worth watching when something
                     // is going wrong, noise the rest of the time.
-                    if printer.verbosity() >= CHATTY {
-                        printer.term().stream(&printer.style(DIM, &t));
-                        std::io::stdout().flush().ok();
+                    //
+                    // Committed with `line`, not streamed in place. Reasoning and the
+                    // answer are both shown live, but only the answer is redrawn in
+                    // full on every fragment: reasoning is a running commentary, so
+                    // each line is finished as it arrives and settles into the
+                    // transcript instead of being rewritten. Streaming both would
+                    // also mean a short answer redraws fewer rows than the reasoning
+                    // left behind, stranding the tail of the longer text.
+                    if printer.verbosity() >= CHATTY && !t.trim().is_empty() {
+                        for part in t.split('\n') {
+                            printer
+                                .term()
+                                .line(format_args!("{}", printer.style(DIM, part)));
+                        }
                     }
                 }
                 Event::ToolStart { id, name } => {
@@ -1203,7 +1222,7 @@ async fn run_turn(
                 // there is no trailing fragment left to flush -- only the line
                 // break that ends it.
                 if streamed_text {
-                    printer.term().blank();
+                    printer.term().end_stream();
                 }
                 if let Some(r) = result {
                     r?;

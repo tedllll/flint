@@ -21,7 +21,7 @@
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Mutex;
 use std::io::{IsTerminal, Write};
 
@@ -102,20 +102,32 @@ pub enum Key {
     Ignore,
 }
 
-/// Rows reserved at the bottom for the input row.
-const RESERVED: u16 = 1;
+/// Rows the streamed answer may occupy, above the input row.
+///
+/// This is the "viewport": a fixed-height strip at the bottom of the screen that
+/// the answer is drawn into and that history insertion never touches. Codex calls
+/// the same thing an inline viewport and arrives at the same design.
+const ANSWER_ROWS: u16 = 4;
+/// The input row plus the answer strip.
+const RESERVED: u16 = ANSWER_ROWS + 1;
 
 pub struct Term {
     interactive: bool,
-    /// Last row of the scrollable output area (1-based, inclusive).
-    bottom: AtomicU16,
-    /// The reserved input row (1-based).
+    /// Last row of the screen (1-based, inclusive).
+    screen_rows: AtomicU16,
+    /// Top row of the answer strip (1-based).
+    viewport_top: AtomicU16,
+    /// First row *below* the answer strip: the input row.
     input_row: AtomicU16,
     input: Mutex<Input>,
     /// Text before the input, e.g. "> " or "  name: ".
     prefix: Mutex<String>,
-    /// Row the streamed answer is currently being rendered from.
-    stream_row: AtomicU16,
+    /// Whether an answer is mid-stream and still has to be committed.
+    stream_active: AtomicBool,
+    /// The answer currently being streamed, so it can be finished off later.
+    stream_text: Mutex<String>,
+    /// How many of the streaming answer's lines have already gone to history.
+    committed: AtomicU16,
 }
 
 impl Term {
@@ -126,11 +138,14 @@ impl Term {
     pub fn plain() -> Self {
         Term {
             interactive: false,
-            bottom: AtomicU16::new(23),
+            screen_rows: AtomicU16::new(24),
+            viewport_top: AtomicU16::new(20),
             input_row: AtomicU16::new(24),
             input: Mutex::new(Input::default()),
             prefix: Mutex::new("> ".to_string()),
-            stream_row: AtomicU16::new(23),
+            stream_active: AtomicBool::new(false),
+            stream_text: Mutex::new(String::new()),
+            committed: AtomicU16::new(0),
         }
     }
 
@@ -142,18 +157,30 @@ impl Term {
 
     /// Enter raw mode and reserve the bottom row, if there is a console.
     pub fn start() -> Result<Self> {
-        let interactive = std::io::stdout().is_terminal();
+        let tty = std::io::stdout().is_terminal();
+        // A debug build can be pointed at a file instead of a terminal, which is the
+        // only way to capture the real interactive byte stream for replay. Release
+        // builds do not compile this at all, so it cannot be used to confuse a real
+        // run. Raw mode and the window-size query still need a real terminal, so
+        // those stay keyed on `tty` below.
+        #[cfg(debug_assertions)]
+        let interactive = tty || std::env::var_os("FLINT_TERM_CAPTURE").is_some();
+        #[cfg(not(debug_assertions))]
+        let interactive = tty;
 
         let term = Term {
             interactive,
-            bottom: AtomicU16::new(23),
+            screen_rows: AtomicU16::new(24),
+            viewport_top: AtomicU16::new(20),
             input_row: AtomicU16::new(24),
             input: Mutex::new(Input::default()),
             prefix: Mutex::new("> ".to_string()),
-            stream_row: AtomicU16::new(23),
+            stream_active: AtomicBool::new(false),
+            stream_text: Mutex::new(String::new()),
+            committed: AtomicU16::new(0),
         };
 
-        if interactive {
+        if tty {
             // A panic with raw mode on leaves the user without echo, which looks
             // like a broken shell. Restore first, then let the message print.
             let default_hook = std::panic::take_hook();
@@ -182,51 +209,31 @@ impl Term {
         self.input.lock().unwrap()
     }
 
-    /// Recompute the reserved row from the current window size.
+    /// Recompute the layout from the current window size.
     fn reclaim(&self) {
         let (_, h) = size().unwrap_or((80, 24));
         let h = h.max(RESERVED + 1);
+        self.screen_rows.store(h, Ordering::Relaxed);
         self.input_row.store(h, Ordering::Relaxed);
-        self.bottom.store(h - RESERVED, Ordering::Relaxed);
+        self.viewport_top.store(h - ANSWER_ROWS, Ordering::Relaxed);
     }
 
-    /// Claim the bottom rows: output lives in the region above them.
+    /// Reserve the bottom strip: the answer is drawn there, history above it.
+    ///
+    /// The whole screen is the scroll region to begin with, because history
+    /// insertion sets its own region per write and resets it afterwards.
     fn setup(&self) {
         if !self.interactive {
             return;
         }
         let mut out = std::io::stdout();
-        let _ = write!(out, "\x1b[1;{}r\x1b[1;1H", self.bottom.load(Ordering::Relaxed));
+        let _ = write!(out, "\x1b[1;{}r\x1b[1;1H", self.screen_rows.load(Ordering::Relaxed));
         let _ = out.flush();
     }
 
-    /// Row the next line of committed output begins on.
-    ///
-    /// Streamed answers are rendered at the bottom of the region and then scrolled
-    /// up as the turn ends, so the committed cursor always comes back to the
-    /// bottom. That invariant is what lets the two paths share one cursor.
-    fn out_row(&self) -> u16 {
-        self.stream_row.load(Ordering::Relaxed).max(1)
-    }
-
-    /// Move to `row` and blank it, so a write starts on a clean line.
-    fn seek(out: &mut std::io::Stdout, row: u16) {
-        let _ = write!(out, "\x1b[{};1H\r\x1b[2K", row);
-    }
-
-    /// Scroll the region one row, which is what advances the committed cursor.
-    ///
-    /// A newline on the bottom margin scrolls the region and leaves the cursor on
-    /// that same row, so the write that preceded it is now one row higher and the
-    /// row itself is blank for the next line.
-    fn roll(&self, out: &mut std::io::Stdout, row: u16) -> u16 {
-        let bottom = self.bottom.load(Ordering::Relaxed);
-        let _ = write!(out, "\x1b[{};1H\r\n", row);
-        if row >= bottom {
-            bottom
-        } else {
-            row + 1
-        }
+    /// Row the history region ends on: the row above the answer strip.
+    fn history_bottom(&self) -> u16 {
+        self.viewport_top.load(Ordering::Relaxed).saturating_sub(1).max(1)
     }
 
     /// Write one complete line of output, then put the input row back.
@@ -239,15 +246,8 @@ impl Term {
             println!("{args}");
             return;
         }
-        let mut out = std::io::stdout();
-        let row = self.out_row();
-        Self::seek(&mut out, row);
-        let _ = out.write_fmt(args);
-        let next = self.roll(&mut out, row);
-        let _ = write!(out, "\x1b[?25l");
-        let _ = out.flush();
-        self.stream_row.store(next, Ordering::Relaxed);
-        self.redraw();
+        self.close_stream();
+        self.emit_history(&format!("{args}"));
     }
 
     /// An empty line. `format_args!()` is not a valid format string, so a bare
@@ -272,56 +272,185 @@ impl Term {
         }
     }
 
-    /// Render a streamed answer, anchored one row above the bottom margin.
+    /// Finish the answer in progress, so the next line starts below it.
+    ///
+    /// Does nothing when nothing is streaming: that is the common case, and it
+    /// keeps `blank()` from inserting a second blank line.
+    pub fn end_stream(&self) {
+        if !self.interactive {
+            println!();
+            return;
+        }
+        self.close_stream();
+    }
+
+    /// Insert history lines `lines` above the answer strip.
+    ///
+    /// This is Codex's inline-viewport idea, and it is the whole reason the layout
+    /// stays stable. The scroll region is narrowed to the rows *above* the strip:
+    ///
+    /// ```text
+    /// row 1
+    ///   :     <- scroll region 1..V-1: history lands here and scrolls up through it
+    /// row V-1
+    /// row V   <- answer strip (the "viewport"): never part of the region
+    /// row V+3
+    /// row V+4 <- input row
+    /// ```
+    ///
+    /// Narrowed like that, a newline on the region's bottom row scrolls history up
+    /// and leaves the strip completely alone -- it never has to be redrawn or
+    /// repositioned, and no cursor position has to be tracked between writes. The
+    /// region is only set for the duration of the write and then reset, so a stray
+    /// scroll can never reach the strip or the input row.
+    fn insert_history(&self, lines: &[String]) {
+        if lines.is_empty() {
+            return;
+        }
+        let bottom = self.history_bottom();
+        let mut out = std::io::stdout();
+        for text in lines {
+            let _ = write!(out, "\x1b[1;{}r", bottom);
+            let _ = write!(out, "\x1b[{};1H\r\x1b[2K{text}\r\n", bottom);
+            let _ = write!(out, "\x1b[r");
+        }
+        let _ = write!(out, "\x1b[?25l");
+        let _ = out.flush();
+        self.redraw();
+    }
+
+    /// One line of committed output.
+    fn emit_history(&self, text: &str) {
+        self.insert_history(&[text.to_string()]);
+    }
+
+    /// Render a streamed answer into the answer strip.
     ///
     /// The accumulated text is redrawn in full on every fragment, which is what
     /// makes a stream that splits mid-word read as one continuous line: each
     /// fragment re-renders the whole answer, so the terminal always shows the
     /// complete text rather than the last fragment alone.
     ///
-    /// The block is bottom-anchored and grows upward, so a one-line answer is
-    /// rewritten in place instead of being left behind as a new line per fragment.
-    /// The committed cursor is deliberately not touched: it is advanced once, when
-    /// the turn ends and the answer scrolls up.
+    /// The strip is a *fixed slice* sitting on the input row and it never moves, so
+    /// nothing done here can disturb the transcript above it -- that is the whole
+    /// point of the layout. The answer is drawn bottom-anchored inside the slice;
+    /// lines that no longer fit at its top are handed to history in order, so the
+    /// transcript keeps the whole answer even though the slice shows only its tail.
     pub fn stream(&self, text: &str) {
         if !self.interactive {
             print!("{text}");
             let _ = std::io::stdout().flush();
             return;
         }
-        let bottom = self.bottom.load(Ordering::Relaxed);
-        let rows: Vec<&str> = text.split('\n').collect();
-        // One row is kept below the block: that is where the next committed line
-        // goes, and leaving it free is why the end of a turn does not eat the last
-        // line of the answer.
-        let lowest = bottom.saturating_sub(1).max(1);
-        let anchor = (self.stream_row.load(Ordering::Relaxed)).max(1);
-        let over = (anchor as usize + rows.len()).saturating_sub(lowest as usize + 1);
-        let start = anchor.saturating_sub(over as u16).max(1);
+        self.stream_active.store(true, Ordering::Relaxed);
+        {
+            let mut held = self.stream_text.lock().unwrap();
+            // A new answer restarts the line accounting. Within a turn the text only
+            // grows, so a shorter text means the previous answer ended and a fresh
+            // one began -- reasoning followed by the answer, for instance. Without
+            // this the second answer would inherit the first one's committed count
+            // and skip lines into history.
+            if !text.starts_with(held.as_str()) {
+                self.committed.store(0, Ordering::Relaxed);
+            }
+            *held = text.to_string();
+        }
 
+        let rows: Vec<&str> = text.split('\n').collect();
+        let height = rows.len() as u16;
+        let top = self.viewport_top.load(Ordering::Relaxed);
+        let last = self.input_row.load(Ordering::Relaxed).saturating_sub(1);
+        let capacity = last.saturating_sub(top).saturating_add(1);
+
+        // Every row of the slice is accounted for, so a line that leaves the top of
+        // the slice must be handed to history or it would be lost when the slice
+        // scrolls it away.
+        let committed = self.committed.load(Ordering::Relaxed);
+        if height > capacity {
+            let drop = height - capacity;
+            if drop > committed {
+                let fresh: Vec<String> = rows[committed as usize..drop as usize]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                self.insert_history(&fresh);
+                self.committed.store(drop, Ordering::Relaxed);
+            }
+        }
+
+        let first = height.saturating_sub(capacity) as usize;
+        let visible = &rows[first..];
+        let start = top + capacity.saturating_sub(visible.len() as u16);
         let mut out = std::io::stdout();
-        let mut last = None;
-        for (n, line) in rows.iter().enumerate() {
+        let mut cursor = None;
+        for (n, line) in visible.iter().enumerate() {
             let r = start + n as u16;
-            if r > lowest {
+            if r > last {
                 break;
             }
             let _ = write!(out, "\x1b[{};1H\x1b[2K{line}", r);
-            last = Some((r, line.chars().count()));
+            cursor = Some((r, line.chars().count()));
         }
-        // Park the cursor after the text. The column matters: writing newlines
-        // instead would walk the answer down onto the reserved row, and the next
-        // fragment has to continue the same line rather than start a new one.
-        //
-        // `CSI {row};{col}H` takes a 1-based column, so `len` characters end at
-        // column `len`, not `len + 1` -- the difference is one stray leading space
-        // on the rendered answer.
-        if let Some((r, len)) = last {
+        // Park the cursor after the text so the next fragment continues the same
+        // line. `CSI {row};{col}H` is 1-based, so `len` characters end at column
+        // `len`.
+        if let Some((r, len)) = cursor {
             let _ = write!(out, "\x1b[{};{}H", r, len.max(1));
         }
         let _ = write!(out, "\x1b[?25l");
         let _ = out.flush();
         self.redraw();
+    }
+
+    /// The streamed answer is finished: hand it to history and clear the slice.
+    ///
+    /// Order matters here. The lines still on screen go to history *first*, so
+    /// nothing can be lost, and the slice is blanked *before* it is scrolled, so
+    /// every row the scroll touches is already empty. Doing it the other way round
+    /// loses the answer's last line and duplicates another.
+    fn close_stream(&self) {
+        if !self.stream_active.swap(false, Ordering::Relaxed) {
+            return;
+        }
+        let text = self.stream_text.lock().unwrap().clone();
+        if text.is_empty() {
+            return;
+        }
+        let lines: Vec<String> = text.split('\n').map(|s| s.to_string()).collect();
+        let top = self.viewport_top.load(Ordering::Relaxed);
+        let last = self.input_row.load(Ordering::Relaxed).saturating_sub(1);
+        let capacity = last.saturating_sub(top).saturating_add(1) as usize;
+        let shown = lines.len().min(capacity);
+        if shown > 0 {
+            let left: Vec<String> = lines[lines.len() - shown..].to_vec();
+            self.insert_history(&left);
+        }
+        self.clear_viewport();
+        // Scroll the now-blank slice up, so the strip is empty and the transcript
+        // above is untouched.
+        let mut out = std::io::stdout();
+        let _ = write!(out, "\x1b[{};{}r\x1b[{};1H", top, last, top);
+        for _ in 0..shown {
+            let _ = write!(out, "\r\n");
+        }
+        let _ = write!(out, "\x1b[r");
+        let _ = out.flush();
+        self.committed.store(0, Ordering::Relaxed);
+        // A blank line keeps the answer from running into whatever comes next.
+        // `insert_history` clears a stream, so calling it here is safe: the answer
+        // has already been handed over above.
+        self.emit_history("");
+    }
+
+    /// Blank the answer strip, so a finished answer is not left on screen twice.
+    fn clear_viewport(&self) {
+        let top = self.viewport_top.load(Ordering::Relaxed);
+        let input = self.input_row.load(Ordering::Relaxed);
+        let mut out = std::io::stdout();
+        for row in top..input {
+            let _ = write!(out, "\x1b[{};1H\x1b[2K", row);
+        }
+        let _ = out.flush();
     }
 
     /// Put the prompt and the current input back on the reserved row.
@@ -445,9 +574,11 @@ impl Term {
             return;
         }
         let mut out = std::io::stdout();
+        // Drop the scroll region, show the cursor, park below the input row so the
+        // shell's next prompt starts on a fresh line.
         let _ = write!(out, "\x1b[r\x1b[?25h");
         let _ = write!(out, "\x1b[{};1H\r\x1b[2K", self.input_row.load(Ordering::Relaxed));
-        let _ = write!(out, "\x1b[{};1H\r\n", self.bottom.load(Ordering::Relaxed).max(1));
+        let _ = write!(out, "\r\n");
         let _ = out.flush();
         let _ = disable_raw_mode();
     }
