@@ -1131,6 +1131,9 @@ async fn run_turn(
         // because a fragment is not a line: it can stop in the middle of a word,
         // and only the whole text can be placed correctly.
         let mut answer = String::new();
+        // Whether this turn's "thinking" marker has been printed yet. One per turn,
+        // not one per fragment.
+        let mut thinking_shown = false;
 
         // The turn and its output closure are confined to this scope: the future
         // holds a mutable borrow of `buffer`, and that borrow has to end before
@@ -1152,22 +1155,20 @@ async fn run_turn(
                     streamed_text = true;
                 }
                 Event::Reasoning(t) => {
-                    // The model thinking out loud. Worth watching when something
-                    // is going wrong, noise the rest of the time.
+                    // The model thinking out loud.
                     //
-                    // Committed with `line`, not streamed in place. Reasoning and the
-                    // answer are both shown live, but only the answer is redrawn in
-                    // full on every fragment: reasoning is a running commentary, so
-                    // each line is finished as it arrives and settles into the
-                    // transcript instead of being rewritten. Streaming both would
-                    // also mean a short answer redraws fewer rows than the reasoning
-                    // left behind, stranding the tail of the longer text.
-                    if printer.verbosity() >= CHATTY && !t.trim().is_empty() {
-                        for part in t.split('\n') {
-                            printer
-                                .term()
-                                .line(format_args!("{}", printer.style(DIM, part)));
-                        }
+                    // The provider emits one event per SSE fragment and a fragment is
+                    // usually a token, so committing each one would print a single
+                    // word per line -- the whole reasoning block spread down the
+                    // screen, which is what a live turn used to look like. There is
+                    // nothing to read in that, so the turn shows one marker instead.
+                    //
+                    // Nothing is lost: the reasoning is still in the session file.
+                    if !thinking_shown && show_thinking(printer.verbosity(), &t) {
+                        thinking_shown = true;
+                        printer
+                            .term()
+                            .line(format_args!("{}", printer.dim(THINKING_MARK)));
                     }
                 }
                 Event::ToolStart { id, name } => {
@@ -1301,6 +1302,21 @@ fn is_local_endpoint(base_url: &str) -> bool {
     provider::is_local_endpoint(base_url)
 }
 
+/// The single line a turn prints when the model starts reasoning.
+const THINKING_MARK: &str = "\u{2026} thinking";
+
+/// Whether a reasoning fragment should produce the thinking marker.
+///
+/// Deliberately a free function rather than a condition inline in the event
+/// closure: the reasoning channel delivers one event per SSE fragment, so this is
+/// called dozens of times per turn, and "exactly once, only when asked for" is the
+/// kind of rule that is better stated once and tested than re-derived at the call
+/// site. An all-whitespace fragment does not count as reasoning -- some providers
+/// send one before any real content.
+fn show_thinking(verbosity: u8, fragment: &str) -> bool {
+    verbosity >= display::CHATTY && !fragment.trim().is_empty()
+}
+
 /// Reduce a tool's JSON arguments to the one value worth showing on a line.
 fn parse_args(argv: Vec<String>) -> Result<Args> {
     let mut args = Args::default();
@@ -1393,4 +1409,32 @@ fn print_help(color: bool, term: &Term) {
   small, dependency-light and hand-editable.",
         config::config_path().display()
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use display::{CHATTY, NORMAL, QUIET};
+
+    #[test]
+    fn the_thinking_marker_needs_chatty_verbosity() {
+        assert!(!show_thinking(QUIET, "considering"));
+        assert!(!show_thinking(NORMAL, "considering"));
+        assert!(show_thinking(CHATTY, "considering"));
+    }
+
+    #[test]
+    fn a_blank_reasoning_fragment_is_not_thinking() {
+        // Providers sometimes open the channel with an empty or whitespace delta;
+        // printing the marker for that would show it before anything was thought.
+        for blank in ["", " ", "\n", "\r\n", "\t "] {
+            assert!(!show_thinking(CHATTY, blank), "{blank:?} counted as thinking");
+        }
+    }
+
+    #[test]
+    fn one_real_fragment_is_enough_to_show_the_marker() {
+        assert!(show_thinking(CHATTY, "The"));
+        assert!(show_thinking(CHATTY, " 用户"));
+    }
 }

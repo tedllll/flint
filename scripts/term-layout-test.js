@@ -307,10 +307,10 @@ function inputRow(s) {
     const joined = s.join('\n');
     console.log('  --- assertions ---');
     check('真字节里用户的话还在', joined.includes('你好，帮我看看磁盘'));
-    check('真字节里思考完整', joined.includes('可能需要先确认一些事。'));
+    check('真字节里思考只占一行', joined.includes('… thinking'));
+    check('真字节里思考没有铺满屏幕', joined.split('thinking').length === 2);
     check('真字节里工具结果在', joined.includes('TOOL_ROUND_OK'));
     check('真字节里回答完整', joined.includes('磁盘占用正常。'));
-    check('真字节没有残留的思考文本', !joined.includes('让我想想') || joined.indexOf('让我想想') < joined.indexOf('TOOL_ROUND_OK'));
     check('真字节里输入行固定在最后一行', inputRow(s).startsWith('>'));
     check('真字节里回答没有盖住输入行', !inputRow(s).includes('磁盘占用正常'));
   }

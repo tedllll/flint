@@ -36,6 +36,9 @@ async fn main() -> anyhow::Result<()> {
 
     let mut answer = String::new();
     let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // Same rule as the REPL: the reasoning channel fires once per token, so the
+    // turn shows one marker per turn rather than a word per line.
+    let mut thinking_shown = false;
     agent
         .run(&question, |event| match event {
             Event::Text(t) => {
@@ -43,8 +46,9 @@ async fn main() -> anyhow::Result<()> {
                 term.stream(&answer);
             }
             Event::Reasoning(t) => {
-                if !t.trim().is_empty() {
-                    term.line(format_args!("[思考] {}", t.trim()));
+                if !thinking_shown && !t.trim().is_empty() {
+                    thinking_shown = true;
+                    term.line(format_args!("\u{2026} thinking"));
                 }
             }
             Event::ToolStart { id, name } => {

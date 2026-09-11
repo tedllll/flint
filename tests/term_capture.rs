@@ -71,13 +71,13 @@ fn interactive_layout_matches_the_replay_model() {
     let term = Term::start().expect("term");
     assert!(term.interactive(), "capture override did not engage");
 
-    // A turn the way the REPL runs it: banner, the echo of the question, a long
-    // reasoning block, a tool result, then a short final answer. Each of those was
-    // a real bug at some point, so they are all in the one capture.
+    // A turn the way the REPL runs it: banner, the echo of the question, the single
+    // thinking marker, a tool result, then a short final answer. Each of those was a
+    // real bug at some point, so they are all in the one capture.
     term.line(format_args!("flint v0.1.0  deepseek/deepseek-flash"));
     term.blank();
     term.line(format_args!("> 你好，帮我看看磁盘"));
-    term.stream("让我想想这个问题的关键点在哪里，可能需要先确认一些事。");
+    term.line(format_args!("\u{2026} thinking"));
     term.line(format_args!("  ✓ TOOL_ROUND_OK"));
     let mut answer = String::new();
     for frag in ["磁盘", "占用", "正常", "。"] {
