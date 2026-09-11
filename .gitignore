@@ -2,3 +2,11 @@
 **/*.rs.bk
 Cargo.lock.orig
 .DS_Store
+
+# Secret files. The real config lives in ~/.flint/config.toml, outside the repo,
+# but these patterns stop a stray key file from ever being committed.
+.env
+.env.*
+*.key
+*.pem
+secrets.toml
