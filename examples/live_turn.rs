@@ -28,6 +28,9 @@ async fn main() -> anyhow::Result<()> {
 
     let term = Term::start()?;
     let cwd = std::env::current_dir()?;
+    // Same as the REPL: without this, paths in the transcript keep their full prefix and
+    // this example stops reproducing what the REPL actually shows.
+    term.set_cwd(&cwd.to_string_lossy());
     // NORMAL, not the config's setting: this example is for judging the default
     // transcript, and CHATTY deliberately shows more of each tool result. Set
     // FLINT_LIVE_VERBOSE=1 to see the chatty layout instead.
@@ -45,21 +48,27 @@ async fn main() -> anyhow::Result<()> {
 
     let mut answer = String::new();
     let mut names: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
-    // Same rule as the REPL: the reasoning channel fires once per token, so the
-    // turn shows one marker per turn rather than a word per line.
-    let mut thinking_shown = false;
+    // The turn says what it is waiting for on the status line, and the reasoning goes
+    // there too rather than into the transcript -- this is the REPL's rule, and this
+    // example exists to reproduce the REPL's layout, so it has to follow it.
+    let mut streamed_text = false;
+    printer.term().activity_started("");
     agent
         .run(&question, |event| match event {
             Event::Text(t) => {
+                if !streamed_text {
+                    // Same label the REPL uses. Kept in step deliberately: this example
+                    // is how the layout is inspected, and a label that differs here
+                    // reads as a REPL fault that does not exist.
+                    printer.term().activity_named("writing the answer");
+                }
+                streamed_text = true;
                 answer.push_str(&t);
                 printer.term().stream(&answer);
             }
             Event::Reasoning(t) => {
-                if !thinking_shown && !t.trim().is_empty() {
-                    thinking_shown = true;
-                    printer
-                        .term()
-                        .line(format_args!("{}", printer.dim("\u{2026} thinking")));
+                if !streamed_text && !t.trim().is_empty() {
+                    printer.term().activity_named("thinking");
                 }
             }
             Event::ToolStart { id, name } => {

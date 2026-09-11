@@ -15,10 +15,12 @@ use crate::session::{SessionEvent, SessionWriter};
 use crate::tools::{self, ToolBox};
 
 pub const SYSTEM_PROMPT: &str = "\
-You are flint, a minimal command-line coding and system-repair agent.
+You are flint, a command-line agent that works directly on the user's machine.
 
-You are the fallback tool. Assume the user's usual tooling may be broken; your \
-job is to diagnose and repair it, not to be pleasant about it.
+The task is whatever the user asks for. It may be building something, exploring \
+or learning a codebase, running and debugging, setting up a machine, changing \
+configuration, or diagnosing something that is broken. Do not assume it is a \
+repair, and do not go looking for damage that was not reported.
 
 Rules:
 - Act, do not narrate. Use the tools to inspect the real system before making \
@@ -29,8 +31,24 @@ Rules:
   failing command.
 - Report exactly what you changed and why.
 - Be concise. The user is looking at a terminal.
-- Prefer the `read`, `write`, `edit` and `list` tools for files over shell \
-  builtins: they behave identically on every platform.";
+- Prefer the `read`, `write`, `edit`, `list`, `glob` and `grep` tools over shell \
+  equivalents. `glob` finds files by name and `grep` searches file contents, both \
+  recursively; they behave identically on every platform, which the shell does not. \
+  Reach for them instead of `find`, `dir /s`, `findstr` or `grep -r`.
+
+About flint itself:
+- flint is the program you are running inside. It is normally an installed \
+  binary, not a source checkout, so editing files in the working directory does \
+  not change how flint behaves.
+- The model, providers, API keys, shell, step limit and proxy live in a \
+  hand-editable TOML config file, not in code. Its path is in the facts below. \
+  `/config` shows it, and `/reload` re-reads it after a hand edit.
+- Prefer `/model`, `/provider` and `/provider key` for those settings: they edit \
+  the config for the user and take effect at once.
+- So when the user asks you to change flint's own configuration -- the model, the \
+  provider, a key -- change the configuration, or tell them the command to run. Do \
+  not go hunting through flint's source to change how flint behaves.
+- Sessions are append-only JSONL, one file per session, in the directory below.";
 
 /// Where commands run, generated per platform.
 ///
@@ -68,10 +86,14 @@ pub fn build_system_prompt(config: &Config, cwd: &std::path::Path) -> String {
         "{SYSTEM_PROMPT}\n\n\
          Local facts:\n\
          - Shell: `{shell}`. {hint}\n\
-         - Working directory: {cwd} (path separator `{sep}`).",
+         - Working directory: {cwd} (path separator `{sep}`).\n\
+         - flint config: {config}\n\
+         - flint sessions: {sessions}",
         hint = platform::SHELL_HINT,
         cwd = cwd.display(),
         sep = platform::PATH_SEPARATOR,
+        config = crate::config::config_path().display(),
+        sessions = crate::config::sessions_dir().display(),
     )
 }
 
@@ -622,6 +644,60 @@ mod tests {
             );
             assert!(!p.contains("cmd.exe"), "must not mention cmd.exe on Unix");
         }
+    }
+
+    /// The task must come from the user, not from the prompt.
+    ///
+    /// Reported from real sessions: every request came back framed as a repair. The cause
+    /// was not the model but the prompt, which said "your job is to diagnose and repair
+    /// it" and "assume the user's usual tooling may be broken". A prompt that fixes the
+    /// agent's purpose turns "write me a script" into an inspection of a system that was
+    /// never broken -- and spends the turn looking for damage nobody mentioned.
+    ///
+    /// So the prompt describes *capabilities and constraints* and leaves the objective to
+    /// the request. This test pins that: the phrasing that caused it must not come back.
+    #[test]
+    fn system_prompt_does_not_dictate_the_task() {
+        let p = build_system_prompt(&cfg_for_prompt(), std::path::Path::new("/tmp"));
+        for banned in [
+            "your job is to",
+            "diagnose and repair",
+            "fallback tool",
+            "usual tooling may be broken",
+        ] {
+            assert!(
+                !p.to_lowercase().contains(banned),
+                "the prompt fixes the agent's purpose with {banned:?}, which makes every \
+                 request a repair: {p}"
+            );
+        }
+        assert!(
+            p.contains("The task is whatever the user asks for"),
+            "the prompt must say the objective comes from the request: {p}"
+        );
+    }
+
+    /// flint must know where its own configuration lives.
+    ///
+    /// Reported from a real session: asked to change its model, flint went looking through
+    /// the project's source. It is an installed binary; the model and providers are config,
+    /// not code, and the prompt has to say so -- including the path, which the model cannot
+    /// guess and should not have to search for.
+    #[test]
+    fn system_prompt_says_where_flint_is_configured() {
+        let p = build_system_prompt(&cfg_for_prompt(), std::path::Path::new("/tmp"));
+        assert!(
+            p.contains(&crate::config::config_path().display().to_string()),
+            "the config path must be stated outright: {p}"
+        );
+        assert!(
+            p.to_lowercase().contains("config"),
+            "it must say the settings are configuration rather than code: {p}"
+        );
+        assert!(
+            p.contains("/model") || p.contains("/provider"),
+            "it must name the commands that change those settings: {p}"
+        );
     }
 
     /// A rescue tool that restates the obvious is burning the user's context.
