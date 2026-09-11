@@ -78,9 +78,24 @@ function charWidth(cp) {
   return wide ? 2 : 1;
 }
 
+// VT100 "pending wrap" state.
+//
+// Writing a character into the last column does NOT move the cursor to the next
+// row; the terminal remembers that the next character must wrap first. The
+// difference is visible: flint parks the cursor with an absolute position, and
+// under pending-wrap semantics a `CR` at that point clears column 0 of the row it
+// is already on, not of the row below. Getting this wrong made a correct stream
+// look like it repeated the answer first row.
+let pendingWrap = false;
+
 function put(ch) {
   const width = charWidth(ch);
   if (width === 0) return;
+  if (pendingWrap) {
+    col = 0;
+    newline();
+    pendingWrap = false;
+  }
   if (col + width > COLS) {
     // Autowrap, but never split a wide cell across the boundary.
     col = 0;
@@ -89,6 +104,10 @@ function put(ch) {
   screen[row][col] = ch;
   for (let k = 1; k < width; k++) screen[row][col + k] = '';
   col += width;
+  if (col >= COLS) {
+    col = COLS - 1;
+    pendingWrap = true;
+  }
 }
 
 function newline() {
@@ -134,6 +153,7 @@ while (i < bytes.length) {
       case 'H': {
         row = Math.min((nums[0] || 1) - 1, ROWS - 1);
         col = Math.min((nums[1] || 1) - 1, COLS - 1);
+        pendingWrap = false;
         break;
       }
       case 'A':
@@ -180,6 +200,7 @@ while (i < bytes.length) {
 
   if (b === 0x0d) {
     col = 0;
+    pendingWrap = false;
     i++;
     continue;
   }
@@ -198,6 +219,7 @@ while (i < bytes.length) {
   }
   if (b === 0x08) {
     col = Math.max(0, col - 1);
+    pendingWrap = false;
     i++;
     continue;
   }

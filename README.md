@@ -101,7 +101,8 @@ Inside the REPL:
 | `/provider key <key>` | set the API key for the active provider |
 | `/model [name]` | show or change the model |
 | `/usage` | context size and token accounting |
-| `/verbose [on\|off\|full]` | how much tool detail to print |
+| `/verbose [on\|off\|full]` | how much of the agent's activity to narrate |
+| `/detail [on\|off]` | print tool output (default off: one line per result) |
 | `/readonly [on\|off]` | toggle the write guard |
 | `/tools` | list tools |
 | `/sessions` | list past sessions |
@@ -241,9 +242,22 @@ formatting when something looks wrong.
 
 One line per tool call and one per tool result — never the output itself, which is
 routinely hundreds of lines. A failure keeps its first line, because that is the
-part a reader may have to act on; `/verbose` shows more. Reasoning shows a single
-`… thinking` marker rather than the stream, which arrives one token at a time and
-would otherwise be a word per line.
+part a reader may have to act on. Reasoning shows a single `… thinking` marker
+rather than the stream, which arrives one token at a time and would otherwise be a
+word per line.
+
+Tool output lives behind its own switch, `/detail`, and not behind `/verbose`. They
+are different wants: "tell me more about what the model is doing" should not also
+print every file it reads, and tying them together meant anyone who wanted the first
+got the second. `/detail on` prints up to 25 lines per result and notes how many it
+withheld.
+
+Rows in the transcript are counted as *screen* rows, not lines, and a line wider
+than the window is wrapped before it is written. Both of those are load-bearing.
+History is inserted inside a scrolling region, so a line the terminal wraps itself
+continues past the region's bottom margin and the same paragraph is written down the
+whole screen; and counting a 283-column line as one row makes the transcript commit
+the wrong rows as the answer streams.
 
 ## License
 

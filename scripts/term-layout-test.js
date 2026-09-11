@@ -286,6 +286,34 @@ function inputRow(s) {
   check('八行齐全', [1, 2, 3, 4, 5, 6, 7, 8].every((i) => joined.includes(`第 ${i} 行回答`)));
 }
 
+// --- a single line wider than the screen ----------------------------------------
+// The reported bug. A Chinese answer whose first sentence is one unbroken 283-column
+// line was committed to history as *one* row. The terminal wrapped it inside the
+// scrolling region, the continuation ran past the region's bottom margin, and the
+// paragraph smeared down thirteen rows of the screen. Rows are counted in screen
+// rows now, and history is wrapped before it is written.
+{
+  const t = new FakeTerm();
+  t.line('> 总结一下');
+  // One logical line, no newlines, far wider than the screen.
+  const oneLine = '当前目录是 flint 仓库根目录（含 src/、tests/、examples/、scripts/、Cargo.lock 等），其 Cargo.toml 定义了一个 MIT 许可的 Rust 2021 包。';
+  let acc = '';
+  for (const ch of oneLine) {
+    acc += ch;
+    t.stream(acc);
+  }
+  t.endStream();
+  const s = screen('超宽单行不重复铺屏', () => t);
+  const joined = s.join('\n');
+  console.log('  --- assertions ---');
+  check('输入行固定在最后一行', inputRow(s).startsWith('>'));
+  check('提问没有被挤掉', joined.includes('> 总结一下'));
+  // The real assertion: the text appears once, not once per wrapped row of history.
+  const marks = joined.split('当前目录是').length - 1;
+  check('这段文字只出现一次（不是每折一行就重印）', marks <= 1);
+  check('尾部内容也还在', joined.includes('Rust 2021'));
+}
+
 // --- the replay model itself -----------------------------------------------------
 // Everything above is only as trustworthy as the width model underneath it. A
 // streamed Chinese answer was reported as duplicating its first row, which turned

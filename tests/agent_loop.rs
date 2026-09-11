@@ -57,6 +57,7 @@ fn test_config(base_url: &str) -> Config {
         readonly: false,
         proxy: None,
         verbose: false,
+        tool_detail: false,
         providers: vec![ProviderConfig {
             name: "stub".to_string(),
             base_url: base_url.to_string(),

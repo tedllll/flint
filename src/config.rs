@@ -72,14 +72,23 @@ pub struct Config {
     )]
     pub proxy: Option<String>,
 
-    /// How much of the agent's tool traffic to print.
+    /// How much of the agent's own activity to print.
     ///
     /// `false` (the default) prints one compact line per tool call plus a short
-    /// result. `true` prints full arguments and more of the output. A rescue
-    /// tool produces a lot of noise if every tool result is dumped in full, and
-    /// the person reading it is usually already having a bad day.
+    /// result. `true` adds the tool's arguments, and the reasoning marker.
     #[serde(default)]
     pub verbose: bool,
+
+    /// Whether to print the output behind a tool result.
+    ///
+    /// Off by default, and separate from `verbose` on purpose. A directory listing
+    /// is forty lines and reading a file is hundreds; wanting a running commentary
+    /// on what the model is doing is not the same as wanting the file it read
+    /// printed into the conversation. `/verbose full` and this used to be the same
+    /// switch, which meant the commentary could not be turned up without the output
+    /// coming with it.
+    #[serde(default)]
+    pub tool_detail: bool,
 
     pub providers: Vec<ProviderConfig>,
 }
@@ -146,6 +155,7 @@ impl Default for Config {
             readonly: false,
             proxy: None,
             verbose: false,
+            tool_detail: false,
             providers: vec![
                 ProviderConfig {
                     name: "deepseek".to_string(),

@@ -222,6 +222,10 @@ async fn real_main() -> Result<i32> {
         if cfg.verbose { CHATTY } else { NORMAL },
         &term,
     );
+    // Tool output is opt-in, and separate from how much of the model's activity is
+    // narrated -- printing a file the model read is not "more verbose", it is a
+    // different thing.
+    printer.set_tool_detail(cfg.tool_detail);
 
     // ---- one-shot ----
     if let Some(prompt) = args.prompt {
@@ -738,7 +742,8 @@ async fn handle_command(
   /config [edit]        show or change shell, steps, proxy
   /model [name]         show or change the model
   /usage                context and token accounting
-  /verbose [on|off|full] how much tool detail to print
+  /verbose [on|off|full] how much of the agent's activity to narrate
+  /detail [on|off]      print tool output (off: one line per result)
   /readonly [on|off]    toggle the write guard
   /tools                list available tools
   /sessions             list past sessions
@@ -954,9 +959,34 @@ async fn handle_command(
             let what = match next {
                 QUIET => "off — only the model's answers",
                 NORMAL => "on — one line per tool call",
-                _ => "full — arguments and more output",
+                _ => "full — arguments and the reasoning marker",
             };
             printer.term().line(format_args!("{} {what}", printer.style(GREEN, "verbose")));
+            if cfg.tool_detail {
+                printer.term().line(format_args!(
+                    "{dim}note: tool output is still printed in full; /detail off to stop that.{reset}",
+                ));
+            }
+        }
+
+        "/detail" => {
+            // Deliberately separate from `/verbose`. Turning up the narration of
+            // what the model is doing should not also print every file it reads.
+            let on = match arg {
+                "on" | "full" => true,
+                "off" | "quiet" => false,
+                "" => !printer.tool_detail(),
+                other => return Err(anyhow!("expected on|off, got '{other}'")),
+            };
+            printer.set_tool_detail(on);
+            cfg.tool_detail = on;
+            cfg.save()?;
+            let what = if on {
+                "on — tool output is printed, up to 25 lines per result"
+            } else {
+                "off — one line per tool result"
+            };
+            printer.term().line(format_args!("{} {what}", printer.style(GREEN, "detail")));
         }
 
         "/config" => {
@@ -972,6 +1002,7 @@ async fn handle_command(
                 cfg.proxy.as_deref().unwrap_or("(none)")
             ));
             printer.term().line(format_args!("  verbose          = {}", cfg.verbose));
+            printer.term().line(format_args!("  tool_detail      = {}", cfg.tool_detail));
 
             if arg == "edit" {
                 // A small wizard, so the settings that matter when you are

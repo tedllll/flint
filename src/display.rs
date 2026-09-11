@@ -107,6 +107,13 @@ pub struct Printer<'a> {
     /// the test harness is writing to the same stream. Recording at the point of
     /// emission tests the real code path without involving the process at all.
     recorded: std::cell::RefCell<Vec<String>>,
+    /// Whether tool *output* is shown, as opposed to a summary of it.
+    ///
+    /// Separate from verbosity on purpose: verbosity is about how much of the
+    /// model's own activity to narrate, and this is about whether to print the
+    /// contents of a file the model just read. Defaults to off, because output is
+    /// measured in hundreds of lines and the transcript is meant to stay readable.
+    tool_detail: std::cell::Cell<bool>,
 }
 
 impl<'a> Printer<'a> {
@@ -117,6 +124,7 @@ impl<'a> Printer<'a> {
             pal: Palette::of(color),
             term,
             recorded: std::cell::RefCell::new(Vec::new()),
+            tool_detail: std::cell::Cell::new(false),
         }
     }
 
@@ -124,6 +132,21 @@ impl<'a> Printer<'a> {
     fn emit(&self, args: std::fmt::Arguments<'_>) {
         self.recorded.borrow_mut().push(format!("{args}"));
         self.term.line(args);
+    }
+
+    /// Whether the output behind a tool result is shown, instead of only its size.
+    ///
+    /// Off by default, and deliberately not tied to verbosity: "show me more of what
+    /// the model is doing" and "print the file it just read" are different wants, and
+    /// conflating them means anyone who turns up the first gets the second. A
+    /// directory listing is forty lines; reading a file is hundreds. They belong
+    /// behind their own switch.
+    pub fn set_tool_detail(&self, on: bool) {
+        self.tool_detail.set(on);
+    }
+
+    pub fn tool_detail(&self) -> bool {
+        self.tool_detail.get()
     }
 
     /// Take everything recorded so far, clearing the record.
@@ -220,12 +243,11 @@ impl<'a> Printer<'a> {
         }
         self.emit(format_args!("{line}"));
 
-        // Only at CHATTY does the output itself get shown, and even then bounded.
-        //
-        // `CHATTY_GIST_LINES` is the cap on the whole emission, header included, so
-        // the "more lines" note has to be budgeted for rather than added on top --
-        // otherwise a verbose result is always one line over its own limit.
-        if self.verbosity() >= CHATTY && lines.len() > 1 {
+        // The output itself only appears when it has been asked for, and even then
+        // under a cap. `CHATTY_GIST_LINES` is the budget for the whole emission,
+        // header included, so the "more lines" note is budgeted for rather than
+        // added on top -- otherwise a detailed result is always one line over.
+        if self.tool_detail() && lines.len() > 1 {
             let rest = lines.len() - 1;
             let budget = CHATTY_GIST_LINES - 1;
             let shown = if rest > budget { budget - 1 } else { rest };
@@ -371,16 +393,17 @@ mod tests {
 
     /// Everything a printer emits for one tool result, colour off so the assertions
     /// read as plain text.
-    fn result_lines(verbosity: u8, name: &str, output: &str, ok: bool) -> Vec<String> {
+    fn result_lines(verbosity: u8, detail: bool, name: &str, output: &str, ok: bool) -> Vec<String> {
         let term = Term::plain();
         let printer = Printer::new(false, verbosity, &term);
+        printer.set_tool_detail(detail);
         printer.tool_result(name, output, ok);
         printer.take_recorded()
     }
 
     #[test]
     fn a_tool_result_is_one_line_and_never_the_output() {
-        let lines = result_lines(NORMAL, "list", &a_big_listing(), true);
+        let lines = result_lines(NORMAL, false, "list", &a_big_listing(), true);
         assert_eq!(lines.len(), 1, "expected one line, got {lines:#?}");
         assert!(lines[0].contains("list"), "no tool name: {lines:?}");
         assert!(
@@ -390,12 +413,27 @@ mod tests {
     }
 
     #[test]
-    fn a_verbose_result_shows_some_detail_and_still_not_everything() {
-        let lines = result_lines(CHATTY, "list", &a_big_listing(), true);
-        assert!(lines.len() > 1, "verbose showed no detail: {lines:#?}");
+    fn detail_is_off_even_at_full_verbosity() {
+        // The reported bug. `/verbose full` used to turn on tool output as well, so
+        // anyone who wanted the running commentary got every directory listing and
+        // file read printed into the conversation. They are different wants.
+        for verbosity in [NORMAL, CHATTY] {
+            let lines = result_lines(verbosity, false, "list", &a_big_listing(), true);
+            assert_eq!(
+                lines.len(),
+                1,
+                "verbosity {verbosity} printed the output anyway: {lines:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn detail_when_asked_for_shows_some_of_it_and_still_not_everything() {
+        let lines = result_lines(NORMAL, true, "list", &a_big_listing(), true);
+        assert!(lines.len() > 1, "detail asked for but not shown: {lines:#?}");
         assert!(
             lines.len() <= CHATTY_GIST_LINES,
-            "verbose flooded the screen with {} lines",
+            "detail flooded the screen with {} lines",
             lines.len()
         );
         assert!(
@@ -408,7 +446,7 @@ mod tests {
     fn a_failed_tool_result_keeps_the_reason() {
         // The exception to "never the output": if something broke, the reader may
         // have to act on it, so the reason survives even at normal verbosity.
-        let lines = result_lines(NORMAL, "bash", "command not found: rq", false);
+        let lines = result_lines(NORMAL, false, "bash", "command not found: rq", false);
         assert_eq!(lines.len(), 1, "not one line: {lines:#?}");
         assert!(
             lines[0].contains("command not found"),
@@ -419,7 +457,7 @@ mod tests {
     #[test]
     fn a_single_line_result_is_shown_rather_than_counted() {
         // "1 lines" would be useless when the tool already wrote a headline.
-        let lines = result_lines(NORMAL, "read", "12 lines", true);
+        let lines = result_lines(NORMAL, false, "read", "12 lines", true);
         assert!(lines[0].contains("12 lines"), "summary dropped: {lines:?}");
     }
 

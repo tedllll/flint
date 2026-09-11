@@ -25,6 +25,76 @@ use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Mutex;
 use std::io::{IsTerminal, Write};
 
+/// How many terminal columns `text` occupies.
+///
+/// Not `chars().count()`. A terminal advances two columns for a CJK ideograph or
+/// other East Asian wide character, so a line of Chinese is roughly twice as wide
+/// as its character count suggests. Streaming an answer has to know where the
+/// cursor ended up, and the answer to that question is in columns.
+///
+/// The ranges are the standard East Asian Wide/Fullwidth set. Being slightly wrong
+/// about an exotic code point is survivable; being wrong about ordinary Chinese is
+/// not.
+fn display_width(text: &str) -> u16 {
+    text.chars().map(char_width).sum()
+}
+
+fn char_width(c: char) -> u16 {
+    let c = c as u32;
+    // Combining marks and zero-width characters take no room of their own.
+    if (0x0300..=0x036f).contains(&c) || c == 0x200b || c == 0xfeff {
+        return 0;
+    }
+    let wide = (0x1100..=0x115f).contains(&c)        // Hangul Jamo
+        || (0x2e80..=0x303e).contains(&c)            // CJK radicals and punctuation
+        || (0x3041..=0x33ff).contains(&c)            // kana, CJK compatibility
+        || (0x3400..=0x4dbf).contains(&c)            // CJK extension A
+        || (0x4e00..=0x9fff).contains(&c)            // CJK unified ideographs
+        || (0xa000..=0xa4cf).contains(&c)            // Yi
+        || (0xac00..=0xd7a3).contains(&c)            // Hangul syllables
+        || (0xf900..=0xfaff).contains(&c)            // CJK compatibility ideographs
+        || (0xfe30..=0xfe6f).contains(&c)            // CJK compatibility forms
+        || (0xff00..=0xff60).contains(&c)            // fullwidth forms
+        || (0xffe0..=0xffe6).contains(&c)
+        || (0x1f300..=0x1f64f).contains(&c)          // emoji
+        || (0x20000..=0x3fffd).contains(&c); // CJK extensions B and beyond
+    if wide {
+        2
+    } else {
+        1
+    }
+}
+
+/// Split `text` into the rows a terminal of `cols` columns would actually display.
+///
+/// This is not a cosmetic step. Output is committed to history one screen row at a
+/// time, inside a scrolling region, and a logical line wider than the screen is
+/// several screen rows. Committing it as one row loses lines and repeats others,
+/// and because the repeat happens through the region's bottom margin the same
+/// paragraph can smear down the whole screen.
+///
+/// A row breaks *before* a wide character that would not fit, so a character is
+/// never split across the boundary.
+fn wrap_rows(text: &str, cols: u16) -> Vec<String> {
+    let cols = cols.max(1) as usize;
+    let mut out = Vec::new();
+    for logical in text.split('\n') {
+        let mut current = String::new();
+        let mut width = 0usize;
+        for ch in logical.chars() {
+            let cw = char_width(ch) as usize;
+            if width + cw > cols && !current.is_empty() {
+                out.push(std::mem::take(&mut current));
+                width = 0;
+            }
+            current.push(ch);
+            width += cw;
+        }
+        out.push(current);
+    }
+    out
+}
+
 /// What the input row currently holds.
 #[derive(Default, Clone)]
 pub struct Input {
@@ -115,6 +185,12 @@ pub struct Term {
     interactive: bool,
     /// Last row of the screen (1-based, inclusive).
     screen_rows: AtomicU16,
+    /// Screen width in columns, which is what decides where wrapped lines break.
+    ///
+    /// Needed because output is committed to history one *screen* row at a time: a
+    /// single logical line longer than the screen occupies several, and counting it
+    /// as one makes the transcript lose lines and repeat others.
+    screen_cols: AtomicU16,
     /// Top row of the answer strip (1-based).
     viewport_top: AtomicU16,
     /// First row *below* the answer strip: the input row.
@@ -128,6 +204,13 @@ pub struct Term {
     stream_text: Mutex<String>,
     /// How many of the streaming answer's lines have already gone to history.
     committed: AtomicU16,
+    /// The rows the last frame drew into the answer strip.
+    ///
+    /// Needed to erase the tail of rows that have just got shorter. Clearing the
+    /// whole row instead is what caused the answer to repeat its first line: a row
+    /// filled to the exact width leaves the cursor in the *next* row, so the erase
+    /// lands on a row that has not been drawn yet.
+    stream_rows: Mutex<Vec<String>>,
 }
 
 impl Term {
@@ -139,6 +222,7 @@ impl Term {
         Term {
             interactive: false,
             screen_rows: AtomicU16::new(24),
+            screen_cols: AtomicU16::new(80),
             viewport_top: AtomicU16::new(20),
             input_row: AtomicU16::new(24),
             input: Mutex::new(Input::default()),
@@ -146,6 +230,7 @@ impl Term {
             stream_active: AtomicBool::new(false),
             stream_text: Mutex::new(String::new()),
             committed: AtomicU16::new(0),
+            stream_rows: Mutex::new(Vec::new()),
         }
     }
 
@@ -171,6 +256,7 @@ impl Term {
         let term = Term {
             interactive,
             screen_rows: AtomicU16::new(24),
+            screen_cols: AtomicU16::new(80),
             viewport_top: AtomicU16::new(20),
             input_row: AtomicU16::new(24),
             input: Mutex::new(Input::default()),
@@ -178,6 +264,7 @@ impl Term {
             stream_active: AtomicBool::new(false),
             stream_text: Mutex::new(String::new()),
             committed: AtomicU16::new(0),
+            stream_rows: Mutex::new(Vec::new()),
         };
 
         if tty {
@@ -211,9 +298,10 @@ impl Term {
 
     /// Recompute the layout from the current window size.
     fn reclaim(&self) {
-        let (_, h) = size().unwrap_or((80, 24));
+        let (w, h) = size().unwrap_or((80, 24));
         let h = h.max(RESERVED + 1);
         self.screen_rows.store(h, Ordering::Relaxed);
+        self.screen_cols.store(w.max(20), Ordering::Relaxed);
         self.input_row.store(h, Ordering::Relaxed);
         self.viewport_top.store(h - ANSWER_ROWS, Ordering::Relaxed);
     }
@@ -303,13 +391,25 @@ impl Term {
     /// repositioned, and no cursor position has to be tracked between writes. The
     /// region is only set for the duration of the write and then reset, so a stray
     /// scroll can never reach the strip or the input row.
+    /// Write lines into the transcript above the strip.
+    ///
+    /// Lines are wrapped to the screen width first, so exactly one terminal row is
+    /// produced per item. Writing a longer line would make the terminal wrap it inside
+    /// the scrolling region, and the continuation would then run past the region's
+    /// bottom margin -- the same row written over and over down the screen. Doing the
+    /// wrapping here keeps the row count honest for every caller.
     fn insert_history(&self, lines: &[String]) {
-        if lines.is_empty() {
+        let mut wrapped: Vec<String> = Vec::new();
+        for line in lines {
+            let cols = self.screen_cols.load(Ordering::Relaxed);
+            wrapped.extend(wrap_rows(line, cols));
+        }
+        if wrapped.is_empty() {
             return;
         }
         let bottom = self.history_bottom();
         let mut out = std::io::stdout();
-        for text in lines {
+        for text in &wrapped {
             let _ = write!(out, "\x1b[1;{}r", bottom);
             let _ = write!(out, "\x1b[{};1H\r\x1b[2K{text}\r\n", bottom);
             let _ = write!(out, "\x1b[r");
@@ -352,27 +452,41 @@ impl Term {
             // and skip lines into history.
             if !text.starts_with(held.as_str()) {
                 self.committed.store(0, Ordering::Relaxed);
+                // A fresh answer's rows have nothing in common with the old ones, so
+                // there is no tail to erase.
+                self.stream_rows.lock().unwrap().clear();
             }
             *held = text.to_string();
         }
 
-        let rows: Vec<&str> = text.split('\n').collect();
+        // Rows are *screen* rows, not lines. A line longer than the screen is several
+        // of them, and every count below -- what fits in the slice, what has to go to
+        // history -- is a count of screen rows, because that is what the terminal
+        // scrolls and what the slice can hold.
+        let rows = wrap_rows(text, self.screen_cols.load(Ordering::Relaxed));
         let height = rows.len() as u16;
         let top = self.viewport_top.load(Ordering::Relaxed);
         let last = self.input_row.load(Ordering::Relaxed).saturating_sub(1);
         let capacity = last.saturating_sub(top).saturating_add(1);
 
-        // Every row of the slice is accounted for, so a line that leaves the top of
-        // the slice must be handed to history or it would be lost when the slice
-        // scrolls it away.
+        // The last row is the one still being appended to: a fragment that arrives next
+        // can rewrap it and change where it breaks. Everything above it is final, and
+        // only final rows may be committed -- handing a row to history that later
+        // rewraps would leave a duplicate of it behind on screen.
+        let settled = if text.ends_with('\n') {
+            height
+        } else {
+            height.saturating_sub(1)
+        };
+
+        // Every row of the slice is accounted for, so a row that leaves the top of the
+        // slice must be handed to history or it would be lost when the slice scrolls
+        // it away.
         let committed = self.committed.load(Ordering::Relaxed);
         if height > capacity {
-            let drop = height - capacity;
+            let drop = (height - capacity).min(settled);
             if drop > committed {
-                let fresh: Vec<String> = rows[committed as usize..drop as usize]
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
+                let fresh: Vec<String> = rows[committed as usize..drop as usize].to_vec();
                 self.insert_history(&fresh);
                 self.committed.store(drop, Ordering::Relaxed);
             }
@@ -382,22 +496,61 @@ impl Term {
         let visible = &rows[first..];
         let start = top + capacity.saturating_sub(visible.len() as u16);
         let mut out = std::io::stdout();
-        let last_row = visible.len().saturating_sub(1);
+        let previous = std::mem::take(&mut *self.stream_rows.lock().unwrap());
+
+        // Rewrite each visible row in place, then erase whatever the row held before
+        // and no longer needs.
+        //
+        // Clearing the whole row first would be simpler, and is wrong. When a line
+        // fills the width exactly, the terminal leaves the cursor in the *next* row,
+        // so the next write's `CR` and erase land on a row that has not been drawn
+        // yet and wipes it. The answer then grows by repeating its first row, which
+        // is precisely the fault this streaming code exists to avoid. Writing the
+        // text first and erasing only the tail never touches a row ahead of the
+        // cursor.
+        let mut drawn = 0u16;
         for (n, line) in visible.iter().enumerate() {
             let r = start + n as u16;
             if r > last {
                 break;
             }
-            let _ = write!(out, "\x1b[{};1H\x1b[2K{line}", r);
-            // Between rows, plain CR+LF puts the cursor at the start of the next one.
-            // After the final row, nothing: the cursor is left immediately after the
-            // text, which is where the next fragment has to continue from.
-            if n < last_row {
+            let _ = write!(out, "\x1b[{};1H{line}", r);
+            let width = display_width(line);
+            if let Some(prev) = previous.get(drawn as usize) {
+                let prev_width = display_width(prev);
+                if prev_width > width {
+                    // `CSI {n}K` erases n cells from the cursor without moving it, so
+                    // it shortens the row and leaves the cursor where the next line's
+                    // positioning needs it to be.
+                    let _ = write!(out, "\x1b[{}K", prev_width - width);
+                }
+            }
+            drawn += 1;
+            if n < visible.len().saturating_sub(1) {
+                // A short line needs the `CR` to return from wherever it ended; a
+                // full one is already at column 1 of the next row.
                 let _ = write!(out, "\r\n");
+            }
+        }
+        for r in (start + drawn)..=last {
+            let _ = write!(out, "\x1b[{};1H\x1b[2K", r);
+        }
+
+        // Park the cursor immediately after the last visible line's text, where the
+        // next fragment continues from.
+        if let Some(last_line) = visible.last() {
+            let r = start + (visible.len() as u16).saturating_sub(1);
+            if r <= last {
+                let w = display_width(last_line);
+                // A line as wide as the screen already left the cursor on the row
+                // below, so aiming at column 1 is what keeps the next fragment there.
+                let _ = write!(out, "\x1b[{};{}H", r, w.max(1));
             }
         }
         let _ = write!(out, "\x1b[?25l");
         let _ = out.flush();
+        // Remember this frame, so the next one knows what it has to shorten.
+        *self.stream_rows.lock().unwrap() = visible.iter().map(|s| s.to_string()).collect();
         self.redraw();
     }
 
@@ -415,7 +568,10 @@ impl Term {
         if text.is_empty() {
             return;
         }
-        let lines: Vec<String> = text.split('\n').map(|s| s.to_string()).collect();
+        // Again in screen rows: the slice holds `capacity` of them, and the answer has
+        // already had its earlier rows committed as it streamed, so only the tail can
+        // still be on screen.
+        let lines = wrap_rows(&text, self.screen_cols.load(Ordering::Relaxed));
         let top = self.viewport_top.load(Ordering::Relaxed);
         let last = self.input_row.load(Ordering::Relaxed).saturating_sub(1);
         let capacity = last.saturating_sub(top).saturating_add(1) as usize;
@@ -586,6 +742,51 @@ impl Term {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cjk_character_is_two_columns_wide() {
+        assert_eq!(display_width("你好"), 4);
+        assert_eq!(display_width("磁盘占用正常。"), 14);
+        assert_eq!(display_width("abc"), 3);
+        assert_eq!(display_width("a你b"), 4);
+    }
+
+    #[test]
+    fn ordinary_punctuation_and_box_drawing_are_one_column() {
+        // The `read` tool draws rules with these, and counting them as wide would
+        // shift every line of a file by one column per rule.
+        assert_eq!(display_width("\u{2502}"), 1);
+        assert_eq!(display_width("—"), 1);
+        assert_eq!(display_width("…"), 1);
+    }
+
+    #[test]
+    fn wrapping_counts_columns_and_never_splits_a_wide_character() {
+        // A line of Chinese is twice as wide as it has characters, so it must break at
+        // half the character count.
+        let rows = wrap_rows("你".repeat(60).as_str(), 70);
+        assert_eq!(rows.len(), 2, "60 wide characters over 70 columns: {rows:?}");
+        assert_eq!(display_width(&rows[0]), 70);
+        assert_eq!(display_width(&rows[1]), 50);
+
+        // A wide character that would straddle the boundary moves down whole.
+        let rows = wrap_rows("ab你", 3);
+        assert_eq!(rows, vec!["ab".to_string(), "你".to_string()]);
+    }
+
+    #[test]
+    fn wrapping_keeps_explicit_newlines_and_empty_lines() {
+        let rows = wrap_rows("a\n\nb", 80);
+        assert_eq!(rows, vec!["a".to_string(), String::new(), "b".to_string()]);
+    }
+
+    #[test]
+    fn a_row_the_screen_width_is_not_wrapped_again() {
+        // The boundary case: exactly `cols` columns is one row, not two. Getting this
+        // wrong adds a blank row to every full-width line of every answer.
+        let rows = wrap_rows(&"x".repeat(80), 80);
+        assert_eq!(rows.len(), 1);
+    }
 
     fn press(term: &Term, code: KeyCode) -> Key {
         term.on_event(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
