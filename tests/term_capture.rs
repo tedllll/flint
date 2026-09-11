@@ -53,6 +53,16 @@ fn redirect_stdout(path: &std::path::Path) -> Box<dyn FnOnce()> {
     })
 }
 
+/// Serialises the tests that move stdout.
+///
+/// `dup2` on file descriptor 1 is process-wide, so two of these running at once
+/// point it at each other's files and every assertion reads someone else's output.
+/// The lock is what makes `redirect_stdout` usable from more than one test.
+fn stdout_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 /// Path the capture is written to, read back by scripts/term-layout-test.js.
 fn capture_path() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -62,6 +72,7 @@ fn capture_path() -> std::path::PathBuf {
 
 #[test]
 fn interactive_layout_matches_the_replay_model() {
+    let _guard = stdout_lock().lock().unwrap_or_else(|e| e.into_inner());
     let path = capture_path();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let restore = redirect_stdout(&path);

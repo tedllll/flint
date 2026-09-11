@@ -286,7 +286,26 @@ function inputRow(s) {
   check('八行齐全', [1, 2, 3, 4, 5, 6, 7, 8].every((i) => joined.includes(`第 ${i} 行回答`)));
 }
 
-// --- the real binary's bytes, captured by tests/term_capture.rs ------------------
+// --- the replay model itself -----------------------------------------------------
+// Everything above is only as trustworthy as the width model underneath it. A
+// streamed Chinese answer was reported as duplicating its first row, which turned
+// out to be the replay treating each CJK character as one column; the code was
+// fixed, but the check belongs here too, or a wrong emulator can hide a real bug.
+{
+  const wide = '你'.repeat(60); // 120 columns of CJK
+  const narrow = 'a'.repeat(60); // 60 columns of ASCII
+  fs.writeFileSync(tmp, `${wide}\r\n${narrow}`, 'utf8');
+  const out = execFileSync('node', ['scripts/vtscreen.js', tmp, '24', String(COLS)], {
+    encoding: 'utf8',
+  });
+  const lines = out.trimEnd().split('\n').slice(1).map((l) => l.slice(3).replace(/\s+$/, ''));
+  console.log('\n===== 回放器宽度模型 =====');
+  console.log(`  row1=${[...lines[0]].length} chars  row2=${[...lines[1]].length} chars`);
+  console.log('  --- assertions ---');
+  check('120 列的中文在 70 列处换行', [...lines[0]].length === 35);
+  check('换行后余下的中文在下一行', [...lines[1]].length === 25);
+  check('60 列 ASCII 不换行', lines[2].length === 60);
+}
 // The hand-written model above is only worth anything if it matches what `Term`
 // actually emits. `cargo test --test term_capture` writes that stream to
 // target/term-capture.bin; replaying it here is what ties the two together.

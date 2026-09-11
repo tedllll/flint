@@ -1178,8 +1178,13 @@ async fn run_turn(
                     let name = tool_names.get(&id).cloned().unwrap_or_default();
                     printer.tool_call(&name, &args);
                 }
-                Event::ToolResult { output, ok, .. } => {
-                    printer.tool_result(&output, ok);
+                Event::ToolResult { id, output, ok } => {
+                    // The name comes from the matching ToolStart: the result is
+                    // reported as "✓ read" or "✓ bash", so the transcript says what
+                    // happened rather than just that something did.
+                    let name = tool_names.get(&id).cloned().unwrap_or_default();
+                    printer.tool_result(&name, &output, ok);
+                    tool_names.remove(&id);
                 }
                 Event::Usage(_) => {}
                 Event::Warning(w) => {

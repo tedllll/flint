@@ -218,14 +218,32 @@ the way the REPL does, and the layout test replays that file. A debug build
 honours `FLINT_TERM_CAPTURE` for this, which is the only way to reach the
 interactive branches from a test; release builds do not compile it.
 
+The replay model counts CJK characters as two columns and expands tabs, because it
+is used to judge output that contains both. A tool that disagrees with a real
+terminal about width produces phantom wrapping, which is worse than no check at
+all — so `scripts/term-layout-test.js` asserts the width behaviour itself.
+
 `examples/live_turn.rs` runs one turn against a real provider through the same
 layout, for checking that genuine model output — reasoning, tool calls, and all —
 lands where it should:
 
 ```bash
 FLINT_TERM_CAPTURE=1 cargo run --example live_turn -- "your question" > live.bin
-node scripts/vtscreen.js live.bin 24 70
+node scripts/vtscreen.js live.bin 24 100     # the visible screen
+node scripts/tall-replay.js live.bin 100     # the whole transcript
 ```
+
+`examples/read_probe.rs` prints what a tool returned with tabs and carriage
+returns made visible, which is how the transcript is separated from the tool's own
+formatting when something looks wrong.
+
+### What the transcript shows
+
+One line per tool call and one per tool result — never the output itself, which is
+routinely hundreds of lines. A failure keeps its first line, because that is the
+part a reader may have to act on; `/verbose` shows more. Reasoning shows a single
+`… thinking` marker rather than the stream, which arrives one token at a time and
+would otherwise be a word per line.
 
 ## License
 

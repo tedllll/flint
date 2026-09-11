@@ -28,11 +28,20 @@ async fn main() -> anyhow::Result<()> {
 
     let term = Term::start()?;
     let cwd = std::env::current_dir()?;
+    // NORMAL, not the config's setting: this example is for judging the default
+    // transcript, and CHATTY deliberately shows more of each tool result. Set
+    // FLINT_LIVE_VERBOSE=1 to see the chatty layout instead.
+    let verbosity = if std::env::var_os("FLINT_LIVE_VERBOSE").is_some() {
+        flint::display::CHATTY
+    } else {
+        flint::display::NORMAL
+    };
+    let printer = flint::display::Printer::new(false, verbosity, &term);
     // Read-only, so a layout check can never run a command by accident.
     let mut agent = Agent::new(&cfg, Provider::new(provider)?, true, cwd, None);
 
     // The REPL echoes the question before the turn, so the layout test covers it.
-    term.line(format_args!("> {question}"));
+    printer.term().line(format_args!("> {question}"));
 
     let mut answer = String::new();
     let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -43,12 +52,14 @@ async fn main() -> anyhow::Result<()> {
         .run(&question, |event| match event {
             Event::Text(t) => {
                 answer.push_str(&t);
-                term.stream(&answer);
+                printer.term().stream(&answer);
             }
             Event::Reasoning(t) => {
                 if !thinking_shown && !t.trim().is_empty() {
                     thinking_shown = true;
-                    term.line(format_args!("\u{2026} thinking"));
+                    printer
+                        .term()
+                        .line(format_args!("{}", printer.dim("\u{2026} thinking")));
                 }
             }
             Event::ToolStart { id, name } => {
@@ -56,18 +67,21 @@ async fn main() -> anyhow::Result<()> {
             }
             Event::ToolArgs { id, args } => {
                 let name = names.get(&id).cloned().unwrap_or_default();
-                term.line(format_args!("  · {name} {args}"));
+                printer.tool_call(&name, &args);
             }
-            Event::ToolResult { output, ok, .. } => {
-                let mark = if ok { "✓" } else { "✗" };
-                term.line(format_args!("  {mark} {output}"));
+            Event::ToolResult { id, output, ok } => {
+                let name = names.get(&id).cloned().unwrap_or_default();
+                // Goes through the printer, not the terminal: this is the code path
+                // under test, and writing straight to the term would bypass it.
+                printer.tool_result(&name, &output, ok);
+                names.remove(&id);
             }
             _ => {}
         })
         .await?;
-    term.end_stream();
-    term.blank();
-    term.line(format_args!("[done]"));
+    printer.term().end_stream();
+    printer.term().blank();
+    printer.term().line(format_args!("[done]"));
 
     Ok(())
 }

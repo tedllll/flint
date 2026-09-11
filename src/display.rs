@@ -73,11 +73,14 @@ pub const QUIET: u8 = 0;
 pub const NORMAL: u8 = 1;
 pub const CHATTY: u8 = 2;
 
-/// Result-line budget, so a runaway tool cannot flood the terminal.
-const COMPACT_GIST: usize = 120;
-const CHATTY_GIST_LINES: usize = 25;
-const CHATTY_ARG: usize = 400;
-const COMPACT_ARG: usize = 100;
+/// Budgets, so a runaway tool cannot flood the terminal.
+///
+/// The summary is what the reader sees; the rest is available at `/verbose`.
+const GIST_LIMIT: usize = 60;
+const FAIL_LIMIT: usize = 200;
+const ARG_LIMIT: usize = 80;
+/// How many lines one `/verbose` tool result is allowed to occupy, header included.
+pub const CHATTY_GIST_LINES: usize = 25;
 
 pub struct Printer<'a> {
     pub color: bool,
@@ -96,6 +99,14 @@ pub struct Printer<'a> {
     /// Where output goes, so that every line lands in the terminal's scroll region
     /// rather than fighting the input row for the same cursor.
     term: &'a Term,
+    /// Every line this printer has emitted, in order.
+    ///
+    /// This is what makes "a tool result is one line, and never the output itself"
+    /// a testable claim. The alternative was to capture the process's stdout by
+    /// redirecting a file descriptor, which cannot work reliably on Windows while
+    /// the test harness is writing to the same stream. Recording at the point of
+    /// emission tests the real code path without involving the process at all.
+    recorded: std::cell::RefCell<Vec<String>>,
 }
 
 impl<'a> Printer<'a> {
@@ -105,7 +116,20 @@ impl<'a> Printer<'a> {
             verbosity: std::cell::Cell::new(verbosity),
             pal: Palette::of(color),
             term,
+            recorded: std::cell::RefCell::new(Vec::new()),
         }
+    }
+
+    /// Emit one line, and remember it.
+    fn emit(&self, args: std::fmt::Arguments<'_>) {
+        self.recorded.borrow_mut().push(format!("{args}"));
+        self.term.line(args);
+    }
+
+    /// Take everything recorded so far, clearing the record.
+    #[cfg(test)]
+    fn take_recorded(&self) -> Vec<String> {
+        std::mem::take(&mut self.recorded.borrow_mut())
     }
 
     pub fn verbosity(&self) -> u8 {
@@ -134,7 +158,7 @@ impl<'a> Printer<'a> {
         self.style(DIM, text)
     }
 
-    /// One compact line describing a tool call that is about to run.
+    /// One line describing a tool call that is about to run.
     ///
     /// The argument is reduced to the one thing worth reading -- the command for
     /// `bash`, the path for a file tool -- because a raw JSON blob tells the
@@ -143,69 +167,94 @@ impl<'a> Printer<'a> {
         if self.verbosity() == QUIET {
             return;
         }
-        let limit = if self.verbosity() >= CHATTY {
-            CHATTY_ARG
-        } else {
-            COMPACT_ARG
-        };
-        let what = summarise_args(name, args, limit);
+        let what = summarise_args(name, args, ARG_LIMIT);
         let head = self.style(CYAN, "\u{23f5}");
-        let label = self.style(BOLD, name);
+        let label = self.style(BOLD, &verb(name));
         if what.is_empty() {
-            self.term.line(format_args!("{head} {label}"));
+            self.emit(format_args!("{head} {label}"));
         } else {
-            self.term.line(format_args!("{head} {label} {}", self.dim(&what)));
+            self.emit(format_args!("{head} {label} {}", self.dim(&what)));
         }
     }
 
-    /// The result of a tool call: a status glyph, a one-line gist, and at most a
-    /// couple of lines of detail.
-    pub fn tool_result(&self, output: &str, ok: bool) {
+    /// One line describing what a tool call produced.
+    ///
+    /// Never the output itself. A directory listing, a file, or a command's stdout
+    /// can be hundreds of lines, and printing them buries the conversation under
+    /// material the model has already read -- the reader wants to know *that*
+    /// something happened, and only needs the detail when something went wrong.
+    ///
+    /// So: a glyph, a verb, and a summary measured in lines. A failure keeps its
+    /// first line, because that is the one thing a reader may have to act on, and
+    /// `/verbose` can still be turned up for the rest.
+    pub fn tool_result(&self, name: &str, output: &str, ok: bool) {
         if self.verbosity() == QUIET {
             return;
         }
         let lines: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
-        let gist = lines.first().copied().unwrap_or("(no output)");
+        let label = verb(name);
         let mark = if ok {
             self.style(GREEN, "\u{2713}")
         } else {
             self.style(RED, "\u{2717}")
         };
 
-        if self.verbosity() >= CHATTY {
-            self.term.line(format_args!("  {mark} {}", self.dim(gist)));
-            for line in lines.iter().skip(1).take(CHATTY_GIST_LINES - 1) {
-                self.term.line(format_args!("    {}", self.dim(line)));
+        let summary = match lines.len() {
+            0 => "no output".to_string(),
+            // The first line is usually a headline the tool wrote itself
+            // ("✓ list C:\Users\zhangzhuo", "12 lines"), so it is worth the space.
+            1 => util::preview(lines[0], GIST_LIMIT),
+            n => format!("{n} lines"),
+        };
+        let mut line = format!("{mark} {label} {}", self.dim(&summary));
+
+        // A failure is the exception: whatever it said, the reader probably needs
+        // it, so the detail is appended rather than summarised away.
+        if !ok {
+            let detail = lines.first().copied().unwrap_or("(no output)");
+            if lines.len() == 1 {
+                line = format!("{mark} {label} {}", self.style(RED, &util::preview(detail, FAIL_LIMIT)));
+            } else {
+                line.push_str(&format!(" {}", self.style(RED, &util::preview(detail, FAIL_LIMIT))));
             }
-            if lines.len() > CHATTY_GIST_LINES {
-                self.term.line(format_args!(
+        }
+        self.emit(format_args!("{line}"));
+
+        // Only at CHATTY does the output itself get shown, and even then bounded.
+        //
+        // `CHATTY_GIST_LINES` is the cap on the whole emission, header included, so
+        // the "more lines" note has to be budgeted for rather than added on top --
+        // otherwise a verbose result is always one line over its own limit.
+        if self.verbosity() >= CHATTY && lines.len() > 1 {
+            let rest = lines.len() - 1;
+            let budget = CHATTY_GIST_LINES - 1;
+            let shown = if rest > budget { budget - 1 } else { rest };
+            for line in lines.iter().skip(1).take(shown) {
+                self.emit(format_args!("    {}", self.dim(line)));
+            }
+            if rest > shown {
+                self.emit(format_args!(
                     "    {}",
-                    self.dim(&format!("… {} more lines", lines.len() - CHATTY_GIST_LINES))
+                    self.dim(&format!("… {} more lines", rest - shown))
                 ));
             }
-            return;
         }
-
-        // Compact: one line, plus a count of what is being deliberately withheld
-        // so the reader knows the agent saw more than they did.
-        let extra = if lines.len() > 1 {
-            format!("  {}", self.dim(&format!("(+{} lines)", lines.len() - 1)))
-        } else {
-            String::new()
-        };
-        let gist: String = gist.chars().take(COMPACT_GIST).collect();
-        let ellipsis = if gist.chars().count() < lines.first().map_or(0, |l| l.chars().count()) {
-            "…"
-        } else {
-            ""
-        };
-        self.term.line(format_args!("  {mark} {}{ellipsis}{extra}", self.dim(&gist)));
     }
 
     /// A turn was stopped because the user typed something.
     pub fn interrupted(&self) {
-        self.term.line(format_args!("{}", self.style(YELLOW, "\u{23f9} interrupted")));
+        self.emit(format_args!("{}", self.style(YELLOW, "\u{23f9} interrupted")));
     }
+}
+
+/// A tool name as it appears in the transcript.
+///
+/// The names come from the function schema and are already lowercase, so this
+/// mostly guards the two things that matter: a name that arrives in another case
+/// still reads consistently, and a new tool that this match has never heard of
+/// still shows up instead of vanishing from the transcript.
+fn verb(name: &str) -> String {
+    name.trim().to_ascii_lowercase()
 }
 
 /// Reduce a tool's JSON arguments to the one value worth showing on a line.
@@ -298,5 +347,91 @@ mod tests {
         let args = r#"{"command":"line one\nline two"}"#;
         let out = summarise_args("bash", args, 100);
         assert!(!out.contains('\n'), "command kept a newline: {out:?}");
+    }
+
+    #[test]
+    fn a_tool_name_is_lowercased_for_the_transcript() {
+        assert_eq!(verb("READ"), "read");
+        assert_eq!(verb("Bash"), "bash");
+        // A tool this match has never heard of must still appear, never vanish.
+        assert_eq!(verb("some_new_tool"), "some_new_tool");
+    }
+
+    // --- what a tool result prints to the reader ---------------------------------
+
+    /// The output of `list` on a home directory, which is what prompted this change:
+    /// forty-five lines of filenames that bury the conversation.
+    fn a_big_listing() -> String {
+        let mut s = String::from("\u{2713} list C:\\Users\\zhangzhuo\n");
+        for i in 0..45 {
+            s.push_str(&format!("  entry-{i}/\n"));
+        }
+        s
+    }
+
+    /// Everything a printer emits for one tool result, colour off so the assertions
+    /// read as plain text.
+    fn result_lines(verbosity: u8, name: &str, output: &str, ok: bool) -> Vec<String> {
+        let term = Term::plain();
+        let printer = Printer::new(false, verbosity, &term);
+        printer.tool_result(name, output, ok);
+        printer.take_recorded()
+    }
+
+    #[test]
+    fn a_tool_result_is_one_line_and_never_the_output() {
+        let lines = result_lines(NORMAL, "list", &a_big_listing(), true);
+        assert_eq!(lines.len(), 1, "expected one line, got {lines:#?}");
+        assert!(lines[0].contains("list"), "no tool name: {lines:?}");
+        assert!(
+            !lines[0].contains("entry-"),
+            "the listing leaked into the transcript: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_verbose_result_shows_some_detail_and_still_not_everything() {
+        let lines = result_lines(CHATTY, "list", &a_big_listing(), true);
+        assert!(lines.len() > 1, "verbose showed no detail: {lines:#?}");
+        assert!(
+            lines.len() <= CHATTY_GIST_LINES,
+            "verbose flooded the screen with {} lines",
+            lines.len()
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("more lines")),
+            "no note about what was withheld: {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_tool_result_keeps_the_reason() {
+        // The exception to "never the output": if something broke, the reader may
+        // have to act on it, so the reason survives even at normal verbosity.
+        let lines = result_lines(NORMAL, "bash", "command not found: rq", false);
+        assert_eq!(lines.len(), 1, "not one line: {lines:#?}");
+        assert!(
+            lines[0].contains("command not found"),
+            "reason lost: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_single_line_result_is_shown_rather_than_counted() {
+        // "1 lines" would be useless when the tool already wrote a headline.
+        let lines = result_lines(NORMAL, "read", "12 lines", true);
+        assert!(lines[0].contains("12 lines"), "summary dropped: {lines:?}");
+    }
+
+    #[test]
+    fn a_quiet_printer_says_nothing_about_tools() {
+        let term = Term::plain();
+        let printer = Printer::new(false, QUIET, &term);
+        printer.tool_call("bash", r#"{"command":"dir"}"#);
+        printer.tool_result("bash", &a_big_listing(), true);
+        assert!(
+            printer.take_recorded().is_empty(),
+            "quiet printer printed something"
+        );
     }
 }

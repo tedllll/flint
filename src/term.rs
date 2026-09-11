@@ -382,20 +382,19 @@ impl Term {
         let visible = &rows[first..];
         let start = top + capacity.saturating_sub(visible.len() as u16);
         let mut out = std::io::stdout();
-        let mut cursor = None;
+        let last_row = visible.len().saturating_sub(1);
         for (n, line) in visible.iter().enumerate() {
             let r = start + n as u16;
             if r > last {
                 break;
             }
             let _ = write!(out, "\x1b[{};1H\x1b[2K{line}", r);
-            cursor = Some((r, line.chars().count()));
-        }
-        // Park the cursor after the text so the next fragment continues the same
-        // line. `CSI {row};{col}H` is 1-based, so `len` characters end at column
-        // `len`.
-        if let Some((r, len)) = cursor {
-            let _ = write!(out, "\x1b[{};{}H", r, len.max(1));
+            // Between rows, plain CR+LF puts the cursor at the start of the next one.
+            // After the final row, nothing: the cursor is left immediately after the
+            // text, which is where the next fragment has to continue from.
+            if n < last_row {
+                let _ = write!(out, "\r\n");
+            }
         }
         let _ = write!(out, "\x1b[?25l");
         let _ = out.flush();

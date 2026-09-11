@@ -48,14 +48,47 @@ function reverseIndex() {
   }
 }
 
+/// Display width of a code point.
+///
+/// This matters more than it looks. flint prints file contents, and the `read`
+/// tool decorates them with box-drawing rules and line numbers; CJK answers are
+/// routine. Treating every code point as one column makes the model's column
+/// arithmetic disagree with a real terminal, and the replay then shows wrapping
+/// that never happened. So: the standard East Asian wide and fullwidth ranges are
+/// two columns, everything else one.
+function charWidth(cp) {
+  const c = cp.codePointAt(0);
+  if (c === undefined) return 1;
+  // Combining marks and control characters take no room.
+  if ((c >= 0x0300 && c <= 0x036f) || c === 0x200b || c === 0xfeff) return 0;
+  const wide =
+    (c >= 0x1100 && c <= 0x115f) || // Hangul Jamo
+    (c >= 0x2e80 && c <= 0x303e) || // CJK radicals, punctuation
+    (c >= 0x3041 && c <= 0x33ff) || // kana, CJK compatibility
+    (c >= 0x3400 && c <= 0x4dbf) || // CJK extension A
+    (c >= 0x4e00 && c <= 0x9fff) || // CJK unified ideographs
+    (c >= 0xa000 && c <= 0xa4cf) || // Yi
+    (c >= 0xac00 && c <= 0xd7a3) || // Hangul syllables
+    (c >= 0xf900 && c <= 0xfaff) || // CJK compatibility ideographs
+    (c >= 0xfe30 && c <= 0xfe6f) || // CJK compatibility forms
+    (c >= 0xff00 && c <= 0xff60) || // fullwidth forms
+    (c >= 0xffe0 && c <= 0xffe6) ||
+    (c >= 0x1f300 && c <= 0x1f64f) || // emoji
+    (c >= 0x20000 && c <= 0x3fffd); // CJK extensions B+
+  return wide ? 2 : 1;
+}
+
 function put(ch) {
-  if (col >= COLS) {
-    // Autowrap.
+  const width = charWidth(ch);
+  if (width === 0) return;
+  if (col + width > COLS) {
+    // Autowrap, but never split a wide cell across the boundary.
     col = 0;
     newline();
   }
   screen[row][col] = ch;
-  col++;
+  for (let k = 1; k < width; k++) screen[row][col + k] = '';
+  col += width;
 }
 
 function newline() {
@@ -155,6 +188,14 @@ while (i < bytes.length) {
     i++;
     continue;
   }
+  if (b === 0x09) {
+    // Tab. The `read` tool separates its line-number column with a tab, so this is
+    // load-bearing: treating a tab as zero-width scatters the numbers across the
+    // line and makes correct output look broken.
+    col = Math.min(COLS - 1, (Math.floor(col / 8) + 1) * 8);
+    i++;
+    continue;
+  }
   if (b === 0x08) {
     col = Math.max(0, col - 1);
     i++;
@@ -171,7 +212,6 @@ while (i < bytes.length) {
   else if (b >= 0xe0) len = 3;
   else if (b >= 0xc0) len = 2;
   const cp = bytes.slice(i, i + len).toString('utf8');
-  // Width: treat box-drawing and CJK as narrow here; good enough for layout.
   put(cp);
   i += len;
 }
