@@ -44,14 +44,79 @@ impl Message {
     }
 }
 
-/// A model's request to invoke a tool. Arguments travel as a raw JSON string
-/// because that is exactly how providers stream them (in fragments); we only
-/// parse once the fragments are complete.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// A model's request to invoke a tool.
+///
+/// Internally the name and arguments live flat, because that is convenient for
+/// the agent. On the wire, though, the OpenAI schema nests them:
+///
+/// ```json
+/// {"id":"call_1","type":"function","function":{"name":"bash","arguments":"{}"}}
+/// ```
+///
+/// `arguments` stays a raw JSON *string* because that is exactly how providers
+/// stream it (in fragments); we only parse once the fragments are complete.
+/// Both representations are kept in sync deliberately: `name`/`arguments` are
+/// skipped when serialising so that only the nested form is ever sent, while
+/// `function` is skipped when deserialising so the flat fields are what code
+/// reads.
+#[derive(Debug, Clone, Default)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: String,
+}
+
+impl Serialize for ToolCall {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("ToolCall", 3)?;
+        s.serialize_field("id", &self.id)?;
+        s.serialize_field("type", "function")?;
+        s.serialize_field(
+            "function",
+            &ToolCallFunction {
+                name: &self.name,
+                arguments: &self.arguments,
+            },
+        )?;
+        s.end()
+    }
+}
+
+#[derive(Serialize)]
+struct ToolCallFunction<'a> {
+    name: &'a str,
+    arguments: &'a str,
+}
+
+impl<'de> Deserialize<'de> for ToolCall {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Accept the nested wire shape.
+        #[derive(Deserialize)]
+        struct Nested {
+            #[serde(default)]
+            id: String,
+            function: Option<Function>,
+        }
+        #[derive(Deserialize)]
+        struct Function {
+            #[serde(default)]
+            name: String,
+            #[serde(default)]
+            arguments: String,
+        }
+
+        let nested = Nested::deserialize(deserializer)?;
+        let function = nested.function.unwrap_or(Function {
+            name: String::new(),
+            arguments: String::new(),
+        });
+        Ok(ToolCall {
+            id: nested.id,
+            name: function.name,
+            arguments: function.arguments,
+        })
+    }
 }
 
 /// Token accounting, straight from the provider when it reports one.

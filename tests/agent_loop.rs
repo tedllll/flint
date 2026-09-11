@@ -55,6 +55,7 @@ fn test_config(base_url: &str) -> Config {
         max_tool_output: 10_000,
         max_steps: 10,
         readonly: false,
+        proxy: None,
         providers: vec![ProviderConfig {
             name: "stub".to_string(),
             base_url: base_url.to_string(),
@@ -132,6 +133,72 @@ async fn shell_execution_reports_failure() {
     assert!(
         out.contains("exit code: 7"),
         "a non-zero exit must be visible, got {out:?}"
+    );
+}
+
+/// The exit code must survive as a *value*, not just as text in the report.
+///
+/// `flint exec` is the mode scripts are meant to drive, and it used to return
+/// `Ok(0)` unconditionally: every failing command looked like success to the
+/// caller. Printing "[exit code: 7]" was not enough, so this asserts the code
+/// itself.
+#[tokio::test]
+async fn run_command_detailed_surfaces_the_real_exit_code() {
+    let config = test_config("http://unused");
+
+    let failed = flint::tools::run_command_detailed(&config, "exit 7", &std::env::temp_dir(), 30)
+        .await
+        .expect("should run");
+    assert_eq!(
+        failed.code, 7,
+        "the child's exit code must be carried out, got {} (report: {:?})",
+        failed.code, failed.report
+    );
+    assert!(!failed.success(), "exit 7 must not count as success");
+
+    let ok = flint::tools::run_command_detailed(&config, "exit 0", &std::env::temp_dir(), 30)
+        .await
+        .expect("should run");
+    assert_eq!(ok.code, 0, "a clean command must report 0");
+    assert!(ok.success());
+}
+
+/// A configured proxy must actually reach the child process.
+///
+/// flint exists to repair tooling, and repairs download things. On a network
+/// where direct access is blocked but a local proxy works, a flint that does not
+/// forward the proxy fails exactly when it is needed.
+#[tokio::test]
+async fn configured_proxy_is_exported_to_the_child() {
+    let mut config = test_config("http://unused");
+
+    // Syntax differs: cmd.exe expands %VAR%, POSIX shells expand $VAR. Getting
+    // this wrong makes the test compare against a literal, and pass or fail for
+    // the wrong reason.
+    let echo_proxy = if cfg!(windows) {
+        "echo proxy=%HTTPS_PROXY%"
+    } else {
+        "echo proxy=$HTTPS_PROXY"
+    };
+
+    let plain = flint::tools::run_command_detailed(&config, echo_proxy, &std::env::temp_dir(), 30)
+        .await
+        .expect("should run");
+    assert!(
+        !plain.report.contains("http://127.0.0.1:9"),
+        "no proxy configured, so it must not be injected: {:?}",
+        plain.report
+    );
+
+    config.proxy = Some("http://127.0.0.1:9".to_string());
+    let proxied =
+        flint::tools::run_command_detailed(&config, echo_proxy, &std::env::temp_dir(), 30)
+            .await
+            .expect("should run");
+    assert!(
+        proxied.report.contains("http://127.0.0.1:9"),
+        "the configured proxy must reach the child process, got {:?}",
+        proxied.report
     );
 }
 

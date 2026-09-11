@@ -29,13 +29,34 @@ pub struct Provider {
     client: reqwest::Client,
 }
 
+/// Whether a base URL points at a local model server.
+///
+/// Used to keep local endpoints off any configured proxy: the local provider is
+/// the one that still works when the network is what broke, so it must not
+/// depend on the network path being healthy.
+pub fn is_local_endpoint(base_url: &str) -> bool {
+    let u = base_url.to_ascii_lowercase();
+    u.contains("localhost")
+        || u.contains("127.0.0.1")
+        || u.contains("0.0.0.0")
+        || u.contains("[::1]")
+}
+
 impl Provider {
     pub fn new(config: ProviderConfig) -> Result<Self> {
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(30))
-            // No total timeout: a long generation is not a failure.
-            .build()
-            .context("cannot build HTTP client")?;
+        let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(30));
+        // No total timeout: a long generation is not a failure.
+
+        // A local endpoint (Ollama, llama.cpp, vLLM) must never be sent through
+        // a proxy. On a machine that has HTTP_PROXY set for the outside world,
+        // routing 127.0.0.1 through it breaks the local model entirely -- and
+        // the local provider is the fallback that still works when the network
+        // is the thing that is broken.
+        if is_local_endpoint(&config.base_url) {
+            builder = builder.no_proxy();
+        }
+
+        let client = builder.build().context("cannot build HTTP client")?;
         Ok(Provider { config, client })
     }
 
@@ -312,6 +333,46 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// The exact wire shape the API requires for an assistant turn that calls a
+    /// tool. Getting this wrong is fatal but quiet: the first request succeeds,
+    /// then every follow-up is rejected with a 400 because the echoed-back
+    /// tool_calls are malformed.
+    #[test]
+    fn assistant_tool_calls_use_the_openai_wire_shape() {
+        let msg = Message::Assistant {
+            content: None,
+            reasoning: None,
+            tool_calls: vec![ToolCall {
+                id: "call_1".to_string(),
+                name: "bash".to_string(),
+                arguments: r#"{"command":"ls"}"#.to_string(),
+            }],
+        };
+        let v = serde_json::to_value(&msg).expect("must serialise");
+        let tc = &v["tool_calls"][0];
+
+        assert_eq!(tc["id"], "call_1");
+        assert_eq!(
+            tc["type"], "function",
+            "the `type` discriminator is required, got {tc}"
+        );
+        assert_eq!(tc["function"]["name"], "bash");
+        assert_eq!(tc["function"]["arguments"], r#"{"command":"ls"}"#);
+        assert!(
+            tc.get("name").is_none(),
+            "name must not be emitted at the top level, got {tc}"
+        );
+
+        // A tool result must carry the id it answers.
+        let tool_msg = Message::Tool {
+            tool_call_id: "call_1".to_string(),
+            content: "ok".to_string(),
+        };
+        let tv = serde_json::to_value(&tool_msg).expect("must serialise");
+        assert_eq!(tv["role"], "tool");
+        assert_eq!(tv["tool_call_id"], "call_1");
     }
 
     #[test]

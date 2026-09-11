@@ -204,14 +204,50 @@ fn command_exists(program: &str) -> bool {
     })
 }
 
+/// The result of running a shell command: the text to show the user, plus the
+/// real exit status.
+///
+/// The exit code is carried separately, and not merely embedded in `report`,
+/// because callers that act as a shell (`flint exec`) must be able to exit with
+/// it. A rescue tool that reports success for a failed command is worse than no
+/// tool at all, and `flint exec` exists precisely to be used from scripts.
+pub struct CommandOutcome {
+    pub report: String,
+    /// The child's exit code, or -1 when the process was killed by a signal
+    /// (which has no exit code on Unix).
+    pub code: i32,
+}
+
+impl CommandOutcome {
+    pub fn success(&self) -> bool {
+        self.code == 0
+    }
+}
+
 /// Run a shell command and return its combined output, including a trailing
 /// `[exit code: N]` marker when it failed.
+///
+/// This is the agent-facing wrapper: the model only needs the text, so the exit
+/// code is dropped here. Callers that must propagate the status should use
+/// [`run_command_detailed`] instead.
 pub async fn run_command_raw(
     config: &Config,
     command: &str,
     cwd: &Path,
     timeout_secs: u64,
 ) -> Result<String> {
+    Ok(run_command_detailed(config, command, cwd, timeout_secs)
+        .await?
+        .report)
+}
+
+/// Run a shell command, returning both the combined output and the exit code.
+pub async fn run_command_detailed(
+    config: &Config,
+    command: &str,
+    cwd: &Path,
+    timeout_secs: u64,
+) -> Result<CommandOutcome> {
     let shell = probe_shell(&config.shell, &config.shell_args);
     let mut cmd = tokio::process::Command::new(&shell[0]);
     // Arguments are passed as argv, never concatenated into one string: that
@@ -224,6 +260,18 @@ pub async fn run_command_raw(
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+
+    // Let a configured proxy reach commands flint runs for us. Without this the
+    // tool cannot repair anything that needs to download, on a network where
+    // direct access is blocked but a local proxy works.
+    if let Some(proxy) = config.proxy.as_deref().filter(|p| !p.trim().is_empty()) {
+        cmd.env("HTTP_PROXY", proxy);
+        cmd.env("HTTPS_PROXY", proxy);
+        cmd.env("http_proxy", proxy);
+        cmd.env("https_proxy", proxy);
+        cmd.env("ALL_PROXY", proxy);
+        cmd.env("all_proxy", proxy);
+    }
 
     let child = cmd
         .spawn()
@@ -261,7 +309,7 @@ pub async fn run_command_raw(
     if code != 0 {
         report.push_str(&format!("\n[exit code: {code}]"));
     }
-    Ok(report)
+    Ok(CommandOutcome { report, code })
 }
 
 #[async_trait::async_trait]

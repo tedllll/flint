@@ -12,7 +12,7 @@ use crate::config::Config;
 use crate::event::{Event, Message, ToolCall, Usage};
 use crate::provider::Provider;
 use crate::session::{SessionEvent, SessionWriter};
-use crate::tools::ToolBox;
+use crate::tools::{self, ToolBox};
 
 pub const SYSTEM_PROMPT: &str = "\
 You are flint, a minimal command-line coding and system-repair agent.
@@ -28,7 +28,37 @@ Rules:
 - When a command fails, read the error and adapt. Do not repeat the same \
   failing command.
 - Report exactly what you changed and why.
-- Be concise. The user is looking at a terminal.";
+- Be concise. The user is looking at a terminal.
+- Prefer the `read`, `write`, `edit` and `list` tools for files over shell \
+  builtins: they behave identically on every platform.";
+
+/// Build the system prompt with the facts the model cannot guess.
+///
+/// Deliberately short. The binary already knows its own OS and architecture, so
+/// stating them spends tokens on something the model cannot act on differently.
+/// What it *cannot* infer is the shell dialect -- trying `ls` in cmd.exe is the
+/// single most common way this agent wastes a turn -- and where commands will
+/// run, because the working directory is set at run time.
+pub fn build_system_prompt(config: &Config, cwd: &std::path::Path) -> String {
+    let shell = tools::probe_shell(&config.shell, &config.shell_args).join(" ");
+
+    // Only say something when there is something worth knowing.
+    let dialect = if cfg!(windows) {
+        "It is cmd.exe, not a POSIX shell: use `dir`, `type`, `echo %CD%`. \
+         `ls`, `pwd`, `cat`, `find` and `grep` do not exist."
+    } else {
+        "It is a POSIX shell: `ls`, `cat`, `find` and `grep` are available."
+    };
+
+    format!(
+        "{SYSTEM_PROMPT}\n\n\
+         Local facts:\n\
+         - Shell: `{shell}`. {dialect}\n\
+         - Working directory: {cwd} (path separator `{sep}`).",
+        cwd = cwd.display(),
+        sep = std::path::MAIN_SEPARATOR,
+    )
+}
 
 pub struct Agent {
     provider: Provider,
@@ -53,7 +83,7 @@ impl Agent {
         Agent {
             provider,
             tools,
-            history: vec![Message::system(SYSTEM_PROMPT)],
+            history: vec![Message::system(build_system_prompt(config, &cwd))],
             max_steps: config.max_steps,
             readonly,
             cwd,
