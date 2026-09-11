@@ -39,8 +39,10 @@ impl ToolBox {
                 readonly,
                 cwd: cwd.clone(),
             }),
-            Box::new(EditTool { readonly, cwd }),
+            Box::new(EditTool { readonly, cwd: cwd.clone() }),
             Box::new(ListTool),
+            Box::new(GlobTool { cwd: cwd.clone() }),
+            Box::new(GrepTool { cwd: cwd.clone() }),
         ];
         let by_name = tools
             .iter()
@@ -1024,5 +1026,378 @@ mod tests {
             format!("{:#}", result.unwrap_err()).contains("readonly"),
             "the refusal must explain itself"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// recursive traversal, shared by `glob` and `grep`
+// ---------------------------------------------------------------------------
+
+/// Directories never worth walking into.
+///
+/// `.git` and `node_modules` are the difference between a search that answers in
+/// milliseconds and one that never finishes -- and neither is what the user meant.
+const SKIP_DIRS: &[&str] = &[".git", "node_modules", "target", ".venv", "__pycache__"];
+
+/// Cap on entries returned, so one search cannot flood the model's context.
+const WALK_LIMIT: usize = 200;
+
+/// Every file under `root`, as paths relative to it, depth-first and sorted.
+///
+/// Written out rather than pulled in: walking a directory tree is twenty lines, and this
+/// project's whole reason for existing is that it must run where package managers and
+/// toolchains do not. A `glob`/`walkdir` dependency would be the one thing standing
+/// between a broken machine and a working search.
+fn walk_files(root: &Path, limit: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            // An unreadable directory is normal (permissions, races) and must not abort
+            // the whole search: partial results beat no results when repairing a system.
+            continue;
+        };
+        let mut subdirs = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if is_dir {
+                if SKIP_DIRS.contains(&name.as_str()) {
+                    continue;
+                }
+                subdirs.push(path);
+            } else if let Ok(rel) = path.strip_prefix(root) {
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+                if out.len() >= limit {
+                    return out;
+                }
+            }
+        }
+        // Reverse so the depth-first order is alphabetical rather than stack order.
+        subdirs.sort_by(|a, b| b.cmp(a));
+        stack.extend(subdirs);
+    }
+    out.sort();
+    out
+}
+
+/// Whether `path` matches a glob pattern of the `**`, `*` and `?` kind.
+///
+/// Supports the three wildcards that matter for finding files and nothing else. `*` and
+/// `?` stop at a `/`; `**` crosses them. Matching is against the `/`-separated relative
+/// path, so it behaves the same on Windows as on Unix -- which is the entire point, since
+/// the shell on one of those platforms has no `find` to fall back on.
+fn glob_match(pattern: &str, path: &str) -> bool {
+    let pat: Vec<char> = pattern.chars().collect();
+    let txt: Vec<char> = path.chars().collect();
+    glob_here(&pat, &txt)
+}
+
+fn glob_here(pat: &[char], txt: &[char]) -> bool {
+    // Walk the pattern, consuming text. `**` is the only case that needs branching, and
+    // it is handled by trying every split point.
+    let mut pi = 0usize;
+    let mut ti = 0usize;
+    while pi < pat.len() {
+        match pat[pi] {
+            '*' => {
+                let double = pat.get(pi + 1) == Some(&'*');
+                let mut next = pi + if double { 2 } else { 1 };
+                // `**/` may also match nothing, so `**/foo` matches a bare `foo`.
+                let allow_empty_dir = double && pat.get(next) == Some(&'/');
+                if allow_empty_dir {
+                    next += 1;
+                }
+                if next >= pat.len() {
+                    // Trailing `*` matches the rest of this segment; trailing `**` matches
+                    // everything.
+                    return double || !txt[ti..].contains(&'/');
+                }
+                // Try the shortest match first, so `*` stays inside one path segment
+                // unless the pattern's remainder forces it to extend.
+                let mut k = ti;
+                loop {
+                    if glob_here(&pat[next..], &txt[k..]) {
+                        return true;
+                    }
+                    if k >= txt.len() {
+                        break;
+                    }
+                    if !double && txt[k] == '/' {
+                        break;
+                    }
+                    k += 1;
+                }
+                if allow_empty_dir && glob_here(&pat[next..], &txt[ti..]) {
+                    return true;
+                }
+                return false;
+            }
+            '?' => {
+                if ti >= txt.len() || txt[ti] == '/' {
+                    return false;
+                }
+                pi += 1;
+                ti += 1;
+            }
+            c => {
+                if ti >= txt.len() || txt[ti] != c {
+                    return false;
+                }
+                pi += 1;
+                ti += 1;
+            }
+        }
+    }
+    ti == txt.len()
+}
+
+/// Does the pattern look like it is meant to match anywhere in the tree?
+///
+/// `*.rs` clearly means "all Rust files" rather than "a file named `*.rs` in the cwd",
+/// so a pattern with no separator is also tried prefixed with `**/`. Guessing otherwise
+/// makes the common case return nothing, which reads as "no such file" and sends the
+/// model down a wrong path.
+fn pattern_needs_prefix(pattern: &str) -> bool {
+    !pattern.contains('/') && (pattern.contains('*') || pattern.contains('?'))
+}
+
+// ---------------------------------------------------------------------------
+// glob
+// ---------------------------------------------------------------------------
+
+pub struct GlobTool {
+    cwd: PathBuf,
+}
+
+#[async_trait::async_trait]
+impl Tool for GlobTool {
+    fn name(&self) -> &str {
+        "glob"
+    }
+
+    fn description(&self) -> &str {
+        "Find files by name pattern, searching recursively. Use this instead of \
+         shelling out: `*.rs` finds every Rust file below the path, and `**/test_*.py` \
+         matches at any depth. This is the tool for \"where is that file\"."
+    }
+
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "Glob pattern. `*` and `?` stop at a path separator, `**` crosses them. A pattern with no `/` is matched at every depth."
+                },
+                "path": { "type": "string", "description": "Directory to search (default '.')." }
+            },
+            "required": ["pattern"]
+        })
+    }
+
+    async fn call(&self, args: &Value) -> Result<String> {
+        let pattern = require_str(args, "pattern")?;
+        let raw = args.get("path").and_then(Value::as_str).unwrap_or(".");
+        let root = resolve_path(&self.cwd, raw);
+
+        let files = walk_files(&root, WALK_LIMIT * 10);
+        let mut hits: Vec<String> = files
+            .into_iter()
+            .filter(|p| {
+                glob_match(pattern, p)
+                    || (pattern_needs_prefix(pattern) && glob_match(&format!("**/{pattern}"), p))
+            })
+            .collect();
+        hits.truncate(WALK_LIMIT);
+
+        if hits.is_empty() {
+            return Ok(format!("no files matching '{pattern}' under {}", root.display()));
+        }
+        let mut out = hits.join("\n");
+        out.push_str(&format!("\n({} file(s))", hits.len()));
+        Ok(util::truncate(&out, 20_000))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// grep
+// ---------------------------------------------------------------------------
+
+pub struct GrepTool {
+    cwd: PathBuf,
+}
+
+#[async_trait::async_trait]
+impl Tool for GrepTool {
+    fn name(&self) -> &str {
+        "grep"
+    }
+
+    fn description(&self) -> &str {
+        "Search file *contents* for a literal string, recursively, and return matches \
+         with file names and line numbers. This is the tool for \"where is this used\". \
+         Narrow the search with `path` and `glob` when the tree is large."
+    }
+
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "pattern": { "type": "string", "description": "Literal text to find (not a regular expression)." },
+                "path": { "type": "string", "description": "Directory or file to search (default '.')." },
+                "glob": { "type": "string", "description": "Only search files matching this pattern, e.g. `*.rs`." },
+                "ignore_case": { "type": "boolean", "description": "Case-insensitive search." }
+            },
+            "required": ["pattern"]
+        })
+    }
+
+    async fn call(&self, args: &Value) -> Result<String> {
+        let needle = require_str(args, "pattern")?;
+        if needle.is_empty() {
+            return Err(anyhow!("grep pattern must not be empty"));
+        }
+        let raw = args.get("path").and_then(Value::as_str).unwrap_or(".");
+        let root = resolve_path(&self.cwd, raw);
+        let file_glob = args.get("glob").and_then(Value::as_str);
+        let ignore_case = args
+            .get("ignore_case")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        // A single file is the common case when following up on a `glob` result.
+        let candidates: Vec<String> = if root.is_file() {
+            vec![String::new()]
+        } else {
+            walk_files(&root, WALK_LIMIT * 20)
+        };
+
+        let hay = if ignore_case { needle.to_lowercase() } else { needle.to_string() };
+        let mut out: Vec<String> = Vec::new();
+        let mut matched_files = 0usize;
+        let mut truncated = false;
+
+        for rel in candidates {
+            let path = if rel.is_empty() { root.clone() } else { root.join(&rel) };
+            if let Some(g) = file_glob {
+                let target = if rel.is_empty() {
+                    path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+                } else {
+                    rel.clone()
+                };
+                if !glob_match(g, &target)
+                    && !(pattern_needs_prefix(g) && glob_match(&format!("**/{g}"), &target))
+                {
+                    continue;
+                }
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                // Binary or unreadable: skip rather than fail. A grep across a project
+                // hits both constantly, and neither is an error worth reporting.
+                continue;
+            };
+            let mut file_hits = 0usize;
+            for (n, line) in text.lines().enumerate() {
+                let hit = if ignore_case {
+                    line.to_lowercase().contains(&hay)
+                } else {
+                    line.contains(&hay)
+                };
+                if hit {
+                    file_hits += 1;
+                    if out.len() < 300 {
+                        out.push(format!(
+                            "{}:{}: {}",
+                            if rel.is_empty() { path.display().to_string() } else { rel.clone() },
+                            n + 1,
+                            util::truncate(line.trim(), 200)
+                        ));
+                    } else {
+                        truncated = true;
+                    }
+                }
+            }
+            if file_hits > 0 {
+                matched_files += 1;
+            }
+        }
+
+        if out.is_empty() {
+            return Ok(format!("no matches for '{needle}' under {}", root.display()));
+        }
+        let mut text = out.join("\n");
+        if truncated {
+            text.push_str("\n... more matches not shown");
+        }
+        text.push_str(&format!("\n({} match(es) in {} file(s))", out.len(), matched_files));
+        Ok(util::truncate(&text, 20_000))
+    }
+}
+
+#[cfg(test)]
+mod glob_tests {
+    use super::*;
+
+    #[test]
+    fn a_star_stays_inside_one_path_segment() {
+        assert!(glob_match("*.rs", "main.rs"));
+        // The classic bug: `*` leaking across separators, so a root-level pattern
+        // matches files in subdirectories and the model gets paths it did not ask for.
+        assert!(!glob_match("*.rs", "src/main.rs"));
+        assert!(glob_match("src/*.rs", "src/main.rs"));
+        assert!(!glob_match("src/*.rs", "src/deep/main.rs"));
+    }
+
+    #[test]
+    fn a_double_star_crosses_separators() {
+        assert!(glob_match("**/*.rs", "src/main.rs"));
+        assert!(glob_match("**/*.rs", "a/b/c/main.rs"));
+        assert!(glob_match("**/*.rs", "main.rs"), "`**/` must also match zero directories");
+        assert!(!glob_match("**/*.rs", "src/main.py"));
+    }
+
+    #[test]
+    fn a_double_star_in_the_middle_matches_any_depth() {
+        assert!(glob_match("src/**/test.rs", "src/test.rs"));
+        assert!(glob_match("src/**/test.rs", "src/a/test.rs"));
+        assert!(glob_match("src/**/test.rs", "src/a/b/test.rs"));
+        assert!(!glob_match("src/**/test.rs", "other/a/test.rs"));
+    }
+
+    #[test]
+    fn a_bare_pattern_is_tried_at_every_depth() {
+        // What the model means by `*.rs` is almost never "a Rust file sitting in the
+        // current directory" -- and returning nothing for the obvious request reads as
+        // "there is no such file", which sends it down a wrong path.
+        assert!(pattern_needs_prefix("*.rs"));
+        assert!(pattern_needs_prefix("test_?.py"));
+        // An explicit path is a deliberate narrowing and must be honoured as written.
+        assert!(!pattern_needs_prefix("src/*.rs"));
+        assert!(!pattern_needs_prefix("main.rs"));
+    }
+
+    #[test]
+    fn a_question_mark_matches_exactly_one_character() {
+        assert!(glob_match("a?c", "abc"));
+        assert!(!glob_match("a?c", "ac"));
+        assert!(!glob_match("a?c", "abbc"));
+        // Still one segment.
+        assert!(!glob_match("a?c", "a/c"));
+    }
+
+    #[test]
+    fn a_literal_pattern_matches_only_itself() {
+        assert!(glob_match("Cargo.toml", "Cargo.toml"));
+        assert!(!glob_match("Cargo.toml", "x/Cargo.toml"));
+        assert!(!glob_match("Cargo.toml", "Cargo.lock"));
+    }
+
+    #[test]
+    fn a_trailing_wildcard_matches_the_remaining_path() {
+        assert!(glob_match("src/*", "src/anything"));
+        assert!(glob_match("src/**", "src/a/b/c"));
+        assert!(!glob_match("src/*", "src/a/b"));
     }
 }
