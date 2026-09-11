@@ -190,7 +190,7 @@ impl<'a> Printer<'a> {
         if self.verbosity() == QUIET {
             return;
         }
-        let what = summarise_args(name, args, ARG_LIMIT);
+        let what = self.subject(name, args);
         let head = self.style(CYAN, "\u{23f5}");
         let label = self.style(BOLD, &verb(name));
         if what.is_empty() {
@@ -198,6 +198,16 @@ impl<'a> Printer<'a> {
         } else {
             self.emit(format_args!("{head} {label} {}", self.dim(&what)));
         }
+    }
+
+    /// What a tool was aimed at, with paths shortened against the session directory.
+    ///
+    /// One place, because the call line and the result line describe the same call: when
+    /// only one of them shortened the path they disagreed, and the result line -- the one
+    /// that stays on screen longest -- was the one that kept the full prefix.
+    fn subject(&self, name: &str, args: &str) -> String {
+        let term = self.term;
+        summarise_args_in(name, args, ARG_LIMIT, Some(&|p: &str| term.shorten_path(p)))
     }
 
     /// One line describing what a tool call produced.
@@ -218,7 +228,7 @@ impl<'a> Printer<'a> {
             return;
         }
         let lines: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
-        let subject = summarise_args(name, args, ARG_LIMIT);
+        let subject = self.subject(name, args);
         let label = if subject.is_empty() {
             verb(name)
         } else {
@@ -233,7 +243,7 @@ impl<'a> Printer<'a> {
         let summary = match lines.len() {
             0 => "no output".to_string(),
             // The first line is usually a headline the tool wrote itself
-            // ("✓ list C:\Users\zhangzhuo", "12 lines"), so it is worth the space.
+            // ("✓ list C:\Users\you", "12 lines"), so it is worth the space.
             1 => util::preview(lines[0], GIST_LIMIT),
             n => format!("{n} lines"),
         };
@@ -289,6 +299,20 @@ fn verb(name: &str) -> String {
 
 /// Reduce a tool's JSON arguments to the one value worth showing on a line.
 pub fn summarise_args(name: &str, args: &str, limit: usize) -> String {
+    summarise_args_in(name, args, limit, None)
+}
+
+/// `summarise_args`, with the session directory available for shortening paths.
+///
+/// Split rather than changing the signature everywhere: most callers -- tests, and the
+/// reasoning about what a tool was aimed at -- do not care about the prefix, and only
+/// the printer has a terminal to shorten against.
+pub fn summarise_args_in(
+    name: &str,
+    args: &str,
+    limit: usize,
+    shorten: Option<&dyn Fn(&str) -> String>,
+) -> String {
     let trimmed = args.trim();
     if trimmed.is_empty() || trimmed == "{}" {
         return String::new();
@@ -296,24 +320,57 @@ pub fn summarise_args(name: &str, args: &str, limit: usize) -> String {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) else {
         return util::preview(trimmed, limit);
     };
-    let key = match name {
-        "bash" => "command",
-        "read" | "write" | "edit" | "list" => "path",
-        _ => "",
-    };
-    let picked = v
-        .get(key)
-        .and_then(|x| x.as_str())
-        .map(str::to_string)
+    let str_at = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+
+    // The field that says *what the call was aimed at*, per tool.
+    //
+    // Getting this wrong is worse than showing nothing. `glob` and `grep` used to fall
+    // through to "the first string argument", and for `grep` that is `path` -- so the
+    // transcript read `grep *.rs` for a call whose whole point was to search for
+    // `MAX_ATTEMPTS`. The one line the user gets about the call named the wrong thing.
+    let picked = match name {
+        "bash" => str_at("command"),
+        "read" | "write" | "edit" | "list" => str_at("path"),
+        "glob" => str_at("pattern"),
+        // Both halves matter for a search: what was looked for, and where.
+        "grep" => str_at("pattern").map(|needle| match str_at("glob") {
+            Some(filter) => format!("{needle}  in {filter}"),
+            None => needle,
+        }),
         // Unknown tool: show the first string it was given rather than nothing.
-        .or_else(|| {
-            v.as_object()
-                .and_then(|o| o.values().find_map(|val| val.as_str()).map(str::to_string))
-        });
-    match picked {
-        Some(s) => util::preview(&s.replace('\n', " \u{23ce} "), limit),
-        None => util::preview(trimmed, limit),
-    }
+        _ => v
+            .as_object()
+            .and_then(|o| o.values().find_map(|val| val.as_str()).map(str::to_string)),
+    };
+    let Some(picked) = picked else {
+        return util::preview(trimmed, limit);
+    };
+
+    // A paged read is only comprehensible with its range: `read src/agent.rs` twice in a
+    // row is exactly the unreadable repetition the tool-result line was fixed for.
+    let summary = if name == "read" {
+        match (v.get("offset").and_then(serde_json::Value::as_u64), v.get("limit").and_then(serde_json::Value::as_u64)) {
+            (Some(offset), Some(limit)) if limit > 0 => {
+                format!("{picked} lines {offset}-{}", offset + limit - 1)
+            }
+            (Some(offset), _) => format!("{picked} from line {offset}"),
+            _ => picked,
+        }
+    } else {
+        picked
+    };
+    // A path is only shortened for display; the model still gets the full one it wrote.
+    let summary = match (shorten, name) {
+        (Some(shorten), "read" | "write" | "edit" | "list") => {
+            // Only the path part, not the "lines 100-149" suffix appended above.
+            match summary.split_once(' ') {
+                Some((path, rest)) => format!("{} {rest}", shorten(path)),
+                None => shorten(&summary),
+            }
+        }
+        _ => summary,
+    };
+    util::preview(&summary.replace('\n', " \u{23ce} "), limit)
 }
 
 #[cfg(test)]
@@ -392,7 +449,7 @@ mod tests {
     /// The output of `list` on a home directory, which is what prompted this change:
     /// forty-five lines of filenames that bury the conversation.
     fn a_big_listing() -> String {
-        let mut s = String::from("\u{2713} list C:\\Users\\zhangzhuo\n");
+        let mut s = String::from("\u{2713} list C:\\Users\\you\n");
         for i in 0..45 {
             s.push_str(&format!("  entry-{i}/\n"));
         }
@@ -501,5 +558,50 @@ mod tests {
             printer.take_recorded().is_empty(),
             "quiet printer printed something"
         );
+    }
+}
+
+#[cfg(test)]
+mod summarise_new_tools {
+    use super::summarise_args;
+
+    #[test]
+    fn glob_shows_its_pattern_not_a_path() {
+        let args = r#"{"pattern":"**/*.rs","path":"src"}"#;
+        assert_eq!(summarise_args("glob", args, 100), "**/*.rs");
+    }
+
+    #[test]
+    fn grep_shows_the_needle_and_the_filter() {
+        // The reported fault: this rendered as `grep *.rs`, naming the filter and hiding
+        // the search term -- so the one line about the call said the wrong thing, and
+        // every grep looked like it searched for a glob.
+        let args = r#"{"pattern":"MAX_ATTEMPTS","glob":"*.rs"}"#;
+        assert_eq!(summarise_args("grep", args, 100), "MAX_ATTEMPTS  in *.rs");
+    }
+
+    #[test]
+    fn grep_without_a_filter_shows_just_the_needle() {
+        let args = r#"{"pattern":"needle","path":"src"}"#;
+        assert_eq!(summarise_args("grep", args, 100), "needle");
+    }
+
+    #[test]
+    fn a_paged_read_shows_its_range() {
+        // `read src/agent.rs` twice in a row says nothing about what differs; the range
+        // is the only thing that makes the second call readable.
+        let args = r#"{"path":"src/agent.rs","offset":100,"limit":50}"#;
+        assert_eq!(summarise_args("read", args, 100), "src/agent.rs lines 100-149");
+        let args = r#"{"path":"src/agent.rs","offset":100}"#;
+        assert_eq!(summarise_args("read", args, 100), "src/agent.rs from line 100");
+        // An unpaged read keeps its plain form.
+        let args = r#"{"path":"src/agent.rs"}"#;
+        assert_eq!(summarise_args("read", args, 100), "src/agent.rs");
+    }
+
+    #[test]
+    fn an_unknown_tool_still_shows_something() {
+        let args = r#"{"whatever":"value"}"#;
+        assert_eq!(summarise_args("mystery", args, 100), "value");
     }
 }

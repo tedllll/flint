@@ -1,4 +1,4 @@
-//! flint 鈥?a minimal cross-platform rescue agent.
+//! flint — a minimal cross-platform command-line agent.
 //!
 //! Modes:
 //!   flint                          interactive REPL
@@ -147,7 +147,7 @@ fn print_transcript(history: &[event::Message], printer: &Printer<'_>) {
         printer.dim(&format!(
             "鈹€鈹€ {}{} 鈹€鈹€",
             if start > 0 {
-                format!("鈥?{start} earlier messages, ")
+                format!("— {start} earlier messages, ")
             } else {
                 String::new()
             },
@@ -212,7 +212,12 @@ async fn real_main() -> Result<i32> {
     // Plain output: exec is for scripts, and its contract is the child's own
     // bytes plus its exit code.
     if let Some(command) = &args.exec {
-        let cfg = config::Config::load().unwrap_or_default();
+        // `load_existing`, not `load`: no config is created, nothing is printed, and a
+        // config that cannot be parsed does not stop the command from running. The old
+        // call created a config file and printed "set your API key ... then re-run"
+        // *before* running the command anyway -- untrue, since exec needs no key, and
+        // the one message guaranteed to make someone stop and go debugging.
+        let cfg = config::Config::load_existing();
         return exec_direct(&cfg, command, &cwd, &Term::plain()).await;
     }
 
@@ -347,6 +352,9 @@ async fn real_main() -> Result<i32> {
     } else {
         term::Term::plain()
     });
+
+    // Lets transcript lines show `src/term.rs` instead of the full path the model wrote.
+    term.set_cwd(&cwd.to_string_lossy());
 
     let (reader, mut input_rx) = if term.interactive() {
         InputReader::from_terminal(std::sync::Arc::clone(&term))
@@ -585,19 +593,19 @@ async fn interactive(
     if agent.readonly() {
         printer.term().line(format_args!(
             "  {}",
-            printer.style(GREEN, "readonly 鈥?writes and mutating commands are refused")
+            printer.style(GREEN, "readonly — writes and mutating commands are refused")
         ));
     } else if key_missing {
         // Say what to do, and say it where the user is already looking. This is
         // the first thing a fresh machine sees, so it has to be actionable
         // without leaving the tool.
         printer.term().line(format_args!(
-            "  {yellow}no API key for this provider{reset}{dim} 鈥?shell tools still work. \
+            "  {yellow}no API key for this provider{reset}{dim} — shell tools still work. \
              Set one with {reset}{bold}/provider key <key>{reset}{dim}, or add a provider with \
              {reset}{bold}/provider add{reset}"
         ));
     } else {
-        printer.term().line(format_args!("  {dim}/help for commands 路 type while it works to interrupt it{reset}"));
+        printer.term().line(format_args!("  {dim}/help for commands · type while it works to interrupt it{reset}"));
     }
     printer.term().blank();
 
@@ -630,8 +638,9 @@ async fn interactive(
             match handle_command(&input, cfg, agent, provider_cfg, printer, reader).await? {
                 Flow::Continue => continue,
                 Flow::Exit => break,
-                Flow::NewAgent(new_agent) => {
+                Flow::NewAgent(new_agent, new_provider) => {
                     *agent = new_agent;
+                    *provider_cfg = new_provider;
                     continue;
                 }
             }
@@ -664,7 +673,14 @@ async fn interactive(
 enum Flow {
     Continue,
     Exit,
-    NewAgent(agent::Agent),
+    /// The provider changed, so both the agent and the provider configuration it was
+    /// built from have to replace the ones the REPL is holding.
+    ///
+    /// Carrying only the agent left `provider_cfg` describing the *previous* provider.
+    /// Requests went to the new one -- the agent had it -- while `/model`, `/provider`
+    /// and the session header kept reading the old one, so switching to a local provider
+    /// and back reported a model that was no longer in use.
+    NewAgent(agent::Agent, config::ProviderConfig),
 }
 
 /// Ask a question and wait for a line.
@@ -810,6 +826,9 @@ async fn provider_wizard(
         name: name.clone(),
         base_url,
         api_key,
+        // Editing a provider keeps whatever model list it already had; the wizard asks
+        // for the active model, and `/model` is where the rest are chosen.
+        models: existing.as_ref().map(|e| e.models.clone()).unwrap_or_default(),
         model,
         api_key_env: if env_name.trim().is_empty() {
             None
@@ -835,7 +854,7 @@ async fn provider_wizard(
             "{}",
             printer.style(
                 YELLOW,
-                "  no key yet 鈥?set one with /provider key, or the request will fail"
+                "  no key yet — set one with /provider key, or the request will fail"
             )
         ));
     }
@@ -882,7 +901,7 @@ fn switch_provider(
         "switched to {bold}{}{reset} ({})",
         target.name, target.model
     ));
-    Ok(Flow::NewAgent(new_agent))
+    Ok(Flow::NewAgent(new_agent, target))
 }
 
 async fn handle_command(
@@ -996,7 +1015,7 @@ async fn handle_command(
                     }
                     if cfg.providers.len() <= 1 {
                         return Err(anyhow!(
-                            "refusing to delete the last provider 鈥?there would be nothing left to talk to"
+                            "refusing to delete the last provider — there would be nothing left to talk to"
                         ));
                     }
                     if !cfg.remove_provider(rest) {
@@ -1067,19 +1086,78 @@ async fn handle_command(
                         "switched to {bold}{}{reset} ({})",
                         target.name, target.model
                     ));
-                    return Ok(Flow::NewAgent(new_agent));
+                    return Ok(Flow::NewAgent(new_agent, target));
                 }
             }
         }
 
         "/model" => {
+            // The same shape as `/provider`: no argument lists what can be chosen and how,
+            // an argument chooses. A list that shows the options is the only way the user
+            // can know what names are valid -- `/provider` already worked that way, and
+            // `/model` disagreeing with it was the reason it read as broken.
+            let choices = provider_cfg.choices();
             if arg.is_empty() {
-                printer.term().line(format_args!("model: {bold}{}{reset}", provider_cfg.model));
-            } else {
                 printer.term().line(format_args!(
-                    "{dim}hint: set `model` in {} to make this permanent.{reset}",
-                    config::config_path().display()
+                    "{dim}models for provider {}{reset} {dim}({}):{reset}",
+                    provider_cfg.name, provider_cfg.base_url
                 ));
+                for m in &choices {
+                    let mark = if *m == provider_cfg.model { "*" } else { " " };
+                    printer.term().line(format_args!("  {mark} {m}"));
+                }
+                printer.term().line(format_args!(
+                    "{dim}  /model <name>         switch to it, and save it\n  \
+                     add more with `models = [...]` in {}, or /provider edit {}{reset}",
+                    config::config_path().display(),
+                    provider_cfg.name
+                ));
+            } else if arg == provider_cfg.model {
+                printer.term().line(format_args!(
+                    "{dim}already using {}{reset}",
+                    provider_cfg.model
+                ));
+            } else if !choices.iter().any(|m| m == arg) {
+                // Refused rather than accepted: a typo would otherwise be sent to the
+                // provider as a model name, and the reply would be a server error that
+                // says nothing about the real mistake.
+                printer.term().line(format_args!(
+                    "{} unknown model {bold}{}{reset} for {}. {dim}/model lists them.{reset}",
+                    printer.style(RED, "error:"),
+                    arg,
+                    provider_cfg.name
+                ));
+            } else {
+                // Actually switch. This used to print "set `model` in <config> to make
+                // this permanent" and change nothing, which read as a refusal: the
+                // command named the setting and then declined to set it.
+                let mut target = provider_cfg.clone();
+                target.model = arg.to_string();
+                let provider = provider::Provider::new(target.clone())?;
+                let writer = Some(session::SessionWriter::create(
+                    &config::sessions_dir(),
+                    agent.cwd(),
+                    &target.name,
+                    &target.model,
+                )?);
+                let new_agent = agent::Agent::new(
+                    cfg,
+                    provider,
+                    agent.readonly(),
+                    agent.cwd().clone(),
+                    writer,
+                );
+                // Persisted as well as applied: the next run should use it, which is
+                // what the old hint was promising the user they had to do by hand.
+                cfg.upsert_provider(target.clone());
+                cfg.save()?;
+                printer.term().line(format_args!(
+                    "{} model {bold}{}{reset} for {bold}{}{reset} {dim}(saved){reset}",
+                    printer.style(GREEN, "ok"),
+                    target.model,
+                    target.name
+                ));
+                return Ok(Flow::NewAgent(new_agent, target));
             }
         }
 
@@ -1109,10 +1187,10 @@ async fn handle_command(
             if turn_on {
                 printer.term().line(format_args!(
                     "{}",
-                    printer.style(GREEN, "readonly ON 鈥?no writes, no mutating commands")
+                    printer.style(GREEN, "readonly ON — no writes, no mutating commands")
                 ));
             } else {
-                printer.term().line(format_args!("{}", printer.style(RED, "readonly OFF 鈥?full permissions")));
+                printer.term().line(format_args!("{}", printer.style(RED, "readonly OFF — full permissions")));
             }
             printer.term().line(format_args!(
                 "{dim}note: takes effect on the next /new or restart (the tool set is per agent).{reset}"
@@ -1137,9 +1215,9 @@ async fn handle_command(
             cfg.verbose = next >= CHATTY;
             cfg.save()?;
             let what = match next {
-                QUIET => "off 鈥?only the model's answers",
-                NORMAL => "on 鈥?one line per tool call",
-                _ => "full 鈥?arguments and the reasoning marker",
+                QUIET => "off — only the model's answers",
+                NORMAL => "on — one line per tool call",
+                _ => "full — arguments and the reasoning marker",
             };
             printer.term().line(format_args!("{} {what}", printer.style(GREEN, "verbose")));
             if cfg.tool_detail {
@@ -1162,9 +1240,9 @@ async fn handle_command(
             cfg.tool_detail = on;
             cfg.save()?;
             let what = if on {
-                "on 鈥?tool output is printed, up to 25 lines per result"
+                "on — tool output is printed, up to 25 lines per result"
             } else {
-                "off 鈥?one line per tool result"
+                "off — one line per tool result"
             };
             printer.term().line(format_args!("{} {what}", printer.style(GREEN, "detail")));
         }
@@ -1288,7 +1366,7 @@ async fn handle_command(
                     format!(", model {}", provider_cfg.model)
                 }
             ));
-            return Ok(Flow::NewAgent(new_agent));
+            return Ok(Flow::NewAgent(new_agent, provider_cfg.clone()));
         }
 
         "/reload" => {
@@ -1319,13 +1397,13 @@ async fn handle_command(
                 String::new()
             };
             printer.term().line(format_args!(
-                "{} reloaded {} 鈥?provider {bold}{}{reset} model {bold}{}{reset}{state}",
+                "{} reloaded {} — provider {bold}{}{reset} model {bold}{}{reset}{state}",
                 printer.style(GREEN, "ok"),
                 config::config_path().display(),
                 target.name,
                 target.model
             ));
-            return Ok(Flow::NewAgent(new_agent));
+            return Ok(Flow::NewAgent(new_agent, target));
         }
 
         "/new" => {
@@ -1339,7 +1417,7 @@ async fn handle_command(
             let new_agent =
                 agent::Agent::new(cfg, provider, agent.readonly(), agent.cwd().clone(), writer);
             printer.term().line(format_args!("started a new session"));
-            return Ok(Flow::NewAgent(new_agent));
+            return Ok(Flow::NewAgent(new_agent, provider_cfg.clone()));
         }
 
         other => {
@@ -1392,6 +1470,20 @@ async fn run_turn(
 
     let mut current = input.to_string();
 
+    // Say something before the request goes out, not only after a tool starts.
+    //
+    // Streamed output is buffered once per attempt so that a retry can discard it and
+    // run again without duplicating text on screen, which means nothing appears until
+    // the whole response has arrived. Without a status line that leaves the terminal
+    // completely still for the length of the model's response -- and a model that is
+    // slow, or an endpoint that is dead, looks exactly like a program that has hung.
+    // The empty name is what makes the line read "waiting for the model" rather than
+    // naming a tool.
+    // Every model call starts here, including the ones after a tool round. The status
+    // line carries the phase from here on; the escalation in the wait loop turns the
+    // nameless wait into an explicit "no response yet".
+    printer.term().activity_started("");
+
     loop {
         let mut tool_names: HashMap<String, (String, String)> = HashMap::new();
         let mut streamed_text = false;
@@ -1399,9 +1491,11 @@ async fn run_turn(
         // because a fragment is not a line: it can stop in the middle of a word,
         // and only the whole text can be placed correctly.
         let mut answer = String::new();
-        // Whether this turn's "thinking" marker has been printed yet. One per turn,
-        // not one per fragment.
-        let mut thinking_shown = false;
+
+        // A tool round is another wait: the step starts by asking the model again, and
+        // the clock has to be running for it or the pause after every tool call looks
+        // like the turn is over.
+        printer.term().activity_started("");
 
         // The turn and its output closure are confined to this scope: the future
         // holds a mutable borrow of `buffer`, and that borrow has to end before
@@ -1409,6 +1503,13 @@ async fn run_turn(
         let (result, steering) = {
             let mut turn = Box::pin(agent.run(&current, |event| match event {
                 Event::Text(t) => {
+                    // The wait is over and the answer is being written. The clock keeps
+                    // running and the label changes, because these are different things
+                    // to be waiting for: a silent model, and a model emitting an answer
+                    // that is being rendered a row at a time.
+                    if !streamed_text {
+                        printer.term().activity_named(WRITING_LABEL);
+                    }
                     if printer.term().interactive() {
                         // The answer is redrawn in full, so the terminal always
                         // shows a complete line even when a fragment stops
@@ -1425,18 +1526,20 @@ async fn run_turn(
                 Event::Reasoning(t) => {
                     // The model thinking out loud.
                     //
-                    // The provider emits one event per SSE fragment and a fragment is
-                    // usually a token, so committing each one would print a single
-                    // word per line -- the whole reasoning block spread down the
-                    // screen, which is what a live turn used to look like. There is
-                    // nothing to read in that, so the turn shows one marker instead.
+                    // Not put in the transcript: the provider emits one event per SSE
+                    // fragment, so there is no natural place to break the block into
+                    // lines, and the whole reasoning spread down the screen is what a
+                    // live turn used to look like. It is not thrown away either -- it is
+                    // in the session file.
                     //
-                    // Nothing is lost: the reasoning is still in the session file.
-                    if !thinking_shown && show_thinking(printer.verbosity(), &t) {
-                        thinking_shown = true;
-                        printer
-                            .term()
-                            .line(format_args!("{}", printer.dim(THINKING_MARK)));
+                    // What the user needs from it is *that it is happening*, and that
+                    // belongs on the status line, which is already showing how long the
+                    // turn has taken. A separate `… thinking` marker in the transcript
+                    // said the same thing a second time, one row above, and left the
+                    // status line claiming the model was still being waited for while it
+                    // was in fact already talking.
+                    if !streamed_text && !t.trim().is_empty() {
+                        printer.term().activity_named(THINKING_LABEL);
                     }
                 }
                 Event::ToolStart { id, name } => {
@@ -1521,6 +1624,16 @@ async fn run_turn(
                         // Keep the running-status line moving. This loop is already
                         // waiting, so the clock costs one comparison per tick and only
                         // repaints when its number changes.
+                        // Distinguish a slow model from one that is not answering at
+                        // all. Until something arrives there is no way to tell them
+                        // apart, so the label escalates once the silence is long enough
+                        // to mean something -- which is the case the user is actually
+                        // staring at when they wonder whether it has hung.
+                        if printer.term().activity_is_unnamed_wait()
+                            && printer.term().activity_elapsed() >= NO_RESPONSE_AFTER
+                        {
+                            printer.term().activity_named(NO_RESPONSE_LABEL);
+                        }
                         printer.term().tick();
                     }
                 }
@@ -1622,20 +1735,19 @@ fn is_local_endpoint(base_url: &str) -> bool {
     provider::is_local_endpoint(base_url)
 }
 
-/// The single line a turn prints when the model starts reasoning.
-const THINKING_MARK: &str = "\u{2026} thinking";
-
-/// Whether a reasoning fragment should produce the thinking marker.
+/// Status-line labels, one per thing the turn can be waiting for.
 ///
-/// Deliberately a free function rather than a condition inline in the event
-/// closure: the reasoning channel delivers one event per SSE fragment, so this is
-/// called dozens of times per turn, and "exactly once, only when asked for" is the
-/// kind of rule that is better stated once and tested than re-derived at the call
-/// site. An all-whitespace fragment does not count as reasoning -- some providers
-/// send one before any real content.
-fn show_thinking(verbosity: u8, fragment: &str) -> bool {
-    verbosity >= display::CHATTY && !fragment.trim().is_empty()
-}
+/// "Waiting" is not one state. The request going out, the model reasoning, the model
+/// emitting an answer, and a tool running are four different waits with four different
+/// meanings, and a single label told the user none of them.
+///
+/// The initial wait has no label: an unnamed activity already reads "waiting for the
+/// model", and a constant for it would be a second way to say the same thing.
+/// How long silence may last before it stops looking like a model thinking.
+const NO_RESPONSE_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+const NO_RESPONSE_LABEL: &str = "no response yet — the network or the endpoint may be stuck";
+const THINKING_LABEL: &str = "thinking";
+const WRITING_LABEL: &str = "writing the answer";
 
 /// Reduce a tool's JSON arguments to the one value worth showing on a line.
 fn parse_args(argv: Vec<String>) -> Result<Args> {
@@ -1713,7 +1825,7 @@ fn print_help(color: bool, term: &Term) {
     let (b, r) = if color { (BOLD, RESET) } else { ("", "") };
     term.line(format_args!(
         "\
-{b}flint{r} 鈥?a minimal cross-platform rescue agent
+{b}flint{r} — a minimal cross-platform command-line agent
 
 {b}USAGE{r}
   flint                            interactive session
@@ -1736,37 +1848,11 @@ fn print_help(color: bool, term: &Term) {
   {}
 
 {b}WHY{r}
-  This exists so that when your usual tooling breaks, you still have something
-  that can talk to a model and run commands to repair it. It is deliberately
-  small, dependency-light and hand-editable.",
+  A command-line agent that works directly on your machine: reading and writing
+  code, running commands, searching a tree, setting a machine up, debugging what
+  is broken, or just answering a question. It is deliberately small,
+  dependency-light and hand-editable — which is also why it is still there when
+  your usual tooling is not.",
         config::config_path().display()
     ));
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use display::{CHATTY, NORMAL, QUIET};
-
-    #[test]
-    fn the_thinking_marker_needs_chatty_verbosity() {
-        assert!(!show_thinking(QUIET, "considering"));
-        assert!(!show_thinking(NORMAL, "considering"));
-        assert!(show_thinking(CHATTY, "considering"));
-    }
-
-    #[test]
-    fn a_blank_reasoning_fragment_is_not_thinking() {
-        // Providers sometimes open the channel with an empty or whitespace delta;
-        // printing the marker for that would show it before anything was thought.
-        for blank in ["", " ", "\n", "\r\n", "\t "] {
-            assert!(!show_thinking(CHATTY, blank), "{blank:?} counted as thinking");
-        }
-    }
-
-    #[test]
-    fn one_real_fragment_is_enough_to_show_the_marker() {
-        assert!(show_thinking(CHATTY, "The"));
-        assert!(show_thinking(CHATTY, " 鐢ㄦ埛"));
-    }
 }

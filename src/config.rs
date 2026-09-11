@@ -19,6 +19,14 @@ pub struct ProviderConfig {
     pub api_key: String,
     #[serde(default)]
     pub model: String,
+    /// Other models this provider can serve, for `/model` to offer.
+    ///
+    /// An empty list is the common case and means "only `model`": one endpoint serving
+    /// one model needs no menu, and a config written before this field existed keeps
+    /// working unchanged. `model` is always among the choices, so it does not have to be
+    /// repeated here.
+    #[serde(default)]
+    pub models: Vec<String>,
     /// Read the key from this environment variable instead of `api_key`.
     #[serde(default)]
     pub api_key_env: Option<String>,
@@ -152,6 +160,26 @@ impl ProviderConfig {
         self.api_key.clone()
     }
 
+    /// The models `/model` can offer for this provider.
+    ///
+    /// Always includes the active `model`, so it appears in the list whether or not it
+    /// was repeated in `models` -- and a provider with no `models` list still offers the
+    /// one it is using, which keeps a config written before the field existed usable.
+    /// Deduplicated in order, because the active model may well be listed too.
+    pub fn choices(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        if !self.model.trim().is_empty() {
+            out.push(self.model.clone());
+        }
+        for m in &self.models {
+            let m = m.trim();
+            if !m.is_empty() && !out.iter().any(|x| x == m) {
+                out.push(m.to_string());
+            }
+        }
+        out
+    }
+
     /// Full chat-completions endpoint.
     pub fn endpoint(&self) -> String {
         let base = self.base_url.trim_end_matches('/');
@@ -181,6 +209,7 @@ impl Default for Config {
                     base_url: "https://api.deepseek.com/v1".to_string(),
                     api_key: String::new(),
                     model: "deepseek-chat".to_string(),
+                    models: vec!["deepseek-chat".to_string(), "deepseek-reasoner".to_string()],
                     api_key_env: Some("DEEPSEEK_API_KEY".to_string()),
                     proxy: None,
                 },
@@ -191,6 +220,7 @@ impl Default for Config {
                     base_url: "http://localhost:11434/v1".to_string(),
                     api_key: "ollama".to_string(),
                     model: "qwen2.5-coder:7b".to_string(),
+                    models: Vec::new(),
                     api_key_env: None,
                     proxy: None,
                 },
@@ -297,6 +327,29 @@ impl Config {
     pub fn fallback_provider(&self) -> Option<&ProviderConfig> {
         self.provider(&self.default_provider)
             .or_else(|| self.providers.first())
+    }
+
+    /// Load the config if it exists, without creating one and without printing anything.
+    ///
+    /// This is what `exec` uses, and the difference matters more than it looks. `exec` is
+    /// the last line of defence: it must run a command when every provider is
+    /// unreachable, which is exactly the situation where the config may be missing,
+    /// half-written, or damaged. It therefore must not create a config file as a side
+    /// effect, and must not fail because an existing one cannot be parsed -- neither is
+    /// the user's problem when all they asked for was `exec echo hi`.
+    ///
+    /// A config that cannot be read falls back to defaults rather than erroring: the only
+    /// thing it contributes to `exec` is which shell to use, and a default shell beats no
+    /// command at all.
+    pub fn load_existing() -> Self {
+        let path = config_path();
+        if !path.exists() {
+            return Config::default();
+        }
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| toml::from_str(&text).ok())
+            .unwrap_or_default()
     }
 
     /// Load the config, creating a default file on first run.
