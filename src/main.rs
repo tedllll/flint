@@ -10,21 +10,14 @@
 //! The `exec` mode is the last line of defence: when every provider is
 //! unreachable, flint still runs commands.
 
-use flint::{agent, config, event, provider, session, tools, util};
+use flint::{agent, config, display, event, provider, session, tools};
 
 use anyhow::{anyhow, Context, Result};
+use display::{Printer, BOLD, CHATTY, DIM, GREEN, NORMAL, QUIET, RED, RESET, YELLOW};
 use event::Event;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
-
-const DIM: &str = "\x1b[2m";
-const BOLD: &str = "\x1b[1m";
-const RED: &str = "\x1b[31m";
-const GREEN: &str = "\x1b[32m";
-const CYAN: &str = "\x1b[36m";
-const YELLOW: &str = "\x1b[33m";
-const RESET: &str = "\x1b[0m";
 
 #[derive(Default)]
 struct Args {
@@ -1079,132 +1072,7 @@ fn is_local_endpoint(base_url: &str) -> bool {
     provider::is_local_endpoint(base_url)
 }
 
-/// Verbosity levels, in the order you would turn them up.
-const QUIET: u8 = 0;
-const NORMAL: u8 = 1;
-const CHATTY: u8 = 2;
-
-struct Printer {
-    color: bool,
-    /// QUIET shows only the model's words; NORMAL adds one line per tool call;
-    /// CHATTY adds full arguments and more of each result.
-    verbosity: u8,
-}
-
-impl Printer {
-    fn style(&self, code: &str, text: &str) -> String {
-        if self.color {
-            format!("{code}{text}{RESET}")
-        } else {
-            text.to_string()
-        }
-    }
-
-    fn dim(&self, text: &str) -> String {
-        self.style(DIM, text)
-    }
-
-    /// One compact line describing a tool call that is about to run.
-    ///
-    /// The argument is reduced to the one thing worth reading -- the command for
-    /// `bash`, the path for a file tool -- because a raw JSON blob tells the
-    /// reader nothing they cannot get from the result.
-    fn tool_call(&self, name: &str, args: &str) {
-        if self.verbosity == QUIET {
-            return;
-        }
-        let what = summarise_args(name, args, if self.verbosity >= CHATTY { 400 } else { 100 });
-        let head = self.style(CYAN, "⏵");
-        let label = self.style(BOLD, name);
-        if what.is_empty() {
-            println!("{head} {label}");
-        } else {
-            println!("{head} {label} {}", self.dim(&what));
-        }
-    }
-
-    /// The result of a tool call: a status glyph, a one-line gist, and at most a
-    /// couple of lines of detail.
-    fn tool_result(&self, output: &str, ok: bool) {
-        if self.verbosity == QUIET {
-            return;
-        }
-        let lines: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
-        let gist = lines.first().copied().unwrap_or("(no output)");
-        let mark = if ok {
-            self.style(GREEN, "✓")
-        } else {
-            self.style(RED, "✗")
-        };
-
-        if self.verbosity >= CHATTY {
-            println!("  {mark} {}", gist);
-            for line in lines.iter().skip(1).take(24) {
-                println!("    {}", self.dim(line));
-            }
-            if lines.len() > 25 {
-                println!(
-                    "    {}",
-                    self.dim(&format!("… {} more lines", lines.len() - 25))
-                );
-            }
-            return;
-        }
-
-        // Compact: one line, with a hint that there is more behind /verbose.
-        let extra = if lines.len() > 1 {
-            format!("  {}", self.dim(&format!("(+{} lines)", lines.len() - 1)))
-        } else {
-            String::new()
-        };
-        let gist = if gist.chars().count() > 120 {
-            format!("{}…", gist.chars().take(120).collect::<String>())
-        } else {
-            gist.to_string()
-        };
-        println!("  {mark} {}{extra}", self.dim(&gist));
-    }
-
-    /// A turn was stopped because the user typed something.
-    fn interrupted(&self) {
-        println!("{}", self.style(YELLOW, "⏹ interrupted"));
-    }
-}
-
 /// Reduce a tool's JSON arguments to the one value worth showing on a line.
-fn summarise_args(name: &str, args: &str, limit: usize) -> String {
-    let trimmed = args.trim();
-    if trimmed.is_empty() || trimmed == "{}" {
-        return String::new();
-    }
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-        return util::preview(trimmed, limit);
-    };
-    // The first of these keys that is present tells the reader what is happening.
-    let key = match name {
-        "bash" => "command",
-        "read" => "path",
-        "write" => "path",
-        "edit" => "path",
-        "list" => "path",
-        _ => "",
-    };
-    let picked = v
-        .get(key)
-        .and_then(|x| x.as_str())
-        .map(|s| s.to_string())
-        .or_else(|| {
-            v.as_object().and_then(|o| {
-                o.iter()
-                    .find_map(|(_, val)| val.as_str().map(|s| s.to_string()))
-            })
-        });
-    match picked {
-        Some(s) => util::preview(&s.replace('\n', " ⏎ "), limit),
-        None => util::preview(trimmed, limit),
-    }
-}
-
 fn parse_args(argv: Vec<String>) -> Result<Args> {
     let mut args = Args::default();
     let mut iter = argv.into_iter();

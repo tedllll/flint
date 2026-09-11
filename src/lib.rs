@@ -5,6 +5,7 @@
 
 pub mod agent;
 pub mod config;
+pub mod display;
 pub mod event;
 pub mod provider;
 pub mod session;
