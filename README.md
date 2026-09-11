@@ -1,0 +1,155 @@
+# flint
+
+A minimal cross-platform rescue agent.
+
+When your usual tooling breaks — DSH, Codex, your editor, whatever — flint is
+still there: a single static binary that can talk to a model and run commands on
+your machine so you can repair the thing that broke.
+
+That purpose drives every design decision:
+
+- **No GUI, no TUI library.** Plain stdin/stdout. It works over SSH, in a
+  container, in a broken terminal.
+- **Very few dependencies.** No SQLite, no OpenSSL, no line-editing crate.
+- **Hand-editable state.** Config is TOML, history is JSONL. Both repairable
+  with a text editor, because when things are broken you may not have a working
+  model to fix them for you.
+- **`flint exec` needs no model at all.** If every provider is unreachable, you
+  can still run commands.
+
+## Install
+
+Download the binary for your platform from Releases and put it on your PATH.
+No toolchain required — that is the whole point.
+
+```bash
+# Linux (x86_64, fully static — runs on any distro)
+curl -fsSL -o flint https://github.com/<you>/flint/releases/latest/download/flint-x86_64-unknown-linux-musl
+chmod +x flint && sudo mv flint /usr/local/bin/
+
+# macOS (Apple Silicon)
+curl -fsSL -o flint https://github.com/<you>/flint/releases/latest/download/flint-aarch64-apple-darwin
+chmod +x flint && sudo mv flint /usr/local/bin/
+```
+
+Windows: download `flint-x86_64-pc-windows-msvc.exe` and put it somewhere on
+your `PATH`.
+
+## Configure
+
+First run creates `~/.flint/config.toml`:
+
+```toml
+default_provider = "deepseek"
+
+# Shell used by the bash tool.
+#   shell      = program name only
+#   shell_args = the arguments that make it run a command string and exit
+# If the program is missing, flint falls back to another shell on the platform
+# (Windows: cmd -> powershell -> pwsh -> bash -> sh; Unix: sh -> bash -> zsh).
+shell = "cmd"              # Unix: "sh"
+shell_args = ["/C"]        # Unix: ["-c"]
+
+max_tool_output = 30000   # cap on tool output fed back to the model
+max_steps = 25            # runaway-loop guard
+readonly = false          # true = refuse every write
+
+[[providers]]
+name = "deepseek"
+base_url = "https://api.deepseek.com/v1"
+api_key = ""                       # or leave empty and export the env var
+api_key_env = "DEEPSEEK_API_KEY"
+model = "deepseek-chat"
+
+[[providers]]
+name = "ollama"                    # local fallback: still works when the
+base_url = "http://localhost:11434/v1"   # internet does not
+api_key = "ollama"
+model = "qwen2.5-coder:7b"
+```
+
+Any OpenAI-compatible endpoint works (DeepSeek, Kimi, GLM, OpenRouter, Ollama,
+vLLM, llama.cpp). The client appends `/chat/completions` to `base_url`.
+
+## Use
+
+```bash
+flint                            # interactive session
+flint -p "why is my dsh broken"  # one-shot
+flint why is my dsh broken       # same thing
+flint --continue                 # resume the last session
+flint exec "npm i -g @deepseek-ai/dsh"   # no model involved
+flint --list-sessions
+```
+
+Inside the REPL:
+
+| Command | Effect |
+|---|---|
+| `/help` | command list |
+| `/provider [name]` | list or switch providers |
+| `/usage` | context size and token accounting |
+| `/readonly [on\|off]` | toggle the write guard |
+| `/tools` | list tools |
+| `/sessions` | list past sessions |
+| `/new` | start a fresh conversation |
+| `!cmd` | run a shell command, bypassing the model |
+
+Flags: `--provider`, `--model`, `--readonly`, `--cwd`, `--no-color` (or
+`NO_COLOR`), `--continue`.
+
+## Permissions
+
+**Full by default.** There is no approval prompt; flint runs what it decides to
+run. This is intentional — an approval dialog in an emergency is friction you do
+not want — but it means flint can damage your system.
+
+The one guard is `/readonly`, which refuses `write`, `edit`, and any mutating
+shell command. Use it when you want flint to look but not touch.
+
+`--readonly` at startup turns it on for the whole run.
+
+## Tools
+
+| Tool | Purpose |
+|---|---|
+| `bash` | run a shell command (120s default timeout, `timeout_secs` to raise) |
+| `read` | read a file with line numbers, pageable via `offset`/`limit` |
+| `write` | create or overwrite a file |
+| `edit` | exact string replacement, unique-match enforced |
+| `list` | list a directory |
+
+Tool output is capped at `max_tool_output` characters before going back to the
+model, with a `[truncated]` marker.
+
+## Context
+
+There is no automatic context management. `/usage` shows the size of your last
+prompt (that *is* your context) and the token accounting. If it grows too large,
+`/new` starts fresh.
+
+## Build from source
+
+```bash
+cargo build --release
+# fully static Linux binary:
+cargo zigbuild --release --target x86_64-unknown-linux-musl
+```
+
+Releases are built by GitHub Actions for Linux (x86_64/aarch64, musl), macOS
+(aarch64/x86_64) and Windows (x86_64).
+
+## Design notes
+
+Sessions are append-only JSONL at `~/.flint/sessions/<id>.jsonl`, one event per
+line. A damaged line is skipped and reported rather than taking the session
+down.
+
+The provider layer implements the OpenAI streaming protocol only, including the
+two parts that are easy to get wrong: SSE frames split across network chunks
+(handled with a carry-over buffer) and tool-call arguments arriving as string
+fragments that must be concatenated by index before they are valid JSON.
+
+## License
+
+MIT

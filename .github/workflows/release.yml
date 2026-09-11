@@ -1,0 +1,105 @@
+name: release
+
+# The point of this workflow: flint must be installable WITHOUT a Rust
+# toolchain. If the thing you use to fix broken machines requires a working
+# compiler, it is not a rescue tool.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux: musl gives a fully static binary that runs on any distro,
+          # regardless of glibc version.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            use_zigbuild: true
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            use_zigbuild: true
+          # macOS: Apple Silicon and Intel.
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            use_zigbuild: false
+          - os: macos-13
+            target: x86_64-apple-darwin
+            use_zigbuild: false
+          # Windows.
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            use_zigbuild: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install zig (static musl builds)
+        if: matrix.use_zigbuild
+        run: |
+          pipx install ziglang
+          cargo install cargo-zigbuild --locked
+
+      - name: Build (zigbuild)
+        if: matrix.use_zigbuild
+        run: cargo zigbuild --release --target ${{ matrix.target }}
+
+      - name: Build (cargo)
+        if: ${{ !matrix.use_zigbuild }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # Raw binaries, no archives. curl + chmod +x is the whole install.
+      - name: Stage binary (unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/flint \
+             dist/flint-${{ matrix.target }}
+          chmod +x dist/flint-${{ matrix.target }}
+
+      - name: Stage binary (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/flint.exe" `
+                    "dist/flint-${{ matrix.target }}.exe"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flint-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd artifacts
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true

@@ -1,0 +1,51 @@
+[package]
+name = "flint"
+version = "0.1.0"
+edition = "2021"
+description = "A minimal cross-platform rescue agent. When everything else is broken, strike a spark."
+license = "MIT"
+
+[lib]
+name = "flint"
+path = "src/lib.rs"
+
+[[bin]]
+name = "flint"
+path = "src/main.rs"
+
+[dependencies]
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
+    "rustls-native-certs",
+    "http2",
+    "json",
+    "stream",
+    "system-proxy",
+] }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "process",
+    "fs",
+    "io-util",
+    "io-std",
+    "sync",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+futures-util = "0.3"
+anyhow = "1"
+async-trait = "0.1"
+dirs = "7"
+
+[dev-dependencies]
+wiremock = "0.6"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

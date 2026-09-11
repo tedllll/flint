@@ -1,0 +1,14 @@
+# Normalise line endings so the same commit looks identical on Windows, macOS
+# and Linux. Without this, a Windows checkout rewrites every file to CRLF and
+# every later diff on the other machines is noise.
+* text=auto eol=lf
+
+# Windows-only helpers keep CRLF so they behave natively in cmd/PowerShell.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary artifacts.
+*.png binary
+*.jpg binary
+*.ico binary
