@@ -10,14 +10,17 @@
 //! The `exec` mode is the last line of defence: when every provider is
 //! unreachable, flint still runs commands.
 
-use flint::{agent, config, display, event, provider, session, tools};
+use flint::{agent, config, display, event, provider, session, term, tools};
 
 use anyhow::{anyhow, Context, Result};
 use display::{Printer, BOLD, CHATTY, DIM, GREEN, NORMAL, QUIET, RED, RESET, YELLOW};
+#[allow(unused_imports)]
+use display::Palette;
 use event::Event;
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
+use term::Term;
 
 #[derive(Default)]
 struct Args {
@@ -57,11 +60,15 @@ fn main() {
 async fn real_main() -> Result<i32> {
     let args = parse_args(std::env::args().skip(1).collect())?;
 
-    // Decide colour before anything prints. Honours NO_COLOR as well as the flag.
-    let color = !args.no_color && std::env::var_os("NO_COLOR").is_none();
+    // Decide colour before anything prints. Honours NO_COLOR as well as the flag,
+    // and gives up automatically when the output is not a terminal -- escape codes
+    // in a pipeline are noise that breaks `flint --help | less` and `| grep`.
+    let color = !args.no_color
+        && std::env::var_os("NO_COLOR").is_none()
+        && std::io::stdout().is_terminal();
 
     if args.help {
-        print_help(color);
+        print_help(color, &Term::plain());
         return Ok(0);
     }
 
@@ -75,9 +82,12 @@ async fn real_main() -> Result<i32> {
     // This is the last line of defence: when every provider is unreachable this
     // must still run a command, so it must not depend on config loading (which
     // could fail, or create a config file as a side effect of `exec echo hi`).
+    //
+    // Plain output: exec is for scripts, and its contract is the child's own
+    // bytes plus its exit code.
     if let Some(command) = &args.exec {
         let cfg = config::Config::load().unwrap_or_default();
-        return exec_direct(&cfg, command, &cwd, color).await;
+        return exec_direct(&cfg, command, &cwd, &Term::plain()).await;
     }
 
     // Everything below may need a provider, so a config is required from here.
@@ -89,6 +99,8 @@ async fn real_main() -> Result<i32> {
         if sessions.is_empty() {
             println!("(no sessions yet)");
         }
+        // Plain output on purpose: this mode is for scripts, and its contract is
+        // one session per line.
         for (id, summary) in sessions {
             println!("{id}  {summary}");
         }
@@ -174,50 +186,152 @@ async fn real_main() -> Result<i32> {
         *agent.history_mut() = merged;
     }
 
-    let mut reader = InputReader::spawn();
-    let mut printer = Printer {
-        color,
-        verbosity: if cfg.verbose { CHATTY } else { NORMAL },
+    // The terminal comes first: it decides whether there is an input row to keep
+    // clear, and the printer needs it for every line it emits.
+    //
+    // One-shot mode has no input row to reserve -- the caller wants the text and
+    // nothing else -- so it leaves the terminal alone.
+    let interactive_mode = args.prompt.is_none();
+    let term = std::sync::Arc::new(if interactive_mode {
+        term::Term::start()?
+    } else {
+        term::Term::plain()
+    });
+
+    let (reader, mut input_rx) = if term.interactive() {
+        InputReader::from_terminal(std::sync::Arc::clone(&term))
+    } else {
+        InputReader::from_stdin()
     };
+
+    let printer = Printer::new(
+        color,
+        if cfg.verbose { CHATTY } else { NORMAL },
+        &term,
+    );
 
     // ---- one-shot ----
     if let Some(prompt) = args.prompt {
-        run_turn(&mut agent, &provider_cfg, &prompt, &printer, &mut reader.rx).await?;
+        run_turn(&mut agent, &provider_cfg, &prompt, &printer, &mut input_rx).await?;
         println!();
         return Ok(0);
     }
 
     // ---- interactive ----
-    interactive(
+    let result = interactive(
         &mut cfg,
         &mut agent,
         &mut provider_cfg,
-        &mut printer,
+        &printer,
         key_missing,
-        &mut reader.rx,
+        &reader,
+        &mut input_rx,
     )
-    .await?;
+    .await;
+    term.stop();
+    result?;
     Ok(0)
 }
 
-/// The REPL. Slash commands carry every convenience feature; the main loop
-/// stays deliberately tiny.
-/// Line-oriented stdin, read on its own thread and delivered over a channel.
+/// Input, delivered over a channel so a turn can run while the keyboard stays
+/// live.
 ///
-/// Two things fall out of this. The REPL can say "run this turn, but keep
-/// listening" instead of blocking on read_line, which is what makes it possible
-/// to interrupt the model by typing. And a blocking read on a background thread
-/// costs nothing when nobody is typing.
-///
-/// A plain OS thread rather than async stdin: tokio has no portable async stdin,
-/// and the reader is almost always parked in read_line anyway.
+/// A real terminal is read with crossterm on its own thread, because a turn has
+/// to be interruptible by typing and crossterm's reader blocks. Without a
+/// terminal -- piped input, a script -- plain lines are read instead, which is
+/// also what keeps `flint < file` and shell pipelines working.
 struct InputReader {
-    rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    /// Present only when there is a terminal to answer questions on.
+    req_tx: Option<tokio::sync::mpsc::UnboundedSender<InputReq>>,
+}
+
+#[derive(Debug)]
+enum InputMsg {
+    /// A submitted line.
+    Line(String),
+    /// The user asked to quit (Ctrl-C on an empty line, Ctrl-D, or EOF).
+    Quit,
+}
+
+/// A request sent *to* the key thread.
+enum InputReq {
+    /// Show this prompt and deliver the next line to the given channel.
+    Ask(String, tokio::sync::oneshot::Sender<String>),
 }
 
 impl InputReader {
-    fn spawn() -> Self {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    /// A terminal: key events, edited into lines here in the reader thread.
+    fn from_terminal(
+        term: std::sync::Arc<term::Term>,
+    ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<InputMsg>) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<InputMsg>();
+        let (req_tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel::<InputReq>();
+        std::thread::Builder::new()
+            .name("flint-keys".to_string())
+            .spawn(move || {
+                let mut pending: Option<tokio::sync::oneshot::Sender<String>> = None;
+                loop {
+                    // Requests first: a wizard may be waiting on an answer.
+                    while let Ok(req) = req_rx.try_recv() {
+                        match req {
+                            InputReq::Ask(prompt, reply) => {
+                                term.set_prefix(&prompt);
+                                pending = Some(reply);
+                                term.redraw();
+                            }
+                        }
+                    }
+
+                    let Ok(ev) = crossterm::event::read() else {
+                        let _ = tx.send(InputMsg::Quit);
+                        return;
+                    };
+                    match term.on_event(ev) {
+                        term::Key::Enter(line) => {
+                            term.set_prefix("> ");
+                            if let Some(reply) = pending.take() {
+                                // A wizard question: answer it here rather than
+                                // handing the line to the REPL.
+                                let _ = reply.send(line);
+                                term.redraw();
+                            } else if tx.send(InputMsg::Line(line)).is_err() {
+                                return;
+                            }
+                        }
+                        term::Key::Quit => {
+                            if let Some(reply) = pending.take() {
+                                let _ = reply.send(String::new());
+                            }
+                            let _ = tx.send(InputMsg::Quit);
+                            return;
+                        }
+                        term::Key::Redraw => term.redraw(),
+                        term::Key::Ignore => {}
+                    }
+                }
+            })
+            .ok();
+        (
+            InputReader {
+                req_tx: Some(req_tx),
+            },
+            rx,
+        )
+    }
+
+    /// Ask a question on the input row and wait for the answer.
+    ///
+    /// Returns `None` when input ends before an answer arrives.
+    async fn ask(&self, prompt: String) -> Option<String> {
+        let tx = self.req_tx.as_ref()?;
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        tx.send(InputReq::Ask(prompt, reply_tx)).ok()?;
+        reply_rx.await.ok()
+    }
+
+    /// No terminal: read lines directly.
+    fn from_stdin() -> (Self, tokio::sync::mpsc::UnboundedReceiver<InputMsg>) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<InputMsg>();
         std::thread::Builder::new()
             .name("flint-stdin".to_string())
             .spawn(move || {
@@ -225,73 +339,102 @@ impl InputReader {
                 let stdin = std::io::stdin();
                 for line in stdin.lock().lines() {
                     let Ok(line) = line else { break };
-                    if tx.send(line).is_err() {
-                        break; // receiver gone; flint is exiting
+                    if tx.send(InputMsg::Line(line)).is_err() {
+                        break;
                     }
                 }
+                let _ = tx.send(InputMsg::Quit);
             })
             .ok();
-        InputReader { rx }
+        (InputReader { req_tx: None }, rx)
     }
 }
 
+/// Wait for the next submitted line.
+///
+/// Polling rather than `recv().await` because callers hold `&InputReader` (to ask
+/// wizard questions) while reading lines. A 2 ms tick is far below perception and
+/// costs nothing next to a network round trip.
+async fn next_line(rx: &mut tokio::sync::mpsc::UnboundedReceiver<InputMsg>) -> Option<InputMsg> {
+    loop {
+        match rx.try_recv() {
+            Ok(msg) => return Some(msg),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return None,
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+        }
+    }
+}
+
+/// The REPL.
 async fn interactive(
     cfg: &mut config::Config,
     agent: &mut agent::Agent,
     provider_cfg: &mut config::ProviderConfig,
-    printer: &mut Printer,
+    printer: &Printer<'_>,
     key_missing: bool,
-    input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    reader: &InputReader,
+    input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<InputMsg>,
 ) -> Result<()> {
+
+    // Colour codes as this terminal should show them: the names below shadow the
+    // bare constants, so {dim} in a format string follows the colour setting
+    // instead of leaking an escape code into a pipeline.
+    #[allow(unused_variables)]
+    let Palette { dim, bold, red, green, cyan, yellow, reset } = printer.pal;
     // Two lines. Everything here is something the user may need to check before
     // they trust what follows, and nothing else is worth a line on start-up.
-    println!(
-        "{BOLD}flint{RESET} {DIM}v{}{RESET}  {BOLD}{}{RESET}{DIM}/{}{RESET}  {DIM}{}{RESET}",
+    printer.term().line(format_args!(
+        "{bold}flint{reset} {dim}v{}{reset}  {bold}{}{reset}{dim}/{}{reset}  {dim}{}{reset}",
         env!("CARGO_PKG_VERSION"),
         provider_cfg.name,
         provider_cfg.model,
         agent.cwd().display()
-    );
+    ));
     if agent.readonly() {
-        println!(
+        printer.term().line(format_args!(
             "  {}",
             printer.style(GREEN, "readonly — writes and mutating commands are refused")
-        );
+        ));
     } else if key_missing {
         // Say what to do, and say it where the user is already looking. This is
         // the first thing a fresh machine sees, so it has to be actionable
         // without leaving the tool.
-        println!(
-            "  {YELLOW}no API key for this provider{RESET}{DIM} — shell tools still work. \
-             Set one with {RESET}{BOLD}/provider key <key>{RESET}{DIM}, or add a provider with \
-             {RESET}{BOLD}/provider add{RESET}"
-        );
+        printer.term().line(format_args!(
+            "  {yellow}no API key for this provider{reset}{dim} — shell tools still work. \
+             Set one with {reset}{bold}/provider key <key>{reset}{dim}, or add a provider with \
+             {reset}{bold}/provider add{reset}"
+        ));
     } else {
-        println!("  {DIM}/help for commands · type while it works to interrupt it{RESET}");
+        printer.term().line(format_args!("  {dim}/help for commands · type while it works to interrupt it{reset}"));
     }
-    println!();
+    printer.term().blank();
 
     loop {
-        print!("{BOLD}>{RESET} ");
-        std::io::stdout().flush().ok();
+        // The prompt lives on the terminal's reserved row, so there is nothing to
+        // print here: the key thread redraws it after every keystroke.
+        printer.term().prompt();
 
-        let Some(input) = input_rx.recv().await else {
-            // The reader thread only ends at EOF (Ctrl-D, or piped input done).
-            println!();
+        let Some(msg) = next_line(input_rx).await else {
+            // The reader thread ends at EOF (Ctrl-D, or piped input done).
             break;
         };
-        let input = input.trim().to_string();
+        let input = match msg {
+            InputMsg::Quit => break,
+            InputMsg::Line(line) => line.trim().to_string(),
+        };
         if input.is_empty() {
             continue;
         }
 
         if let Some(rest) = input.strip_prefix('!') {
-            run_shell_escape(cfg, rest, agent.cwd(), printer).await;
+            run_shell_escape(cfg, rest, agent.cwd(), printer.term(), printer.pal).await;
             continue;
         }
 
         if input.starts_with('/') {
-            match handle_command(&input, cfg, agent, provider_cfg, printer).await? {
+            match handle_command(&input, cfg, agent, provider_cfg, printer, reader).await? {
                 Flow::Continue => continue,
                 Flow::Exit => break,
                 Flow::NewAgent(new_agent) => {
@@ -304,8 +447,8 @@ async fn interactive(
         match run_turn(agent, provider_cfg, &input, printer, input_rx).await {
             Ok(()) => {}
             Err(e) => {
-                println!();
-                println!("{} {e:#}", printer.style(RED, "error:"));
+                printer.term().blank();
+                printer.term().line(format_args!("{} {e:#}", printer.style(RED, "error:")));
             }
         }
     }
@@ -323,48 +466,46 @@ enum Flow {
     NewAgent(agent::Agent),
 }
 
-/// Prompt on stdout and read one line from stdin.
+/// Ask a question and wait for a line.
 ///
-/// Everything here is plain line input: no raw mode, no terminal library, no
-/// cursor control. That is deliberate -- the configuration wizard has to work
-/// over SSH, in a dumb pipe, and on a machine where the terminal is one of the
-/// things that is broken.
-fn prompt(label: &str, current: Option<&str>, _color: bool) -> Result<String> {
+/// The answer comes from the same channel as everything else the user types.
+/// Reading stdin directly would race the key thread -- and on a real terminal it
+/// would echo into the middle of the model's output, which is the problem the
+/// input row exists to solve.
+async fn prompt(
+    reader: &InputReader,
+    pal: Palette,
+    label: &str,
+    current: Option<&str>,
+) -> Result<String> {
+    #[allow(unused_variables)]
+    let Palette { dim, bold, red, green, cyan, yellow, reset } = pal;
     let shown = match current {
-        Some(c) if !c.is_empty() => format!(" {DIM}[{c}]{RESET}"),
+        Some(c) if !c.is_empty() => format!(" {dim}[{c}]{reset}"),
         _ => String::new(),
     };
-    print!("  {label}{shown}: ");
-    std::io::stdout().flush().ok();
-
-    let mut line = String::new();
-    let n = std::io::stdin().read_line(&mut line)?;
-    if n == 0 {
-        return Err(anyhow!("input ended"));
+    let default = current.unwrap_or("").to_string();
+    match reader.ask(format!("  {label}{shown}: ")).await {
+        Some(v) if v.trim().is_empty() => Ok(default),
+        Some(v) => Ok(v.trim().to_string()),
+        // Input ended: keep the current value rather than aborting mid-wizard.
+        None => Ok(default),
     }
-    let v = line.trim().to_string();
-    Ok(if v.is_empty() {
-        current.unwrap_or("").to_string()
-    } else {
-        v
-    })
 }
 
-/// Ask a yes/no question. Empty answer takes `default`.
-fn confirm(label: &str, default: bool) -> Result<bool> {
+/// Ask a yes/no question. An empty answer takes `default`.
+async fn confirm(reader: &InputReader, label: &str, default: bool) -> Result<bool> {
     let hint = if default { "Y/n" } else { "y/N" };
-    print!("  {label} [{hint}]: ");
-    std::io::stdout().flush().ok();
-    let mut line = String::new();
-    if std::io::stdin().read_line(&mut line)? == 0 {
-        return Ok(default);
-    }
-    match line.trim().to_ascii_lowercase().as_str() {
-        "" => Ok(default),
-        "y" | "yes" => Ok(true),
-        "n" | "no" => Ok(false),
-        _ => Ok(default),
-    }
+    let answer = reader.ask(format!("  {label} [{hint}]: ")).await;
+    Ok(match answer {
+        None => default,
+        Some(a) => match a.trim().to_ascii_lowercase().as_str() {
+            "" => default,
+            "y" | "yes" => true,
+            "n" | "no" => false,
+            _ => default,
+        },
+    })
 }
 
 /// Interactive provider setup.
@@ -376,37 +517,48 @@ async fn provider_wizard(
     cfg: &mut config::Config,
     agent: &agent::Agent,
     editing: Option<&str>,
-    printer: &Printer,
+    printer: &Printer<'_>,
+    reader: &InputReader,
 ) -> Result<Flow> {
+
+    // Colour codes as this terminal should show them: the names below shadow the
+    // bare constants, so {dim} in a format string follows the colour setting
+    // instead of leaking an escape code into a pipeline.
+    #[allow(unused_variables)]
+    let Palette { dim, bold, red, green, cyan, yellow, reset } = printer.pal;
     let existing = editing.and_then(|n| cfg.provider(n)).cloned();
     let verb = if existing.is_some() {
         "editing"
     } else {
         "new provider"
     };
-    println!("\n{BOLD}{verb}{RESET} {DIM}(blank = keep current value){RESET}");
+    printer.term().line(format_args!("\n{bold}{verb}{reset} {dim}(blank = keep current value){reset}"));
 
-    let name = prompt("name", existing.as_ref().map(|p| p.name.as_str()), true)?;
+    let name = prompt(reader, printer.pal, "name", existing.as_ref().map(|p| p.name.as_str())).await?;
     if name.trim().is_empty() {
         return Err(anyhow!("a provider needs a name"));
     }
 
     let base_url = prompt(
+        reader,
+        printer.pal,
         "base_url",
         existing
             .as_ref()
             .map(|p| p.base_url.as_str())
             .or(Some("https://api.deepseek.com/v1")),
-        true,
-    )?;
+    )
+    .await?;
     let model = prompt(
+        reader,
+        printer.pal,
         "model",
         existing
             .as_ref()
             .map(|p| p.model.as_str())
             .or(Some("deepseek-chat")),
-        true,
-    )?;
+    )
+    .await?;
 
     let is_local = is_local_endpoint(&base_url);
     let current_key = existing.as_ref().map(|p| p.api_key.as_str()).unwrap_or("");
@@ -421,16 +573,18 @@ async fn provider_wizard(
     } else {
         format!("<set, {} chars>", current_key.len())
     };
-    println!("{DIM}  (the key is stored in plain text in the config file; you can also use an env var instead){RESET}");
+    printer.term().line(format_args!("{dim}  (the key is stored in plain text in the config file; you can also use an env var instead){reset}"));
     let api_key = prompt(
+        reader,
+        printer.pal,
         "api_key (or leave blank)",
         if key_hint.is_empty() {
             None
         } else {
             Some(key_hint.as_str())
         },
-        true,
-    )?;
+    )
+    .await?;
     // If the user accepted the hint, keep the existing key rather than writing
     // the literal "<set, N chars>" into the config.
     let api_key = if api_key == key_hint {
@@ -440,14 +594,16 @@ async fn provider_wizard(
     };
 
     let env_name = prompt(
+        reader,
+        printer.pal,
         "api_key_env (read key from this env var; wins over api_key)",
         if current_env.is_empty() {
             None
         } else {
             Some(current_env.as_str())
         },
-        true,
-    )?;
+    )
+    .await?;
 
     let p = config::ProviderConfig {
         name: name.clone(),
@@ -464,26 +620,26 @@ async fn provider_wizard(
     let had_key = !p.resolved_key().trim().is_empty();
     let added = cfg.upsert_provider(p);
     cfg.save()?;
-    println!(
-        "{} {BOLD}{name}{RESET} {} {}",
+    printer.term().line(format_args!(
+        "{} {bold}{name}{reset} {} {}",
         printer.style(GREEN, "saved"),
         if added { "added to" } else { "updated in" },
         config::config_path().display()
-    );
+    ));
     if !had_key && !is_local {
-        println!(
+        printer.term().line(format_args!(
             "{}",
             printer.style(
                 YELLOW,
                 "  no key yet — set one with /provider key, or the request will fail"
             )
-        );
+        ));
     }
 
-    if confirm(&format!("switch to '{name}' now?"), true)? {
+    if confirm(reader, &format!("switch to '{name}' now?"), true).await? {
         cfg.default_provider = name.clone();
         cfg.save()?;
-        return switch_provider(cfg, &name, agent.cwd(), agent.readonly());
+        return switch_provider(cfg, &name, agent.cwd(), agent.readonly(), printer.term(), printer.pal);
     }
     Ok(Flow::Continue)
 }
@@ -498,7 +654,14 @@ fn switch_provider(
     name: &str,
     cwd: &std::path::Path,
     readonly: bool,
+    term: &Term,
+    pal: Palette,
 ) -> Result<Flow> {
+    // Colour codes as this terminal should show them: the names below shadow the
+    // bare constants, so {dim} in a format string follows the colour setting
+    // instead of leaking an escape code into a pipeline.
+    #[allow(unused_variables)]
+    let Palette { dim, bold, red, green, cyan, yellow, reset } = pal;
     let target = cfg
         .provider(name)
         .ok_or_else(|| anyhow!("unknown provider '{name}'"))?
@@ -511,10 +674,10 @@ fn switch_provider(
         &target.model,
     )?);
     let new_agent = agent::Agent::new(cfg, provider, readonly, cwd.to_path_buf(), writer);
-    println!(
-        "switched to {BOLD}{}{RESET} ({})",
+    term.line(format_args!(
+        "switched to {bold}{}{reset} ({})",
         target.name, target.model
-    );
+    ));
     Ok(Flow::NewAgent(new_agent))
 }
 
@@ -523,8 +686,15 @@ async fn handle_command(
     cfg: &mut config::Config,
     agent: &mut agent::Agent,
     provider_cfg: &mut config::ProviderConfig,
-    printer: &mut Printer,
+    printer: &Printer<'_>,
+    reader: &InputReader,
 ) -> Result<Flow> {
+
+    // Colour codes as this terminal should show them: the names below shadow the
+    // bare constants, so {dim} in a format string follows the colour setting
+    // instead of leaking an escape code into a pipeline.
+    #[allow(unused_variables)]
+    let Palette { dim, bold, red, green, cyan, yellow, reset } = printer.pal;
     let mut parts = input.splitn(2, char::is_whitespace);
     let cmd = parts.next().unwrap_or("");
     let arg = parts.next().unwrap_or("").trim();
@@ -533,9 +703,9 @@ async fn handle_command(
         "/exit" | "/quit" | "/q" => return Ok(Flow::Exit),
 
         "/help" | "/?" => {
-            println!(
+            printer.term().line(format_args!(
                 "\
-{DIM}commands{RESET}
+{dim}commands{reset}
   /help                 this message
   /exit                 quit
   /provider             list providers
@@ -554,15 +724,15 @@ async fn handle_command(
   /new                  start a fresh conversation
   /reload               re-read the config file (after editing it yourself)
   !<command>            run a shell command without the model
-{DIM}while the model is working{RESET}
+{dim}while the model is working{reset}
   Type and press Enter to interrupt it. Your line becomes the next input.
-{DIM}notes{RESET}
+{dim}notes{reset}
   Permission model is full by default. /readonly is the only guard.
   Everything above is configurable from inside flint; the file is only there
   so that it stays hand-editable when that is easier.
-  Config file: {RESET}{}",
+  Config file: {reset}{}",
                 config::config_path().display()
-            );
+            ));
         }
 
         "/provider" => {
@@ -574,7 +744,7 @@ async fn handle_command(
 
             match first {
                 "" => {
-                    println!("{DIM}providers:{RESET}");
+                    printer.term().line(format_args!("{dim}providers:{reset}"));
                     for p in &cfg.providers {
                         let mark = if p.name == provider_cfg.name {
                             "*"
@@ -588,21 +758,21 @@ async fn handle_command(
                         } else {
                             String::new()
                         };
-                        println!(
+                        printer.term().line(format_args!(
                             "  {mark} {:<12} {:<34} {}{key_state}",
                             p.name, p.base_url, p.model
-                        );
+                        ));
                     }
-                    println!(
-                        "{DIM}  /provider <name>       switch\n  \
+                    printer.term().line(format_args!(
+                        "{dim}  /provider <name>       switch\n  \
                          /provider add          configure a new one\n  \
                          /provider edit <name>  change one\n  \
                          /provider key <key>    set the key for the active one\n  \
-                         /provider rm <name>    delete one{RESET}"
-                    );
+                         /provider rm <name>    delete one{reset}"
+                    ));
                 }
 
-                "add" => return provider_wizard(cfg, agent, None, printer).await,
+                "add" => return provider_wizard(cfg, agent, None, printer, reader).await,
 
                 "edit" => {
                     if rest.is_empty() {
@@ -611,7 +781,7 @@ async fn handle_command(
                     if cfg.provider(rest).is_none() {
                         return Err(anyhow!("unknown provider '{rest}'"));
                     }
-                    return provider_wizard(cfg, agent, Some(rest), printer).await;
+                    return provider_wizard(cfg, agent, Some(rest), printer, reader).await;
                 }
 
                 "rm" | "remove" | "delete" => {
@@ -635,12 +805,12 @@ async fn handle_command(
                         cfg.default_provider = fallback.clone();
                     }
                     cfg.save()?;
-                    println!(
-                        "{} removed {BOLD}{rest}{RESET}; default is now {BOLD}{fallback}{RESET}",
+                    printer.term().line(format_args!(
+                        "{} removed {bold}{rest}{reset}; default is now {bold}{fallback}{reset}",
                         printer.style(GREEN, "ok")
-                    );
+                    ));
                     if provider_cfg.name == rest {
-                        return switch_provider(cfg, &fallback, agent.cwd(), agent.readonly());
+                        return switch_provider(cfg, &fallback, agent.cwd(), agent.readonly(), printer.term(), printer.pal);
                     }
                 }
 
@@ -655,13 +825,13 @@ async fn handle_command(
                     target.api_key_env = None;
                     cfg.upsert_provider(target.clone());
                     cfg.save()?;
-                    println!(
-                        "{} key saved for {BOLD}{}{RESET} ({})",
+                    printer.term().line(format_args!(
+                        "{} key saved for {bold}{}{reset} ({})",
                         printer.style(GREEN, "ok"),
                         target.name,
                         config::config_path().display()
-                    );
-                    return switch_provider(cfg, &target.name, agent.cwd(), agent.readonly());
+                    ));
+                    return switch_provider(cfg, &target.name, agent.cwd(), agent.readonly(), printer.term(), printer.pal);
                 }
 
                 _ => {
@@ -687,10 +857,10 @@ async fn handle_command(
                     );
                     cfg.default_provider = target.name.clone();
                     cfg.save()?;
-                    println!(
-                        "switched to {BOLD}{}{RESET} ({})",
+                    printer.term().line(format_args!(
+                        "switched to {bold}{}{reset} ({})",
                         target.name, target.model
-                    );
+                    ));
                     return Ok(Flow::NewAgent(new_agent));
                 }
             }
@@ -698,29 +868,29 @@ async fn handle_command(
 
         "/model" => {
             if arg.is_empty() {
-                println!("model: {BOLD}{}{RESET}", provider_cfg.model);
+                printer.term().line(format_args!("model: {bold}{}{reset}", provider_cfg.model));
             } else {
-                println!(
-                    "{DIM}hint: set `model` in {} to make this permanent.{RESET}",
+                printer.term().line(format_args!(
+                    "{dim}hint: set `model` in {} to make this permanent.{reset}",
                     config::config_path().display()
-                );
+                ));
             }
         }
 
         "/usage" => match agent.last_usage() {
             Some(u) => {
-                println!(
-                    "last request:  prompt {BOLD}{}{RESET}  completion {BOLD}{}{RESET}  total {BOLD}{}{RESET} tokens",
+                printer.term().line(format_args!(
+                    "last request:  prompt {bold}{}{reset}  completion {bold}{}{reset}  total {bold}{}{reset} tokens",
                     u.prompt_tokens,
                     u.completion_tokens,
                     u.total()
-                );
-                println!(
-                    "{DIM}prompt tokens = your current context size. Nothing is trimmed automatically; \
-                     use /new if it grows too large.{RESET}"
-                );
+                ));
+                printer.term().line(format_args!(
+                    "{dim}prompt tokens = your current context size. Nothing is trimmed automatically; \
+                     use /new if it grows too large.{reset}"
+                ));
             }
-            None => println!("{DIM}no usage reported yet by this provider{RESET}"),
+            None => printer.term().line(format_args!("{dim}no usage reported yet by this provider{reset}")),
         },
 
         "/readonly" => {
@@ -731,16 +901,16 @@ async fn handle_command(
                 other => return Err(anyhow!("expected on|off, got '{other}'")),
             };
             if turn_on {
-                println!(
+                printer.term().line(format_args!(
                     "{}",
                     printer.style(GREEN, "readonly ON — no writes, no mutating commands")
-                );
+                ));
             } else {
-                println!("{}", printer.style(RED, "readonly OFF — full permissions"));
+                printer.term().line(format_args!("{}", printer.style(RED, "readonly OFF — full permissions")));
             }
-            println!(
-                "{DIM}note: takes effect on the next /new or restart (the tool set is per agent).{RESET}"
-            );
+            printer.term().line(format_args!(
+                "{dim}note: takes effect on the next /new or restart (the tool set is per agent).{reset}"
+            ));
         }
 
         "/verbose" => {
@@ -749,7 +919,7 @@ async fn handle_command(
                 "off" | "quiet" => QUIET,
                 "full" | "all" => CHATTY,
                 "" => {
-                    if printer.verbosity == NORMAL {
+                    if printer.verbosity() == NORMAL {
                         CHATTY
                     } else {
                         NORMAL
@@ -757,7 +927,7 @@ async fn handle_command(
                 }
                 other => return Err(anyhow!("expected on|off|full, got '{other}'")),
             };
-            printer.verbosity = next;
+            printer.set_verbosity(next);
             cfg.verbose = next >= CHATTY;
             cfg.save()?;
             let what = match next {
@@ -765,39 +935,43 @@ async fn handle_command(
                 NORMAL => "on — one line per tool call",
                 _ => "full — arguments and more output",
             };
-            println!("{} {what}", printer.style(GREEN, "verbose"));
+            printer.term().line(format_args!("{} {what}", printer.style(GREEN, "verbose")));
         }
 
         "/config" => {
-            println!("{DIM}config: {}{RESET}", config::config_path().display());
-            println!("  default_provider = {BOLD}{}{RESET}", cfg.default_provider);
-            println!(
-                "  shell            = {BOLD}{}{RESET} {:?}",
+            printer.term().line(format_args!("{dim}config: {}{reset}", config::config_path().display()));
+            printer.term().line(format_args!("  default_provider = {bold}{}{reset}", cfg.default_provider));
+            printer.term().line(format_args!(
+                "  shell            = {bold}{}{reset} {:?}",
                 cfg.shell, cfg.shell_args
-            );
-            println!("  max_steps        = {}", cfg.max_steps);
-            println!(
+            ));
+            printer.term().line(format_args!("  max_steps        = {}", cfg.max_steps));
+            printer.term().line(format_args!(
                 "  proxy            = {}",
                 cfg.proxy.as_deref().unwrap_or("(none)")
-            );
-            println!("  verbose          = {}", cfg.verbose);
+            ));
+            printer.term().line(format_args!("  verbose          = {}", cfg.verbose));
 
             if arg == "edit" {
                 // A small wizard, so the settings that matter when you are
                 // stuck are reachable without hand-editing TOML.
-                println!("\n{BOLD}settings{RESET} {DIM}(blank = keep){RESET}");
-                let shell = prompt("shell", Some(&cfg.shell), printer.color)?;
+                printer.term().line(format_args!("\n{bold}settings{reset} {dim}(blank = keep){reset}"));
+                let shell = prompt(reader, printer.pal, "shell", Some(&cfg.shell)).await?;
                 let args = prompt(
+                    reader,
+                    printer.pal,
                     "shell_args (space separated)",
                     Some(&cfg.shell_args.join(" ")),
-                    printer.color,
-                )?;
-                let steps = prompt("max_steps", Some(&cfg.max_steps.to_string()), printer.color)?;
+                )
+                .await?;
+                let steps = prompt(reader, printer.pal, "max_steps", Some(&cfg.max_steps.to_string())).await?;
                 let proxy = prompt(
+                    reader,
+                    printer.pal,
                     "proxy (e.g. http://127.0.0.1:10808, blank to clear)",
                     cfg.proxy.as_deref(),
-                    printer.color,
-                )?;
+                )
+                .await?;
 
                 cfg.shell = shell;
                 cfg.shell_args = args.split_whitespace().map(str::to_string).collect();
@@ -808,28 +982,28 @@ async fn handle_command(
                     Some(proxy)
                 };
                 cfg.save()?;
-                println!(
+                printer.term().line(format_args!(
                     "{} saved to {}",
                     printer.style(GREEN, "ok"),
                     config::config_path().display()
-                );
+                ));
             } else {
-                println!("{DIM}  /config edit   change shell, steps, proxy{RESET}");
-                println!("{DIM}  (provider settings: /provider){RESET}");
+                printer.term().line(format_args!("{dim}  /config edit   change shell, steps, proxy{reset}"));
+                printer.term().line(format_args!("{dim}  (provider settings: /provider){reset}"));
             }
         }
 
         "/tools" => {
-            println!("{DIM}tools:{RESET} {}", agent.tool_names().join(", "));
+            printer.term().line(format_args!("{dim}tools:{reset} {}", agent.tool_names().join(", ")));
         }
 
         "/sessions" => {
             let sessions = session::list(&config::sessions_dir())?;
             if sessions.is_empty() {
-                println!("(no sessions yet)");
+                printer.term().line(format_args!("(no sessions yet)"));
             }
             for (id, summary) in sessions {
-                println!("  {id}  {summary}");
+                printer.term().line(format_args!("  {id}  {summary}"));
             }
         }
 
@@ -860,13 +1034,13 @@ async fn handle_command(
             } else {
                 String::new()
             };
-            println!(
-                "{} reloaded {} — provider {BOLD}{}{RESET} model {BOLD}{}{RESET}{state}",
+            printer.term().line(format_args!(
+                "{} reloaded {} — provider {bold}{}{reset} model {bold}{}{reset}{state}",
                 printer.style(GREEN, "ok"),
                 config::config_path().display(),
                 target.name,
                 target.model
-            );
+            ));
             return Ok(Flow::NewAgent(new_agent));
         }
 
@@ -880,12 +1054,12 @@ async fn handle_command(
             )?);
             let new_agent =
                 agent::Agent::new(cfg, provider, agent.readonly(), agent.cwd().clone(), writer);
-            println!("started a new session");
+            printer.term().line(format_args!("started a new session"));
             return Ok(Flow::NewAgent(new_agent));
         }
 
         other => {
-            println!("{DIM}unknown command '{other}'. /help for the list.{RESET}");
+            printer.term().line(format_args!("{dim}unknown command '{other}'. /help for the list.{reset}"));
         }
     }
     Ok(Flow::Continue)
@@ -920,9 +1094,11 @@ async fn run_turn(
     agent: &mut agent::Agent,
     provider_cfg: &config::ProviderConfig,
     input: &str,
-    printer: &Printer,
-    input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    printer: &Printer<'_>,
+    input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<InputMsg>,
 ) -> Result<()> {
+    #[allow(unused_variables)]
+    let Palette { dim, bold, red, green, cyan, yellow, reset } = printer.pal;
     ensure_usable(provider_cfg)?;
 
     let mut current = input.to_string();
@@ -941,10 +1117,10 @@ async fn run_turn(
                     buffer.push_str(&t);
                     while let Some(pos) = buffer.find('\n') {
                         let line: String = buffer.drain(..=pos).collect();
-                        print!("{line}");
+                        printer.term().text(format_args!("{line}"));
                     }
                     if !buffer.is_empty() {
-                        print!("{buffer}");
+                        printer.term().text(format_args!("{buffer}"));
                         buffer.clear();
                     }
                     std::io::stdout().flush().ok();
@@ -953,8 +1129,8 @@ async fn run_turn(
                 Event::Reasoning(t) => {
                     // The model thinking out loud. Worth watching when something
                     // is going wrong, noise the rest of the time.
-                    if printer.verbosity >= CHATTY {
-                        print!("{}", printer.style(DIM, &t));
+                    if printer.verbosity() >= CHATTY {
+                        printer.term().text(format_args!("{}", printer.style(DIM, &t)));
                         std::io::stdout().flush().ok();
                     }
                 }
@@ -970,8 +1146,8 @@ async fn run_turn(
                 }
                 Event::Usage(_) => {}
                 Event::Warning(w) => {
-                    println!();
-                    println!("{} {w}", printer.style(RED, "warning:"));
+                    printer.term().blank();
+                    printer.term().line(format_args!("{} {w}", printer.style(RED, "warning:")));
                 }
                 Event::Done => {}
             }));
@@ -979,14 +1155,28 @@ async fn run_turn(
             // Whichever happens first: the model finishes this turn, or the user
             // says something. Dropping the future cancels the HTTP stream, which
             // is exactly what an interrupt should do.
+            //
+            // Polling rather than a channel select, for the same reason as
+            // next_line: the stream is woken by the network, the input by the tick.
             let mut result = None;
-            let steering = tokio::select! {
-                r = &mut turn => {
-                    result = Some(r);
-                    None
+            let mut steering = None;
+            loop {
+                // Only a submitted line interrupts. `Quit` here means stdin ended
+                // (a one-shot run, or a script that closed the pipe) -- treating
+                // it as steering would abort the turn before it ever started,
+                // which is exactly what `flint -p ...  | cat` used to do.
+                if let Ok(InputMsg::Line(line)) = input_rx.try_recv() {
+                    steering = Some(line);
+                    break;
                 }
-                steer = input_rx.recv() => steer,
-            };
+                tokio::select! {
+                    r = &mut turn => {
+                        result = Some(r);
+                        break;
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(2)) => {}
+                }
+            }
             (result, steering)
         };
 
@@ -995,11 +1185,11 @@ async fn run_turn(
                 // The turn finished: flush whatever is still buffered, then
                 // surface a transport error if there was one.
                 if !buffer.is_empty() {
-                    print!("{buffer}");
+                    printer.term().text(format_args!("{buffer}"));
                     std::io::stdout().flush().ok();
                 }
                 if streamed_text {
-                    println!();
+                    printer.term().blank();
                 }
                 if let Some(r) = result {
                     r?;
@@ -1007,19 +1197,22 @@ async fn run_turn(
                 break;
             }
             Some(text) => {
+                if text.trim().is_empty() {
+                    continue;
+                }
                 if streamed_text || !buffer.is_empty() {
                     // A partial answer is on screen and is no longer valid.
-                    println!();
+                    printer.term().blank();
                 }
                 printer.interrupted();
-                println!("{BOLD}> {RESET}{}", printer.dim(&text));
+                printer.term().line(format_args!("{bold}> {reset}{}", printer.dim(&text)));
                 current = text;
             }
         }
     }
 
     if let Some(u) = agent.last_usage() {
-        println!(
+        printer.term().line(format_args!(
             "{}",
             printer.style(
                 DIM,
@@ -1030,7 +1223,7 @@ async fn run_turn(
                     u.total()
                 )
             )
-        );
+        ));
     }
     Ok(())
 }
@@ -1040,15 +1233,18 @@ async fn run_shell_escape(
     cfg: &config::Config,
     command: &str,
     cwd: &std::path::Path,
-    _printer: &Printer,
+    term: &Term,
+    pal: Palette,
 ) {
+    #[allow(unused_variables)]
+    let Palette { dim, bold, red, green, cyan, yellow, reset } = pal;
     if command.trim().is_empty() {
-        println!("usage: !<command>");
+        term.line(format_args!("usage: !<command>"));
         return;
     }
     match tools::run_command_raw(cfg, command, cwd, 600).await {
-        Ok(out) => print!("{out}"),
-        Err(e) => println!("{RED}error:{RESET} {e:#}"),
+        Ok(out) => term.text(format_args!("{out}")),
+        Err(e) => term.line(format_args!("{red}error:{reset} {e:#}")),
     }
 }
 
@@ -1056,12 +1252,12 @@ async fn exec_direct(
     cfg: &config::Config,
     command: &str,
     cwd: &std::path::Path,
-    _color: bool,
+    term: &Term,
 ) -> Result<i32> {
     // A direct exec is meant for real work (installs, rebuilds), so it gets a
     // generous ceiling rather than the conversational default.
     let outcome = tools::run_command_detailed(cfg, command, cwd, 1800).await?;
-    print!("{}", outcome.report);
+    term.text(format_args!("{}", outcome.report));
     // Propagate the child's status. `flint exec` is meant to be usable from
     // scripts, so a failing command must make flint itself fail -- reporting
     // success here would make the exit code meaningless.
@@ -1131,11 +1327,11 @@ fn parse_args(argv: Vec<String>) -> Result<Args> {
     Ok(args)
 }
 
-fn print_help(color: bool) {
+fn print_help(color: bool, term: &Term) {
     // The escape sequences are applied only when colour is wanted, so
     // `flint --no-color --help` is plain text (and piping stays clean).
     let (b, r) = if color { (BOLD, RESET) } else { ("", "") };
-    println!(
+    term.line(format_args!(
         "\
 {b}flint{r} — a minimal cross-platform rescue agent
 
@@ -1163,5 +1359,5 @@ fn print_help(color: bool) {
   that can talk to a model and run commands to repair it. It is deliberately
   small, dependency-light and hand-editable.",
         config::config_path().display()
-    );
+    ));
 }

@@ -38,6 +38,7 @@ futures-util = "0.3"
 anyhow = "1"
 async-trait = "0.1"
 dirs = "7"
+crossterm = "0.29"
 
 [dev-dependencies]
 wiremock = "0.6"

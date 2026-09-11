@@ -9,5 +9,6 @@ pub mod display;
 pub mod event;
 pub mod provider;
 pub mod session;
+pub mod term;
 pub mod tools;
 pub mod util;
