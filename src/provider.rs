@@ -42,6 +42,50 @@ pub fn is_local_endpoint(base_url: &str) -> bool {
         || u.contains("[::1]")
 }
 
+/// Guarantee the one shape the API insists on: every tool call an assistant message
+/// asked for is answered by a tool message right after it.
+///
+/// The agent repairs its own history, so this should have nothing left to do. It runs
+/// anyway because the cost of the API rejecting a request is the whole session being
+/// unusable, and the check is cheap; a provider that only sometimes produces valid
+/// payloads is not one you can rescue a broken machine with.
+fn ensure_tool_calls_are_answered(messages: &[Message]) -> Vec<Message> {
+    let mut out: Vec<Message> = Vec::with_capacity(messages.len());
+    let mut index = 0;
+    while index < messages.len() {
+        let message = messages[index].clone();
+        out.push(message.clone());
+        let Message::Assistant { tool_calls, .. } = &message else {
+            index += 1;
+            continue;
+        };
+        if tool_calls.is_empty() {
+            index += 1;
+            continue;
+        }
+        let mut answered: Vec<String> = Vec::new();
+        let mut next = index + 1;
+        while let Some(Message::Tool { tool_call_id, .. }) = messages.get(next) {
+            answered.push(tool_call_id.clone());
+            out.push(messages[next].clone());
+            next += 1;
+        }
+        for call in tool_calls {
+            if !answered.contains(&call.id) {
+                out.push(Message::Tool {
+                    tool_call_id: call.id.clone(),
+                    content: format!(
+                        "interrupted by the user: tool '{}' was requested but never ran.",
+                        call.name
+                    ),
+                });
+            }
+        }
+        index = next;
+    }
+    out
+}
+
 impl Provider {
     pub fn new(config: ProviderConfig) -> Result<Self> {
         let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(30));
@@ -91,7 +135,7 @@ impl Provider {
 
         let mut body = json!({
             "model": self.config.model,
-            "messages": messages,
+            "messages": ensure_tool_calls_are_answered(messages),
             "stream": true,
             // Ask for a final usage frame; harmless for servers that ignore it.
             "stream_options": { "include_usage": true },

@@ -238,6 +238,15 @@ node scripts/tall-replay.js live.bin 100     # the whole transcript
 returns made visible, which is how the transcript is separated from the tool's own
 formatting when something looks wrong.
 
+`examples/channels.rs` prints which channel each fragment arrived on — `content` or
+`reasoning_content` — which is how a stray line in the transcript is attributed to
+the model or to the display.
+
+Tests can pin the window size with `FLINT_TERM_SIZE=100x24` (debug builds only). A
+capture made at whatever width the test harness happens to report cannot be replayed
+at a different one without manufacturing failures: lines wrap in different places,
+and every assertion about them becomes a guess.
+
 ### What the transcript shows
 
 One line per tool call and one per tool result — never the output itself, which is
@@ -258,6 +267,13 @@ History is inserted inside a scrolling region, so a line the terminal wraps itse
 continues past the region's bottom margin and the same paragraph is written down the
 whole screen; and counting a 283-column line as one row makes the transcript commit
 the wrong rows as the answer streams.
+
+Within one turn the model streams in *segments*: it reasons, calls a tool, reasons
+again, and only then answers. Each segment is a fresh streamed answer, so each one
+starts from an empty strip and the earlier segment is committed first. A row is
+committed once and only once, tracked by count rather than by position — a long
+answer has most of its rows committed while it streams, so re-committing "the rows on
+screen" sends the overlap again and the paragraph reappears under the next round.
 
 ## License
 

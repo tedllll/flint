@@ -495,6 +495,97 @@ async fn malformed_tool_arguments_are_reported_not_fatal() {
     assert!(warned, "the user must be warned about malformed arguments");
 }
 
+/// Interrupting mid-tool-loop must not leave the history unsendable.
+///
+/// Reported from a real session: the user typed while the model was running tools,
+/// and every message after that failed with "An assistant message with 'tool_calls'
+/// must be followed by tool messages responding to each 'tool_call_id'".
+///
+/// The turn future is *dropped* to interrupt, which cancels the tool loop where it
+/// stands, so the assistant message can end up asking for tools that never answered.
+/// Dropping the future also means the loop's own cleanup never runs, which is why the
+/// repair has to happen when the *next* turn starts. The session must fix itself or it
+/// is bricked, not merely wrong for one turn.
+#[tokio::test]
+async fn an_interrupted_tool_loop_leaves_the_session_usable() {
+    use flint::event::{Message, ToolCall};
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(SseFixture {
+            body: answer_only(),
+        })
+        .mount(&server)
+        .await;
+
+    let mut agent = agent_for(&server, std::env::temp_dir()).await;
+
+    // Exactly the state a dropped turn leaves behind: the model asked for two tools,
+    // the first ran, and the interrupt landed before the second.
+    agent.history_mut().push(Message::Assistant {
+        content: None,
+        reasoning: None,
+        tool_calls: vec![
+            ToolCall {
+                id: "call_a".to_string(),
+                name: "bash".to_string(),
+                arguments: r#"{"command":"echo first"}"#.to_string(),
+            },
+            ToolCall {
+                id: "call_b".to_string(),
+                name: "bash".to_string(),
+                arguments: r#"{"command":"echo second"}"#.to_string(),
+            },
+        ],
+    });
+    agent.history_mut().push(Message::Tool {
+        tool_call_id: "call_a".to_string(),
+        content: "first".to_string(),
+    });
+
+    // The next turn has to repair the history rather than be rejected.
+    agent
+        .run("never mind", |_| {})
+        .await
+        .expect("a turn after an interrupt must be able to run");
+
+    // Walk the history the way the API would, and insist the shape is valid: after
+    // every assistant message with tool calls, a tool message per call, in order.
+    let history = agent.history_mut();
+    let mut index = 0;
+    let mut repaired = false;
+    while index < history.len() {
+        let Message::Assistant { tool_calls, .. } = &history[index] else {
+            index += 1;
+            continue;
+        };
+        let asked: Vec<&str> = tool_calls.iter().map(|c| c.id.as_str()).collect();
+        if asked.is_empty() {
+            index += 1;
+            continue;
+        }
+        let mut answered: Vec<&str> = Vec::new();
+        let mut next = index + 1;
+        while let Some(Message::Tool { tool_call_id, content }) = history.get(next) {
+            if content.contains("interrupted by the user") {
+                repaired = true;
+            }
+            answered.push(tool_call_id.as_str());
+            next += 1;
+        }
+        assert_eq!(
+            answered, asked,
+            "every tool call must be answered, in order, before the next request"
+        );
+        index = next;
+    }
+    assert!(
+        repaired,
+        "the second call should have been answered by a placeholder saying it never ran"
+    );
+}
+
 #[tokio::test]
 async fn empty_response_is_reported() {
     let server = MockServer::start().await;

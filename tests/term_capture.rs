@@ -117,3 +117,94 @@ fn the_capture_helper_writes_where_the_replay_expects() {
     // file, which is worse than failing.
     assert!(capture_path().ends_with("target/term-capture.bin"));
 }
+
+/// A second, different answer in the same turn must replace the first, not stack on it.
+///
+/// Reported from a real session: the model narrated "I'll run a few network
+/// diagnostics" before each round of tool calls, and that sentence stayed on screen
+/// under the next round's text, so it was visible once per round. The reasoning and
+/// the answer are separate streamed segments, and `line()` only writes *history* -- it
+/// never touches the strip -- so without an explicit clear the old segment simply
+/// sits there while the new one draws over and past it.
+#[test]
+fn a_new_streamed_segment_replaces_the_previous_one() {
+    let _guard = stdout_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("term-segments.bin");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let restore = redirect_stdout(&path);
+
+    std::env::set_var("FLINT_TERM_CAPTURE", "1");
+    // Pin the size, because the replay below has to use the same one. A capture made
+    // at whatever width the harness reports wraps in different places than a replay at
+    // 70 columns, which manufactures failures that are not in the code.
+    std::env::set_var("FLINT_TERM_SIZE", "70x24");
+    let term = Term::start().expect("term");
+    term.line(format_args!("> 测试连通性"));
+
+    // Segment one, long enough to occupy several strip rows.
+    let first = "我先跑几条网络诊断命令，看看回环、DNS 和外网是否都通。";
+    let mut acc = String::new();
+    for frag in first.chars() {
+        acc.push(frag);
+        term.stream(&acc);
+    }
+    // A tool result goes to history between segments, as it does in a real turn.
+    term.line(format_args!("  \u{2713} bash 9 lines"));
+
+    // Segment two: unrelated text, as the model's next narration would be.
+    let second = "回环正常，DNS 也通。";
+    let mut acc2 = String::new();
+    for frag in second.chars() {
+        acc2.push(frag);
+        term.stream(&acc2);
+    }
+    term.end_stream();
+    restore();
+    std::env::remove_var("FLINT_TERM_CAPTURE");
+    std::env::remove_var("FLINT_TERM_SIZE");
+
+    // Replay both this and the layout capture, so the model is checked too.
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(!bytes.is_empty(), "nothing was captured");
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join("vtscreen.js");
+    let out = std::process::Command::new("node")
+        .arg(&script)
+        .arg(&path)
+        .arg("24")
+        .arg("70")
+        .output()
+        .expect("node scripts/vtscreen.js");
+    let screen = String::from_utf8_lossy(&out.stdout).to_string();
+
+    // The screen shows segment two; segment one has been committed to the transcript
+    // above, which is what the screen *is*, so it must appear exactly once there.
+    assert!(screen.contains("回环正常"), "the new segment is missing:\n{screen}");
+    let first_seen = screen.matches("我先跑几条网络诊断").count();
+    assert_eq!(
+        first_seen, 1,
+        "the previous segment should appear once, not once per round:\n{screen}"
+    );
+
+    // The structural version of the same claim, which is what actually went wrong on a
+    // long multi-round turn: no two consecutive rows of the transcript may be identical.
+    // Counting occurrences in the text cannot catch it, because the duplicated rows are
+    // the paragraph re-wrapped -- the same characters in the same order, not a second
+    // copy appended after the first.
+    let rows: Vec<&str> = screen
+        .lines()
+        .filter_map(|l| l.split_once('|').map(|(_, rest)| rest.trim_end()))
+        .collect();
+    let repeated: Vec<&str> = rows
+        .windows(2)
+        .filter(|w| !w[0].is_empty() && w[0] == w[1])
+        .map(|w| w[0])
+        .collect();
+    assert!(
+        repeated.is_empty(),
+        "the transcript wrote these rows twice in a row: {repeated:?}\n{screen}"
+    );
+}

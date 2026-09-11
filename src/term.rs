@@ -298,7 +298,21 @@ impl Term {
 
     /// Recompute the layout from the current window size.
     fn reclaim(&self) {
-        let (w, h) = size().unwrap_or((80, 24));
+        let (mut w, mut h) = size().unwrap_or((80, 24));
+        // A test has no terminal to ask, and a capture made at whatever size the
+        // harness happened to report cannot be replayed at a different one: lines wrap
+        // in different places and every assertion about them becomes a guess. Debug
+        // builds only, and it changes nothing about how the code lays itself out.
+        #[cfg(debug_assertions)]
+        if let Some(spec) = std::env::var_os("FLINT_TERM_SIZE") {
+            if let Some((cw, ch)) = spec.to_str().and_then(|s| {
+                let (a, b) = s.split_once('x')?;
+                Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+            }) {
+                w = cw;
+                h = ch;
+            }
+        }
         let h = h.max(RESERVED + 1);
         self.screen_rows.store(h, Ordering::Relaxed);
         self.screen_cols.store(w.max(20), Ordering::Relaxed);
@@ -399,6 +413,7 @@ impl Term {
     /// bottom margin -- the same row written over and over down the screen. Doing the
     /// wrapping here keeps the row count honest for every caller.
     fn insert_history(&self, lines: &[String]) {
+
         let mut wrapped: Vec<String> = Vec::new();
         for line in lines {
             let cols = self.screen_cols.load(Ordering::Relaxed);
@@ -444,19 +459,27 @@ impl Term {
         }
         self.stream_active.store(true, Ordering::Relaxed);
         {
-            let mut held = self.stream_text.lock().unwrap();
-            // A new answer restarts the line accounting. Within a turn the text only
-            // grows, so a shorter text means the previous answer ended and a fresh
-            // one began -- reasoning followed by the answer, for instance. Without
-            // this the second answer would inherit the first one's committed count
-            // and skip lines into history.
-            if !text.starts_with(held.as_str()) {
+            let held = self.stream_text.lock().unwrap();
+            // Within one streamed answer the text only ever grows, so text that does
+            // not start with what came before is a *new segment*: the reasoning is over
+            // and the answer has begun, or the answer resumed after a tool finished.
+            //
+            // A new segment has to start from an empty strip. It used to keep the old
+            // rows, so each round's narration stayed on screen under the next one and
+            // the same sentence was visible once per tool round. The previous segment is
+            // committed first, because it is real output and must not be dropped.
+            let fresh_segment = !text.starts_with(held.as_str());
+            // An empty held string is the first fragment of the turn, not a segment
+            // boundary, and the strip is already blank.
+            let after_something = !held.is_empty();
+            drop(held);
+            if fresh_segment && after_something {
+                self.close_stream();
+                self.clear_viewport();
                 self.committed.store(0, Ordering::Relaxed);
-                // A fresh answer's rows have nothing in common with the old ones, so
-                // there is no tail to erase.
                 self.stream_rows.lock().unwrap().clear();
             }
-            *held = text.to_string();
+            *self.stream_text.lock().unwrap() = text.to_string();
         }
 
         // Rows are *screen* rows, not lines. A line longer than the screen is several
@@ -564,21 +587,35 @@ impl Term {
         if !self.stream_active.swap(false, Ordering::Relaxed) {
             return;
         }
-        let text = self.stream_text.lock().unwrap().clone();
+        // Take the text rather than copy it: this runs more than once per turn -- a tool
+        // result arriving mid-turn closes the current segment, and the next segment's
+        // first fragment closes it again -- and if the text stayed behind, the second run
+        // would commit the same rows a second time. Taking it makes the function
+        // idempotent, which is what its callers already assume.
+        let text = std::mem::take(&mut *self.stream_text.lock().unwrap());
         if text.is_empty() {
             return;
         }
-        // Again in screen rows: the slice holds `capacity` of them, and the answer has
-        // already had its earlier rows committed as it streamed, so only the tail can
-        // still be on screen.
+        // Screen rows again: the slice holds `capacity` of them, and the rows that slid
+        // off its top were committed as they went, so only what is *still* on screen is
+        // left to hand over.
+        //
+        // "Still on screen" is the tail, but "not yet committed" is what must be sent,
+        // and those are not the same set: a tall answer has had most of its rows
+        // committed already. Committing the tail by position -- which is what this used
+        // to do -- sends the overlap a second time, and that is the reported fault of
+        // each round's text appearing again underneath the next one.
         let lines = wrap_rows(&text, self.screen_cols.load(Ordering::Relaxed));
         let top = self.viewport_top.load(Ordering::Relaxed);
         let last = self.input_row.load(Ordering::Relaxed).saturating_sub(1);
         let capacity = last.saturating_sub(top).saturating_add(1) as usize;
         let shown = lines.len().min(capacity);
-        if shown > 0 {
-            let left: Vec<String> = lines[lines.len() - shown..].to_vec();
-            self.insert_history(&left);
+        let sent = (self.committed.load(Ordering::Relaxed) as usize).min(lines.len());
+        let remaining: Vec<String> = lines[sent..].to_vec();
+        if !remaining.is_empty() {
+            self.insert_history(&remaining);
+            self.committed
+                .store(lines.len().min(u16::MAX as usize) as u16, Ordering::Relaxed);
         }
         self.clear_viewport();
         // Scroll the now-blank slice up, so the strip is empty and the transcript

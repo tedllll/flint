@@ -138,6 +138,13 @@ impl Agent {
 
     /// Run one user turn to completion, reporting progress through `sink`.
     pub async fn run(&mut self, user_input: &str, mut sink: impl FnMut(Event)) -> Result<()> {
+        // Before anything can be sent: if the previous turn was interrupted while it
+        // had tool calls outstanding, the history ends with those unanswered and every
+        // later request is rejected with "An assistant message with 'tool_calls' must
+        // be followed by tool messages responding to each 'tool_call_id'". That made
+        // the session permanently unusable, not just the one turn.
+        self.close_dangling_tool_calls();
+
         self.history.push(Message::user(user_input));
         self.record(SessionEvent::Chat {
             message: Message::user(user_input),
@@ -237,6 +244,56 @@ impl Agent {
         };
         self.history.push(msg.clone());
         self.record(SessionEvent::Chat { message: msg });
+    }
+
+    /// Answer every tool call that never got an answer, so the history stays valid.
+    ///
+    /// Dropping the turn future -- which is what typing to interrupt does -- cancels a
+    /// tool loop exactly where it stood: the assistant message asking for three tools
+    /// can be followed by one result or none. The wire contract has no room for that,
+    /// so the turn that follows would fail before it started, and every turn after it
+    /// too. The placeholder says plainly what happened, which is more honest than
+    /// deleting the exchange and pretending the model never asked.
+    fn close_dangling_tool_calls(&mut self) {
+        let mut repaired: Vec<Message> = Vec::with_capacity(self.history.len());
+        let mut index = 0;
+        while index < self.history.len() {
+            let message = self.history[index].clone();
+            repaired.push(message.clone());
+            let Message::Assistant { tool_calls, .. } = &message else {
+                index += 1;
+                continue;
+            };
+            if tool_calls.is_empty() {
+                index += 1;
+                continue;
+            }
+            // The results for this assistant turn are the tool messages that follow it.
+            let mut answered: Vec<String> = Vec::new();
+            let mut next = index + 1;
+            while let Some(Message::Tool { tool_call_id, .. }) = self.history.get(next) {
+                answered.push(tool_call_id.clone());
+                repaired.push(self.history[next].clone());
+                next += 1;
+            }
+            for call in tool_calls {
+                if !answered.contains(&call.id) {
+                    let placeholder = Message::Tool {
+                        tool_call_id: call.id.clone(),
+                        content: format!(
+                            "interrupted by the user: tool '{}' was requested but never ran.",
+                            call.name
+                        ),
+                    };
+                    self.record(SessionEvent::Chat {
+                        message: placeholder.clone(),
+                    });
+                    repaired.push(placeholder);
+                }
+            }
+            index = next;
+        }
+        self.history = repaired;
     }
 
     fn record(&mut self, event: SessionEvent) {
