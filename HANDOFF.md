@@ -6,131 +6,105 @@ of it.
 
 ## Where things stand
 
-Everything is committed and the working tree is clean. `cargo test` is 79 passing
-(53 lib, 3 + 14 + 5 + 4 integration), `cargo clippy --all-targets` is silent, and
-`node scripts/term-layout-test.js` passes every layout assertion.
+Everything is committed, the working tree is clean, and `main` is pushed to
+`origin/main` (tip `8b0e788`). `cargo test` is 106 passing, `cargo clippy
+--all-targets` is silent, and `node scripts/term-layout-test.js` passes every layout
+assertion.
 
-The binary is installed at `%USERPROFILE%\bin\flint.exe`. Build one with:
+Build with:
 
 ```bash
 cargo build --release
 ```
 
-It is held open by any running `flint`, so close those before replacing it.
+The binary is held open by any running `flint`, so close those before replacing it.
+On macOS the release binary was also installed behind a launcher at
+`~/.local/bin/flint`, which execs `~/flint/target/release/flint`; the API key is read
+from `$DEEPSEEK_API_KEY`, loaded from a 600-mode `~/.flint/api_key`.
+
+## What was just fixed
+
+Six commits, all pushed. The full reasoning is in each commit message; this is the
+index.
+
+- **Terminal layout.** Transcript is top-aligned and grows downward; the running clock
+  has its own row and names the phase (waiting / thinking / writing / tool / no
+  response); resizing no longer wipes the conversation; startup clears every row and
+  requests a full repaint.
+- **Provider and model state.** `Flow::NewAgent` carries the new configuration, not
+  only the new agent, so `/model` and `/provider` stop reporting the previous provider.
+  `/model` switches and lists; a provider can list several models.
+- **Provider retry.** A dropped stream is retried with bounded backoff; events are
+  buffered per attempt so a retry cannot duplicate text.
+- **Search tools.** `glob` and `grep` are built in, so "where is this file" works in
+  `cmd.exe`, where `grep` does not exist and `findstr` is not recursive.
+- **Prompt.** It no longer names a job ("diagnose and repair"), and it now says where
+  flint keeps its own configuration, so "change your model" edits the config instead of
+  the source.
+- **Mojibake.** Fifteen user-visible strings had shipped as `readonly 鈥?writes ...`;
+  a test now walks the tree for it. Also `exec` no longer creates a config file or asks
+  for an API key it never uses.
 
 ## Known unfinished
 
-**The strip merges two segments into one row.** When the model writes an opening line,
-calls tools, and then continues *in the same streamed segment* (it re-sends the
-cumulative text rather than new text), the opening line and the continuation render on
-the same screen row:
-
-```
-I'll read both files.`src/lib.rs`: library root declaring nine modules...
-```
-
-The text is correct and appears exactly once — the row is just missing a break. Fixing
-it means inserting a newline after the already-committed prefix when a segment's text
-begins with text that has already been committed. That is invasive: a newline changes
-where every following row wraps, so the commit accounting has to move with it. Not
-attempted, deliberately.
+**Windows is unverified.** Every fix above was developed and tested on macOS. The
+layout depends on DECSTBM scroll regions, which `conhost` and Windows Terminal do not
+handle identically, and the test suite cannot tell them apart — `scripts/vtscreen.js`
+is one model of one terminal. The cross-compile cannot even be type-checked here:
+`aws-lc-sys` (rustls's crypto backend) needs a Windows C toolchain. **CI does not run on
+push** — `.github/workflows/release.yml` triggers only on `v*` tags and
+`workflow_dispatch`, so a push to `main` checks nothing. Running that workflow by hand,
+or tagging a release, is the only way to exercise Windows.
 
 **Three `eprintln!` sites can still fire mid-turn**, which puts them inside the strip:
 `agent.rs` (cannot persist session event), `config.rs`, `session.rs`. They are rare
-enough that they have not been seen, but they are the same fault that was just fixed
-for tool notices — they should move to the notice sink.
+enough that they have not been seen, but they are the same fault that was fixed for tool
+notices — they should move to the notice sink.
 
-**The transcript is not trimmed by construction.** The step guard is now 100, and what
+**The transcript is not trimmed by construction.** The step guard is 100, and what
 keeps a long turn from walking into the context ceiling is request-side pruning of
 stale tool output (see `prune_tool_output` in `agent.rs`): the four most recent results,
 anything short, and every failure are kept; older long output is replaced with a note.
-The session file keeps every byte. If a real turn still hits a context wall, that
-policy is the thing to change — not the step count.
+The session file keeps every byte.
+
+**Streamed output arrives in one go**, because events are buffered per attempt to make
+retries safe. The status line is what tells the user work is happening. If real
+token-by-token output is wanted back, the buffer has to be flushed as it fills and the
+retry path has to reconcile what was already drawn — that was considered and not done.
 
 ## Verification without a terminal
 
-There is no TTY here, so interactive behaviour is checked by replaying bytes through a
-screen model rather than by watching a terminal:
-
 ```bash
-cargo test --test term_capture        # capture the real interactive byte stream
-node scripts/term-layout-test.js      # replay it, plus hand-written scenarios
-node scripts/vtscreen.js raw.bin 24 100   # one raw dump, as a screen
-cargo test --test cli_output          # the real binary, in a pipe
+cargo test                            # 106 tests, including the real byte stream
+node scripts/term-layout-test.js      # replay the layout through a screen model
+node scripts/vtscreen.js raw.bin 24 100          # one raw dump, as a screen
+node scripts/vtscreen.js raw.bin 24 100 --prefill OLD   # ...onto a dirty screen
 ```
 
 `FLINT_TERM_CAPTURE=1` and `FLINT_TERM_SIZE=100x24` (debug builds only) force the
-interactive branch with a pinned size. `examples/live_turn.rs` drives a real turn
-against the configured provider and prints what the terminal received — that is how
-the strip faults were found, and how to find the next one.
+interactive branch with a pinned size. Since the last session the startup path runs
+under capture too, so `setup` — scrolling the old screen away and clearing it — is
+reachable from a test; that is where "the previous screen is still visible" lives.
 
-## Moving between machines
-
-Pushing from here did not work at the end of this session, but the network was the
-reason, not the repository: `git fetch origin` at 17:xx failed with
-`Failed to connect to github.com port 443 via 127.0.0.1`, while the same remote had
-been fetched successfully at 15:36 the same afternoon. The company machine reaches
-GitHub only through a local proxy (v2rayN), and that proxy was not listening at the
-end of the session. `git config --local http.proxy` is
-`socks5h://127.0.0.1:10808` — a *local* setting, deliberately, so it is not carried
-anywhere else. On a machine without that proxy it turns every remote operation into a
-connection error that reads like a network outage.
-
-To push once the proxy is up:
+For a real terminal, the useful trick is to read the text buffer rather than look at
+pixels, which settles what is on screen character by character:
 
 ```bash
-git fetch origin
-git log --oneline HEAD..origin/main    # empty means a plain fast-forward
-git push origin main
+osascript -e 'tell application "Terminal" to get contents of selected tab of item 1 of windows'
 ```
 
-### Two unrelated histories on the remote
+`examples/live_turn.rs` drives a real turn against the configured provider. It has its
+own copy of the event handling and does **not** go through `run_turn`, so it must be
+kept in step by hand — twice now it has reported behaviour the REPL no longer had, and
+cost time chasing a fault that was only in the example.
 
-Worth knowing before pushing. The local branch and `origin/main` share no common
-commit, so there is nothing to fast-forward:
+## Two histories on the remote — resolved
 
-| | root | tip | author |
-|---|---|---|---|
-| local `main` | `2b51f31` 13:57 | `d9e2e6c` | zhangzhuo |
-| `origin/main` | `59a3243` | `e03b34f` 14:23 | tedllll |
+An earlier session found the local branch and `origin/main` sharing no common commit.
+That is no longer true: `main` fast-forwards from `270add6`, which is what the remote
+already had. Nothing to reconcile.
 
-Every file that exists on `origin/main` also exists locally, and the local versions are
-strictly more developed: `README.md` is 245 lines against 116, `Cargo.toml` is 50
-against 46, and `.github/workflows/release.yml` (97 lines) and `.gitignore` are already
-present locally. Merging the two would therefore conflict on all 18 files and resolve
-to the local side anyway.
-
-So the decision is a deliberate one, not a mechanical merge — either
-
-```bash
-git push --force-with-lease origin main     # keep the local history, discard the remote's
-```
-
-or start a branch from `origin/main` and cherry-pick. Neither should be done by
-reflex; the remote history is someone's commits, whatever it looks like.
-
-### Offline transfer
-
-The bundle is the fallback that always works, and it carries both histories:
-
-```bash
-git bundle create flint.bundle --all refs/remotes/origin/main
-git bundle verify flint.bundle
-git fetch /path/to/flint.bundle 'refs/heads/*:refs/heads/*' refs/remotes/origin/main:refs/remotes/origin/main
-```
-
-The refspec in the fetch matters: without it a bundle only moves `HEAD`.
-
-## Design constraints worth not re-litigating
-
-- **The point is rescue, not comfort.** The tool exists so that a broken `dsh` or
-  `codex` can still be repaired. History reading, the file tools, and `exec` must keep
-  working when the provider is unreachable — that ordering is why the provider error is
-  deferred rather than fatal at startup.
-- **Direct by default.** No proxy is used unless `proxy` is set in the config.
-  Inheriting the Windows system proxy is invisible and was the cause of a real outage.
-- **A single Ctrl-C stops the turn; it never exits.** Two inside 1.5s, `Ctrl-D`, or
-  `/exit` quit. Losing the session to a reflex is the expensive mistake.
-- **Full permissions by default.** `/readonly` is the only guard, and it is explicit.
-- **Piped output emits zero escape bytes.** `tests/cli_output.rs` counts ESC bytes in
-  the real binary's output to keep that true.
+Pushing worked over SSH without a proxy. `HANDOFF` used to say the company machine
+needed `socks5h://127.0.0.1:10808` for remote operations; that was a *local* git
+setting for HTTPS and is not in the repository, and the remote here is `git@github.com:`
+in any case.
