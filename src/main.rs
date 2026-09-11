@@ -63,26 +63,31 @@ fn main() {
 async fn real_main() -> Result<i32> {
     let args = parse_args(std::env::args().skip(1).collect())?;
 
+    // Decide colour before anything prints. Honours NO_COLOR as well as the flag.
+    let color = !args.no_color && std::env::var_os("NO_COLOR").is_none();
+
     if args.help {
-        print_help();
+        print_help(color);
         return Ok(0);
     }
 
-    if args.no_color {
-        // Handled by the Printer below; nothing global to set.
-    }
-
-    let mut cfg = config::Config::load()?;
-    let color = !args.no_color && std::env::var_os("NO_COLOR").is_none();
     let cwd = match &args.cwd {
         Some(dir) => PathBuf::from(dir),
         None => std::env::current_dir().context("cannot determine working directory")?,
     };
 
-    // ---- exec: no model, no network. Pure command passthrough. ----
+    // ---- exec: no model, no network, and deliberately no config. ----
+    //
+    // This is the last line of defence: when every provider is unreachable this
+    // must still run a command, so it must not depend on config loading (which
+    // could fail, or create a config file as a side effect of `exec echo hi`).
     if let Some(command) = &args.exec {
+        let cfg = config::Config::load().unwrap_or_default();
         return exec_direct(&cfg, command, &cwd, color).await;
     }
+
+    // Everything below may need a provider, so a config is required from here.
+    let mut cfg = config::Config::load()?;
 
     // ---- list sessions ----
     if args.list_sessions {
@@ -657,12 +662,15 @@ fn parse_args(argv: Vec<String>) -> Result<Args> {
     Ok(args)
 }
 
-fn print_help() {
+fn print_help(color: bool) {
+    // The escape sequences are applied only when colour is wanted, so
+    // `flint --no-color --help` is plain text (and piping stays clean).
+    let (b, r) = if color { (BOLD, RESET) } else { ("", "") };
     println!(
         "\
-{BOLD}flint{RESET} — a minimal cross-platform rescue agent
+{b}flint{r} — a minimal cross-platform rescue agent
 
-{BOLD}USAGE{RESET}
+{b}USAGE{r}
   flint                            interactive session
   flint -p \"<prompt>\"              one-shot, prints the answer and exits
   flint <words...>                 same as -p
@@ -670,7 +678,7 @@ fn print_help() {
   flint exec <command>             run a command directly (no model, no network)
   flint --list-sessions            show saved sessions
 
-{BOLD}OPTIONS{RESET}
+{b}OPTIONS{r}
   --provider <name>   use a specific provider          (config: default_provider)
   --model <name>      override the model for this run
   --readonly          refuse writes and mutating commands
@@ -678,10 +686,10 @@ fn print_help() {
   --no-color          disable ANSI colour (also honours NO_COLOR)
   -h, --help          this message
 
-{BOLD}CONFIG{RESET}
+{b}CONFIG{r}
   {}
 
-{BOLD}WHY{RESET}
+{b}WHY{r}
   This exists so that when your usual tooling breaks, you still have something
   that can talk to a model and run commands to repair it. It is deliberately
   small, dependency-light and hand-editable.",
