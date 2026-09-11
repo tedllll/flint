@@ -15,7 +15,7 @@ use flint::{agent, config, event, provider, session, tools, util};
 use anyhow::{anyhow, Context, Result};
 use event::Event;
 use std::collections::HashMap;
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::path::PathBuf;
 
 const DIM: &str = "\x1b[2m";
@@ -181,11 +181,15 @@ async fn real_main() -> Result<i32> {
         *agent.history_mut() = merged;
     }
 
-    let printer = Printer { color };
+    let mut reader = InputReader::spawn();
+    let mut printer = Printer {
+        color,
+        verbosity: if cfg.verbose { CHATTY } else { NORMAL },
+    };
 
     // ---- one-shot ----
     if let Some(prompt) = args.prompt {
-        run_turn(&mut agent, &provider_cfg, &prompt, &printer).await?;
+        run_turn(&mut agent, &provider_cfg, &prompt, &printer, &mut reader.rx).await?;
         println!();
         return Ok(0);
     }
@@ -195,8 +199,9 @@ async fn real_main() -> Result<i32> {
         &mut cfg,
         &mut agent,
         &mut provider_cfg,
-        &printer,
+        &mut printer,
         key_missing,
+        &mut reader.rx,
     )
     .await?;
     Ok(0)
@@ -204,20 +209,52 @@ async fn real_main() -> Result<i32> {
 
 /// The REPL. Slash commands carry every convenience feature; the main loop
 /// stays deliberately tiny.
+/// Line-oriented stdin, read on its own thread and delivered over a channel.
+///
+/// Two things fall out of this. The REPL can say "run this turn, but keep
+/// listening" instead of blocking on read_line, which is what makes it possible
+/// to interrupt the model by typing. And a blocking read on a background thread
+/// costs nothing when nobody is typing.
+///
+/// A plain OS thread rather than async stdin: tokio has no portable async stdin,
+/// and the reader is almost always parked in read_line anyway.
+struct InputReader {
+    rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+}
+
+impl InputReader {
+    fn spawn() -> Self {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        std::thread::Builder::new()
+            .name("flint-stdin".to_string())
+            .spawn(move || {
+                use std::io::BufRead;
+                let stdin = std::io::stdin();
+                for line in stdin.lock().lines() {
+                    let Ok(line) = line else { break };
+                    if tx.send(line).is_err() {
+                        break; // receiver gone; flint is exiting
+                    }
+                }
+            })
+            .ok();
+        InputReader { rx }
+    }
+}
+
 async fn interactive(
     cfg: &mut config::Config,
     agent: &mut agent::Agent,
     provider_cfg: &mut config::ProviderConfig,
-    printer: &Printer,
+    printer: &mut Printer,
     key_missing: bool,
+    input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
 ) -> Result<()> {
+    // Two lines. Everything here is something the user may need to check before
+    // they trust what follows, and nothing else is worth a line on start-up.
     println!(
-        "{BOLD}flint{RESET} {DIM}v{}{RESET}  {}",
+        "{BOLD}flint{RESET} {DIM}v{}{RESET}  {BOLD}{}{RESET}{DIM}/{}{RESET}  {DIM}{}{RESET}",
         env!("CARGO_PKG_VERSION"),
-        printer.style(DIM, "last spark in the dark")
-    );
-    println!(
-        "  provider {BOLD}{}{RESET}   model {BOLD}{}{RESET}   cwd {DIM}{}{RESET}",
         provider_cfg.name,
         provider_cfg.model,
         agent.cwd().display()
@@ -225,40 +262,32 @@ async fn interactive(
     if agent.readonly() {
         println!(
             "  {}",
-            printer.style(GREEN, "READONLY — writes and mutating commands are refused")
+            printer.style(GREEN, "readonly — writes and mutating commands are refused")
         );
-    }
-    if key_missing {
+    } else if key_missing {
         // Say what to do, and say it where the user is already looking. This is
         // the first thing a fresh machine sees, so it has to be actionable
         // without leaving the tool.
         println!(
-            "  {}",
-            printer.style(
-                YELLOW,
-                "no API key for this provider — the shell tools still work."
-            )
+            "  {YELLOW}no API key for this provider{RESET}{DIM} — shell tools still work. \
+             Set one with {RESET}{BOLD}/provider key <key>{RESET}{DIM}, or add a provider with \
+             {RESET}{BOLD}/provider add{RESET}"
         );
-        println!(
-            "  {DIM}set one with {RESET}{BOLD}/provider key <key>{RESET}{DIM}, or configure a \
-             different provider with {RESET}{BOLD}/provider add{RESET}"
-        );
+    } else {
+        println!("  {DIM}/help for commands · type while it works to interrupt it{RESET}");
     }
-    println!("  {DIM}/help for commands, /exit to quit, !cmd to run a shell command{RESET}");
     println!();
 
-    let stdin = std::io::stdin();
     loop {
         print!("{BOLD}>{RESET} ");
         std::io::stdout().flush().ok();
 
-        let mut line = String::new();
-        let n = stdin.lock().read_line(&mut line).unwrap_or(0);
-        if n == 0 {
+        let Some(input) = input_rx.recv().await else {
+            // The reader thread only ends at EOF (Ctrl-D, or piped input done).
             println!();
-            break; // EOF (Ctrl-D / piped input exhausted)
-        }
-        let input = line.trim_end_matches(['\r', '\n']).trim().to_string();
+            break;
+        };
+        let input = input.trim().to_string();
         if input.is_empty() {
             continue;
         }
@@ -279,10 +308,11 @@ async fn interactive(
             }
         }
 
-        match run_turn(agent, provider_cfg, &input, printer).await {
+        match run_turn(agent, provider_cfg, &input, printer, input_rx).await {
             Ok(()) => {}
             Err(e) => {
-                println!("\n{} {e:#}", printer.style(RED, "error:"));
+                println!();
+                println!("{} {e:#}", printer.style(RED, "error:"));
             }
         }
     }
@@ -500,7 +530,7 @@ async fn handle_command(
     cfg: &mut config::Config,
     agent: &mut agent::Agent,
     provider_cfg: &mut config::ProviderConfig,
-    printer: &Printer,
+    printer: &mut Printer,
 ) -> Result<Flow> {
     let mut parts = input.splitn(2, char::is_whitespace);
     let cmd = parts.next().unwrap_or("");
@@ -524,12 +554,15 @@ async fn handle_command(
   /config [edit]        show or change shell, steps, proxy
   /model [name]         show or change the model
   /usage                context and token accounting
+  /verbose [on|off|full] how much tool detail to print
   /readonly [on|off]    toggle the write guard
   /tools                list available tools
   /sessions             list past sessions
   /new                  start a fresh conversation
   /reload               re-read the config file (after editing it yourself)
   !<command>            run a shell command without the model
+{DIM}while the model is working{RESET}
+  Type and press Enter to interrupt it. Your line becomes the next input.
 {DIM}notes{RESET}
   Permission model is full by default. /readonly is the only guard.
   Everything above is configurable from inside flint; the file is only there
@@ -717,6 +750,31 @@ async fn handle_command(
             );
         }
 
+        "/verbose" => {
+            let next = match arg {
+                "on" | "normal" => NORMAL,
+                "off" | "quiet" => QUIET,
+                "full" | "all" => CHATTY,
+                "" => {
+                    if printer.verbosity == NORMAL {
+                        CHATTY
+                    } else {
+                        NORMAL
+                    }
+                }
+                other => return Err(anyhow!("expected on|off|full, got '{other}'")),
+            };
+            printer.verbosity = next;
+            cfg.verbose = next >= CHATTY;
+            cfg.save()?;
+            let what = match next {
+                QUIET => "off — only the model's answers",
+                NORMAL => "on — one line per tool call",
+                _ => "full — arguments and more output",
+            };
+            println!("{} {what}", printer.style(GREEN, "verbose"));
+        }
+
         "/config" => {
             println!("{DIM}config: {}{RESET}", config::config_path().display());
             println!("  default_provider = {BOLD}{}{RESET}", cfg.default_provider);
@@ -729,6 +787,7 @@ async fn handle_command(
                 "  proxy            = {}",
                 cfg.proxy.as_deref().unwrap_or("(none)")
             );
+            println!("  verbose          = {}", cfg.verbose);
 
             if arg == "edit" {
                 // A small wizard, so the settings that matter when you are
@@ -869,58 +928,102 @@ async fn run_turn(
     provider_cfg: &config::ProviderConfig,
     input: &str,
     printer: &Printer,
+    input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
 ) -> Result<()> {
     ensure_usable(provider_cfg)?;
-    let mut tool_names: HashMap<String, String> = HashMap::new();
-    let mut streamed_text = false;
-    let mut buffer = String::new();
 
-    let result = agent
-        .run(input, |event| match event {
-            Event::Text(t) => {
-                buffer.push_str(&t);
-                // Flush complete lines as they arrive so output streams.
-                while let Some(pos) = buffer.find('\n') {
-                    let line: String = buffer.drain(..=pos).collect();
-                    print!("{line}");
+    let mut current = input.to_string();
+
+    loop {
+        let mut tool_names: HashMap<String, String> = HashMap::new();
+        let mut streamed_text = false;
+        let mut buffer = String::new();
+
+        // The turn and its output closure are confined to this scope: the future
+        // holds a mutable borrow of `buffer`, and that borrow has to end before
+        // the code below can read `buffer` to decide what to flush.
+        let (result, steering) = {
+            let mut turn = Box::pin(agent.run(&current, |event| match event {
+                Event::Text(t) => {
+                    buffer.push_str(&t);
+                    while let Some(pos) = buffer.find('\n') {
+                        let line: String = buffer.drain(..=pos).collect();
+                        print!("{line}");
+                    }
+                    if !buffer.is_empty() {
+                        print!("{buffer}");
+                        buffer.clear();
+                    }
+                    std::io::stdout().flush().ok();
+                    streamed_text = true;
                 }
+                Event::Reasoning(t) => {
+                    // The model thinking out loud. Worth watching when something
+                    // is going wrong, noise the rest of the time.
+                    if printer.verbosity >= CHATTY {
+                        print!("{}", printer.style(DIM, &t));
+                        std::io::stdout().flush().ok();
+                    }
+                }
+                Event::ToolStart { id, name } => {
+                    tool_names.insert(id, name);
+                }
+                Event::ToolArgs { id, args } => {
+                    let name = tool_names.get(&id).cloned().unwrap_or_default();
+                    printer.tool_call(&name, &args);
+                }
+                Event::ToolResult { output, ok, .. } => {
+                    printer.tool_result(&output, ok);
+                }
+                Event::Usage(_) => {}
+                Event::Warning(w) => {
+                    println!();
+                    println!("{} {w}", printer.style(RED, "warning:"));
+                }
+                Event::Done => {}
+            }));
+
+            // Whichever happens first: the model finishes this turn, or the user
+            // says something. Dropping the future cancels the HTTP stream, which
+            // is exactly what an interrupt should do.
+            let mut result = None;
+            let steering = tokio::select! {
+                r = &mut turn => {
+                    result = Some(r);
+                    None
+                }
+                steer = input_rx.recv() => steer,
+            };
+            (result, steering)
+        };
+
+        match steering {
+            None => {
+                // The turn finished: flush whatever is still buffered, then
+                // surface a transport error if there was one.
                 if !buffer.is_empty() {
                     print!("{buffer}");
-                    buffer.clear();
+                    std::io::stdout().flush().ok();
                 }
-                std::io::stdout().flush().ok();
-                streamed_text = true;
+                if streamed_text {
+                    println!();
+                }
+                if let Some(r) = result {
+                    r?;
+                }
+                break;
             }
-            Event::Reasoning(t) => {
-                print!("{}", printer.style(DIM, &t));
-                std::io::stdout().flush().ok();
+            Some(text) => {
+                if streamed_text || !buffer.is_empty() {
+                    // A partial answer is on screen and is no longer valid.
+                    println!();
+                }
+                printer.interrupted();
+                println!("{BOLD}> {RESET}{}", printer.dim(&text));
+                current = text;
             }
-            Event::ToolStart { id, name } => {
-                printer.tool_start(&name);
-                tool_names.insert(id, name);
-            }
-            Event::ToolArgs { id, args } => {
-                let name = tool_names.get(&id).cloned().unwrap_or_default();
-                printer.tool_args(&name, &args);
-            }
-            Event::ToolResult { output, ok, .. } => {
-                printer.tool_result(&output, ok);
-            }
-            Event::Usage(_) => {}
-            Event::Warning(w) => {
-                println!("\n{} {w}", printer.style(RED, "warning:"));
-            }
-            Event::Done => {}
-        })
-        .await;
-
-    if !buffer.is_empty() {
-        print!("{buffer}");
+        }
     }
-    if streamed_text {
-        println!();
-    }
-    result?;
 
     if let Some(u) = agent.last_usage() {
         println!(
@@ -976,8 +1079,16 @@ fn is_local_endpoint(base_url: &str) -> bool {
     provider::is_local_endpoint(base_url)
 }
 
+/// Verbosity levels, in the order you would turn them up.
+const QUIET: u8 = 0;
+const NORMAL: u8 = 1;
+const CHATTY: u8 = 2;
+
 struct Printer {
     color: bool,
+    /// QUIET shows only the model's words; NORMAL adds one line per tool call;
+    /// CHATTY adds full arguments and more of each result.
+    verbosity: u8,
 }
 
 impl Printer {
@@ -989,57 +1100,108 @@ impl Printer {
         }
     }
 
-    fn tool_start(&self, name: &str) {
-        println!(
-            "\n{} {}",
-            self.style(CYAN, "[tool]"),
-            self.style(BOLD, name)
-        );
+    fn dim(&self, text: &str) -> String {
+        self.style(DIM, text)
     }
 
-    fn tool_args(&self, name: &str, args: &str) {
-        if args.trim().is_empty() || args.trim() == "{}" {
+    /// One compact line describing a tool call that is about to run.
+    ///
+    /// The argument is reduced to the one thing worth reading -- the command for
+    /// `bash`, the path for a file tool -- because a raw JSON blob tells the
+    /// reader nothing they cannot get from the result.
+    fn tool_call(&self, name: &str, args: &str) {
+        if self.verbosity == QUIET {
             return;
         }
-        let display = if name == "bash" {
-            serde_json::from_str::<serde_json::Value>(args)
-                .ok()
-                .and_then(|v| {
-                    v.get("command")
-                        .and_then(|c| c.as_str())
-                        .map(|s| s.to_string())
-                })
-                .unwrap_or_else(|| util::json_preview(args, 200))
+        let what = summarise_args(name, args, if self.verbosity >= CHATTY { 400 } else { 100 });
+        let head = self.style(CYAN, "⏵");
+        let label = self.style(BOLD, name);
+        if what.is_empty() {
+            println!("{head} {label}");
         } else {
-            util::json_preview(args, 200)
-        };
-        println!("       {}", self.style(DIM, &display));
+            println!("{head} {label} {}", self.dim(&what));
+        }
     }
 
+    /// The result of a tool call: a status glyph, a one-line gist, and at most a
+    /// couple of lines of detail.
     fn tool_result(&self, output: &str, ok: bool) {
-        let label = if ok {
-            self.style(GREEN, "[ok]")
+        if self.verbosity == QUIET {
+            return;
+        }
+        let lines: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
+        let gist = lines.first().copied().unwrap_or("(no output)");
+        let mark = if ok {
+            self.style(GREEN, "✓")
         } else {
-            self.style(RED, "[fail]")
+            self.style(RED, "✗")
         };
-        let lines: Vec<&str> = output.lines().collect();
-        let shown = 12.min(lines.len());
-        println!("       {label}");
-        for line in lines.iter().take(shown) {
-            println!("       {}", self.style(DIM, line));
+
+        if self.verbosity >= CHATTY {
+            println!("  {mark} {}", gist);
+            for line in lines.iter().skip(1).take(24) {
+                println!("    {}", self.dim(line));
+            }
+            if lines.len() > 25 {
+                println!(
+                    "    {}",
+                    self.dim(&format!("… {} more lines", lines.len() - 25))
+                );
+            }
+            return;
         }
-        if lines.len() > shown {
-            println!(
-                "       {}",
-                self.style(
-                    DIM,
-                    &format!(
-                        "... {} more lines (full output was sent to the model)",
-                        lines.len() - shown
-                    )
-                )
-            );
-        }
+
+        // Compact: one line, with a hint that there is more behind /verbose.
+        let extra = if lines.len() > 1 {
+            format!("  {}", self.dim(&format!("(+{} lines)", lines.len() - 1)))
+        } else {
+            String::new()
+        };
+        let gist = if gist.chars().count() > 120 {
+            format!("{}…", gist.chars().take(120).collect::<String>())
+        } else {
+            gist.to_string()
+        };
+        println!("  {mark} {}{extra}", self.dim(&gist));
+    }
+
+    /// A turn was stopped because the user typed something.
+    fn interrupted(&self) {
+        println!("{}", self.style(YELLOW, "⏹ interrupted"));
+    }
+}
+
+/// Reduce a tool's JSON arguments to the one value worth showing on a line.
+fn summarise_args(name: &str, args: &str, limit: usize) -> String {
+    let trimmed = args.trim();
+    if trimmed.is_empty() || trimmed == "{}" {
+        return String::new();
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+        return util::preview(trimmed, limit);
+    };
+    // The first of these keys that is present tells the reader what is happening.
+    let key = match name {
+        "bash" => "command",
+        "read" => "path",
+        "write" => "path",
+        "edit" => "path",
+        "list" => "path",
+        _ => "",
+    };
+    let picked = v
+        .get(key)
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            v.as_object().and_then(|o| {
+                o.iter()
+                    .find_map(|(_, val)| val.as_str().map(|s| s.to_string()))
+            })
+        });
+    match picked {
+        Some(s) => util::preview(&s.replace('\n', " ⏎ "), limit),
+        None => util::preview(trimmed, limit),
     }
 }
 

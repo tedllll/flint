@@ -72,6 +72,15 @@ pub struct Config {
     )]
     pub proxy: Option<String>,
 
+    /// How much of the agent's tool traffic to print.
+    ///
+    /// `false` (the default) prints one compact line per tool call plus a short
+    /// result. `true` prints full arguments and more of the output. A rescue
+    /// tool produces a lot of noise if every tool result is dumped in full, and
+    /// the person reading it is usually already having a bad day.
+    #[serde(default)]
+    pub verbose: bool,
+
     pub providers: Vec<ProviderConfig>,
 }
 
@@ -136,6 +145,7 @@ impl Default for Config {
             max_steps: default_max_steps(),
             readonly: false,
             proxy: None,
+            verbose: false,
             providers: vec![
                 ProviderConfig {
                     name: "deepseek".to_string(),
