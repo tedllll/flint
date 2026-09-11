@@ -159,3 +159,146 @@ async fn a_piped_one_shot_run_ignores_its_stdin() {
         "stdin was treated as steering: {text:?}"
     );
 }
+
+/// The source tree must not contain mojibake.
+///
+/// Not hypothetical: this happened twice, to user-visible text and to a test fixture.
+/// A UTF-8 em dash (`e2 80 94`) read as CP936 and written back out became `鈥?`, which
+/// shipped in fifteen user-visible strings -- including the line a user sees the moment
+/// they start a session read-only. Later, `" 用户"` in a test became `" 鐢ㄦ埛"`.
+///
+/// The build notices nothing, because the damage is valid UTF-8 either way: the file
+/// compiles and the tests pass, and the corruption is only visible on screen. So this
+/// checks the *text*.
+///
+/// The character set below is how CP936 renders UTF-8 three-byte sequences. Those code
+/// points are real Chinese characters, but they are vanishingly rare in ordinary prose,
+/// so finding one inside a string or comment means something was mis-decoded. Matching
+/// on a fixed list of complete corrupted strings is not enough -- that was the first
+/// version of this test, and it missed `鐢ㄦ埛` entirely.
+#[test]
+fn the_source_tree_contains_no_mojibake() {
+    // Characters CP936 produces when it swallows a UTF-8 multi-byte sequence. Any of
+    // these in this repository is an artifact, not prose.
+    const MARKERS: &[char] = &[
+        '\u{9225}', // 鈥  -- half of the em dash above
+        '\u{9429}', '\u{951b}', '\u{9422}', // 锟 锛 鐢
+        '\u{3126}', '\u{57db}', // ㄦ 埛 -- pieces of 用户
+        '\u{8def}', // 路 -- a middle dot (U+00B7) mis-read as CP936. Ordinary-looking
+                     // Chinese, which is exactly why it survived a scan for obvious
+                     // garbage; it is listed because this repository has no prose that
+                     // would use it. 败/失/项 are NOT listed for that reason: "项失败"
+                     // is ordinary Chinese in the layout script's own output.
+        '\u{9428}', '\u{93b4}', '\u{93c1}', '\u{93c8}', '\u{93c5}',
+        '\u{fffd}', // the replacement character: data already lost
+    ];
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders: Vec<String> = Vec::new();
+    let mut scanned = 0usize;
+
+    let mut walk = vec![root.to_path_buf()];
+    while let Some(dir) = walk.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read_dir") {
+            let path = entry.expect("dir entry").path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name == ".git" || name == "target" || name == "node_modules" {
+                continue;
+            }
+            if path.is_dir() {
+                walk.push(path);
+                continue;
+            }
+            // This file names the markers it looks for, so it would always match itself.
+            if name == "cli_output.rs" {
+                continue;
+            }
+            let is_text = matches!(
+                path.extension().and_then(|e| e.to_str()),
+                Some("rs" | "js" | "md" | "toml" | "yml" | "yaml")
+            );
+            if !is_text {
+                continue;
+            }
+            scanned += 1;
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            for (n, line) in text.lines().enumerate() {
+                if MARKERS.iter().any(|m| line.contains(*m)) {
+                    offenders.push(format!(
+                        "{}:{}: {}",
+                        path.strip_prefix(root).unwrap_or(&path).display(),
+                        n + 1,
+                        line.trim()
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(scanned > 5, "the walk found almost nothing ({scanned} files)");
+    assert!(
+        offenders.is_empty(),
+        "mojibake in the source tree -- a UTF-8 file was written back through a CP936 \
+         code page:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// `exec` must run a command without a config, and must not create one.
+///
+/// This is the whole point of `exec`: when every provider is unreachable it still has to
+/// work, which is exactly the situation where no config exists yet. The old path called
+/// the config loader that creates a default file, so `exec echo hi` printed
+///
+///   flint: created default config at .../config.toml
+///   flint: set your API key there (or export DEEPSEEK_API_KEY), then re-run.
+///
+/// and then ran the command anyway. Two things wrong with that: it writes to the user's
+/// home directory as a side effect of asking for one echo, and it tells them to go set an
+/// API key that `exec` never uses -- the one message guaranteed to stop someone mid-rescue
+/// and send them debugging the wrong thing.
+#[test]
+fn exec_works_without_a_config_and_creates_none() {
+    let home = std::env::temp_dir().join(format!("flint-exec-noconfig-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).expect("temp home");
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_flint"))
+        .arg("exec")
+        .arg("echo exec-works")
+        // Both variables, because the config directory is resolved per platform.
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        // A key in the ambient environment would mask nothing here, but leaving it set
+        // would make the test's own intent unclear.
+        .env_remove("DEEPSEEK_API_KEY")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run flint exec");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(out.status.success(), "exec failed: {stderr}");
+    assert!(
+        stdout.contains("exec-works"),
+        "the command did not run: stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        !stderr.contains("API key"),
+        "exec must not ask for an API key it never uses: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("created default config"),
+        "exec must not announce config creation: {stderr:?}"
+    );
+    assert!(
+        !home.join(".flint").exists(),
+        "exec created a config directory as a side effect: {}",
+        home.display()
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}

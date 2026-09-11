@@ -1,12 +1,18 @@
 # flint
 
-A minimal cross-platform rescue agent.
+A minimal cross-platform command-line agent.
 
-When your usual tooling breaks — DSH, Codex, your editor, whatever — flint is
-still there: a single static binary that can talk to a model and run commands on
-your machine so you can repair the thing that broke.
+One static binary that talks to a model and works directly on your machine:
+reading and writing code, running commands, searching a tree, setting a machine
+up, debugging what is broken, or just answering a question. It needs no runtime,
+no package manager and no toolchain.
 
-That purpose drives every design decision:
+It is also what is still there when your usual tooling breaks — DSH, Codex, your
+editor, whatever — which is where the constraints below come from. That is a
+property of how it is built, not a description of what it is for: you should not
+have to be in trouble to use it.
+
+Those constraints drive every design decision:
 
 - **No GUI.** Terminals only. It works over SSH, in a container, in a broken
   terminal.
@@ -16,7 +22,9 @@ That purpose drives every design decision:
   with a text editor, because when things are broken you may not have a working
   model to fix them for you.
 - **`flint exec` needs no model at all.** If every provider is unreachable, you
-  can still run commands.
+  can still run commands. It also needs no config: it creates none, prints no
+  advice, and does not care whether an existing config can be parsed. When it is
+  the last thing working, it must not depend on anything else working.
 
 The one affordance the interactive session does have is a **fixed input line**:
 the bottom row is reserved, so the model's output scrolls above it and your
@@ -146,6 +154,16 @@ shell command. Use it when you want flint to look but not touch.
 | `write` | create or overwrite a file |
 | `edit` | exact string replacement, unique-match enforced |
 | `list` | list a directory |
+| `glob` | find files by name pattern (`*.rs`, `**/test_*.py`), recursively |
+| `grep` | search file contents for a literal string, recursively, with line numbers |
+
+`glob` and `grep` are built in rather than shelled out on purpose. Every other
+platform difference flint can paper over, but this one it cannot: `grep` does not
+exist in `cmd`, `findstr` is not recursive, and `find` does not match file names --
+so on the platform where a rescue tool is most likely to be needed, "where is this
+file" and "where is this symbol" would have no working answer. They are also what
+makes getting your bearings in an unfamiliar tree a single step instead of a dozen
+`list` calls.
 
 Tool output is capped at `max_tool_output` characters before going back to the
 model, with a `[truncated]` marker.

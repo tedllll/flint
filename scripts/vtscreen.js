@@ -20,7 +20,19 @@ const file = process.argv[2];
 const ROWS = parseInt(process.argv[3] || '24', 10);
 const COLS = parseInt(process.argv[4] || '80', 10);
 
-const screen = Array.from({ length: ROWS }, () => Array(COLS).fill(' '));
+// Optional prefill: what was already on the screen before the capture began.
+//
+// A capture replayed onto a blank screen cannot show whether the program cleaned up
+// after itself -- but leaving the previous screen behind is exactly the fault this
+// models, so the screen has to be able to start dirty.
+const prefillAt = process.argv.indexOf('--prefill');
+const prefillText = prefillAt >= 0 ? process.argv[prefillAt + 1] : null;
+
+const screen = Array.from({ length: ROWS }, (_, n) => {
+  if (prefillText === null) return Array(COLS).fill(' ');
+  const label = `${prefillText}${n + 1} `;
+  return (label + ' '.repeat(COLS)).slice(0, COLS).split('');
+});
 let row = 0; // 0-based
 let col = 0;
 let top = 0; // scroll region, 0-based inclusive

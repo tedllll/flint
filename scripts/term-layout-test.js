@@ -23,31 +23,50 @@ const path = require('path');
 const ESC = '\x1b';
 const ROWS = 24;
 const COLS = 70;
-const ANSWER_ROWS = 4;
+const ANSWER_ROWS = 3;
+// The running-status clock owns the row between the answer strip and the input row, and
+// the strip stops above it. Drawn inside the strip -- which is where it used to go, on
+// INPUT - 1 -- it shared a row with the answer's last line and the two wrote over each
+// other. Mirrors STATUS_ROWS in src/term.rs.
+const STATUS_ROWS = 1;
 const INPUT = ROWS; // last row
-const VIEWPORT_TOP = ROWS - ANSWER_ROWS; // 20
+const ANSWER_BOTTOM = INPUT - 1 - STATUS_ROWS; // 22: last row the answer may use
+const VIEWPORT_TOP = ANSWER_BOTTOM - ANSWER_ROWS + 1; // 20
 const HISTORY_BOTTOM = VIEWPORT_TOP - 1; // 19
 
 const tmp = path.join(os.tmpdir(), 'term-layout.bin');
 
 class FakeTerm {
   constructor() {
+    // Assumes a blank screen. `Term::setup` clears every row before drawing anything --
+    // including the rows the status line and input occupy, which the scroll-down would
+    // otherwise leave holding the shell's old screen. That ordering is checked by the
+    // Rust test `starting_up_leaves_no_remnant_of_the_previous_screen`, which can start
+    // from a screen that already has content; this model cannot.
     this.s = `${ESC}[1;${ROWS}r${ESC}[1;1H`;
     this.viewportTop = VIEWPORT_TOP;
     this.streamActive = false;
     this.streamText = '';
     this.committed = 0;
+    // Transcript grows downward from row 1; see HISTORY_ROW in src/term.rs.
+    this.historyRow = 1;
   }
   redraw(prefix = '> ') {
     this.s += `${ESC}[${INPUT};1H${ESC}[2K${ESC}[1m${prefix}${ESC}[0m`;
   }
   // Mirrors Term::insert_history.
+  //
+  // Each line goes on the next free transcript row rather than on the region's bottom
+  // row: that is what makes a short session fill the screen from the top instead of
+  // sitting just above the input with a blank area above it.
   insertHistory(lines) {
+    const bottom = Math.max(this.viewportTop - 1, 1);
     for (const text of lines) {
-      const bottom = Math.max(this.viewportTop - 1, 1);
+      const row = Math.min(Math.max(this.historyRow, 1), bottom);
       this.s += `${ESC}[1;${bottom}r`;
-      this.s += `${ESC}[${bottom};1H\r${ESC}[2K${text}\r\n`;
+      this.s += `${ESC}[${row};1H\r${ESC}[2K${text}\r\n`;
       this.s += `${ESC}[r`;
+      this.historyRow = Math.min(row + 1, bottom);
     }
     this.s += `${ESC}[?25l`;
     this.redraw();
@@ -78,7 +97,7 @@ class FakeTerm {
     this.s += `${ESC}[r`;
   }
   clearViewport() {
-    for (let row = this.viewportTop; row < INPUT; row++) {
+    for (let row = this.viewportTop; row <= ANSWER_BOTTOM; row++) {
       this.s += `${ESC}[${row};1H${ESC}[2K`;
     }
   }
@@ -88,7 +107,7 @@ class FakeTerm {
     if (!this.streamText) return;
     const lines = this.streamText.split('\n');
     const top = VIEWPORT_TOP;
-    const last = INPUT - 1;
+    const last = ANSWER_BOTTOM;
     const capacity = last - top + 1;
     const shown = Math.min(lines.length, capacity);
     const left = lines.slice(lines.length - shown);
@@ -107,7 +126,7 @@ class FakeTerm {
     this.streamText = text;
     const rows = text.split('\n');
     const height = rows.length;
-    const capacity = INPUT - 1 - VIEWPORT_TOP + 1;
+    const capacity = ANSWER_BOTTOM - VIEWPORT_TOP + 1;
     if (height > capacity) {
       const drop = height - capacity;
       if (drop > this.committed) {
@@ -121,7 +140,7 @@ class FakeTerm {
     let cursor = null;
     for (let n = 0; n < visible.length; n++) {
       const r = start + n;
-      if (r > INPUT - 1) break;
+      if (r > ANSWER_BOTTOM) break;
       this.s += `${ESC}[${r};1H${ESC}[2K${visible[n]}`;
       cursor = [r, [...visible[n]].length];
     }
