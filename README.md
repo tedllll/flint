@@ -24,11 +24,11 @@ No toolchain required — that is the whole point.
 
 ```bash
 # Linux (x86_64, fully static — runs on any distro)
-curl -fsSL -o flint https://github.com/<you>/flint/releases/latest/download/flint-x86_64-unknown-linux-musl
+curl -fsSL -o flint https://github.com/tedllll/flint/releases/latest/download/flint-x86_64-unknown-linux-musl
 chmod +x flint && sudo mv flint /usr/local/bin/
 
 # macOS (Apple Silicon)
-curl -fsSL -o flint https://github.com/<you>/flint/releases/latest/download/flint-aarch64-apple-darwin
+curl -fsSL -o flint https://github.com/tedllll/flint/releases/latest/download/flint-aarch64-apple-darwin
 chmod +x flint && sudo mv flint /usr/local/bin/
 ```
 
