@@ -8,14 +8,24 @@ your machine so you can repair the thing that broke.
 
 That purpose drives every design decision:
 
-- **No GUI, no TUI library.** Plain stdin/stdout. It works over SSH, in a
-  container, in a broken terminal.
-- **Very few dependencies.** No SQLite, no OpenSSL, no line-editing crate.
+- **No GUI.** Terminals only. It works over SSH, in a container, in a broken
+  terminal.
+- **Very few dependencies.** No SQLite, no OpenSSL. The one terminal library is
+  there for a single reason, below.
 - **Hand-editable state.** Config is TOML, history is JSONL. Both repairable
   with a text editor, because when things are broken you may not have a working
   model to fix them for you.
 - **`flint exec` needs no model at all.** If every provider is unreachable, you
   can still run commands.
+
+The one affordance the interactive session does have is a **fixed input line**:
+the bottom row is reserved, so the model's output scrolls above it and your
+half-typed message never travels up the screen. Everything else is plain text.
+
+That is also the one thing that switches itself off. When stdout is not a
+terminal — piped, redirected, run from a script — flint emits no escape codes at
+all, so `flint -p "..." | grep`, `flint exec` in a Makefile, and
+`flint --help | less` all behave like ordinary Unix programs.
 
 ## Install
 
@@ -87,13 +97,22 @@ Inside the REPL:
 | Command | Effect |
 |---|---|
 | `/help` | command list |
-| `/provider [name]` | list or switch providers |
+| `/provider [name]` | list, switch, add, edit or remove providers |
+| `/provider key <key>` | set the API key for the active provider |
+| `/model [name]` | show or change the model |
 | `/usage` | context size and token accounting |
+| `/verbose [on\|off\|full]` | how much tool detail to print |
 | `/readonly [on\|off]` | toggle the write guard |
 | `/tools` | list tools |
 | `/sessions` | list past sessions |
 | `/new` | start a fresh conversation |
+| `/config [edit]` | show or change shell, steps, proxy |
+| `/reload` | re-read the config file after editing it yourself |
 | `!cmd` | run a shell command, bypassing the model |
+
+Type while the model is working to interrupt it; your line becomes the next
+input. Ctrl-C clears a half-typed line, and quits when the line is already
+empty. Ctrl-D quits.
 
 Flags: `--provider`, `--model`, `--readonly`, `--cwd`, `--no-color` (or
 `NO_COLOR`), `--continue`.
@@ -149,6 +168,20 @@ The provider layer implements the OpenAI streaming protocol only, including the
 two parts that are easy to get wrong: SSE frames split across network chunks
 (handled with a carry-over buffer) and tool-call arguments arriving as string
 fragments that must be concatenated by index before they are valid JSON.
+
+### Testing the non-terminal paths
+
+The guarantee that pipes stay escape-free is easy to break and impossible to
+notice, so it is checked by script rather than by eye:
+
+```bash
+cargo test                                  # unit tests, incl. key translation
+node scripts/run-capture.js out.bin ./flint --help   # assert esc=0
+node scripts/pipe-check.js ./flint cmds.txt out.bin  # a piped REPL session
+```
+
+These capture raw bytes and count escape sequences; `scripts/interactive-check.js`
+drives a real Windows pseudo-console for the path that needs one.
 
 ## License
 
