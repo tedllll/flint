@@ -61,7 +61,7 @@ shell = "cmd"              # Unix: "sh"
 shell_args = ["/C"]        # Unix: ["-c"]
 
 max_tool_output = 30000   # cap on tool output fed back to the model
-max_steps = 25            # runaway-loop guard
+max_steps = 100           # runaway-loop guard, not a work ration
 readonly = false          # true = refuse every write
 
 [[providers]]

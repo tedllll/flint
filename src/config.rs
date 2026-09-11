@@ -107,8 +107,17 @@ fn default_max_tool_output() -> usize {
     30_000
 }
 
+/// Steps in one turn, counting model round-trips rather than tool runs, so a turn that
+/// calls two tools at a time gets two calls per step.
+///
+/// Generous on purpose. Reaching this is not a safety net doing its job, it is a turn
+/// that was cut off in the middle of the work it was asked to do -- and the person
+/// watching cannot tell how close it was until it happens. It exists for the runaway
+/// case (a model looping on the same failing command), not to ration work. An ordinary
+/// turn takes five to fifteen steps; a real repair, reading files and running builds,
+/// takes thirty or more.
 fn default_max_steps() -> usize {
-    25
+    100
 }
 
 /// Serialise `Option<String>` as a plain string, `None` becoming `""`.
