@@ -191,7 +191,14 @@ async fn real_main() -> Result<i32> {
     }
 
     // ---- interactive ----
-    interactive(&mut cfg, &mut agent, &provider_cfg, &printer, key_missing).await?;
+    interactive(
+        &mut cfg,
+        &mut agent,
+        &mut provider_cfg,
+        &printer,
+        key_missing,
+    )
+    .await?;
     Ok(0)
 }
 
@@ -200,7 +207,7 @@ async fn real_main() -> Result<i32> {
 async fn interactive(
     cfg: &mut config::Config,
     agent: &mut agent::Agent,
-    provider_cfg: &config::ProviderConfig,
+    provider_cfg: &mut config::ProviderConfig,
     printer: &Printer,
     key_missing: bool,
 ) -> Result<()> {
@@ -492,7 +499,7 @@ async fn handle_command(
     input: &str,
     cfg: &mut config::Config,
     agent: &mut agent::Agent,
-    provider_cfg: &config::ProviderConfig,
+    provider_cfg: &mut config::ProviderConfig,
     printer: &Printer,
 ) -> Result<Flow> {
     let mut parts = input.splitn(2, char::is_whitespace);
@@ -521,6 +528,7 @@ async fn handle_command(
   /tools                list available tools
   /sessions             list past sessions
   /new                  start a fresh conversation
+  /reload               re-read the config file (after editing it yourself)
   !<command>            run a shell command without the model
 {DIM}notes{RESET}
   Permission model is full by default. /readonly is the only guard.
@@ -771,6 +779,43 @@ async fn handle_command(
             for (id, summary) in sessions {
                 println!("  {id}  {summary}");
             }
+        }
+
+        "/reload" => {
+            // Re-read the config from disk and rebuild the agent.
+            //
+            // Necessary because the agent can edit its own config with the file
+            // tools: without this, a change it just made would not take effect
+            // until the process restarted, which is exactly the "leave the tool
+            // to fix the tool" problem this is meant to avoid.
+            let fresh = config::Config::load()?;
+            let target = fresh.active_provider(None)?.clone();
+            *cfg = fresh;
+            let provider = provider::Provider::new(target.clone())?;
+            *provider_cfg = target.clone();
+            let writer = Some(session::SessionWriter::create(
+                &config::sessions_dir(),
+                agent.cwd(),
+                &provider_cfg.name,
+                &provider_cfg.model,
+            )?);
+            let new_agent =
+                agent::Agent::new(cfg, provider, agent.readonly(), agent.cwd().clone(), writer);
+            let state = if target.resolved_key().trim().is_empty()
+                && !is_local_endpoint(&target.base_url)
+            {
+                printer.style(YELLOW, " (still no key)")
+            } else {
+                String::new()
+            };
+            println!(
+                "{} reloaded {} — provider {BOLD}{}{RESET} model {BOLD}{}{RESET}{state}",
+                printer.style(GREEN, "ok"),
+                config::config_path().display(),
+                target.name,
+                target.model
+            );
+            return Ok(Flow::NewAgent(new_agent));
         }
 
         "/new" => {
