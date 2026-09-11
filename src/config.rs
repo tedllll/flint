@@ -22,6 +22,16 @@ pub struct ProviderConfig {
     /// Read the key from this environment variable instead of `api_key`.
     #[serde(default)]
     pub api_key_env: Option<String>,
+    /// Proxy for reaching *this provider*, e.g. `socks5h://127.0.0.1:10808` or
+    /// `http://127.0.0.1:10808`.
+    ///
+    /// Separate from [`Config::proxy`], which is for the `bash` tool's child processes:
+    /// the model endpoint and the commands it asks for can need different routes, and a
+    /// provider reached through a dead proxy must be fixable without disturbing them.
+    ///
+    /// Empty or absent means "ask the environment, then the system setting".
+    #[serde(default, deserialize_with = "de_opt_string")]
+    pub proxy: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +173,7 @@ impl Default for Config {
                     api_key: String::new(),
                     model: "deepseek-chat".to_string(),
                     api_key_env: Some("DEEPSEEK_API_KEY".to_string()),
+                    proxy: None,
                 },
                 // A local fallback costs nothing to configure and still works
                 // when every hosted provider is unreachable.
@@ -172,6 +183,7 @@ impl Default for Config {
                     api_key: "ollama".to_string(),
                     model: "qwen2.5-coder:7b".to_string(),
                     api_key_env: None,
+                    proxy: None,
                 },
             ],
         }

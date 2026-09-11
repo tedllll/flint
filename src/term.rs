@@ -181,6 +181,29 @@ const ANSWER_ROWS: u16 = 4;
 /// The input row plus the answer strip.
 const RESERVED: u16 = ANSWER_ROWS + 1;
 
+/// What is running right now.
+struct Activity {
+    /// The tool name, or empty while the model is thinking rather than running one.
+    name: String,
+    /// When it started, as seconds since the process began.
+    ///
+    /// Elapsed time rather than a wall clock, so the status line is built from plain
+    /// integers and a suspended machine does not make it jump.
+    started: std::time::Instant,
+}
+
+/// `12s`, `1m 05s`, `1h 02m` -- short enough to sit in a status line.
+fn elapsed_label(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
 pub struct Term {
     interactive: bool,
     /// Last row of the screen (1-based, inclusive).
@@ -211,6 +234,15 @@ pub struct Term {
     /// filled to the exact width leaves the cursor in the *next* row, so the erase
     /// lands on a row that has not been drawn yet.
     stream_rows: Mutex<Vec<String>>,
+    /// What is running right now, and since when.
+    ///
+    /// A tool can take minutes -- a build, a package download, a hung network call --
+    /// and without a moving clock "still working" and "wedged" look identical from the
+    /// outside. That is the difference between waiting and killing the thing.
+    activity: Mutex<Option<Activity>>,
+    /// Last value of the status clock that was painted, so the redraw only happens
+    /// when the displayed number would actually change.
+    activity_shown: AtomicU16,
 }
 
 impl Term {
@@ -231,6 +263,8 @@ impl Term {
             stream_text: Mutex::new(String::new()),
             committed: AtomicU16::new(0),
             stream_rows: Mutex::new(Vec::new()),
+            activity: Mutex::new(None),
+            activity_shown: AtomicU16::new(0),
         }
     }
 
@@ -265,6 +299,8 @@ impl Term {
             stream_text: Mutex::new(String::new()),
             committed: AtomicU16::new(0),
             stream_rows: Mutex::new(Vec::new()),
+            activity: Mutex::new(None),
+            activity_shown: AtomicU16::new(0),
         };
 
         if tty {
@@ -286,6 +322,96 @@ impl Term {
         }
 
         Ok(term)
+    }
+
+    /// Note that a tool has started, so the status line can say what is running.
+    pub fn activity_started(&self, name: &str) {
+        if !self.interactive {
+            return;
+        }
+        // Keep the original start time for a repeated name: a tool that reports itself
+        // in stages would otherwise reset its own clock and never appear to take long.
+        let mut activity = self.activity.lock().unwrap();
+        let keep = matches!(&*activity, Some(a) if a.name == name);
+        if !keep {
+            *activity = Some(Activity {
+                name: name.to_string(),
+                started: std::time::Instant::now(),
+            });
+        }
+    }
+
+    /// The tool finished: stop the clock.
+    pub fn activity_done(&self) {
+        if !self.interactive {
+            return;
+        }
+        *self.activity.lock().unwrap() = None;
+        self.activity_shown.store(0, Ordering::Relaxed);
+        self.paint_activity();
+    }
+
+    /// Repaint the status line when its number would change.
+    ///
+    /// Called from the REPL's own waiting loop, which is already ticking every couple
+    /// of milliseconds. A thread of its own would need the `Term` to outlive the
+    /// caller, and the input loop is right there -- one comparison while nothing is
+    /// running, and a repaint four times a second while something is.
+    pub fn tick(&self) {
+        if !self.interactive {
+            return;
+        }
+        let running = self.activity.lock().unwrap().is_some();
+        if !running {
+            return;
+        }
+        let seconds = self
+            .activity
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|a| a.started.elapsed().as_secs() as u16)
+            .unwrap_or(0);
+        if seconds == self.activity_shown.load(Ordering::Relaxed) {
+            return;
+        }
+        self.activity_shown.store(seconds, Ordering::Relaxed);
+        self.paint_activity();
+    }
+
+    /// Draw, or clear, the running-status line in the row just above the input.
+    fn paint_activity(&self) {
+        if !self.interactive {
+            return;
+        }
+        let row = self.input_row.load(Ordering::Relaxed).saturating_sub(1);
+        let line = {
+            let activity = self.activity.lock().unwrap();
+            activity.as_ref().map(|a| {
+                let what = if a.name.is_empty() {
+                    "waiting for the model".to_string()
+                } else {
+                    a.name.clone()
+                };
+                format!(
+                    "\u{2500}\u{2500} {} {} \u{2500}\u{2500}",
+                    elapsed_label(a.started.elapsed()),
+                    what
+                )
+            })
+        };
+        let mut out = std::io::stdout();
+        // The whole row is cleared either way, so a finished tool leaves no stale clock
+        // behind on a row that is also part of the answer strip.
+        let _ = write!(out, "\x1b[{};1H\x1b[2K", row);
+        if let Some(line) = line {
+            let width = display_width(&line);
+            let cols = self.screen_cols.load(Ordering::Relaxed);
+            let pad = cols.saturating_sub(width) / 2;
+            let _ = write!(out, "\x1b[{};{}H\x1b[2m{line}\x1b[0m", row, pad.max(1));
+        }
+        let _ = write!(out, "\x1b[?25l");
+        let _ = out.flush();
     }
 
     pub fn interactive(&self) -> bool {

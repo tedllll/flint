@@ -224,6 +224,47 @@ impl CommandOutcome {
     }
 }
 
+/// After this long, say out loud that a command is taking a while.
+///
+/// Long enough that ordinary commands never trip it, short enough that a hang is
+/// obvious before the reader starts wondering whether flint itself has died.
+const STUCK_AFTER_SECS: u64 = 20;
+
+/// Default budget for an ordinary command.
+const DEFAULT_BASH_TIMEOUT: u64 = 120;
+
+/// Budget for a command that installs, builds or downloads, which is slow by nature.
+const LONG_BASH_TIMEOUT: u64 = 900;
+
+/// Whether a command is the kind that legitimately takes minutes.
+///
+/// Deliberately generous and deliberately dumb: a false positive costs a longer wait
+/// before the kill, while a false negative kills a package install halfway through and
+/// leaves the toolchain in a worse state than before.
+fn looks_slow(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    [
+        "install", "update", "upgrade", "upgrade", "build", "fetch", "clone", "download",
+        "cargo", "npm", "pnpm", "yarn", "pip", "winget", "choco", "scoop", "apt", "dnf",
+        "yum", "pacman", "brew", "rustup", "docker", "msbuild", "gradle", "mvn", "make",
+        "cmake", "dist-upgrade", "system-upgrade",
+    ]
+    .iter()
+    .any(|word| lower.contains(word))
+}
+
+/// `12s`, `1m 05s`, `1h 02m` -- short enough for a one-line notice.
+fn elapsed_label(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
 /// Run a shell command and return its combined output, including a trailing
 /// `[exit code: N]` marker when it failed.
 ///
@@ -277,17 +318,44 @@ pub async fn run_command_detailed(
         .spawn()
         .with_context(|| format!("cannot spawn shell '{}'", shell[0]))?;
 
-    let output =
-        match tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output())
-            .await
-        {
-            Ok(res) => res.context("failed to collect command output")?,
+    // The pipes have to be drained while the process runs, and only one task may own
+    // it: `select` on the read future keeps draining, and the branch that waits for the
+    // child never tries to read the pipes itself.
+    //
+    // Polling in short steps rather than waiting on one long timeout, because a command
+    // that hangs is the case the reader most needs to hear about: silence teaches
+    // nothing about whether anything is still happening. When the budget runs out the
+    // process is killed, not merely abandoned -- dropping `wait_with_output` leaves the
+    // child running, which is how a timed-out build keeps the machine busy forever.
+    let total = Duration::from_secs(timeout_secs);
+    let started = std::time::Instant::now();
+    let mut warned = false;
+    let wait = child.wait_with_output();
+    tokio::pin!(wait);
+    let output = loop {
+        match tokio::time::timeout(Duration::from_millis(250), &mut wait).await {
+            Ok(res) => break res.context("failed to collect command output")?,
             Err(_) => {
-                return Err(anyhow!(
-            "command timed out after {timeout_secs}s (raise timeout_secs if it is genuinely slow)"
-        ))
+                let waited = started.elapsed();
+                if !warned && waited >= Duration::from_secs(STUCK_AFTER_SECS) {
+                    warned = true;
+                    eprintln!(
+                        "flint: this command has been running for {} and may be stuck. \
+                         It is killed at {timeout_secs}s; pass a larger `timeout_secs`, or \
+                         write [timeout:N] before the command, if it is genuinely slow.",
+                        elapsed_label(waited)
+                    );
+                }
+                if waited >= total {
+                    return Err(anyhow!(
+                        "killed after {timeout_secs}s with no result. If it is genuinely slow, \
+                         pass a larger timeout_secs or write [timeout:N] before the command; \
+                         if it is waiting for input, it never will -- stdin is closed."
+                    ));
+                }
             }
-        };
+        }
+    };
 
     let stdout = util::sanitize_output(&String::from_utf8_lossy(&output.stdout));
     let stderr = util::sanitize_output(&String::from_utf8_lossy(&output.stderr));
@@ -332,7 +400,11 @@ impl Tool for BashTool {
                 "command": { "type": "string", "description": "The command line to execute." },
                 "timeout_secs": {
                     "type": "integer",
-                    "description": "Kill the command after this many seconds (default 120)."
+                    "description": format!(
+                        "Kill the command after this many seconds (default {DEFAULT_BASH_TIMEOUT} \
+                         for ordinary commands, {LONG_BASH_TIMEOUT} when the command installs, \
+                         builds or downloads). Raise it for anything known to be slow."
+                    )
                 }
             },
             "required": ["command"]
@@ -341,11 +413,15 @@ impl Tool for BashTool {
 
     async fn call(&self, args: &Value) -> Result<String> {
         let command = require_str(args, "command")?;
-        let timeout = args
-            .get("timeout_secs")
-            .and_then(Value::as_u64)
-            .unwrap_or(120)
-            .clamp(1, 3600);
+        let timeout = match args.get("timeout_secs").and_then(Value::as_u64) {
+            Some(explicit) => explicit,
+            // A command that installs, builds or downloads is expected to be slow, and
+            // killing `cargo install` at two minutes is not a safety feature -- it is a
+            // false alarm that teaches the model to work around the tool.
+            None if looks_slow(command) => LONG_BASH_TIMEOUT,
+            None => DEFAULT_BASH_TIMEOUT,
+        }
+        .clamp(1, 3600);
 
         if self.readonly && !is_readonly_command(command) {
             return Err(anyhow!(

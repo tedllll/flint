@@ -64,6 +64,10 @@ fn test_config(base_url: &str) -> Config {
             api_key: "test".to_string(),
             model: "stub-model".to_string(),
             api_key_env: None,
+            // Never a proxy in tests: a stub server lives on localhost, and inheriting a
+            // dead system proxy would make the suite fail for reasons that have nothing
+            // to do with the code under test.
+            proxy: None,
         }],
     }
 }
@@ -123,6 +127,56 @@ async fn shell_execution_actually_runs_the_command() {
         !out.contains("Microsoft Windows [Version"),
         "the shell went interactive instead of running the command: {out:?}"
     );
+}
+
+/// A command that outlives its budget must be **killed**, not merely abandoned.
+///
+/// The old code wrapped `wait_with_output` in a timeout and returned an error, which
+/// drops the future and leaves the child running. A timed-out `cargo build` therefore
+/// kept building forever while flint calmly reported a timeout -- which is what makes a
+/// machine feel wedged. The check is the only honest one: the command writes a file
+/// *after* the timeout should have killed it, and the file must never appear.
+#[tokio::test]
+async fn a_timed_out_command_is_killed_not_abandoned() {
+    let config = test_config("http://unused");
+    let dir = std::env::temp_dir().join(format!("flint-timeout-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let marker = dir.join("survived.txt");
+    let _ = std::fs::remove_file(&marker);
+
+    // Sleeps past the 2s budget, then writes the marker. If the process survives the
+    // timeout, the marker shows up a few seconds later.
+    let command = if cfg!(windows) {
+        format!(
+            "ping -n 5 127.0.0.1 > nul & echo survived > \"{}\"",
+            marker.display()
+        )
+    } else {
+        format!("sleep 4; echo survived > \"{}\"", marker.display())
+    };
+
+    let started = std::time::Instant::now();
+    let result = flint::tools::run_command_raw(&config, &command, &std::env::temp_dir(), 2).await;
+    let elapsed = started.elapsed();
+    assert!(result.is_err(), "a command over its budget must report an error");
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains("killed after"),
+        "the error should say it was killed, got: {message}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "it returned before the command would have finished on its own: {elapsed:?}"
+    );
+
+    // Well past when the orphan would have written the marker.
+    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+    assert!(
+        !marker.exists(),
+        "the command outlived its timeout and wrote {} -- it was abandoned, not killed",
+        marker.display()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A failing command must report a non-zero exit code, not silence.

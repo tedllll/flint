@@ -26,6 +26,12 @@ use term::Term;
 struct Args {
     prompt: Option<String>,
     continue_last: bool,
+    /// A specific session to resume: its list index, an id or id prefix, or a path.
+    ///
+    /// `--continue` only ever reaches the most recent one, which is useless when the
+    /// session worth returning to is three conversations back -- and going back is the
+    /// normal case when the last thing you did was break something.
+    resume: Option<String>,
     provider: Option<String>,
     model: Option<String>,
     readonly: bool,
@@ -74,6 +80,113 @@ fn main() {
     std::process::exit(code);
 }
 
+/// Turn what the user typed after `--resume` into a session file.
+///
+/// Three forms, in the order they are tried, because each is the natural way to name a
+/// session in a different situation: the number from `/sessions` when you are looking at
+/// the list, an id prefix when you have seen the id, and a path when you have the file.
+/// Guessing wrong must never silently open the wrong conversation, so every ambiguous or
+/// missing case is an error that says what the options were.
+fn resolve_session(target: &str) -> Result<PathBuf> {
+    let dir = config::sessions_dir();
+
+    if let Ok(index) = target.parse::<usize>() {
+        let sessions = session::list(&dir)?;
+        if index == 0 || index > sessions.len() {
+            return Err(anyhow!(
+                "no session {index}: /sessions lists {} (1 is the most recent)",
+                sessions.len()
+            ));
+        }
+        return Ok(dir.join(format!("{}.jsonl", sessions[index - 1].0)));
+    }
+
+    let prefix = target.trim_end_matches(".jsonl");
+    let matches: Vec<String> = session::list(&dir)?
+        .into_iter()
+        .map(|(id, _)| id)
+        .filter(|id| id.starts_with(prefix))
+        .collect();
+    match matches.len() {
+        1 => return Ok(dir.join(format!("{}.jsonl", matches[0]))),
+        0 => {}
+        _ => {
+            return Err(anyhow!(
+                "'{target}' matches {} sessions: {}. Use a longer prefix.",
+                matches.len(),
+                matches.join(", ")
+            ))
+        }
+    }
+
+    let path = PathBuf::from(target);
+    if path.is_file() {
+        return Ok(path);
+    }
+    Err(anyhow!(
+        "no session matches '{target}'. Run `flint --list-sessions` or `/sessions`."
+    ))
+}
+
+/// Replay a loaded conversation onto the screen.
+///
+/// Short on purpose. The point is to show that the history arrived and which
+/// conversation it is -- the last few exchanges do that, and scrolling a hundred
+/// messages of old transcript is worse than useless when the session file is right
+/// there.
+fn print_transcript(history: &[event::Message], printer: &Printer<'_>) {
+    const TAIL: usize = 12;
+    let shown: Vec<&event::Message> = history
+        .iter()
+        .filter(|m| !matches!(m, event::Message::System { .. }))
+        .collect();
+    let start = shown.len().saturating_sub(TAIL);
+    printer.term().blank();
+    printer.term().line(format_args!(
+        "{}",
+        printer.dim(&format!(
+            "── {}{} ──",
+            if start > 0 {
+                format!("… {start} earlier messages, ")
+            } else {
+                String::new()
+            },
+            "resumed transcript"
+        ))
+    ));
+    for message in &shown[start..] {
+        match message {
+            event::Message::User { content } => {
+                printer
+                    .term()
+                    .line(format_args!("{} {}", printer.style(BOLD, ">"), content));
+            }
+            event::Message::Assistant { content, tool_calls, .. } => {
+                let text = content.as_deref().unwrap_or("").trim();
+                if !text.is_empty() {
+                    printer.term().line(format_args!("{text}"));
+                }
+                for call in tool_calls {
+                    printer.term().line(format_args!(
+                        "{}",
+                        printer.dim(&format!("  \u{2713} {}", call.name))
+                    ));
+                }
+            }
+            event::Message::Tool { content, .. } => {
+                // One line: the stored output can be a whole file.
+                let first = content.lines().next().unwrap_or("").trim();
+                let first: String = first.chars().take(100).collect();
+                printer
+                    .term()
+                    .line(format_args!("{}", printer.dim(&format!("  \u{2502} {first}"))));
+            }
+            event::Message::System { .. } => {}
+        }
+    }
+    printer.term().blank();
+}
+
 async fn real_main() -> Result<i32> {
     let args = parse_args(std::env::args().skip(1).collect())?;
 
@@ -106,6 +219,7 @@ async fn real_main() -> Result<i32> {
     // Everything below may need a provider, so a config is required from here.
     let mut cfg = config::Config::load()?;
 
+
     // ---- list sessions ----
     if args.list_sessions {
         let sessions = session::list(&config::sessions_dir())?;
@@ -113,9 +227,11 @@ async fn real_main() -> Result<i32> {
             println!("(no sessions yet)");
         }
         // Plain output on purpose: this mode is for scripts, and its contract is
-        // one session per line.
-        for (id, summary) in sessions {
-            println!("{id}  {summary}");
+        // one session per line. The *first* field is still the id -- the session
+        // is the id, exactly as before -- and the number in front is what
+        // `--resume N` takes.
+        for (index, (id, summary)) in sessions.iter().enumerate() {
+            println!("{}  {id}  {summary}", index + 1);
         }
         return Ok(0);
     }
@@ -148,11 +264,18 @@ async fn real_main() -> Result<i32> {
     // ---- resume a session, if asked ----
     let mut history: Vec<event::Message> = Vec::new();
     let mut resumed: Option<PathBuf> = None;
-    if args.continue_last {
-        match session::latest(&config::sessions_dir())? {
+    // Kept whole, not just its messages: the transcript is printed from it after the
+    // terminal exists, and an empty screen cannot be told apart from a failed load.
+    let mut resumed_history: Option<session::LoadedSession> = None;
+    if args.continue_last || args.resume.is_some() {
+        let target = match &args.resume {
+            Some(t) => Some(resolve_session(t)?),
+            None => session::latest(&config::sessions_dir())?,
+        };
+        match target {
             Some(path) => {
                 let loaded = session::load(&path)?;
-                history = loaded.messages;
+                history = loaded.messages.clone();
                 if !loaded.model.is_empty() && args.model.is_none() {
                     provider_cfg.model = loaded.model.clone();
                 }
@@ -164,12 +287,26 @@ async fn real_main() -> Result<i32> {
                     history.len()
                 );
                 resumed = Some(path);
+                resumed_history = Some(loaded);
             }
             None => eprintln!("flint: no previous session found; starting a new one."),
         }
     }
 
-    let provider = provider::Provider::new(provider_cfg.clone())?;
+    // Built before the terminal only because the writer needs the model name; a failure
+    // is *deferred*, not fatal.
+    //
+    // A rescue tool must open its own history when the network is down -- that history is
+    // how you find out what you were doing when you broke it. Dying during startup
+    // because a proxy is closed takes away the one thing that still works.
+    let mut provider_error: Option<String> = None;
+    let provider = match provider::Provider::new(provider_cfg.clone()) {
+        Ok(p) => p,
+        Err(e) => {
+            provider_error = Some(format!("{e:#}"));
+            provider::Provider::new(provider::Provider::fallback_config())?
+        }
+    };
     // Continuing a conversation appends to the same file, so nothing said after
     // `--continue` is lost.
     let writer = match &resumed {
@@ -226,6 +363,23 @@ async fn real_main() -> Result<i32> {
     // narrated -- printing a file the model read is not "more verbose", it is a
     // different thing.
     printer.set_tool_detail(cfg.tool_detail);
+
+    // A provider that could not be configured is reported now that something can be
+    // read, rather than having taken the whole process down before the terminal existed.
+    if let Some(error) = &provider_error {
+        printer.term().line(format_args!("{} {error}", printer.style(RED, "warning:")));
+        printer.term().line(format_args!(
+            "{}",
+            printer.dim("  flint still works for reading history and running commands")
+        ));
+    }
+
+    // Show what was resumed. Loading a conversation and showing an empty screen is
+    // indistinguishable from loading nothing, and the transcript is the reason for
+    // resuming at all.
+    if let Some(loaded) = &resumed_history {
+        print_transcript(&loaded.messages, &printer);
+    }
 
     // ---- one-shot ----
     if let Some(prompt) = args.prompt {
@@ -640,6 +794,9 @@ async fn provider_wizard(
         } else {
             Some(env_name)
         },
+        // Inherited from the config's shell proxy, which is what a user setting up a
+        // provider behind one has already told us.
+        proxy: cfg.proxy.clone(),
     };
 
     let had_key = !p.resolved_key().trim().is_empty();
@@ -746,7 +903,8 @@ async fn handle_command(
   /detail [on|off]      print tool output (off: one line per result)
   /readonly [on|off]    toggle the write guard
   /tools                list available tools
-  /sessions             list past sessions
+  /sessions             list past sessions, numbered
+  /resume <n|id>        switch to one of them
   /new                  start a fresh conversation
   /reload               re-read the config file (after editing it yourself)
   !<command>            run a shell command without the model
@@ -1054,9 +1212,61 @@ async fn handle_command(
             if sessions.is_empty() {
                 printer.term().line(format_args!("(no sessions yet)"));
             }
-            for (id, summary) in sessions {
-                printer.term().line(format_args!("  {id}  {summary}"));
+            // Numbered so the number can be typed straight back: `/resume 3`. The id is
+            // still shown, because that is the name of the file and the thing to quote.
+            for (index, (id, summary)) in sessions.iter().enumerate() {
+                printer.term().line(format_args!("  {:>2}. {id}  {summary}", index + 1));
             }
+            if !sessions.is_empty() {
+                printer.term().line(format_args!(
+                    "{}",
+                    printer.dim("     /resume <number|id> to continue one of these")
+                ));
+            }
+        }
+
+        "/resume" => {
+            // Switch conversations without restarting.
+            //
+            // Restarting is what `--resume` needs, but this is a rescue tool: the process
+            // may be the only thing still working on the machine, and losing it to change
+            // which conversation is on screen would be a poor trade. `/new` already
+            // rebuilds the agent, so this only changes which file it appends to.
+            if arg.is_empty() {
+                printer
+                    .term()
+                    .line(format_args!("usage: /resume <number|id>  (/sessions to list)"));
+                return Ok(Flow::Continue);
+            }
+            let path = resolve_session(arg)?;
+            let loaded = session::load(&path)?;
+            let count = loaded.messages.len();
+            if !loaded.model.is_empty() {
+                provider_cfg.model = loaded.model.clone();
+            }
+            let provider = provider::Provider::new(provider_cfg.clone())?;
+            let writer = Some(session::SessionWriter::resume(&path)?);
+            let mut new_agent = agent::Agent::new(
+                cfg,
+                provider,
+                agent.readonly(),
+                agent.cwd().clone(),
+                writer,
+            );
+            *new_agent.history_mut() = loaded.messages;
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            printer.term().line(format_args!(
+                "{green}resumed:{reset} {name} ({count} messages){}",
+                if loaded.model.is_empty() {
+                    String::new()
+                } else {
+                    format!(", model {}", provider_cfg.model)
+                }
+            ));
+            return Ok(Flow::NewAgent(new_agent));
         }
 
         "/reload" => {
@@ -1203,6 +1413,10 @@ async fn run_turn(
                     }
                 }
                 Event::ToolStart { id, name } => {
+                    // Start the clock as soon as the tool is known, not when its
+                    // arguments have finished streaming: the wait begins here, and a
+                    // tool that never returns is exactly the case this is for.
+                    printer.term().activity_started(&name);
                     tool_names.insert(id, name);
                 }
                 Event::ToolArgs { id, args } => {
@@ -1213,6 +1427,7 @@ async fn run_turn(
                     // The name comes from the matching ToolStart: the result is
                     // reported as "✓ read" or "✓ bash", so the transcript says what
                     // happened rather than just that something did.
+                    printer.term().activity_done();
                     let name = tool_names.get(&id).cloned().unwrap_or_default();
                     printer.tool_result(&name, &output, ok);
                     tool_names.remove(&id);
@@ -1247,11 +1462,20 @@ async fn run_turn(
                         result = Some(r);
                         break;
                     }
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(2)) => {}
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(2)) => {
+                        // Keep the running-status line moving. This loop is already
+                        // waiting, so the clock costs one comparison per tick and only
+                        // repaints when its number changes.
+                        printer.term().tick();
+                    }
                 }
             }
             (result, steering)
         };
+
+        // Whatever happened, nothing is running now: leaving a stale clock on the strip
+        // would be worse than showing none.
+        printer.term().activity_done();
 
         match steering {
             None => {
@@ -1356,7 +1580,7 @@ fn show_thinking(verbosity: u8, fragment: &str) -> bool {
 /// Reduce a tool's JSON arguments to the one value worth showing on a line.
 fn parse_args(argv: Vec<String>) -> Result<Args> {
     let mut args = Args::default();
-    let mut iter = argv.into_iter();
+    let mut iter = argv.into_iter().peekable();
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -1367,7 +1591,18 @@ fn parse_args(argv: Vec<String>) -> Result<Args> {
                         .ok_or_else(|| anyhow!("--prompt requires a value"))?,
                 )
             }
-            "-c" | "--continue" | "--resume" => args.continue_last = true,
+            "-c" | "--continue" => args.continue_last = true,
+            // `--resume` with a value is a specific session; bare, it means the most
+            // recent one, which is what it used to mean and what `-c` already does.
+            "--resume" => {
+                let next = iter.peek().cloned().unwrap_or_default();
+                if next.is_empty() || next.starts_with('-') || next == "exec" {
+                    args.continue_last = true;
+                } else {
+                    iter.next();
+                    args.resume = Some(next);
+                }
+            }
             "--provider" => {
                 args.provider = Some(
                     iter.next()
@@ -1425,8 +1660,9 @@ fn print_help(color: bool, term: &Term) {
   flint -p \"<prompt>\"              one-shot, prints the answer and exits
   flint <words...>                 same as -p
   flint --continue                 resume the most recent session
+  flint --resume <n|id>            resume a particular session
   flint exec <command>             run a command directly (no model, no network)
-  flint --list-sessions            show saved sessions
+  flint --list-sessions            list saved sessions, numbered for --resume
 
 {b}OPTIONS{r}
   --provider <name>   use a specific provider          (config: default_provider)

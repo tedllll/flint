@@ -88,9 +88,16 @@ flint                            # interactive session
 flint -p "why is my dsh broken"  # one-shot
 flint why is my dsh broken       # same thing
 flint --continue                 # resume the last session
+flint --resume 3                 # resume a particular one (see the list)
+flint --resume 1789116592        # ...by id prefix, or by path to the .jsonl
 flint exec "npm i -g @deepseek-ai/dsh"   # no model involved
-flint --list-sessions
+flint --list-sessions            # numbered, so --resume N works
 ```
+
+Resuming prints the tail of the transcript, so "did it load?" is answerable at a
+glance. Loading also happens when there is no network: an unreachable provider is
+reported and the session still opens, because the history is how you find out what
+you were doing when you broke it.
 
 Inside the REPL:
 
@@ -105,7 +112,8 @@ Inside the REPL:
 | `/detail [on\|off]` | print tool output (default off: one line per result) |
 | `/readonly [on\|off]` | toggle the write guard |
 | `/tools` | list tools |
-| `/sessions` | list past sessions |
+| `/sessions` | list past sessions, numbered |
+| `/resume <n\|id>` | switch to one of them, without restarting |
 | `/new` | start a fresh conversation |
 | `/config [edit]` | show or change shell, steps, proxy |
 | `/reload` | re-read the config file after editing it yourself |
@@ -163,7 +171,25 @@ Releases are built by GitHub Actions for Linux (x86_64/aarch64, musl), macOS
 
 Sessions are append-only JSONL at `~/.flint/sessions/<id>.jsonl`, one event per
 line. A damaged line is skipped and reported rather than taking the session
-down.
+down. A resumed session is appended to, not rewritten, so nothing said after
+`--continue` is lost.
+
+### Proxies
+
+By default flint connects **directly**, and that is a deliberate choice rather
+than an absence of one. `reqwest` would otherwise apply the platform's proxy
+setting -- on Windows, the registry one under Internet Settings, which is not an
+environment variable and is invisible from inside flint. A proxy client that is
+installed but has no server selected leaves that setting enabled and pointing at
+a closed port, so every request dies inside a tunnel that nothing owns. The
+symptom is a working network, a working `curl`, and an agent that cannot connect,
+with no configured proxy to blame because there is not one.
+
+The only proxy used is the one written down: `proxy` on a provider in
+`config.toml`, or the top-level `proxy` that the `bash` tool exports to its
+children. When a request fails, the error names the proxy that was in force and
+whether anything is listening on it, because "the proxy is up and the remote is
+down" and "the proxy is not running" need opposite responses.
 
 The provider layer implements the OpenAI streaming protocol only, including the
 two parts that are easy to get wrong: SSE frames split across network chunks

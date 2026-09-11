@@ -29,6 +29,27 @@ pub struct Provider {
     client: reqwest::Client,
 }
 
+/// Which proxy to reach this provider through -- an explicit one, or none.
+///
+/// "None" is the default and it means *direct*, not "whatever the platform thinks".
+/// reqwest otherwise picks up the Windows system proxy from the registry, which is a
+/// setting the user may not have chosen and cannot see from flint: on a machine where a
+/// proxy client is installed but has no server selected, `ProxyEnable=1` points at a
+/// closed port and every request dies inside a tunnel nothing owns. The symptom is a
+/// working network and an agent that cannot connect -- with no configured proxy to
+/// blame, because there is not one.
+///
+/// So the only proxy is the one written down for this provider. An explicit setting is
+/// honoured; silence means connect directly.
+pub fn configured_proxy(config: &ProviderConfig) -> Option<String> {
+    config
+        .proxy
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| p.to_string())
+}
+
 /// Whether a base URL points at a local model server.
 ///
 /// Used to keep local endpoints off any configured proxy: the local provider is
@@ -87,17 +108,72 @@ fn ensure_tool_calls_are_answered(messages: &[Message]) -> Vec<Message> {
 }
 
 impl Provider {
+    /// A client that is valid but points nowhere, for when the real one cannot be built.
+    ///
+    /// Used so a failure to configure the client does not stop the process from opening
+    /// its own session history. Nothing is ever sent through it: the deferred error is
+    /// reported before the first request.
+    pub fn fallback_config() -> ProviderConfig {
+        ProviderConfig {
+            name: "unavailable".to_string(),
+            base_url: "http://127.0.0.1:1".to_string(),
+            api_key: String::new(),
+            model: String::new(),
+            api_key_env: None,
+            proxy: None,
+        }
+    }
+
+    /// One line naming the proxy in force, for an error message.
+    ///
+    /// Only ever present when one was configured, so its absence is a real signal: the
+    /// request went out directly. Silence is the useful default here -- there is nothing
+    /// to say about a proxy when there is not one.
+    fn proxy_note(&self) -> Option<String> {
+        let proxy = configured_proxy(&self.config)?;
+        let host_port = proxy
+            .rsplit("://")
+            .next()
+            .unwrap_or(&proxy)
+            .trim_end_matches('/')
+            .to_string();
+        let listening = host_port
+            .parse()
+            .ok()
+            .and_then(|addr| {
+                std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(300)).ok()
+            })
+            .is_some();
+        Some(format!(
+            "  configured proxy: {proxy}{}",
+            if listening {
+                ""
+            } else {
+                "  (nothing is listening there)"
+            }
+        ))
+    }
+
     pub fn new(config: ProviderConfig) -> Result<Self> {
         let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(30));
-        // No total timeout: a long generation is not a failure.
+        // No total timeout here: a long generation is not a failure. The wait for the
+        // *response* is bounded at the call site instead.
 
-        // A local endpoint (Ollama, llama.cpp, vLLM) must never be sent through
-        // a proxy. On a machine that has HTTP_PROXY set for the outside world,
-        // routing 127.0.0.1 through it breaks the local model entirely -- and
-        // the local provider is the fallback that still works when the network
-        // is the thing that is broken.
-        if is_local_endpoint(&config.base_url) {
-            builder = builder.no_proxy();
+        // Direct by default. `no_proxy()` is not decoration: without it reqwest applies
+        // the platform's proxy setting, which on Windows comes from the registry and is
+        // invisible from here. A configured proxy is then added on top, deliberately and
+        // explicitly, so what is used is exactly what is written down.
+        builder = builder.no_proxy();
+        if let Some(proxy) = configured_proxy(&config) {
+            let url = if proxy.contains("://") {
+                proxy.clone()
+            } else {
+                format!("http://{proxy}")
+            };
+            builder = builder.proxy(
+                reqwest::Proxy::all(&url)
+                    .with_context(|| format!("proxy '{proxy}' is not a usable URL"))?,
+            );
         }
 
         let client = builder.build().context("cannot build HTTP client")?;
@@ -150,10 +226,31 @@ impl Provider {
             req = req.bearer_auth(&key);
         }
 
-        let resp = req
-            .send()
-            .await
-            .with_context(|| format!("request to {} failed", self.config.endpoint()))?;
+        // A dead network has to be *named*, and so does the proxy in front of it. The
+        // reader's question is whether to wait, fix the cable, start the proxy, or clear
+        // the proxy setting -- and reqwest's bare "error sending request" answers none
+        // of them.
+        let resp = match tokio::time::timeout(Duration::from_secs(180), req.send()).await {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(e)) => {
+                let endpoint = self.config.endpoint();
+                return Err(anyhow!(
+                    "no network -- the request to {endpoint} did not get out.{}{e:#}",
+                    self.proxy_note()
+                        .map(|n| format!("\n{n}\n  "))
+                        .unwrap_or_default()
+                ));
+            }
+            Err(_) => {
+                return Err(anyhow!(
+                    "no response from {} after 180s -- the connection was established but \
+                     the server never answered. Usually the network dropped, or a proxy is \
+                     swallowing the request.{}",
+                    self.config.endpoint(),
+                    self.proxy_note().map(|n| format!("\n{n}")).unwrap_or_default()
+                ))
+            }
+        };
 
         let status = resp.status();
         if !status.is_success() {
