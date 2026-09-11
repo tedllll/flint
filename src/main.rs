@@ -36,6 +36,19 @@ struct Args {
     cwd: Option<String>,
 }
 
+/// Whether ANSI colour may be emitted.
+///
+/// Honours `--no-color` and `NO_COLOR`, and gives up automatically when stdout is
+/// not a terminal: escape codes in a pipeline are noise that breaks
+/// `flint --help | less` and `| grep`.
+///
+/// Called from `main` as well as `real_main`, because the top-level error handler
+/// prints before `real_main` can report anything -- hardcoding colour there leaks
+/// escapes into every redirected failure.
+fn colour_allowed(no_color: bool) -> bool {
+    !no_color && std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
+}
+
 fn main() {
     // Set up the async runtime by hand: it keeps `#[tokio::main]` out of the
     // way and lets us return a normal exit code from any failure.
@@ -47,10 +60,14 @@ fn main() {
         }
     };
 
+    // The only thing needed to report a startup failure in the right colours.
+    let color = colour_allowed(std::env::args().any(|a| a == "--no-color"));
+
     let code = match runtime.block_on(real_main()) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("\x1b[31mflint: error:\x1b[0m {e:#}");
+            let (red, reset) = if color { ("\x1b[31m", "\x1b[0m") } else { ("", "") };
+            eprintln!("{red}flint: error:{reset} {e:#}");
             1
         }
     };
@@ -60,12 +77,8 @@ fn main() {
 async fn real_main() -> Result<i32> {
     let args = parse_args(std::env::args().skip(1).collect())?;
 
-    // Decide colour before anything prints. Honours NO_COLOR as well as the flag,
-    // and gives up automatically when the output is not a terminal -- escape codes
-    // in a pipeline are noise that breaks `flint --help | less` and `| grep`.
-    let color = !args.no_color
-        && std::env::var_os("NO_COLOR").is_none()
-        && std::io::stdout().is_terminal();
+    // Decide colour before anything prints.
+    let color = colour_allowed(args.no_color);
 
     if args.help {
         print_help(color, &Term::plain());
@@ -1106,7 +1119,10 @@ async fn run_turn(
     loop {
         let mut tool_names: HashMap<String, String> = HashMap::new();
         let mut streamed_text = false;
-        let mut buffer = String::new();
+        // The answer so far. Streamed output is redrawn in full on every fragment,
+        // because a fragment is not a line: it can stop in the middle of a word,
+        // and only the whole text can be placed correctly.
+        let mut answer = String::new();
 
         // The turn and its output closure are confined to this scope: the future
         // holds a mutable borrow of `buffer`, and that borrow has to end before
@@ -1114,23 +1130,24 @@ async fn run_turn(
         let (result, steering) = {
             let mut turn = Box::pin(agent.run(&current, |event| match event {
                 Event::Text(t) => {
-                    buffer.push_str(&t);
-                    while let Some(pos) = buffer.find('\n') {
-                        let line: String = buffer.drain(..=pos).collect();
-                        printer.term().text(format_args!("{line}"));
+                    if printer.term().interactive() {
+                        // The answer is redrawn in full, so the terminal always
+                        // shows a complete line even when a fragment stops
+                        // mid-word.
+                        answer.push_str(&t);
+                        printer.term().stream(&answer);
+                    } else {
+                        // A pipeline gets each fragment once. Re-rendering here
+                        // would print the whole answer again per fragment.
+                        printer.term().stream(&t);
                     }
-                    if !buffer.is_empty() {
-                        printer.term().text(format_args!("{buffer}"));
-                        buffer.clear();
-                    }
-                    std::io::stdout().flush().ok();
                     streamed_text = true;
                 }
                 Event::Reasoning(t) => {
                     // The model thinking out loud. Worth watching when something
                     // is going wrong, noise the rest of the time.
                     if printer.verbosity() >= CHATTY {
-                        printer.term().text(format_args!("{}", printer.style(DIM, &t)));
+                        printer.term().stream(&printer.style(DIM, &t));
                         std::io::stdout().flush().ok();
                     }
                 }
@@ -1182,12 +1199,9 @@ async fn run_turn(
 
         match steering {
             None => {
-                // The turn finished: flush whatever is still buffered, then
-                // surface a transport error if there was one.
-                if !buffer.is_empty() {
-                    printer.term().text(format_args!("{buffer}"));
-                    std::io::stdout().flush().ok();
-                }
+                // The turn finished. `stream` already rendered the whole answer, so
+                // there is no trailing fragment left to flush -- only the line
+                // break that ends it.
                 if streamed_text {
                     printer.term().blank();
                 }
@@ -1200,7 +1214,7 @@ async fn run_turn(
                 if text.trim().is_empty() {
                     continue;
                 }
-                if streamed_text || !buffer.is_empty() {
+                if streamed_text {
                     // A partial answer is on screen and is no longer valid.
                     printer.term().blank();
                 }

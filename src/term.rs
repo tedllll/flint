@@ -114,6 +114,8 @@ pub struct Term {
     input: Mutex<Input>,
     /// Text before the input, e.g. "> " or "  name: ".
     prefix: Mutex<String>,
+    /// Row the streamed answer is currently being rendered from.
+    stream_row: AtomicU16,
 }
 
 impl Term {
@@ -128,6 +130,7 @@ impl Term {
             input_row: AtomicU16::new(24),
             input: Mutex::new(Input::default()),
             prefix: Mutex::new("> ".to_string()),
+            stream_row: AtomicU16::new(23),
         }
     }
 
@@ -147,6 +150,7 @@ impl Term {
             input_row: AtomicU16::new(24),
             input: Mutex::new(Input::default()),
             prefix: Mutex::new("> ".to_string()),
+            stream_row: AtomicU16::new(23),
         };
 
         if interactive {
@@ -196,6 +200,35 @@ impl Term {
         let _ = out.flush();
     }
 
+    /// Row the next line of committed output begins on.
+    ///
+    /// Streamed answers are rendered at the bottom of the region and then scrolled
+    /// up as the turn ends, so the committed cursor always comes back to the
+    /// bottom. That invariant is what lets the two paths share one cursor.
+    fn out_row(&self) -> u16 {
+        self.stream_row.load(Ordering::Relaxed).max(1)
+    }
+
+    /// Move to `row` and blank it, so a write starts on a clean line.
+    fn seek(out: &mut std::io::Stdout, row: u16) {
+        let _ = write!(out, "\x1b[{};1H\r\x1b[2K", row);
+    }
+
+    /// Scroll the region one row, which is what advances the committed cursor.
+    ///
+    /// A newline on the bottom margin scrolls the region and leaves the cursor on
+    /// that same row, so the write that preceded it is now one row higher and the
+    /// row itself is blank for the next line.
+    fn roll(&self, out: &mut std::io::Stdout, row: u16) -> u16 {
+        let bottom = self.bottom.load(Ordering::Relaxed);
+        let _ = write!(out, "\x1b[{};1H\r\n", row);
+        if row >= bottom {
+            bottom
+        } else {
+            row + 1
+        }
+    }
+
     /// Write one complete line of output, then put the input row back.
     ///
     /// Takes `Arguments` so that call sites can stay `println!`-shaped: the
@@ -207,12 +240,13 @@ impl Term {
             return;
         }
         let mut out = std::io::stdout();
-        // Bottom of the scroll region: writing a newline here scrolls the region
-        // instead of moving past it, so the reserved row is never touched.
-        let _ = write!(out, "\x1b[{};1H\r\x1b[2K", self.bottom.load(Ordering::Relaxed));
+        let row = self.out_row();
+        Self::seek(&mut out, row);
         let _ = out.write_fmt(args);
-        let _ = write!(out, "\r\n");
+        let next = self.roll(&mut out, row);
+        let _ = write!(out, "\x1b[?25l");
         let _ = out.flush();
+        self.stream_row.store(next, Ordering::Relaxed);
         self.redraw();
     }
 
@@ -222,33 +256,70 @@ impl Term {
         self.line(format_args!(""));
     }
 
-    /// Write text verbatim, adding a newline only if it does not already end in
-    /// one.
+    /// Write text owned by a subprocess, adding a newline only if it lacks one.
     ///
-    /// For output owned by a subprocess: `!cmd` and `flint exec` must reproduce
-    /// the command's bytes exactly, and adding a newline to output that already
-    /// has one puts a blank line between every pair of commands.
+    /// `!cmd` and `flint exec` must reproduce the command's bytes, and adding a
+    /// newline to output that already has one puts a blank line between every
+    /// pair of commands.
     pub fn text_ln(&self, text: &str) {
         if text.is_empty() {
             return;
         }
-        self.text(format_args!("{text}"));
-        if !text.ends_with('\n') {
-            self.line(format_args!(""));
+        // Each line goes through `line`, so a multi-line result is placed the
+        // same way as any other output.
+        for part in text.trim_end_matches(['\n', '\r']).split('\n') {
+            self.line(format_args!("{}", part.trim_end_matches('\r')));
         }
     }
 
-    /// Write text with no trailing newline, for streamed model output where the
-    /// caller already holds a complete line.
-    pub fn text(&self, args: std::fmt::Arguments<'_>) {
+    /// Render a streamed answer, anchored one row above the bottom margin.
+    ///
+    /// The accumulated text is redrawn in full on every fragment, which is what
+    /// makes a stream that splits mid-word read as one continuous line: each
+    /// fragment re-renders the whole answer, so the terminal always shows the
+    /// complete text rather than the last fragment alone.
+    ///
+    /// The block is bottom-anchored and grows upward, so a one-line answer is
+    /// rewritten in place instead of being left behind as a new line per fragment.
+    /// The committed cursor is deliberately not touched: it is advanced once, when
+    /// the turn ends and the answer scrolls up.
+    pub fn stream(&self, text: &str) {
         if !self.interactive {
-            print!("{args}");
+            print!("{text}");
             let _ = std::io::stdout().flush();
             return;
         }
+        let bottom = self.bottom.load(Ordering::Relaxed);
+        let rows: Vec<&str> = text.split('\n').collect();
+        // One row is kept below the block: that is where the next committed line
+        // goes, and leaving it free is why the end of a turn does not eat the last
+        // line of the answer.
+        let lowest = bottom.saturating_sub(1).max(1);
+        let anchor = (self.stream_row.load(Ordering::Relaxed)).max(1);
+        let over = (anchor as usize + rows.len()).saturating_sub(lowest as usize + 1);
+        let start = anchor.saturating_sub(over as u16).max(1);
+
         let mut out = std::io::stdout();
-        let _ = write!(out, "\x1b[{};1H\r\x1b[2K", self.bottom.load(Ordering::Relaxed));
-        let _ = out.write_fmt(args);
+        let mut last = None;
+        for (n, line) in rows.iter().enumerate() {
+            let r = start + n as u16;
+            if r > lowest {
+                break;
+            }
+            let _ = write!(out, "\x1b[{};1H\x1b[2K{line}", r);
+            last = Some((r, line.chars().count()));
+        }
+        // Park the cursor after the text. The column matters: writing newlines
+        // instead would walk the answer down onto the reserved row, and the next
+        // fragment has to continue the same line rather than start a new one.
+        //
+        // `CSI {row};{col}H` takes a 1-based column, so `len` characters end at
+        // column `len`, not `len + 1` -- the difference is one stray leading space
+        // on the rendered answer.
+        if let Some((r, len)) = last {
+            let _ = write!(out, "\x1b[{};{}H", r, len.max(1));
+        }
+        let _ = write!(out, "\x1b[?25l");
         let _ = out.flush();
         self.redraw();
     }
