@@ -227,6 +227,9 @@ pub struct Term {
     stream_text: Mutex<String>,
     /// How many of the streaming answer's lines have already gone to history.
     committed: AtomicU16,
+    /// Where the last frame's visible slice began, so the rows it used and this frame
+    /// does not can be cleared.
+    stream_first: AtomicU16,
     /// The rows the last frame drew into the answer strip.
     ///
     /// Needed to erase the tail of rows that have just got shorter. Clearing the
@@ -263,6 +266,7 @@ impl Term {
             stream_text: Mutex::new(String::new()),
             committed: AtomicU16::new(0),
             stream_rows: Mutex::new(Vec::new()),
+            stream_first: AtomicU16::new(0),
             activity: Mutex::new(None),
             activity_shown: AtomicU16::new(0),
         }
@@ -299,6 +303,7 @@ impl Term {
             stream_text: Mutex::new(String::new()),
             committed: AtomicU16::new(0),
             stream_rows: Mutex::new(Vec::new()),
+            stream_first: AtomicU16::new(0),
             activity: Mutex::new(None),
             activity_shown: AtomicU16::new(0),
         };
@@ -478,6 +483,24 @@ impl Term {
         self.emit_history(&format!("{args}"));
     }
 
+    /// Say something that is not part of the conversation.
+    ///
+    /// Goes through the transcript machinery rather than straight to stderr, because a
+    /// stray write lands wherever the cursor is -- inside the answer strip -- and tears
+    /// the layout apart. `line` commits the half-written answer first and the next
+    /// fragment redraws the strip, so the notice reads as a line above a continuing
+    /// answer rather than overwriting one.
+    ///
+    /// Non-interactive differs on purpose: the answer is on stdout and has to stay
+    /// parseable, so a notice goes to stderr even though the two share a terminal.
+    pub fn notice(&self, message: &str) {
+        if !self.interactive {
+            eprintln!("flint: {message}");
+            return;
+        }
+        self.line(format_args!("{message}"));
+    }
+
     /// An empty line. `format_args!()` is not a valid format string, so a bare
     /// `println!()` needs its own path.
     pub fn blank(&self) {
@@ -540,6 +563,7 @@ impl Term {
     /// wrapping here keeps the row count honest for every caller.
     fn insert_history(&self, lines: &[String]) {
 
+
         let mut wrapped: Vec<String> = Vec::new();
         for line in lines {
             let cols = self.screen_cols.load(Ordering::Relaxed);
@@ -562,7 +586,22 @@ impl Term {
 
     /// One line of committed output.
     fn emit_history(&self, text: &str) {
+        if !self.interactive {
+            return;
+        }
+        // The status line lives on a row *below* the scroll region, so inserting a row
+        // above it pushes it up the screen -- leaving a stale clock stranded in the middle
+        // of the transcript until the next tick. Clear it first; the caller repaints.
+        let row = self.input_row.load(Ordering::Relaxed).saturating_sub(1);
+        if self.activity.lock().unwrap().is_some() {
+            let mut out = std::io::stdout();
+            let _ = write!(out, "\x1b[{};1H\x1b[2K", row);
+            let _ = out.flush();
+        }
         self.insert_history(&[text.to_string()]);
+        if self.activity.lock().unwrap().is_some() {
+            self.paint_activity();
+        }
     }
 
     /// Render a streamed answer into the answer strip.
@@ -578,6 +617,8 @@ impl Term {
     /// lines that no longer fit at its top are handed to history in order, so the
     /// transcript keeps the whole answer even though the slice shows only its tail.
     pub fn stream(&self, text: &str) {
+        // Not a terminal: no strip, no cursor games, just the bytes. A notice during a
+        // piped run goes to stderr so the answer on stdout stays parseable.
         if !self.interactive {
             print!("{text}");
             let _ = std::io::stdout().flush();
@@ -599,6 +640,7 @@ impl Term {
             // boundary, and the strip is already blank.
             let after_something = !held.is_empty();
             drop(held);
+
             if fresh_segment && after_something {
                 self.close_stream();
                 self.clear_viewport();
@@ -641,12 +683,49 @@ impl Term {
             }
         }
 
-        let first = height.saturating_sub(capacity) as usize;
-        let visible = &rows[first..];
+        // Draw from the first row that has *not* been committed, not from the overflow
+        // boundary. The two differ after a segment reset -- a tall answer has had rows
+        // committed, the next segment shrinks the text, so the boundary moves back below
+        // what is already in the transcript -- and drawing from the boundary then puts
+        // those committed rows back on screen, directly beneath a transcript that already
+        // has them.
+        let committed_now = self.committed.load(Ordering::Relaxed) as usize;
+        let first = (height.saturating_sub(capacity) as usize).max(committed_now);
+        let visible = &rows[first.min(rows.len())..];
         let start = top + capacity.saturating_sub(visible.len() as u16);
         let mut out = std::io::stdout();
         let previous = std::mem::take(&mut *self.stream_rows.lock().unwrap());
+        let previous_first = self.stream_first.swap(first as u16, Ordering::Relaxed) as usize;
 
+        let previous_drawn = previous.len();
+        // A row the previous frame drew starts where its slice started, which is the top
+        // of the strip plus whatever padding its length required.
+        let previous_start_frame =
+            top + capacity.saturating_sub(previous_drawn.min(capacity as usize) as u16);
+
+        // Which row of the answer each strip row held last time, compared per row rather
+        // than by "did the slice move".
+        //
+        // The slice can lose its *first* row without its start changing at all: the text
+        // is cumulative, so as the answer grows the visible window slides while the row it
+        // is drawn on stays put. A row that is no longer part of the slice has to be
+        // erased, or the earlier part of the answer sits in the strip while the rest draws
+        // underneath it -- the same sentence, visible twice, once just above its own
+        // continuation.
+        //
+        // Only rows the previous frame actually drew are considered: the rows below it
+        // were erased then, and the ones above belong to history.
+        for n in 0..previous_drawn {
+            let strip_row = previous_start_frame + n as u16;
+            if strip_row < top || strip_row > last {
+                continue;
+            }
+            let was_showing = previous_first + n;
+            let still_showing = was_showing >= first && was_showing < first + visible.len();
+            if !still_showing {
+                let _ = write!(out, "\x1b[{};1H\x1b[2K", strip_row);
+            }
+        }
         // Rewrite each visible row in place, then erase whatever the row held before
         // and no longer needs.
         //
@@ -719,6 +798,7 @@ impl Term {
         // would commit the same rows a second time. Taking it makes the function
         // idempotent, which is what its callers already assume.
         let text = std::mem::take(&mut *self.stream_text.lock().unwrap());
+
         if text.is_empty() {
             return;
         }
@@ -762,6 +842,7 @@ impl Term {
 
     /// Blank the answer strip, so a finished answer is not left on screen twice.
     fn clear_viewport(&self) {
+
         let top = self.viewport_top.load(Ordering::Relaxed);
         let input = self.input_row.load(Ordering::Relaxed);
         let mut out = std::io::stdout();

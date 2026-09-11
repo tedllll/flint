@@ -118,6 +118,75 @@ fn the_capture_helper_writes_where_the_replay_expects() {
     assert!(capture_path().ends_with("target/term-capture.bin"));
 }
 
+#[test]
+fn a_notice_mid_answer_does_not_tear_the_layout() {
+    let _guard = stdout_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("term-notice.bin");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let restore = redirect_stdout(&path);
+
+    std::env::set_var("FLINT_TERM_CAPTURE", "1");
+    std::env::set_var("FLINT_TERM_SIZE", "70x24");
+    let term = Term::start().expect("term");
+    term.line(format_args!("> 检查网络"));
+
+    term.stream("第一段：正在检查网络连通性");
+    // The notice arrives mid-answer, as a long command's warning does.
+    term.notice("this command has been running for 20s and may be stuck");
+    term.stream("第一段：正在检查网络连通性第二段继续输出");
+    term.end_stream();
+    restore();
+    std::env::remove_var("FLINT_TERM_CAPTURE");
+    std::env::remove_var("FLINT_TERM_SIZE");
+
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join("vtscreen.js");
+    let out = std::process::Command::new("node")
+        .arg(&script)
+        .arg(&path)
+        .arg("24")
+        .arg("70")
+        .output()
+        .expect("node scripts/vtscreen.js");
+    let screen = String::from_utf8_lossy(&out.stdout).to_string();
+
+    assert!(
+        screen.contains("may be stuck"),
+        "the notice is missing from the screen:\n{screen}"
+    );
+    // The notice gets its own row: sharing one with the answer is exactly the tear this
+    // is about.
+    let notice_row = screen
+        .lines()
+        .find(|l| l.contains("may be stuck"))
+        .expect("the notice should be on some row");
+    assert!(
+        !notice_row.contains("正在检查网络"),
+        "the notice was written over the answer:\n{notice_row}"
+    );
+    assert!(
+        screen.contains("第二段继续输出"),
+        "the answer did not continue after the notice:\n{screen}"
+    );
+
+    let rows: Vec<&str> = screen
+        .lines()
+        .filter_map(|l| l.split_once('|').map(|(_, rest)| rest.trim_end()))
+        .collect();
+    let repeated: Vec<&str> = rows
+        .windows(2)
+        .filter(|w| !w[0].is_empty() && w[0] == w[1])
+        .map(|w| w[0])
+        .collect();
+    assert!(
+        repeated.is_empty(),
+        "the notice left duplicated rows behind: {repeated:?}\n{screen}"
+    );
+}
+
 /// A second, different answer in the same turn must replace the first, not stack on it.
 ///
 /// Reported from a real session: the model narrated "I'll run a few network

@@ -218,6 +218,33 @@ pub struct CommandOutcome {
     pub code: i32,
 }
 
+/// What a UI implements to receive notices: anything callable with a message.
+type NoticeSink = Box<dyn Fn(&str) + Send + Sync>;
+
+/// A hook for notices that have to reach the user while a tool is still running.
+///
+/// A global rather than a parameter because the alternative is threading a callback
+/// through every `run_command_*` signature and every call site, including the tests,
+/// for the sake of one message. The notice cannot go to stderr: when the interactive
+/// terminal is active, stderr lands wherever the cursor happens to be, which is inside
+/// the answer strip, and it tears the layout apart.
+static NOTICE: std::sync::OnceLock<NoticeSink> = std::sync::OnceLock::new();
+
+/// Route notices to the UI. Called once, by the CLI, before the first turn.
+pub fn set_notice_sink(sink: NoticeSink) {
+    let _ = NOTICE.set(sink);
+}
+
+/// Report something to the user without disturbing whatever is on screen.
+pub fn notice(message: &str) {
+    match NOTICE.get() {
+        Some(sink) => sink(message),
+        // No UI has claimed the notices (a test, or an embedder): stderr is still better
+        // than silence, and there is no layout to protect.
+        None => eprintln!("flint: {message}"),
+    }
+}
+
 impl CommandOutcome {
     pub fn success(&self) -> bool {
         self.code == 0
@@ -314,46 +341,56 @@ pub async fn run_command_detailed(
         cmd.env("all_proxy", proxy);
     }
 
+    // `kill_on_drop` as well as the explicit kill below. The explicit one is what
+    // actually reaps the process; this is the backstop for every *other* way the future
+    // can end -- an interrupt drops the turn, and a dropped turn must not leave a build
+    // running behind it.
+    cmd.kill_on_drop(true);
     let child = cmd
         .spawn()
         .with_context(|| format!("cannot spawn shell '{}'", shell[0]))?;
 
-    // The pipes have to be drained while the process runs, and only one task may own
-    // it: `select` on the read future keeps draining, and the branch that waits for the
-    // child never tries to read the pipes itself.
+    // The pipes have to be drained while the process runs, and exactly one task may own
+    // that: `select!` polls the read future, and the timers only ever observe.
     //
-    // Polling in short steps rather than waiting on one long timeout, because a command
-    // that hangs is the case the reader most needs to hear about: silence teaches
-    // nothing about whether anything is still happening. When the budget runs out the
-    // process is killed, not merely abandoned -- dropping `wait_with_output` leaves the
-    // child running, which is how a timed-out build keeps the machine busy forever.
+    // Polling rather than one long `timeout`, because the two things a reader needs --
+    // "it is still going" and "it is being killed" -- both have to happen while the
+    // command is running, and a single `timeout(..).await` can say neither.
     let total = Duration::from_secs(timeout_secs);
+    let stuck_at = Duration::from_secs(STUCK_AFTER_SECS);
     let started = std::time::Instant::now();
     let mut warned = false;
-    let wait = child.wait_with_output();
-    tokio::pin!(wait);
+    let drain = child.wait_with_output();
+    tokio::pin!(drain);
     let output = loop {
-        match tokio::time::timeout(Duration::from_millis(250), &mut wait).await {
-            Ok(res) => break res.context("failed to collect command output")?,
-            Err(_) => {
-                let waited = started.elapsed();
-                if !warned && waited >= Duration::from_secs(STUCK_AFTER_SECS) {
-                    warned = true;
-                    eprintln!(
-                        "flint: this command has been running for {} and may be stuck. \
-                         It is killed at {timeout_secs}s; pass a larger `timeout_secs`, or \
-                         write [timeout:N] before the command, if it is genuinely slow.",
-                        elapsed_label(waited)
-                    );
-                }
-                if waited >= total {
-                    return Err(anyhow!(
-                        "killed after {timeout_secs}s with no result. If it is genuinely slow, \
-                         pass a larger timeout_secs or write [timeout:N] before the command; \
-                         if it is waiting for input, it never will -- stdin is closed."
-                    ));
-                }
+        // Recomputed each pass: a `sleep` is only good for one `select!`.
+        let until_stuck = stuck_at.saturating_sub(started.elapsed());
+        let until_kill = total.saturating_sub(started.elapsed());
+        let out_of_time = tokio::select! {
+            done = &mut drain => break done.context("failed to collect command output")?,
+            _ = tokio::time::sleep(until_kill) => true,
+            _ = tokio::time::sleep(until_stuck), if !warned => {
+                warned = true;
+                notice(&format!(
+                    "this command has been running for {} and may be stuck. It is killed at \
+                     {timeout_secs}s; pass a larger `timeout_secs`, or write [timeout:N] before \
+                     the command, if it is genuinely slow.",
+                    elapsed_label(started.elapsed())
+                ));
+                false
             }
+        };
+        if out_of_time {
+            // Returning drops the future, and `kill_on_drop` on the command is what makes
+            // that a kill: the child is terminated and reaped as the future goes out of
+            // scope. That is exactly why it is set -- `wait_with_output` owns the child,
+            // and the borrow checker is right that there is no way to also hold a `&mut`
+            // to kill it explicitly.
+            return Err(anyhow!(
+                "killed after {timeout_secs}s with no result. If it is genuinely slow, pass a \
+                 larger timeout_secs or write [timeout:N] before the command; if it is waiting \
+                 for input, it never will -- stdin is closed."
+            ));
         }
     };
 

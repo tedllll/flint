@@ -207,15 +207,23 @@ impl<'a> Printer<'a> {
     /// material the model has already read -- the reader wants to know *that*
     /// something happened, and only needs the detail when something went wrong.
     ///
-    /// So: a glyph, a verb, and a summary measured in lines. A failure keeps its
-    /// first line, because that is the one thing a reader may have to act on, and
-    /// `/verbose` can still be turned up for the rest.
-    pub fn tool_result(&self, name: &str, output: &str, ok: bool) {
+    /// So: a glyph, a verb, *what it was done to*, and a summary measured in lines. The
+    /// subject matters more than it looks: `✓ read 121 lines` twice in a row is
+    /// unreadable, because nothing distinguishes two calls from one call printed twice --
+    /// which is exactly the fault this transcript had. A failure keeps its first line,
+    /// because that is the one thing a reader may have to act on, and `/detail` can still
+    /// be turned on for the rest.
+    pub fn tool_result(&self, name: &str, args: &str, output: &str, ok: bool) {
         if self.verbosity() == QUIET {
             return;
         }
         let lines: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
-        let label = verb(name);
+        let subject = summarise_args(name, args, ARG_LIMIT);
+        let label = if subject.is_empty() {
+            verb(name)
+        } else {
+            format!("{} {}", verb(name), self.dim(&subject))
+        };
         let mark = if ok {
             self.style(GREEN, "\u{2713}")
         } else {
@@ -394,11 +402,33 @@ mod tests {
     /// Everything a printer emits for one tool result, colour off so the assertions
     /// read as plain text.
     fn result_lines(verbosity: u8, detail: bool, name: &str, output: &str, ok: bool) -> Vec<String> {
+        result_lines_with_args(verbosity, detail, name, "", output, ok)
+    }
+
+    fn result_lines_with_args(
+        verbosity: u8,
+        detail: bool,
+        name: &str,
+        args: &str,
+        output: &str,
+        ok: bool,
+    ) -> Vec<String> {
         let term = Term::plain();
         let printer = Printer::new(false, verbosity, &term);
         printer.set_tool_detail(detail);
-        printer.tool_result(name, output, ok);
+        printer.tool_result(name, args, output, ok);
         printer.take_recorded()
+    }
+
+    #[test]
+    fn a_tool_result_names_what_it_was_done_to() {
+        // Two reads of two files must not read as the same line twice, which is how a
+        // real duplicate in the transcript went unnoticed for a while.
+        let one = result_lines_with_args(NORMAL, false, "read", r#"{"path":"src/lib.rs"}"#, "14 lines", true);
+        let two = result_lines_with_args(NORMAL, false, "read", r#"{"path":"Cargo.toml"}"#, "55 lines", true);
+        assert!(one[0].contains("src/lib.rs"), "no path: {one:?}");
+        assert!(two[0].contains("Cargo.toml"), "no path: {two:?}");
+        assert_ne!(one[0], two[0], "two different reads printed identically");
     }
 
     #[test]
@@ -466,7 +496,7 @@ mod tests {
         let term = Term::plain();
         let printer = Printer::new(false, QUIET, &term);
         printer.tool_call("bash", r#"{"command":"dir"}"#);
-        printer.tool_result("bash", &a_big_listing(), true);
+        printer.tool_result("bash", "ls -la", &a_big_listing(), true);
         assert!(
             printer.take_recorded().is_empty(),
             "quiet printer printed something"

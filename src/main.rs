@@ -364,6 +364,14 @@ async fn real_main() -> Result<i32> {
     // different thing.
     printer.set_tool_detail(cfg.tool_detail);
 
+    // Tools have no terminal handle, and must not write to stderr: with the strip
+    // active, stderr lands inside it and wrecks the layout. They get a line of the
+    // transcript instead.
+    {
+        let sink_term = std::sync::Arc::clone(&term);
+        tools::set_notice_sink(Box::new(move |message| sink_term.notice(message)));
+    }
+
     // A provider that could not be configured is reported now that something can be
     // read, rather than having taken the whole process down before the terminal existed.
     if let Some(error) = &provider_error {
@@ -1366,7 +1374,7 @@ async fn run_turn(
     let mut current = input.to_string();
 
     loop {
-        let mut tool_names: HashMap<String, String> = HashMap::new();
+        let mut tool_names: HashMap<String, (String, String)> = HashMap::new();
         let mut streamed_text = false;
         // The answer so far. Streamed output is redrawn in full on every fragment,
         // because a fragment is not a line: it can stop in the middle of a word,
@@ -1417,19 +1425,31 @@ async fn run_turn(
                     // arguments have finished streaming: the wait begins here, and a
                     // tool that never returns is exactly the case this is for.
                     printer.term().activity_started(&name);
-                    tool_names.insert(id, name);
+                    tool_names.insert(id, (name, String::new()));
                 }
                 Event::ToolArgs { id, args } => {
-                    let name = tool_names.get(&id).cloned().unwrap_or_default();
+                    let name = tool_names
+                        .get(&id)
+                        .map(|(name, _)| name.clone())
+                        .unwrap_or_default();
                     printer.tool_call(&name, &args);
+                    // Remembered so the result line can name what it was done to. Without
+                    // it, two reads of two different files both print "read N lines" and
+                    // the transcript looks like a duplicate.
+                    if let Some(entry) = tool_names.get_mut(&id) {
+                        entry.1 = args;
+                    }
                 }
                 Event::ToolResult { id, output, ok } => {
                     // The name comes from the matching ToolStart: the result is
                     // reported as "✓ read" or "✓ bash", so the transcript says what
                     // happened rather than just that something did.
                     printer.term().activity_done();
-                    let name = tool_names.get(&id).cloned().unwrap_or_default();
-                    printer.tool_result(&name, &output, ok);
+                    let (name, args) = tool_names
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| (String::new(), String::new()));
+                    printer.tool_result(&name, &args, &output, ok);
                     tool_names.remove(&id);
                 }
                 Event::Usage(_) => {}

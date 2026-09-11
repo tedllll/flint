@@ -369,6 +369,17 @@ impl Agent {
                 id: id.clone(),
                 name: name.clone(),
             });
+            // The arguments have to reach the UI too, or the transcript never says what a
+            // tool was pointed at: `✓ read 55 lines` is the same line for every file, and
+            // two calls in a row are indistinguishable from one call printed twice.
+            sink(Event::ToolArgs {
+                id: id.clone(),
+                args: if arguments.trim().is_empty() {
+                    "{}".to_string()
+                } else {
+                    arguments.clone()
+                },
+            });
             if !arguments.trim().is_empty() {
                 if serde_json::from_str::<serde_json::Value>(&arguments).is_err() {
                     sink(Event::Warning(format!(

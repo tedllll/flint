@@ -44,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
     printer.term().line(format_args!("> {question}"));
 
     let mut answer = String::new();
-    let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut names: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
     // Same rule as the REPL: the reasoning channel fires once per token, so the
     // turn shows one marker per turn rather than a word per line.
     let mut thinking_shown = false;
@@ -63,17 +63,23 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             Event::ToolStart { id, name } => {
-                names.insert(id, name);
+                names.insert(id, (name, String::new()));
             }
             Event::ToolArgs { id, args } => {
-                let name = names.get(&id).cloned().unwrap_or_default();
+                let name = names.get(&id).map(|(n, _)| n.clone()).unwrap_or_default();
                 printer.tool_call(&name, &args);
+                if let Some(entry) = names.get_mut(&id) {
+                    entry.1 = args;
+                }
             }
             Event::ToolResult { id, output, ok } => {
-                let name = names.get(&id).cloned().unwrap_or_default();
+                let (name, args) = names
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_else(|| (String::new(), String::new()));
                 // Goes through the printer, not the terminal: this is the code path
                 // under test, and writing straight to the term would bypass it.
-                printer.tool_result(&name, &output, ok);
+                printer.tool_result(&name, &args, &output, ok);
                 names.remove(&id);
             }
             _ => {}

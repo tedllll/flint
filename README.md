@@ -198,6 +198,18 @@ fragments that must be concatenated by index before they are valid JSON.
 
 ### The bottom strip
 
+Notices -- anything that must reach the user while a tool is still running, such as
+"this command has been running for 20s" -- go through the transcript machinery, not
+stderr. With the strip active there is no safe place for a stray write: stderr lands
+wherever the cursor happens to be, which is inside the answer strip, and it tears the
+layout apart. The half-written answer is committed first, so the notice reads as a
+line above an answer that then continues.
+
+A tool result line names *what* the tool was pointed at (`✓ read src/lib.rs 14
+lines`), because `✓ read 55 lines` twice in a row is unreadable: nothing
+distinguishes two calls to two files from one call printed twice, and the latter is a
+bug this transcript has had.
+
 The input row is pinned to the last line of the screen, and the three rows above
 it are the answer strip, where a streamed answer is drawn. Above that, output is
 ordinary transcript that scrolls.
@@ -242,8 +254,7 @@ node scripts/vtscreen.js raw.bin 24 70  # one raw dump, as a screen
 
 `tests/term_capture.rs` points stdout at `target/term-capture.bin`, drives `Term`
 the way the REPL does, and the layout test replays that file. A debug build
-honours `FLINT_TERM_CAPTURE` for this, which is the only way to reach the
-interactive branches from a test; release builds do not compile it.
+honours `FLINT_TERM_CAPTURE` for this, which is the only way to reach theinteractive branches from a test; release builds do not compile it.
 
 The replay model counts CJK characters as two columns and expands tabs, because it
 is used to judge output that contains both. A tool that disagrees with a real
