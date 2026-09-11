@@ -66,21 +66,60 @@ the strip faults were found, and how to find the next one.
 
 ## Moving between machines
 
-`git` here cannot reach GitHub: the company network needs a proxy and the local v2rayN
-is not currently listening, so pushes and fetches fail. The repository moves by bundle
-instead.
+Pushing from here did not work at the end of this session, but the network was the
+reason, not the repository: `git fetch origin` at 17:xx failed with
+`Failed to connect to github.com port 443 via 127.0.0.1`, while the same remote had
+been fetched successfully at 15:36 the same afternoon. The company machine reaches
+GitHub only through a local proxy (v2rayN), and that proxy was not listening at the
+end of the session. `git config --local http.proxy` is
+`socks5h://127.0.0.1:10808` — a *local* setting, deliberately, so it is not carried
+anywhere else. On a machine without that proxy it turns every remote operation into a
+connection error that reads like a network outage.
+
+To push once the proxy is up:
 
 ```bash
-git bundle create flint.bundle --all     # on the machine that has the work
-git bundle verify flint.bundle           # on the machine receiving it
-git fetch /path/to/flint.bundle 'refs/heads/*:refs/remotes/bundle/*'
-git merge bundle/main
+git fetch origin
+git log --oneline HEAD..origin/main    # empty means a plain fast-forward
+git push origin main
 ```
 
-`git config --local http.proxy` is `socks5h://127.0.0.1:10808` here. That setting is
-per-repository and must not be copied anywhere else; on a machine without the proxy it
-makes every remote operation fail with a connection error that looks like a network
-outage rather than a wrong setting.
+### Two unrelated histories on the remote
+
+Worth knowing before pushing. The local branch and `origin/main` share no common
+commit, so there is nothing to fast-forward:
+
+| | root | tip | author |
+|---|---|---|---|
+| local `main` | `2b51f31` 13:57 | `d9e2e6c` | zhangzhuo |
+| `origin/main` | `59a3243` | `e03b34f` 14:23 | tedllll |
+
+Every file that exists on `origin/main` also exists locally, and the local versions are
+strictly more developed: `README.md` is 245 lines against 116, `Cargo.toml` is 50
+against 46, and `.github/workflows/release.yml` (97 lines) and `.gitignore` are already
+present locally. Merging the two would therefore conflict on all 18 files and resolve
+to the local side anyway.
+
+So the decision is a deliberate one, not a mechanical merge — either
+
+```bash
+git push --force-with-lease origin main     # keep the local history, discard the remote's
+```
+
+or start a branch from `origin/main` and cherry-pick. Neither should be done by
+reflex; the remote history is someone's commits, whatever it looks like.
+
+### Offline transfer
+
+The bundle is the fallback that always works, and it carries both histories:
+
+```bash
+git bundle create flint.bundle --all refs/remotes/origin/main
+git bundle verify flint.bundle
+git fetch /path/to/flint.bundle 'refs/heads/*:refs/heads/*' refs/remotes/origin/main:refs/remotes/origin/main
+```
+
+The refspec in the fetch matters: without it a bundle only moves `HEAD`.
 
 ## Design constraints worth not re-litigating
 
