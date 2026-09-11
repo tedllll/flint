@@ -210,7 +210,18 @@ pub fn home_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Where flint keeps its config and sessions.
+///
+/// `FLINT_HOME` overrides it, for two reasons. A test needs a directory of its own
+/// rather than the developer's real config -- and this is a rescue tool, so "start with
+/// a different config file without touching the one that is broken" is a use, not a
+/// testing convenience.
 pub fn config_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("FLINT_HOME") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
     home_dir().join(".flint")
 }
 

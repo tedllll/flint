@@ -314,8 +314,15 @@ impl Agent {
         // `self.history` ends.
         let mut usage_update: Option<Usage> = None;
 
+        // What is sent is not what is stored. A turn that runs to the step limit
+        // accumulates one tool result per step, and most of them are listings and file
+        // dumps the model has already read and summarised -- asking again with all of
+        // them is how a working turn walks into the context ceiling. Dropping the old
+        // ones from the *request* costs nothing and keeps the session file whole.
+        let sent = prune_tool_output(&self.history);
+
         {
-            let history = &self.history;
+            let history = &sent;
             let result = self
                 .provider
                 .stream_chat(history, &specs, |event| match event {
@@ -419,6 +426,76 @@ struct StepOutcome {
     tool_calls: Vec<ToolCall>,
 }
 
+/// How many of the most recent tool results survive pruning.
+///
+/// The current step's work is what the model is acting on, so that part is never
+/// touched. Everything older has already been read and written about, and the model's
+/// own summary of it is in the assistant messages, which are kept.
+const KEEP_TOOL_RESULTS: usize = 4;
+
+/// Anything this short is worth more than the note that replaces it.
+const MIN_PRUNABLE: usize = 160;
+
+/// What the model is asked with: the conversation minus stale tool output.
+///
+/// Errors are exempt. The one thing a reader -- human or model -- may still have to act
+/// on is *why* something failed, and a failure that scrolls out of context is how the
+/// same broken command gets tried a fifth time.
+///
+/// This is a request-side view only. `self.history` and the session file keep every
+/// byte, because those are the record of what happened rather than the prompt.
+fn prune_tool_output(history: &[Message]) -> Vec<Message> {
+    let tool_total = history
+        .iter()
+        .filter(|m| matches!(m, Message::Tool { .. }))
+        .count();
+    let mut seen = 0usize;
+
+    history
+        .iter()
+        .map(|m| match m {
+            Message::Tool {
+                tool_call_id,
+                content,
+            } if tool_total.saturating_sub(seen) > KEEP_TOOL_RESULTS => {
+                seen += 1;
+                if content.len() <= MIN_PRUNABLE || looks_like_failure(content) {
+                    m.clone()
+                } else {
+                    Message::Tool {
+                        tool_call_id: tool_call_id.clone(),
+                        content: format!(
+                            "[{} lines of earlier output dropped to save context; \
+                             ask again if you need it]",
+                            content.lines().count().max(1)
+                        ),
+                    }
+                }
+            }
+            Message::Tool { .. } => {
+                seen += 1;
+                m.clone()
+            }
+            other => other.clone(),
+        })
+        .collect()
+}
+
+/// Whether a tool result reports that it did not work.
+///
+/// Matched loosely on purpose: the wording comes from a shell, a language runtime, or
+/// an HTTP client, and none of those were written with this check in mind.
+fn looks_like_failure(content: &str) -> bool {
+    let head: String = content.chars().take(400).collect::<String>().to_lowercase();
+    head.contains("[exit code:")
+        || head.contains("error")
+        || head.contains("failed")
+        || head.contains("cannot")
+        || head.contains("not found")
+        || head.contains("denied")
+        || head.contains("no such file")
+}
+
 fn non_empty(s: String) -> Option<String> {
     if s.trim().is_empty() {
         None
@@ -430,6 +507,86 @@ fn non_empty(s: String) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tool_result(id: &str, content: &str) -> Message {
+        Message::Tool {
+            tool_call_id: id.to_string(),
+            content: content.to_string(),
+        }
+    }
+
+    fn big(n: usize) -> String {
+        (0..n)
+            .map(|i| format!("entry-{i} some listing text"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// A turnaround that runs to the step limit collects one tool result per step. Once
+    /// they are no longer the thing being worked on, re-sending them all is what walks a
+    /// working turn into the context ceiling.
+    #[test]
+    fn stale_tool_output_is_dropped_from_the_request() {
+        let mut history = vec![Message::user("fix codex")];
+        for i in 0..12 {
+            history.push(tool_result(&format!("call_{i}"), &big(30)));
+        }
+
+        let sent = prune_tool_output(&history);
+        let kept: Vec<&Message> = sent
+            .iter()
+            .filter(|m| matches!(m, Message::Tool { .. }))
+            .collect();
+        assert_eq!(kept.len(), 12, "messages must not disappear, only shrink");
+
+        let last = match kept.last().unwrap() {
+            Message::Tool { content, .. } => content,
+            _ => unreachable!(),
+        };
+        assert!(last.contains("entry-0"), "recent output was pruned: {last}");
+        let first = match kept.first().unwrap() {
+            Message::Tool { content, .. } => content,
+            _ => unreachable!(),
+        };
+        assert!(!first.contains("entry-0"), "stale output was kept: {first}");
+        assert!(first.contains("dropped to save context"), "{first}");
+    }
+
+    /// The failure is the part still worth having: it is what stops the same broken
+    /// command being tried a fifth time.
+    #[test]
+    fn an_old_failure_is_never_pruned() {
+        let mut history = vec![Message::user("go")];
+        history.push(tool_result("call_old", &format!("[exit code: 1]\n{}", big(40))));
+        for i in 0..6 {
+            history.push(tool_result(&format!("call_{i}"), &big(30)));
+        }
+
+        let sent = prune_tool_output(&history);
+        let kept = match &sent[1] {
+            Message::Tool { content, .. } => content,
+            other => panic!("expected a tool message, got {other:?}"),
+        };
+        assert!(kept.contains("[exit code: 1]"), "the failure was pruned: {kept}");
+        assert!(kept.contains("entry-0"), "the detail was pruned: {kept}");
+    }
+
+    /// Below the threshold there is nothing to gain: the note would be as long as the
+    /// thing it replaces.
+    #[test]
+    fn a_short_result_is_left_alone() {
+        let mut history = vec![Message::user("go")];
+        history.push(tool_result("call_old", "3 lines"));
+        for i in 0..6 {
+            history.push(tool_result(&format!("call_{i}"), &big(30)));
+        }
+
+        let sent = prune_tool_output(&history);
+        match &sent[1] {
+            Message::Tool { content, .. } => assert_eq!(content, "3 lines"),
+            other => panic!("expected a tool message, got {other:?}"),
+        }
+    }
 
     fn cfg_for_prompt() -> Config {
         Config::default()

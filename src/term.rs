@@ -164,8 +164,15 @@ impl Input {
 pub enum Key {
     /// A line was submitted.
     Enter(String),
-    /// Ctrl-C on an empty line, Ctrl-D, or EOF: leave the REPL.
+    /// Leave the REPL. Only from Ctrl-D or EOF, never from a single Ctrl-C.
     Quit,
+    /// Stop what is happening: an empty Ctrl-C, or Ctrl-C with text to discard.
+    ///
+    /// A single Ctrl-C must never take the process with it. It is the key people press
+    /// when something looks stuck, and a rescue tool that exits on it is refusing to do
+    /// the one thing it is for -- worse, the session is the record of what was being
+    /// fixed. Quitting takes `/exit`, Ctrl-D, or two Ctrl-C presses in quick succession.
+    Interrupt,
     /// The input row changed and needs redrawing.
     Redraw,
     /// Nothing to do.
@@ -246,6 +253,8 @@ pub struct Term {
     /// Last value of the status clock that was painted, so the redraw only happens
     /// when the displayed number would actually change.
     activity_shown: AtomicU16,
+    /// When the last bare Ctrl-C arrived, so two in a row can mean quit.
+    last_ctrl_c: Mutex<Option<std::time::Instant>>,
 }
 
 impl Term {
@@ -269,6 +278,7 @@ impl Term {
             stream_first: AtomicU16::new(0),
             activity: Mutex::new(None),
             activity_shown: AtomicU16::new(0),
+            last_ctrl_c: Mutex::new(None),
         }
     }
 
@@ -306,6 +316,7 @@ impl Term {
             stream_first: AtomicU16::new(0),
             activity: Mutex::new(None),
             activity_shown: AtomicU16::new(0),
+            last_ctrl_c: Mutex::new(None),
         };
 
         if tty {
@@ -902,11 +913,26 @@ impl Term {
                 match code {
                     KeyCode::Char('d') if ctrl => Key::Quit,
                     KeyCode::Char('c') if ctrl => {
-                        if input.is_empty() {
+                        // Text on the line means "clear it"; an empty line means "stop
+                        // whatever is running". Neither is quit. Quitting is what a second
+                        // Ctrl-C within the window below is for, because losing the
+                        // session to a reflex is the expensive mistake here.
+                        if !input.is_empty() {
+                            input.clear();
+                            return Key::Redraw;
+                        }
+                        let now = std::time::Instant::now();
+                        let repeated = self
+                            .last_ctrl_c
+                            .lock()
+                            .unwrap()
+                            .map(|then| now.duration_since(then) < std::time::Duration::from_millis(1500))
+                            .unwrap_or(false);
+                        *self.last_ctrl_c.lock().unwrap() = Some(now);
+                        if repeated {
                             Key::Quit
                         } else {
-                            input.clear();
-                            Key::Redraw
+                            Key::Interrupt
                         }
                     }
                     KeyCode::Char(c) => {
@@ -1081,6 +1107,9 @@ mod tests {
         assert!(matches!(ctrl(&t, 'c'), Key::Redraw));
         assert!(t.input_mut().is_empty());
         // Second press has nothing to clear, so it means quit.
+        // One Ctrl-C stops the turn; only a second one within the window quits. The
+        // session must not go away because someone pressed the panic key.
+        assert!(matches!(ctrl(&t, 'c'), Key::Interrupt));
         assert!(matches!(ctrl(&t, 'c'), Key::Quit));
     }
 

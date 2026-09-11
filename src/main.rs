@@ -1,4 +1,4 @@
-//! flint — a minimal cross-platform rescue agent.
+//! flint 鈥?a minimal cross-platform rescue agent.
 //!
 //! Modes:
 //!   flint                          interactive REPL
@@ -145,9 +145,9 @@ fn print_transcript(history: &[event::Message], printer: &Printer<'_>) {
     printer.term().line(format_args!(
         "{}",
         printer.dim(&format!(
-            "── {}{} ──",
+            "鈹€鈹€ {}{} 鈹€鈹€",
             if start > 0 {
-                format!("… {start} earlier messages, ")
+                format!("鈥?{start} earlier messages, ")
             } else {
                 String::new()
             },
@@ -391,7 +391,7 @@ async fn real_main() -> Result<i32> {
 
     // ---- one-shot ----
     if let Some(prompt) = args.prompt {
-        run_turn(&mut agent, &provider_cfg, &prompt, &printer, &mut input_rx).await?;
+        run_turn(&mut agent, &provider_cfg, &prompt, &printer, &mut input_rx, false).await?;
         println!();
         return Ok(0);
     }
@@ -428,7 +428,9 @@ struct InputReader {
 enum InputMsg {
     /// A submitted line.
     Line(String),
-    /// The user asked to quit (Ctrl-C on an empty line, Ctrl-D, or EOF).
+    /// Stop the turn in flight, but keep the process: Ctrl-C once.
+    Interrupt,
+    /// The user asked to quit (Ctrl-D, EOF, or Ctrl-C twice).
     Quit,
 }
 
@@ -483,6 +485,15 @@ impl InputReader {
                             }
                             let _ = tx.send(InputMsg::Quit);
                             return;
+                        }
+                        term::Key::Interrupt => {
+                            // Stop the turn, keep the process. Nothing is running when the
+                            // line is empty and no turn is in flight, so this is also the
+                            // "did that do anything?" case -- say so rather than exiting.
+                            if let Some(reply) = pending.take() {
+                                let _ = reply.send(String::new());
+                            }
+                            let _ = tx.send(InputMsg::Interrupt);
                         }
                         term::Key::Redraw => term.redraw(),
                         term::Key::Ignore => {}
@@ -574,19 +585,19 @@ async fn interactive(
     if agent.readonly() {
         printer.term().line(format_args!(
             "  {}",
-            printer.style(GREEN, "readonly — writes and mutating commands are refused")
+            printer.style(GREEN, "readonly 鈥?writes and mutating commands are refused")
         ));
     } else if key_missing {
         // Say what to do, and say it where the user is already looking. This is
         // the first thing a fresh machine sees, so it has to be actionable
         // without leaving the tool.
         printer.term().line(format_args!(
-            "  {yellow}no API key for this provider{reset}{dim} — shell tools still work. \
+            "  {yellow}no API key for this provider{reset}{dim} 鈥?shell tools still work. \
              Set one with {reset}{bold}/provider key <key>{reset}{dim}, or add a provider with \
              {reset}{bold}/provider add{reset}"
         ));
     } else {
-        printer.term().line(format_args!("  {dim}/help for commands · type while it works to interrupt it{reset}"));
+        printer.term().line(format_args!("  {dim}/help for commands 路 type while it works to interrupt it{reset}"));
     }
     printer.term().blank();
 
@@ -601,6 +612,9 @@ async fn interactive(
         };
         let input = match msg {
             InputMsg::Quit => break,
+            // Nothing is running once the prompt is back, so there is nothing to stop
+            // and no reason to take the process with it.
+            InputMsg::Interrupt => continue,
             InputMsg::Line(line) => line.trim().to_string(),
         };
         if input.is_empty() {
@@ -631,7 +645,7 @@ async fn interactive(
             printer.style(BOLD, &input)
         ));
 
-        match run_turn(agent, provider_cfg, &input, printer, input_rx).await {
+        match run_turn(agent, provider_cfg, &input, printer, input_rx, true).await {
             Ok(()) => {}
             Err(e) => {
                 printer.term().blank();
@@ -821,7 +835,7 @@ async fn provider_wizard(
             "{}",
             printer.style(
                 YELLOW,
-                "  no key yet — set one with /provider key, or the request will fail"
+                "  no key yet 鈥?set one with /provider key, or the request will fail"
             )
         ));
     }
@@ -982,7 +996,7 @@ async fn handle_command(
                     }
                     if cfg.providers.len() <= 1 {
                         return Err(anyhow!(
-                            "refusing to delete the last provider — there would be nothing left to talk to"
+                            "refusing to delete the last provider 鈥?there would be nothing left to talk to"
                         ));
                     }
                     if !cfg.remove_provider(rest) {
@@ -1095,10 +1109,10 @@ async fn handle_command(
             if turn_on {
                 printer.term().line(format_args!(
                     "{}",
-                    printer.style(GREEN, "readonly ON — no writes, no mutating commands")
+                    printer.style(GREEN, "readonly ON 鈥?no writes, no mutating commands")
                 ));
             } else {
-                printer.term().line(format_args!("{}", printer.style(RED, "readonly OFF — full permissions")));
+                printer.term().line(format_args!("{}", printer.style(RED, "readonly OFF 鈥?full permissions")));
             }
             printer.term().line(format_args!(
                 "{dim}note: takes effect on the next /new or restart (the tool set is per agent).{reset}"
@@ -1123,9 +1137,9 @@ async fn handle_command(
             cfg.verbose = next >= CHATTY;
             cfg.save()?;
             let what = match next {
-                QUIET => "off — only the model's answers",
-                NORMAL => "on — one line per tool call",
-                _ => "full — arguments and the reasoning marker",
+                QUIET => "off 鈥?only the model's answers",
+                NORMAL => "on 鈥?one line per tool call",
+                _ => "full 鈥?arguments and the reasoning marker",
             };
             printer.term().line(format_args!("{} {what}", printer.style(GREEN, "verbose")));
             if cfg.tool_detail {
@@ -1148,9 +1162,9 @@ async fn handle_command(
             cfg.tool_detail = on;
             cfg.save()?;
             let what = if on {
-                "on — tool output is printed, up to 25 lines per result"
+                "on 鈥?tool output is printed, up to 25 lines per result"
             } else {
-                "off — one line per tool result"
+                "off 鈥?one line per tool result"
             };
             printer.term().line(format_args!("{} {what}", printer.style(GREEN, "detail")));
         }
@@ -1305,7 +1319,7 @@ async fn handle_command(
                 String::new()
             };
             printer.term().line(format_args!(
-                "{} reloaded {} — provider {bold}{}{reset} model {bold}{}{reset}{state}",
+                "{} reloaded {} 鈥?provider {bold}{}{reset} model {bold}{}{reset}{state}",
                 printer.style(GREEN, "ok"),
                 config::config_path().display(),
                 target.name,
@@ -1366,6 +1380,11 @@ async fn run_turn(
     input: &str,
     printer: &Printer<'_>,
     input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<InputMsg>,
+    // Whether a line arriving mid-turn is a person interrupting. It is not when the
+    // lines come from a pipe: `echo OK | flint -p "..."` would have its own input read
+    // as steering, and the answer would be cancelled before it started -- which is
+    // exactly what `flint -p ... | cat` used to do.
+    can_steer: bool,
 ) -> Result<()> {
     #[allow(unused_variables)]
     let Palette { dim, bold, red, green, cyan, yellow, reset } = printer.pal;
@@ -1442,7 +1461,7 @@ async fn run_turn(
                 }
                 Event::ToolResult { id, output, ok } => {
                     // The name comes from the matching ToolStart: the result is
-                    // reported as "✓ read" or "✓ bash", so the transcript says what
+                    // reported as "鉁?read" or "鉁?bash", so the transcript says what
                     // happened rather than just that something did.
                     printer.term().activity_done();
                     let (name, args) = tool_names
@@ -1468,14 +1487,30 @@ async fn run_turn(
             // next_line: the stream is woken by the network, the input by the tick.
             let mut result = None;
             let mut steering = None;
+            let mut interrupted = false;
             loop {
                 // Only a submitted line interrupts. `Quit` here means stdin ended
                 // (a one-shot run, or a script that closed the pipe) -- treating
                 // it as steering would abort the turn before it ever started,
                 // which is exactly what `flint -p ...  | cat` used to do.
-                if let Ok(InputMsg::Line(line)) = input_rx.try_recv() {
-                    steering = Some(line);
-                    break;
+                match if can_steer {
+                    input_rx.try_recv()
+                } else {
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                } {
+                    Ok(InputMsg::Line(line)) => {
+                        steering = Some(line);
+                        break;
+                    }
+                    // A bare Ctrl-C stops the turn but keeps the process: the session is
+                    // the record of what was being fixed, and losing it to a reflex is the
+                    // expensive mistake. It has to be said out loud, or a cancelled turn
+                    // is indistinguishable from one that finished with nothing to say.
+                    Ok(InputMsg::Interrupt) => {
+                        interrupted = true;
+                        break;
+                    }
+                    Ok(InputMsg::Quit) | Err(_) => {}
                 }
                 tokio::select! {
                     r = &mut turn => {
@@ -1489,6 +1524,11 @@ async fn run_turn(
                         printer.term().tick();
                     }
                 }
+            }
+            if interrupted {
+                printer
+                    .term()
+                    .notice("stopped -- the model is not running any more");
             }
             (result, steering)
         };
@@ -1673,7 +1713,7 @@ fn print_help(color: bool, term: &Term) {
     let (b, r) = if color { (BOLD, RESET) } else { ("", "") };
     term.line(format_args!(
         "\
-{b}flint{r} — a minimal cross-platform rescue agent
+{b}flint{r} 鈥?a minimal cross-platform rescue agent
 
 {b}USAGE{r}
   flint                            interactive session
@@ -1727,6 +1767,6 @@ mod tests {
     #[test]
     fn one_real_fragment_is_enough_to_show_the_marker() {
         assert!(show_thinking(CHATTY, "The"));
-        assert!(show_thinking(CHATTY, " 用户"));
+        assert!(show_thinking(CHATTY, " 鐢ㄦ埛"));
     }
 }
