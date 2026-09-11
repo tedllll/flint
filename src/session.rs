@@ -53,9 +53,18 @@ impl SessionWriter {
         Ok(writer)
     }
 
-    /// Path of the file being written. Kept for diagnostics and for future
-    /// session-append support.
-    #[allow(dead_code)]
+    /// Reopen an existing session file so the conversation keeps being saved.
+    ///
+    /// Resuming used to be read-only, which meant the answers you gave after
+    /// `--continue` were written nowhere. A conversation you cannot save is
+    /// barely a conversation, and the whole point of resuming is to carry on.
+    pub fn resume(path: &Path) -> Result<Self> {
+        Ok(SessionWriter {
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// Path of the file being written.
     pub fn path(&self) -> &Path {
         &self.path
     }

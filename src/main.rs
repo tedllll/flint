@@ -129,37 +129,50 @@ async fn real_main() -> Result<i32> {
 
     // ---- resume a session, if asked ----
     let mut history: Vec<event::Message> = Vec::new();
-    let mut resumed_id: Option<String> = None;
+    let mut resumed: Option<PathBuf> = None;
     if args.continue_last {
         match session::latest(&config::sessions_dir())? {
             Some(path) => {
                 let loaded = session::load(&path)?;
                 history = loaded.messages;
-                resumed_id = Some(loaded.id.clone());
                 if !loaded.model.is_empty() && args.model.is_none() {
                     provider_cfg.model = loaded.model.clone();
                 }
+                eprintln!(
+                    "flint: resumed {} ({} messages)",
+                    path.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                    history.len()
+                );
+                resumed = Some(path);
             }
             None => eprintln!("flint: no previous session found; starting a new one."),
         }
     }
 
     let provider = provider::Provider::new(provider_cfg.clone())?;
-    let writer = if resumed_id.is_some() {
-        None // appending to a resumed session file is not supported; keep it read-only
-    } else {
-        Some(session::SessionWriter::create(
+    // Continuing a conversation appends to the same file, so nothing said after
+    // `--continue` is lost.
+    let writer = match &resumed {
+        Some(path) => Some(session::SessionWriter::resume(path)?),
+        None => Some(session::SessionWriter::create(
             &config::sessions_dir(),
             &cwd,
             &provider_cfg.name,
             &provider_cfg.model,
-        )?)
+        )?),
     };
 
     let mut agent = agent::Agent::new(&cfg, provider, readonly, cwd.clone(), writer);
     if !history.is_empty() {
-        // Drop the fresh system prompt, splice in the loaded conversation.
-        let mut merged = vec![event::Message::system(agent::SYSTEM_PROMPT)];
+        // Drop the fresh system prompt, splice in the loaded conversation, and
+        // put a freshly built prompt back -- it carries run-time facts (the
+        // shell dialect, the working directory) that a stored transcript cannot
+        // be trusted to still be accurate about.
+        let mut merged = vec![event::Message::system(agent::build_system_prompt(
+            &cfg, &cwd,
+        ))];
         merged.extend(
             history
                 .into_iter()

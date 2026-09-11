@@ -32,6 +32,28 @@ Rules:
 - Prefer the `read`, `write`, `edit` and `list` tools for files over shell \
   builtins: they behave identically on every platform.";
 
+/// Where commands run, generated per platform.
+///
+/// The shell dialect is settled at build time and baked into the binary, so it
+/// costs nothing at run time. The alternative -- describing every platform and
+/// letting the model work out which applies -- spends tokens on every request
+/// and invites the model to guess wrong.
+mod platform {
+    #[cfg(windows)]
+    pub const SHELL_HINT: &str =
+        "It is cmd.exe: use `dir`, `type`, `echo %CD%`. `ls`, `pwd`, `cat`, `find` and `grep` are not available.";
+
+    #[cfg(not(windows))]
+    pub const SHELL_HINT: &str =
+        "It is a POSIX shell: `ls`, `cat`, `find` and `grep` are available.";
+
+    #[cfg(windows)]
+    pub const PATH_SEPARATOR: char = '\\';
+
+    #[cfg(not(windows))]
+    pub const PATH_SEPARATOR: char = '/';
+}
+
 /// Build the system prompt with the facts the model cannot guess.
 ///
 /// Deliberately short. The binary already knows its own OS and architecture, so
@@ -42,21 +64,14 @@ Rules:
 pub fn build_system_prompt(config: &Config, cwd: &std::path::Path) -> String {
     let shell = tools::probe_shell(&config.shell, &config.shell_args).join(" ");
 
-    // Only say something when there is something worth knowing.
-    let dialect = if cfg!(windows) {
-        "It is cmd.exe, not a POSIX shell: use `dir`, `type`, `echo %CD%`. \
-         `ls`, `pwd`, `cat`, `find` and `grep` do not exist."
-    } else {
-        "It is a POSIX shell: `ls`, `cat`, `find` and `grep` are available."
-    };
-
     format!(
         "{SYSTEM_PROMPT}\n\n\
          Local facts:\n\
-         - Shell: `{shell}`. {dialect}\n\
+         - Shell: `{shell}`. {hint}\n\
          - Working directory: {cwd} (path separator `{sep}`).",
+        hint = platform::SHELL_HINT,
         cwd = cwd.display(),
-        sep = std::path::MAIN_SEPARATOR,
+        sep = platform::PATH_SEPARATOR,
     )
 }
 
@@ -72,6 +87,15 @@ pub struct Agent {
 }
 
 impl Agent {
+    /// The system prompt for this run, including run-time facts.
+    ///
+    /// Exposed so that resuming a session rebuilds it rather than reusing a
+    /// stored copy: the shell dialect and working directory are properties of
+    /// *now*, not of whenever the transcript happened to be written.
+    pub fn build_system_prompt(config: &Config, cwd: &std::path::Path) -> String {
+        build_system_prompt(config, cwd)
+    }
+
     pub fn new(
         config: &Config,
         provider: Provider,
@@ -127,6 +151,20 @@ impl Agent {
                     sink(Event::Warning(
                         "the model returned an empty response".to_string(),
                     ));
+                }
+                // Persist the final answer. Without this the transcript holds
+                // the user's questions and the tool calls, but none of the
+                // actual replies -- so a resumed conversation is missing every
+                // answer, and the model is asked to continue from a one-sided
+                // record of what happened.
+                if !outcome.text.is_empty() || !outcome.reasoning.is_empty() {
+                    let answer = Message::Assistant {
+                        content: non_empty(outcome.text.clone()),
+                        reasoning: non_empty(outcome.reasoning.clone()),
+                        tool_calls: Vec::new(),
+                    };
+                    self.history.push(answer.clone());
+                    self.record(SessionEvent::Chat { message: answer });
                 }
                 sink(Event::Done);
                 return Ok(());
@@ -318,5 +356,60 @@ fn non_empty(s: String) -> Option<String> {
         None
     } else {
         Some(s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg_for_prompt() -> Config {
+        Config::default()
+    }
+
+    /// The prompt must carry the shell dialect for the platform it was built
+    /// for, and must not hedge by describing both.
+    #[test]
+    fn system_prompt_states_the_platform_shell() {
+        let cwd = std::path::Path::new("/tmp/example");
+        let p = build_system_prompt(&cfg_for_prompt(), cwd);
+
+        assert!(p.contains("Working directory"));
+        assert!(p.contains("example"), "cwd must appear: {p}");
+
+        if cfg!(windows) {
+            assert!(
+                p.contains("cmd.exe"),
+                "a Windows build must warn about cmd.exe"
+            );
+            assert!(
+                p.contains("`dir`"),
+                "it must name the replacement command, not just refuse `ls`"
+            );
+            assert!(
+                !p.contains("POSIX shell: `ls`"),
+                "must not advertise POSIX tools on Windows"
+            );
+        } else {
+            assert!(
+                p.contains("POSIX shell"),
+                "a Unix build must say the shell is POSIX"
+            );
+            assert!(!p.contains("cmd.exe"), "must not mention cmd.exe on Unix");
+        }
+    }
+
+    /// A rescue tool that restates the obvious is burning the user's context.
+    #[test]
+    fn system_prompt_does_not_waste_tokens_on_the_obvious() {
+        let p = build_system_prompt(&cfg_for_prompt(), std::path::Path::new("/tmp"));
+        assert!(
+            !p.contains("OS: "),
+            "the binary knows its own OS; saying so only costs tokens"
+        );
+        assert!(
+            !p.contains("ARCH") && !p.contains("x86_64") && !p.contains("aarch64"),
+            "architecture is likewise known at compile time"
+        );
     }
 }
