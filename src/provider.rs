@@ -14,7 +14,7 @@
 //! `StreamParser` is deliberately a plain, synchronous state machine with no
 //! I/O so it can be tested against recorded provider payloads.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -107,6 +107,55 @@ fn ensure_tool_calls_are_answered(messages: &[Message]) -> Vec<Message> {
     out
 }
 
+const MAX_ATTEMPTS: u32 = 4;
+
+/// How long to wait before attempt `n` (1-based: the wait after attempt 1 is the first).
+///
+/// Exponential with a one-second floor and a floor on the growth of the clock, so a
+/// provider that is down does not get hammered and a blip costs a fraction of a second.
+fn retry_delay(attempt: u32) -> Duration {
+    let secs = 1u64 << (attempt.saturating_sub(1)).min(4);
+    Duration::from_secs(secs.min(RETRY_CAP_SECS))
+}
+
+const RETRY_CAP_SECS: u64 = 16;
+
+/// The backoff schedule, exposed so its shape can be asserted rather than guessed at.
+///
+/// Not `pub(crate)`: it is only interesting to the test that pins the ladder's bounds.
+#[doc(hidden)]
+pub fn retry_delay_for_test(attempt: u32) -> Duration {
+    retry_delay(attempt)
+}
+
+/// First line of a message, for the one-line notice printed between attempts.
+fn first_line(text: &str) -> &str {
+    text.lines().next().unwrap_or(text)
+}
+
+/// Why one attempt failed, and whether another attempt could plausibly help.
+///
+/// The split is the whole point of the type: an HTTP 503 or a dropped socket is worth
+/// retrying, while a 401 or a malformed request will fail identically every time, and
+/// retrying it just makes the user wait longer for the same error.
+enum AttemptError {
+    /// The connection did not carry the request, or the stream died mid-response.
+    Transport(String),
+    /// The server answered with a status worth retrying (429, 5xx).
+    Status(String),
+    /// Anything else: bad credentials, a bad request, a parse failure.
+    Fatal(anyhow::Error),
+}
+
+/// Whether a status is worth another attempt.
+///
+/// 429 is the provider asking us to slow down and will usually clear; 5xx is the
+/// provider being briefly broken. Both are transient by definition, and both are exactly
+/// the cases where giving up loses a turn that would have succeeded a second later.
+fn status_is_transient(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
 impl Provider {
     /// A client that is valid but points nowhere, for when the real one cannot be built.
     ///
@@ -119,6 +168,7 @@ impl Provider {
             base_url: "http://127.0.0.1:1".to_string(),
             api_key: String::new(),
             model: String::new(),
+            models: Vec::new(),
             api_key_env: None,
             proxy: None,
         }
@@ -188,6 +238,7 @@ impl Provider {
         &self.config.name
     }
 
+/// How many times one completion is attempted before the turn is reported as failed.
     /// Stream one completion, invoking `on_event` for every incremental update.
     pub async fn stream_chat(
         &self,
@@ -195,6 +246,7 @@ impl Provider {
         tools: &[(String, String, Value)],
         mut on_event: impl FnMut(Event),
     ) -> Result<()> {
+
         let tools_payload: Vec<Value> = tools
             .iter()
             .map(|(name, description, parameters)| {
@@ -221,11 +273,86 @@ impl Provider {
         }
 
         let key = self.config.resolved_key();
-        let mut req = self.client.post(self.config.endpoint()).json(&body);
-        if !key.is_empty() {
-            req = req.bearer_auth(&key);
+
+        // One HTTP request is not one attempt. A stream that dies halfway through is the
+        // normal failure of a long turn on a flaky link, and reporting it as a failed turn
+        // throws away everything the model had already produced -- including, often, the
+        // part that says what it was doing.
+        //
+        // Retrying is only safe because events are buffered per attempt and flushed once
+        // that attempt has *completed*. Handing a fragment to `on_event` is irreversible:
+        // a retry would then render the retried text under the partial text already on
+        // screen, and the answer would appear twice. Buffering costs one attempt's worth
+        // of text and buys a retry the user never sees.
+        let mut attempt = 0u32;
+        let mut last_error: Option<anyhow::Error>;
+
+        loop {
+            attempt += 1;
+            let mut req = self.client.post(self.config.endpoint()).json(&body);
+            if !key.is_empty() {
+                req = req.bearer_auth(&key);
+            }
+
+            let mut pending: Vec<Event> = Vec::new();
+            let outcome = self.attempt_stream(req, &mut pending).await;
+
+            match outcome {
+                Ok(()) => {
+                    // The attempt completed, so everything it produced is real and can be
+                    // handed over now. `finish` runs here rather than inside the attempt,
+                    // because the assembled tool calls are only meaningful once the whole
+                    // response has arrived.
+                    for event in pending {
+                        on_event(event);
+                    }
+                    return Ok(());
+                }
+                Err(e) => {
+                    let retryable = matches!(e, AttemptError::Transport(_) | AttemptError::Status(_));
+                    last_error = Some(match e {
+                        AttemptError::Transport(m) | AttemptError::Status(m) => anyhow::anyhow!(m),
+                        AttemptError::Fatal(e) => e,
+                    });
+                    if !retryable || attempt >= MAX_ATTEMPTS {
+                        break;
+                    }
+                    let wait = retry_delay(attempt);
+                    let why = last_error
+                        .as_ref()
+                        .map(|e| format!("{e:#}"))
+                        .unwrap_or_default();
+                    eprintln!(
+                        "flint: {} -- retrying in {}s (attempt {}/{})",
+                        first_line(&why),
+                        wait.as_secs(),
+                        attempt + 1,
+                        MAX_ATTEMPTS
+                    );
+                    tokio::time::sleep(wait).await;
+                }
+            }
         }
 
+        let mut err = last_error.unwrap_or_else(|| anyhow::anyhow!("the provider gave no response"));
+        if attempt > 1 {
+            err = anyhow::anyhow!(
+                "{err:#}\n(gave up after {attempt} attempts -- the network or the provider \
+                 stayed unreachable)"
+            );
+        }
+        Err(err)
+    }
+
+    /// One attempt at the request, buffering its events instead of emitting them.
+    ///
+    /// Events go into `pending` so a failed attempt leaves no trace: the caller only
+    /// hands them to `on_event` once the whole response has arrived.
+    async fn attempt_stream(
+        &self,
+        req: reqwest::RequestBuilder,
+        pending: &mut Vec<Event>,
+    ) -> std::result::Result<(), AttemptError> {
         // A dead network has to be *named*, and so does the proxy in front of it. The
         // reader's question is whether to wait, fix the cable, start the proxy, or clear
         // the proxy setting -- and reqwest's bare "error sending request" answers none
@@ -234,33 +361,38 @@ impl Provider {
             Ok(Ok(resp)) => resp,
             Ok(Err(e)) => {
                 let endpoint = self.config.endpoint();
-                return Err(anyhow!(
+                return Err(AttemptError::Transport(format!(
                     "no network -- the request to {endpoint} did not get out.{}{e:#}",
                     self.proxy_note()
                         .map(|n| format!("\n{n}\n  "))
                         .unwrap_or_default()
-                ));
+                )));
             }
             Err(_) => {
-                return Err(anyhow!(
+                return Err(AttemptError::Transport(format!(
                     "no response from {} after 180s -- the connection was established but \
                      the server never answered. Usually the network dropped, or a proxy is \
                      swallowing the request.{}",
                     self.config.endpoint(),
                     self.proxy_note().map(|n| format!("\n{n}")).unwrap_or_default()
-                ))
+                )));
             }
         };
 
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow!(
+            let message = format!(
                 "provider '{}' returned HTTP {}: {}",
                 self.config.name,
                 status,
                 crate::util::truncate(text.trim(), 800)
-            ));
+            );
+            return Err(if status_is_transient(status) {
+                AttemptError::Status(message)
+            } else {
+                AttemptError::Fatal(anyhow::anyhow!(message))
+            });
         }
 
         let mut stream = resp.bytes_stream();
@@ -268,7 +400,12 @@ impl Provider {
         let mut buffer = String::new();
 
         while let Some(chunk) = stream.next().await {
-            let bytes = chunk.context("stream error while reading response")?;
+            let bytes = chunk.map_err(|e| {
+                AttemptError::Transport(format!(
+                    "the connection to {} dropped while the answer was streaming: {e}",
+                    self.config.endpoint()
+                ))
+            })?;
             buffer.push_str(&String::from_utf8_lossy(&bytes));
 
             // Only consume whole lines; a partial frame stays in the buffer.
@@ -276,7 +413,7 @@ impl Provider {
                 let line = buffer[..pos].trim_end_matches('\r').to_string();
                 buffer.drain(..=pos);
                 for event in parser.feed_line(&line) {
-                    on_event(event);
+                    pending.push(event);
                 }
                 if parser.done {
                     break;
@@ -289,10 +426,7 @@ impl Provider {
         }
 
         // Surface the fully assembled tool calls so the agent can execute them.
-        for event in parser.finish() {
-            on_event(event);
-        }
-
+        pending.extend(parser.finish());
         Ok(())
     }
 }

@@ -63,6 +63,9 @@ fn test_config(base_url: &str) -> Config {
             base_url: base_url.to_string(),
             api_key: "test".to_string(),
             model: "stub-model".to_string(),
+            // A second model, so anything that lists or chooses models has something to
+            // list. Served by the same stub, which ignores the model name.
+            models: vec!["stub-model".to_string(), "stub-other".to_string()],
             api_key_env: None,
             // Never a proxy in tests: a stub server lives on localhost, and inheriting a
             // dead system proxy would make the suite fail for reasons that have nothing
@@ -401,7 +404,14 @@ async fn history_contains_the_tool_round_trip() {
     );
 }
 
-const SYSTEM_PROMPT_SNIPPET: &str = "minimal command-line coding and system-repair agent";
+/// A phrase from the system prompt, used to prove it reached the history.
+///
+/// Deliberately a *behavioural* line rather than the opening description. The opening
+/// was `minimal command-line coding and system-repair agent`, and when the prompt was
+/// rewritten to stop framing every request as a repair, this test failed for a reason
+/// that had nothing to do with what it checks -- that the system message is in the
+/// history at all. Pinning a rule instead keeps the test about the plumbing.
+const SYSTEM_PROMPT_SNIPPET: &str = "Act, do not narrate.";
 
 #[tokio::test]
 async fn survives_a_tool_that_fails() {
@@ -667,5 +677,100 @@ async fn empty_response_is_reported() {
     assert!(
         warnings.iter().any(|w| w.contains("empty")),
         "an empty response should warn instead of silently doing nothing, got {warnings:?}"
+    );
+}
+
+// --- retrying a transient failure ------------------------------------------------
+
+/// A 503 is the provider being briefly broken, so the turn must survive it.
+///
+/// The failure this guards against is the opposite of a crash: the request goes out, the
+/// server answers "not right now", and the whole turn is reported as failed even though
+/// the identical request would have succeeded a second later.
+#[tokio::test]
+async fn a_transient_status_is_retried_and_the_turn_succeeds() {
+    let server = MockServer::start().await;
+
+    // Priority 1 so this is consulted first, and `up_to_n_times(1)` so it stops matching
+    // once it has fired; the second attempt then falls through to the fixture below.
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(503).set_body_string("upstream is restarting"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(SseFixture { body: answer_only() })
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let mut agent = agent_for(&server, std::env::temp_dir()).await;
+    let mut seen: Vec<String> = Vec::new();
+    agent
+        .run("hello", |event| {
+            if let Event::Text(t) = event {
+                seen.push(t);
+            }
+        })
+        .await
+        .expect("a 503 must not fail the turn");
+
+    // The retry must not double up. A failed attempt's events are buffered and dropped,
+    // so only the attempt that completed contributes -- and because the agent assembles
+    // the answer from accumulated deltas, seeing the text twice here would produce a
+    // doubled sentence on screen.
+    let joined = seen.join("");
+    assert!(!joined.is_empty(), "no text reached the callback at all");
+    assert!(
+        joined.matches("你好").count() <= 1,
+        "the answer was delivered more than once, so a failed attempt leaked its events: {joined:?}"
+    );
+}
+
+/// A 401 will fail identically every time, so retrying only delays the bad news.
+#[tokio::test]
+async fn a_permanent_status_is_not_retried() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(401).set_body_string(r#"{"error":"bad key"}"#))
+        .mount(&server)
+        .await;
+
+    let mut agent = agent_for(&server, std::env::temp_dir()).await;
+    let started = std::time::Instant::now();
+    let err = agent.run("hello", |_| {}).await.unwrap_err();
+    let msg = format!("{err:#}");
+
+    assert!(msg.contains("401"), "got: {msg}");
+    // The retry ladder starts at one second and doubles, so a single wasted retry would
+    // already show up well past this.
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(900),
+        "a 401 was retried; it took {:?}",
+        started.elapsed()
+    );
+    assert!(
+        !msg.contains("gave up after"),
+        "a permanent failure must not report the retry ladder: {msg}"
+    );
+}
+
+/// The backoff ladder itself: bounded, and never zero.
+#[test]
+fn retry_delays_grow_and_stay_bounded() {
+    use flint::provider::retry_delay_for_test as retry_delay;
+    let delays: Vec<u64> = (1..=8).map(|n| retry_delay(n).as_secs()).collect();
+    assert!(delays.iter().all(|&d| d >= 1), "a zero wait would hammer: {delays:?}");
+    assert!(
+        delays.windows(2).all(|w| w[1] >= w[0]),
+        "the ladder must not shrink: {delays:?}"
+    );
+    assert!(
+        delays.iter().all(|&d| d <= 16),
+        "the ladder must stay bounded: {delays:?}"
     );
 }
