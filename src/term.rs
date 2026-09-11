@@ -184,9 +184,21 @@ pub enum Key {
 /// This is the "viewport": a fixed-height strip at the bottom of the screen that
 /// the answer is drawn into and that history insertion never touches. Codex calls
 /// the same thing an inline viewport and arrives at the same design.
-const ANSWER_ROWS: u16 = 4;
-/// The input row plus the answer strip.
-const RESERVED: u16 = ANSWER_ROWS + 1;
+/// How long work must be running before the status line is worth showing.
+const ACTIVITY_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+
+const ANSWER_ROWS: u16 = 3;
+/// The row the running-status clock is drawn on: the one between the answer strip and
+/// the input row.
+///
+/// It has to be its own row, because the clock is not part of the transcript machinery
+/// and nothing arbitrates between it and the answer. Drawn inside the strip -- which is
+/// where it used to go, on `input_row - 1` -- it shared that row with the answer's last
+/// line, and the two simply wrote over each other: a clock repaint erased the answer's
+/// final line, and an answer redraw erased the clock, so a long tool looked wedged.
+const STATUS_ROWS: u16 = 1;
+/// The input row, the status row and the answer strip.
+const RESERVED: u16 = ANSWER_ROWS + STATUS_ROWS + 1;
 
 /// What is running right now.
 struct Activity {
@@ -234,6 +246,42 @@ pub struct Term {
     stream_text: Mutex<String>,
     /// How many of the streaming answer's lines have already gone to history.
     committed: AtomicU16,
+    /// The full, unstripped text of the segment currently streaming.
+    ///
+    /// Needed because stripping and segment detection want opposite things from the same
+    /// string. A model that resends the cumulative text puts us in a position where a
+    /// fragment can start with the *committed head* rather than with the previous
+    /// fragment -- that is precisely what makes it a repeat -- so once the head has been
+    /// stripped, the stripped text is no longer a prefix of the next stripped text, and
+    /// the boundary test fires mid-segment. Keeping the unstripped text here gives the
+    /// boundary test the origin it needs, while `stream_text` holds what is being drawn.
+    segment_text: Mutex<String>,
+    /// The text of the segment most recently committed to history, so a later segment
+    /// that repeats it at its head does not draw it a second time.
+    ///
+    /// A model that narrates, calls a tool, and then *resends the cumulative text*
+    /// rather than only its continuation produces exactly that. Nothing in `committed`
+    /// can tell us: it counts rows, and when the repeated head is short the answer never
+    /// overflows the strip, so `committed` stays 0 while the head is nevertheless on
+    /// screen. The result was the opening line printed twice -- once in the transcript
+    /// and once at the head of the next segment, with no break before its continuation.
+    ///
+    /// Deliberately *not* derived from `stream_text`. That field holds the text the
+    /// strip is drawing, which is this text minus the head; comparing a new fragment
+    /// against it would compare two different origins, and the segment-boundary test
+    /// would then fire on the very fragments the strip is meant to be dropping.
+    last_segment_text: Mutex<String>,
+    /// The row the next transcript line is written on.
+    ///
+    /// Transcript grows *downward* from the top of the history region, so the first line
+    /// of a session lands on row 1 and the screen fills from the top. Writing at the
+    /// region's bottom row instead -- which is what this used to do -- makes every line
+    /// appear at the lowest row and scroll up from there, so a short session sits at the
+    /// bottom of the window above a large blank area.
+    ///
+    /// It stops at `history_bottom`, because that is where a newline scrolls the region:
+    /// beyond that the screen moves rather than the cursor.
+    history_row: AtomicU16,
     /// Where the last frame's visible slice began, so the rows it used and this frame
     /// does not can be cleared.
     stream_first: AtomicU16,
@@ -250,9 +298,22 @@ pub struct Term {
     /// and without a moving clock "still working" and "wedged" look identical from the
     /// outside. That is the difference between waiting and killing the thing.
     activity: Mutex<Option<Activity>>,
+    /// The session working directory, so displayed paths can be shortened against it.
+    ///
+    /// Held as a plain string rather than a `PathBuf` because the only use is a prefix
+    /// comparison against text the model wrote.
+    cwd: Mutex<String>,
     /// Last value of the status clock that was painted, so the redraw only happens
     /// when the displayed number would actually change.
     activity_shown: AtomicU16,
+    /// Whether the status line has been painted at least once for the current activity.
+    ///
+    /// The first paint waits out a short delay. Most turns produce their first token
+    /// well within a second, and a status line that appears and vanishes that fast reads
+    /// as a flicker rather than as information. Once the wait is long enough to notice,
+    /// showing it is the whole point -- with streamed output buffered for retry safety
+    /// there is no other sign that anything is happening.
+    activity_painted: AtomicBool,
     /// When the last bare Ctrl-C arrived, so two in a row can mean quit.
     last_ctrl_c: Mutex<Option<std::time::Instant>>,
 }
@@ -274,12 +335,46 @@ impl Term {
             stream_active: AtomicBool::new(false),
             stream_text: Mutex::new(String::new()),
             committed: AtomicU16::new(0),
+            history_row: AtomicU16::new(1),
+            segment_text: Mutex::new(String::new()),
+            last_segment_text: Mutex::new(String::new()),
             stream_rows: Mutex::new(Vec::new()),
             stream_first: AtomicU16::new(0),
             activity: Mutex::new(None),
+            cwd: Mutex::new(String::new()),
             activity_shown: AtomicU16::new(0),
+            activity_painted: AtomicBool::new(false),
             last_ctrl_c: Mutex::new(None),
         }
+    }
+
+    /// Record the working directory, so transcript lines can show shorter paths.
+    pub fn set_cwd(&self, cwd: &str) {
+        *self.cwd.lock().unwrap() = cwd.trim_end_matches(['/', '\\']).to_string();
+    }
+
+    /// A path as the user would write it: relative to the session directory when it is
+    /// inside it.
+    ///
+    /// The model usually hands over absolute paths, and a transcript of
+    /// `/home/you/project/src/term.rs` twice per file operation is mostly prefix -- six
+    /// lines of it look identical at a glance, which is the opposite of what a one-line
+    /// summary is for.
+    pub fn shorten_path(&self, raw: &str) -> String {
+        let cwd = self.cwd.lock().unwrap();
+        if cwd.is_empty() {
+            return raw.to_string();
+        }
+        // Only strip at a separator boundary: `/app` must not shorten `/apple`.
+        if let Some(rest) = raw.strip_prefix(cwd.as_str()) {
+            if rest.is_empty() {
+                return ".".to_string();
+            }
+            if let Some(rel) = rest.strip_prefix('/').or_else(|| rest.strip_prefix('\\')) {
+                return rel.to_string();
+            }
+        }
+        raw.to_string()
     }
 
     /// Change what is shown before the input. Used by the configuration wizard,
@@ -312,13 +407,23 @@ impl Term {
             stream_active: AtomicBool::new(false),
             stream_text: Mutex::new(String::new()),
             committed: AtomicU16::new(0),
+            history_row: AtomicU16::new(1),
+            segment_text: Mutex::new(String::new()),
+            last_segment_text: Mutex::new(String::new()),
             stream_rows: Mutex::new(Vec::new()),
             stream_first: AtomicU16::new(0),
             activity: Mutex::new(None),
+            cwd: Mutex::new(String::new()),
             activity_shown: AtomicU16::new(0),
+            activity_painted: AtomicBool::new(false),
             last_ctrl_c: Mutex::new(None),
         };
 
+        // Raw mode and the panic hook need a real console; laying out the screen does
+        // not. A capture therefore runs `reclaim`/`setup`/`redraw` too, which is the
+        // point: the startup path -- scrolling the old screen away and clearing what is
+        // left -- is exactly where "the previous screen is still visible" lives, and it
+        // was untestable while it only ran against a terminal.
         if tty {
             // A panic with raw mode on leaves the user without echo, which looks
             // like a broken shell. Restore first, then let the message print.
@@ -332,8 +437,10 @@ impl Term {
             }));
 
             enable_raw_mode()?;
+        }
+        if interactive {
             term.reclaim();
-            term.setup();
+            term.reserve_screen();
             term.redraw();
         }
 
@@ -354,7 +461,68 @@ impl Term {
                 name: name.to_string(),
                 started: std::time::Instant::now(),
             });
+            // A sentinel, not zero. `tick` repaints only when the displayed second
+            // changes, and the first second of any activity *is* zero -- so starting
+            // from zero means the very first paint is suppressed as a no-op, and the
+            // status line cannot appear until the clock reaches one second. That is the
+            // whole window in which a fast-but-not-instant turn needs to say something.
+            self.activity_shown.store(u16::MAX, Ordering::Relaxed);
+            self.activity_painted.store(false, Ordering::Relaxed);
         }
+    }
+
+    /// Rename what is running without restarting its clock.
+    ///
+    /// Used when a wait turns into something more specific -- the model is no longer
+    /// being waited for, it is thinking -- and the elapsed time should keep counting
+    /// from when the wait began rather than from the moment the name changed.
+    pub fn activity_named(&self, name: &str) {
+        if !self.interactive {
+            return;
+        }
+        let renamed = {
+            let mut activity = self.activity.lock().unwrap();
+            match activity.as_mut() {
+                Some(a) if a.name != name => {
+                    a.name = name.to_string();
+                    true
+                }
+                // Nothing running: naming it would invent an activity out of a stray
+                // fragment, and a clock with no start time has nothing to show.
+                _ => false,
+            }
+        };
+        if renamed {
+            // Repaint now rather than at the next second: the point of the change is
+            // that the line said the wrong thing until it was corrected.
+            self.paint_activity();
+        }
+    }
+
+    /// Whether the activity is still the initial wait, with no name yet.
+    ///
+    /// The status line is the only place that knows what phase the turn is in, so the
+    /// caller asks it rather than keeping a second copy of the same fact.
+    pub fn activity_is_unnamed_wait(&self) -> bool {
+        self.activity
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|a| a.name.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// How long the current activity has been running; zero when none is.
+    ///
+    /// Lets the caller tell a slow model from one that is not answering. The clock itself
+    /// cannot make that distinction -- only elapsed time can.
+    pub fn activity_elapsed(&self) -> std::time::Duration {
+        self.activity
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|a| a.started.elapsed())
+            .unwrap_or_default()
     }
 
     /// The tool finished: stop the clock.
@@ -377,17 +545,23 @@ impl Term {
         if !self.interactive {
             return;
         }
-        let running = self.activity.lock().unwrap().is_some();
-        if !running {
-            return;
+        let elapsed = {
+            let activity = self.activity.lock().unwrap();
+            match activity.as_ref() {
+                Some(a) => a.started.elapsed(),
+                None => return,
+            }
+        };
+        // Hold the first paint back briefly. A status line that appears and disappears
+        // inside half a second is a flicker, not information; anything slower than that
+        // is exactly when the user needs to see that work is happening.
+        if !self.activity_painted.load(Ordering::Relaxed) {
+            if elapsed < ACTIVITY_DELAY {
+                return;
+            }
+            self.activity_painted.store(true, Ordering::Relaxed);
         }
-        let seconds = self
-            .activity
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|a| a.started.elapsed().as_secs() as u16)
-            .unwrap_or(0);
+        let seconds = elapsed.as_secs() as u16;
         if seconds == self.activity_shown.load(Ordering::Relaxed) {
             return;
         }
@@ -440,21 +614,23 @@ impl Term {
 
     /// Recompute the layout from the current window size.
     fn reclaim(&self) {
-        let (mut w, mut h) = size().unwrap_or((80, 24));
+        let (w, h) = size().unwrap_or((80, 24));
         // A test has no terminal to ask, and a capture made at whatever size the
         // harness happened to report cannot be replayed at a different one: lines wrap
         // in different places and every assertion about them becomes a guess. Debug
         // builds only, and it changes nothing about how the code lays itself out.
+        //
+        // Shadowed rather than reassigned, so a release build -- where the override is
+        // compiled out entirely and the binding would never be written to -- does not
+        // warn about a `mut` that only the debug configuration needs.
         #[cfg(debug_assertions)]
-        if let Some(spec) = std::env::var_os("FLINT_TERM_SIZE") {
-            if let Some((cw, ch)) = spec.to_str().and_then(|s| {
-                let (a, b) = s.split_once('x')?;
-                Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
-            }) {
-                w = cw;
-                h = ch;
-            }
-        }
+        let (w, h) = match std::env::var_os("FLINT_TERM_SIZE").and_then(|spec| {
+            let (a, b) = spec.to_str()?.split_once('x')?;
+            Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+        }) {
+            Some((cw, ch)) => (cw, ch),
+            None => (w, h),
+        };
         let h = h.max(RESERVED + 1);
         self.screen_rows.store(h, Ordering::Relaxed);
         self.screen_cols.store(w.max(20), Ordering::Relaxed);
@@ -462,17 +638,68 @@ impl Term {
         self.viewport_top.store(h - ANSWER_ROWS, Ordering::Relaxed);
     }
 
-    /// Reserve the bottom strip: the answer is drawn there, history above it.
+    /// Take the screen: push the old one into the scrollback, blank it, and start the
+    /// transcript at the top.
     ///
-    /// The whole screen is the scroll region to begin with, because history
-    /// insertion sets its own region per write and resets it afterwards.
-    fn setup(&self) {
+    /// **Once, at startup.** It scrolls and clears everything and rewinds the transcript
+    /// to row 1, so running it again -- which the resize handler used to do -- wipes the
+    /// conversation off the screen. Resizing needs `redraw`, not this.
+    fn reserve_screen(&self) {
         if !self.interactive {
             return;
         }
         let mut out = std::io::stdout();
-        let _ = write!(out, "\x1b[1;{}r\x1b[1;1H", self.screen_rows.load(Ordering::Relaxed));
+        let rows = self.screen_rows.load(Ordering::Relaxed);
+        // Take the screen, rather than inheriting wherever the shell left the cursor.
+        //
+        // Transcript is written at absolute rows so it can grow downward from row 1, and
+        // that only stays honest if those rows are ours: writing at row 1 of a screen
+        // still holding a shell prompt would overwrite the prompt instead of scrolling it
+        // away. Scrolling first pushes the existing screen into the scrollback, where it
+        // is still readable, and leaves the cursor at the top of a screen we own.
+        let _ = write!(out, "\x1b[1;{}r", rows);
+        for _ in 0..RESERVED {
+            let _ = write!(out, "\x1bM");
+        }
+        let _ = write!(out, "\x1b[r");
+        // Every row, not just the transcript's.
+        //
+        // The scrolls above moved the shell's screen *down* into the rows the status
+        // line, the answer strip and the input line occupy. Those rows are repainted in
+        // place rather than scrolled, so anything left there stays on screen for the
+        // whole session, sitting immediately above and beside the input line. Clearing
+        // only rows 1..history_bottom is what allowed that -- reported from a real
+        // session as "a bracket to the left and right of the command line that does not
+        // go away until you scroll".
+        for row in 1..=rows {
+            let _ = write!(out, "\x1b[{};1H\x1b[2K", row);
+        }
+        self.history_row.store(1, Ordering::Relaxed);
+        // Force a full repaint rather than trusting the line erases above.
+        //
+        // Erasing a line rewrites its *characters*, which is not the same as repainting
+        // the screen: anything the terminal had already rasterised and not yet
+        // invalidated survives, showing as stale glyphs in the gaps -- reported as
+        // brackets sitting at the left and right edges of a row, absent from the text
+        // buffer, and vanishing the moment the window was resized. A resize works
+        // because it makes the terminal rebuild its whole display, which is exactly what
+        // this asks for up front.
+        //
+        // `2J` clears the display (not the scrollback) and `H` homes the cursor; the
+        // banner is then drawn on a screen the terminal has fully re-rendered.
+        let _ = write!(out, "\x1b[2J\x1b[1;1H");
         let _ = out.flush();
+    }
+
+    /// Last row of the answer strip: the row above the status line.
+    ///
+    /// Not `input_row - 1`. That row belongs to the running-status clock, and the strip
+    /// stops above it -- which is what keeps a clock repaint and an answer redraw from
+    /// writing over one another.
+    fn answer_bottom(&self) -> u16 {
+        self.input_row
+            .load(Ordering::Relaxed)
+            .saturating_sub(1 + STATUS_ROWS)
     }
 
     /// Row the history region ends on: the row above the answer strip.
@@ -586,9 +813,15 @@ impl Term {
         let bottom = self.history_bottom();
         let mut out = std::io::stdout();
         for text in &wrapped {
+            // Where this line goes, then advance. At the bottom the newline scrolls the
+            // region instead, so the row stays put and the *screen* moves -- which is
+            // what keeps a full transcript scrolling rather than overwriting itself.
+            let row = self.history_row.load(Ordering::Relaxed).clamp(1, bottom);
             let _ = write!(out, "\x1b[1;{}r", bottom);
-            let _ = write!(out, "\x1b[{};1H\r\x1b[2K{text}\r\n", bottom);
+            let _ = write!(out, "\x1b[{};1H\r\x1b[2K{text}\r\n", row);
             let _ = write!(out, "\x1b[r");
+            self.history_row
+                .store(row.saturating_add(1).min(bottom), Ordering::Relaxed);
         }
         let _ = write!(out, "\x1b[?25l");
         let _ = out.flush();
@@ -636,21 +869,52 @@ impl Term {
             return;
         }
         self.stream_active.store(true, Ordering::Relaxed);
+
+        // A model that resends the *cumulative* text rather than only the continuation
+        // hands us a segment whose head is already in the transcript. Drawing it whole
+        // printed the opening line a second time -- once in the transcript, where it went
+        // when the tools ran, and once at the head of the new segment, with no break
+        // before its own continuation, because the redraw starts at column 1 of the
+        // strip's top row rather than after the committed line:
+        //
+        //   I'll read both files.`src/lib.rs`: library root declaring nine modules...
+        //
+        // So drop the committed head first, and let everything downstream -- the strip's
+        // text, `committed`, and `close_stream` -- work on what is left. They must all
+        // agree on one text: `committed` counts rows of *the text being drawn*, and
+        // `close_stream` commits from it, so leaving `stream_text` holding the unstripped
+        // text applies one text's row offsets to another's rows.
+        let incoming = text;
+        let stripped;
+        let text = {
+            let head = self.last_segment_text.lock().unwrap();
+            if !head.is_empty() && text.starts_with(head.as_str()) {
+                stripped = text[head.len()..].to_string();
+                stripped.as_str()
+            } else {
+                text
+            }
+        };
+
         {
-            let held = self.stream_text.lock().unwrap();
-            // Within one streamed answer the text only ever grows, so text that does
-            // not start with what came before is a *new segment*: the reasoning is over
-            // and the answer has begun, or the answer resumed after a tool finished.
+            // The boundary test uses the *unstripped* text, and it has to: the fragment
+            // that begins a repeat does not start with the previous fragment at all -- it
+            // starts with the committed head instead. Comparing the stripped form would
+            // fire a segment reset on exactly the fragments the strip is dropping.
+            let held = self.segment_text.lock().unwrap().clone();
+
+            // Within one streamed answer the text only ever grows, so text that does not
+            // start with what came before is a *new segment*: the reasoning is over and
+            // the answer has begun, or the answer resumed after a tool finished.
             //
             // A new segment has to start from an empty strip. It used to keep the old
-            // rows, so each round's narration stayed on screen under the next one and
-            // the same sentence was visible once per tool round. The previous segment is
+            // rows, so each round's narration stayed on screen under the next one and the
+            // same sentence was visible once per tool round. The previous segment is
             // committed first, because it is real output and must not be dropped.
-            let fresh_segment = !text.starts_with(held.as_str());
-            // An empty held string is the first fragment of the turn, not a segment
+            let fresh_segment = !incoming.starts_with(held.as_str());
+            // An empty previous text is the first fragment of the turn, not a segment
             // boundary, and the strip is already blank.
             let after_something = !held.is_empty();
-            drop(held);
 
             if fresh_segment && after_something {
                 self.close_stream();
@@ -658,7 +922,10 @@ impl Term {
                 self.committed.store(0, Ordering::Relaxed);
                 self.stream_rows.lock().unwrap().clear();
             }
+            // The drawing text and the unstripped text are recorded separately, because
+            // they answer different questions and only the second one stays monotonic.
             *self.stream_text.lock().unwrap() = text.to_string();
+            *self.segment_text.lock().unwrap() = incoming.to_string();
         }
 
         // Rows are *screen* rows, not lines. A line longer than the screen is several
@@ -668,7 +935,7 @@ impl Term {
         let rows = wrap_rows(text, self.screen_cols.load(Ordering::Relaxed));
         let height = rows.len() as u16;
         let top = self.viewport_top.load(Ordering::Relaxed);
-        let last = self.input_row.load(Ordering::Relaxed).saturating_sub(1);
+        let last = self.answer_bottom();
         let capacity = last.saturating_sub(top).saturating_add(1);
 
         // The last row is the one still being appended to: a fragment that arrives next
@@ -824,7 +1091,7 @@ impl Term {
         // each round's text appearing again underneath the next one.
         let lines = wrap_rows(&text, self.screen_cols.load(Ordering::Relaxed));
         let top = self.viewport_top.load(Ordering::Relaxed);
-        let last = self.input_row.load(Ordering::Relaxed).saturating_sub(1);
+        let last = self.answer_bottom();
         let capacity = last.saturating_sub(top).saturating_add(1) as usize;
         let shown = lines.len().min(capacity);
         let sent = (self.committed.load(Ordering::Relaxed) as usize).min(lines.len());
@@ -834,6 +1101,11 @@ impl Term {
             self.committed
                 .store(lines.len().min(u16::MAX as usize) as u16, Ordering::Relaxed);
         }
+        // Record how much of this answer is now in the transcript. A later segment may
+        // repeat it verbatim at its head -- a model that resends the cumulative text
+        // after a tool call does exactly that -- and this is what lets `stream` drop the
+        // repeat instead of drawing a second copy of a line that is already above.
+        *self.last_segment_text.lock().unwrap() = text;
         self.clear_viewport();
         // Scroll the now-blank slice up, so the strip is empty and the transcript
         // above is untouched.
@@ -976,8 +1248,11 @@ impl Term {
                 }
             }
             Event::Resize(_, _) => {
+                // Layout only. `reserve_screen` blanks the display and rewinds the
+                // transcript to row 1, so calling it here erased the whole conversation
+                // on every resize -- which is also why dragging the window used to look
+                // like it "fixed" a stale-glyph artefact: it was clearing the screen.
                 self.reclaim();
-                self.setup();
                 Key::Redraw
             }
             Event::Paste(s) => {
