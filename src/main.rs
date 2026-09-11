@@ -1243,7 +1243,7 @@ async fn run_shell_escape(
         return;
     }
     match tools::run_command_raw(cfg, command, cwd, 600).await {
-        Ok(out) => term.text(format_args!("{out}")),
+        Ok(out) => term.text_ln(&out),
         Err(e) => term.line(format_args!("{red}error:{reset} {e:#}")),
     }
 }
@@ -1257,7 +1257,7 @@ async fn exec_direct(
     // A direct exec is meant for real work (installs, rebuilds), so it gets a
     // generous ceiling rather than the conversational default.
     let outcome = tools::run_command_detailed(cfg, command, cwd, 1800).await?;
-    term.text(format_args!("{}", outcome.report));
+    term.text_ln(&outcome.report);
     // Propagate the child's status. `flint exec` is meant to be usable from
     // scripts, so a failing command must make flint itself fail -- reporting
     // success here would make the exit code meaningless.

@@ -222,9 +222,26 @@ impl Term {
         self.line(format_args!(""));
     }
 
+    /// Write text verbatim, adding a newline only if it does not already end in
+    /// one.
+    ///
+    /// For output owned by a subprocess: `!cmd` and `flint exec` must reproduce
+    /// the command's bytes exactly, and adding a newline to output that already
+    /// has one puts a blank line between every pair of commands.
+    pub fn text_ln(&self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.text(format_args!("{text}"));
+        if !text.ends_with('\n') {
+            self.line(format_args!(""));
+        }
+    }
+
     /// Write text with no trailing newline, for streamed model output where the
     /// caller already holds a complete line.
-    pub fn text(&self, args: std::fmt::Arguments<'_>) {        if !self.interactive {
+    pub fn text(&self, args: std::fmt::Arguments<'_>) {
+        if !self.interactive {
             print!("{args}");
             let _ = std::io::stdout().flush();
             return;
