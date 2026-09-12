@@ -160,6 +160,20 @@ async fn a_piped_one_shot_run_ignores_its_stdin() {
     );
 }
 
+/// Whether a line is one of the marker definitions the scan itself needs.
+///
+/// Recognised by shape rather than by line number, so adding a marker does not silently
+/// re-open the hole: a marker is a character literal in the marker table, or the array's
+/// own declaration.
+fn is_marker_definition(line: &str) -> bool {
+    let t = line.trim();
+    // The table itself, its entries, and the prose that explains what the damage looks
+    // like -- all of which have to name the characters they are about.
+    t.starts_with("const MARKERS")
+        || (t.starts_with('\'') && t.contains("\\u{"))
+        || t.starts_with("///")
+}
+
 /// The source tree must not contain mojibake.
 ///
 /// Not hypothetical: this happened twice, to user-visible text and to a test fixture.
@@ -209,10 +223,6 @@ fn the_source_tree_contains_no_mojibake() {
                 walk.push(path);
                 continue;
             }
-            // This file names the markers it looks for, so it would always match itself.
-            if name == "cli_output.rs" {
-                continue;
-            }
             let is_text = matches!(
                 path.extension().and_then(|e| e.to_str()),
                 Some("rs" | "js" | "md" | "toml" | "yml" | "yaml")
@@ -225,14 +235,22 @@ fn the_source_tree_contains_no_mojibake() {
                 continue;
             };
             for (n, line) in text.lines().enumerate() {
-                if MARKERS.iter().any(|m| line.contains(*m)) {
-                    offenders.push(format!(
-                        "{}:{}: {}",
-                        path.strip_prefix(root).unwrap_or(&path).display(),
-                        n + 1,
-                        line.trim()
-                    ));
+                if !MARKERS.iter().any(|m| line.contains(*m)) {
+                    continue;
                 }
+                // This file has to name the characters it looks for, and the marker
+                // definitions are the only lines where that is legitimate. Excluding the
+                // whole file instead -- which this used to do -- leaves the one file that
+                // is *about* encoding damage as the one file damage could hide in.
+                if path.ends_with("cli_output.rs") && is_marker_definition(line) {
+                    continue;
+                }
+                offenders.push(format!(
+                    "{}:{}: {}",
+                    path.strip_prefix(root).unwrap_or(&path).display(),
+                    n + 1,
+                    line.trim()
+                ));
             }
         }
     }
