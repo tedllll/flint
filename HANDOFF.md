@@ -41,9 +41,11 @@ index.
 - **Prompt.** It no longer names a job ("diagnose and repair"), and it now says where
   flint keeps its own configuration, so "change your model" edits the config instead of
   the source.
-- **Mojibake.** Fifteen user-visible strings had shipped as `readonly 鈥?writes ...`;
-  a test now walks the tree for it. Also `exec` no longer creates a config file or asks
-  for an API key it never uses.
+- **Mojibake.** Fifteen user-visible strings had shipped with a CP936-damaged em dash
+  (U+9225 followed by `?`), which `tests/cli_output.rs` now scans the tree for. The
+  damaged characters are deliberately not reproduced here -- the scanner would find
+  them. Also `exec` no longer creates a config file or asks for an API key it never
+  uses.
 
 ## Known unfinished
 

@@ -888,9 +888,19 @@ impl Term {
         let stripped;
         let text = {
             let head = self.last_segment_text.lock().unwrap();
-            if !head.is_empty() && text.starts_with(head.as_str()) {
-                stripped = text[head.len()..].to_string();
-                stripped.as_str()
+
+            if !head.is_empty() {
+                // Leading blank space is not new content, and a model that restates
+                // itself habitually separates the restatement from what follows with
+                // one. Comparing from the first non-blank character is what keeps a
+                // restatement recognisable when it does not begin at column one.
+                let lead = text.len() - text.trim_start().len();
+                if text[lead..].starts_with(head.as_str()) {
+                    stripped = text[lead + head.len()..].to_string();
+                    stripped.as_str()
+                } else {
+                    text
+                }
             } else {
                 text
             }
@@ -922,8 +932,20 @@ impl Term {
                 self.committed.store(0, Ordering::Relaxed);
                 self.stream_rows.lock().unwrap().clear();
             }
-            // The drawing text and the unstripped text are recorded separately, because
-            // they answer different questions and only the second one stays monotonic.
+            // What is recorded is the text being *drawn*, not the text as it arrived.
+            //
+            // These differ whenever a segment restates what is already in the transcript:
+            // the head is stripped for drawing, and `close_stream` commits from this same
+            // variable. Storing the unstripped text made every tool round commit the whole
+            // accumulation again, so the transcript read:
+            //
+            //   I'll see how it was installed.
+            //   I'll see how it was installed. Let me check the update options.
+            //   I'll see how it was installed. Let me check the update options. Confirmed.
+            //
+            // `segment_text` keeps the unstripped form, because the segment-boundary test
+            // needs an origin that stays monotonic -- the stripped form shrinks when a
+            // restatement is removed, and comparing against it fired a reset mid-segment.
             *self.stream_text.lock().unwrap() = text.to_string();
             *self.segment_text.lock().unwrap() = incoming.to_string();
         }
@@ -1101,11 +1123,41 @@ impl Term {
             self.committed
                 .store(lines.len().min(u16::MAX as usize) as u16, Ordering::Relaxed);
         }
-        // Record how much of this answer is now in the transcript. A later segment may
-        // repeat it verbatim at its head -- a model that resends the cumulative text
-        // after a tool call does exactly that -- and this is what lets `stream` drop the
-        // repeat instead of drawing a second copy of a line that is already above.
-        *self.last_segment_text.lock().unwrap() = text;
+        // Record what is now in the transcript, so a later segment that restates it can
+        // drop the repeat instead of drawing a second copy.
+        //
+        // The *committed part*, not the whole text. The text handed in is the answer as
+        // it stands, and rows below `committed` may not have gone to history at all --
+        // they are still in the strip, and they will be handed over by a later close. The
+        // next round restates this round, so recording the whole thing claims that rows
+        // which never reached the transcript are already in it, the rows get shown twice,
+        // and each round's line is longer than the last:
+        //
+        //   I'll see how it was installed.
+        //   I'll see how it was installed. Let me check the update options.
+        //   I'll see how it was installed. Let me check the update options. Confirmed.
+        //
+        // Which is what a real eight-round session looked like.
+        // Appended, not replaced: this is the running prefix of everything handed to the
+        // transcript, and a restatement is compared against all of it.
+        //
+        // Storing only this segment's text is the tempting version and it is wrong,
+        // because the model sends the *accumulation*, not the addition. Round one commits
+        // "A" and records it; round two arrives as "A B" and commits only " B", and
+        // recording just " B" throws away the "A" that round three will begin with:
+        //
+        //   round 1 commits "A"        prefix "A"
+        //   round 2 commits " B"       prefix "A B"     <- must be the whole thing
+        //   round 3 arrives "A B C"    strips "A B", commits " C"
+        //
+        // With only the last addition kept, every third round matches nothing and the
+        // whole accumulation is committed again -- which is exactly the reported fault,
+        // and it is why two consecutive rounds looked fine.
+        //
+        // `text` here is what was drawn, so it is already missing any head that was
+        // stripped; appending it to the running prefix reproduces the model's own text.
+        let mut prefix = self.last_segment_text.lock().unwrap();
+        prefix.push_str(&text);
         self.clear_viewport();
         // Scroll the now-blank slice up, so the strip is empty and the transcript
         // above is untouched.

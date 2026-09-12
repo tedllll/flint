@@ -1005,3 +1005,76 @@ fn the_status_line_knows_which_phase_it_is_in() {
     std::env::remove_var("FLINT_TERM_CAPTURE");
     std::env::remove_var("FLINT_TERM_SIZE");
 }
+
+/// Text committed across several tool rounds must not be repeated, each time longer.
+///
+/// Reported from a real session that updated `codex` over eight tool rounds. The
+/// narration grew by a sentence per round, and every round committed the whole of what
+/// had accumulated so far rather than only what was new, so the transcript read:
+///
+/// ```text
+/// 我先看看它是怎么装的，再决定用哪种方式更新。
+/// 我先看看它是怎么装的，再决定用哪种方式更新。看下它自带哪些更新方式：...
+/// 我先看看它是怎么装的，再决定用哪种方式更新。看下它自带哪些更新方式：... 现在执行更新：
+/// ```
+///
+/// Each round's text *does* begin with the previous round's, because the model restates
+/// what it has said so far -- which is what makes this look like one growing segment
+/// rather than a new one. The strip holds the accumulation, but only the part not yet in
+/// the transcript may be committed.
+#[test]
+fn narration_is_not_recommitted_each_tool_round() {
+    let _guard = stdout_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("term-rounds.bin");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let restore = redirect_stdout(&path);
+
+    std::env::set_var("FLINT_TERM_CAPTURE", "1");
+    std::env::set_var("FLINT_TERM_SIZE", "70x24");
+    let term = Term::start().expect("term");
+    term.line(format_args!("> 帮我更新 codex"));
+
+    // Four rounds, each restating everything before it and adding one sentence, with a
+    // tool call in between -- exactly the shape the real session had.
+    // Each round appends one sentence to what the model had already said, so the answer
+    // grows as "A", "A B", "A B C" -- the leading blank is part of how the restatement
+    // is separated from the continuation, and it is what made this recognisable in the
+    // real transcript.
+    let parts = [
+        "I'll look at how it was installed.",
+        " Let me see what update options it has.",
+        " Confirmed.",
+        " Now updating.",
+    ];
+    let mut acc = String::new();
+    for (n, part) in parts.iter().enumerate() {
+        // The REPL accumulates the answer for the turn and streams the whole of it on
+        // every fragment, so `stream` sees a string that grows character by character
+        // and never shrinks.
+        for ch in part.chars() {
+            acc.push(ch);
+            term.stream(&acc);
+        }
+        // The round ends with a tool call, which commits what was streamed.
+        term.line(format_args!("  \u{2713} bash round {n} 3 lines"));
+    }
+    term.end_stream();
+
+    restore();
+    std::env::remove_var("FLINT_TERM_CAPTURE");
+    std::env::remove_var("FLINT_TERM_SIZE");
+
+    let text = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).to_string();
+    let rows = history_rows(&text);
+
+    // The sentence belongs in the transcript once. More than once means a round
+    // recommitted the accumulation instead of only its own addition.
+    let opening = "I'll look at how it was installed.";
+    let copies = rows.iter().filter(|r| r.starts_with(opening)).count();
+    assert_eq!(
+        copies, 1,
+        "the narration opening was committed {copies} times, once per round:\n{rows:#?}"
+    );
+}
