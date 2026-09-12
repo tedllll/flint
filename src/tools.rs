@@ -237,6 +237,30 @@ pub fn set_notice_sink(sink: NoticeSink) {
     let _ = NOTICE.set(sink);
 }
 
+/// Where a running command's latest output line goes, when there is somewhere for it.
+///
+/// Separate from the notice sink on purpose. A notice is a permanent line in the
+/// transcript; a download's progress is not -- one line per percent would bury the
+/// conversation under its own transport. This goes to the status row instead, which
+/// already exists to say what is happening right now and is repainted in place.
+type ProgressSink = Box<dyn Fn(&str) + Send + Sync>;
+static PROGRESS: std::sync::OnceLock<ProgressSink> = std::sync::OnceLock::new();
+
+/// Route a running command's progress to the UI. Called once, by the CLI.
+pub fn set_progress_sink(sink: ProgressSink) {
+    let _ = PROGRESS.set(sink);
+}
+
+/// Report the command's most recent line of output.
+///
+/// Silent when nothing is listening -- a test, or a non-interactive run -- which is why
+/// callers can call it unconditionally from inside the read loop.
+pub fn progress(line: &str) {
+    if let Some(sink) = PROGRESS.get() {
+        sink(line);
+    }
+}
+
 /// Report something to the user without disturbing whatever is on screen.
 pub fn notice(message: &str) {
     match NOTICE.get() {
@@ -259,6 +283,23 @@ impl CommandOutcome {
 /// obvious before the reader starts wondering whether flint itself has died.
 const STUCK_AFTER_SECS: u64 = 20;
 
+/// How long a command may print nothing before it is treated as stopped.
+///
+/// Applies to downloads, where a total budget is the wrong instrument: a slow transfer
+/// must be allowed to finish, and a dead one must not be waited on. Long enough to
+/// survive a stalled chunk or a slow mirror.
+const IDLE_KILL_SECS: u64 = 300;
+
+/// Ceiling on what is kept from a command's output, per pipe.
+///
+/// Output is streamed as it arrives and only the report is bounded; without a cap a
+/// command that prints forever would grow the string until the process ran out of memory,
+/// because nothing else limits what a child may write.
+const MAX_CAPTURE: usize = 4 * 1024 * 1024;
+
+/// Budget for a download, which is bounded by idleness rather than by this.
+const DOWNLOAD_BASH_TIMEOUT: u64 = 2 * 3600;
+
 /// Default budget for an ordinary command.
 const DEFAULT_BASH_TIMEOUT: u64 = 120;
 
@@ -280,6 +321,53 @@ fn looks_slow(command: &str) -> bool {
     ]
     .iter()
     .any(|word| lower.contains(word))
+}
+
+/// Whether a command is fetching something over the network.
+///
+/// Detection is deliberately literal and conservative, because the cost of a wrong
+/// answer is asymmetric. Treating an ordinary command as a download only means it gets a
+/// longer leash and its output is echoed to the status row -- harmless. Treating a
+/// download as ordinary kills it at two minutes and loses the transfer, which is the
+/// complaint this exists to answer.
+///
+/// Only the *fetching forms* count, not the tool names: `git status` and `pip list` are
+/// not downloads, while `git clone` and `pip install` are, and a bare `npm` or `cargo`
+/// says nothing either way. Flagging a whole tool would make `cargo build` -- which
+/// compiles locally and can take ten minutes for other reasons -- look like a transfer.
+///
+/// The model can say so outright with the `download` argument when this misses, which is
+/// the escape hatch for a vendored script or a tool nobody has heard of.
+fn looks_like_download(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    let words: Vec<&str> = lower.split_whitespace().collect();
+    let has = |w: &str| words.contains(&w);
+    let any = |list: &[&str]| words.iter().any(|x| list.contains(x));
+
+    // Fetching tools, in their fetching forms.
+    if has("curl") {
+        // A plain `curl URL` prints to stdout and is a fetch too; the flags that make it
+        // a plain read (`-I`, `-sS -o /dev/null`) are still network calls, so anything
+        // with curl counts.
+        return true;
+    }
+    if has("wget") || has("aria2c") || has("axel") || has("rsync") || has("scp") || has("sftp") {
+        return true;
+    }
+    // Package managers: the verbs that fetch, not the ones that list.
+    if any(&["install", "add", "upgrade", "update", "fetch", "download", "pull", "sync"])
+        && any(&["npm", "pnpm", "yarn", "pip", "pip3", "poetry", "uv", "gem", "go", "cargo",
+                "brew", "apt", "apt-get", "dnf", "yum", "pacman", "apk", "choco", "winget",
+                "scoop", "nix", "conda", "mamba", "docker", "helm", "rustup"])
+    {
+        return true;
+    }
+    // `git` fetches only for these verbs.
+    if has("git") && any(&["clone", "fetch", "pull", "submodule"]) {
+        return true;
+    }
+    // `pip download`, `npm pack`, and friends are covered above by the verb list.
+    false
 }
 
 /// `12s`, `1m 05s`, `1h 02m` -- short enough for a one-line notice.
@@ -318,6 +406,24 @@ pub async fn run_command_detailed(
     cwd: &Path,
     timeout_secs: u64,
 ) -> Result<CommandOutcome> {
+    run_command_streaming(config, command, cwd, timeout_secs, false).await
+}
+
+/// Run a command, reporting its output as it arrives.
+///
+/// `idle_kill` changes what the clock means. An ordinary command is bounded by its total
+/// timeout, because nothing about it is expected to take long. A download is not: it may
+/// legitimately take an hour at a slow link, and the interesting question is not how long
+/// it has run but whether it is still moving. With `idle_kill` set, output resets the
+/// clock and a transfer that has gone quiet is killed -- which a total budget cannot
+/// express, since it kills the slow and tolerates the dead.
+pub async fn run_command_streaming(
+    config: &Config,
+    command: &str,
+    cwd: &Path,
+    timeout_secs: u64,
+    idle_kill: bool,
+) -> Result<CommandOutcome> {
     let shell = probe_shell(&config.shell, &config.shell_args);
     let mut cmd = tokio::process::Command::new(&shell[0]);
     // Arguments are passed as argv, never concatenated into one string: that
@@ -348,57 +454,133 @@ pub async fn run_command_detailed(
     // can end -- an interrupt drops the turn, and a dropped turn must not leave a build
     // running behind it.
     cmd.kill_on_drop(true);
-    let child = cmd
+    let mut child = cmd
         .spawn()
         .with_context(|| format!("cannot spawn shell '{}'", shell[0]))?;
 
-    // The pipes have to be drained while the process runs, and exactly one task may own
-    // that: `select!` polls the read future, and the timers only ever observe.
-    //
-    // Polling rather than one long `timeout`, because the two things a reader needs --
-    // "it is still going" and "it is being killed" -- both have to happen while the
-    // command is running, and a single `timeout(..).await` can say neither.
+    // Both pipes are read while the command runs, and the lines are funnelled through one
+    // channel. `wait_with_output` cannot do this: it returns only when the child has
+    // finished, which is precisely the moment progress is no longer interesting.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Line>();
+    let mut readers = Vec::new();
+    if let Some(pipe) = child.stdout.take() {
+        readers.push(tokio::spawn(pump_lines(pipe, tx.clone(), true)));
+    }
+    if let Some(pipe) = child.stderr.take() {
+        readers.push(tokio::spawn(pump_lines(pipe, tx.clone(), false)));
+    }
+    drop(tx);
+
     let total = Duration::from_secs(timeout_secs);
     let stuck_at = Duration::from_secs(STUCK_AFTER_SECS);
     let started = std::time::Instant::now();
     let mut warned = false;
-    let drain = child.wait_with_output();
-    tokio::pin!(drain);
-    let output = loop {
-        // Recomputed each pass: a `sleep` is only good for one `select!`.
+    let mut stdout_text = String::new();
+    let mut stderr_text = String::new();
+    let mut last_output = std::time::Instant::now();
+
+    // Each pass either yields a line, or ends the loop with the child's status.
+    let status = loop {
         let until_stuck = stuck_at.saturating_sub(started.elapsed());
         let until_kill = total.saturating_sub(started.elapsed());
-        let out_of_time = tokio::select! {
-            done = &mut drain => break done.context("failed to collect command output")?,
-            _ = tokio::time::sleep(until_kill) => true,
-            _ = tokio::time::sleep(until_stuck), if !warned => {
+        let idle_deadline = Duration::from_secs(IDLE_KILL_SECS);
+        let until_idle = idle_deadline.saturating_sub(last_output.elapsed());
+
+        enum Wake {
+            Line(Option<Line>),
+            Exited(std::io::Result<std::process::ExitStatus>),
+            TimedOut,
+            WentQuiet,
+            Stuck,
+        }
+
+        let wake = tokio::select! {
+            line = rx.recv() => Wake::Line(line),
+            status = child.wait() => Wake::Exited(status),
+            _ = tokio::time::sleep(until_kill) => Wake::TimedOut,
+            // Only a download gets the idleness rule; see the doc comment.
+            _ = tokio::time::sleep(until_idle), if idle_kill => Wake::WentQuiet,
+            _ = tokio::time::sleep(until_stuck), if !warned => Wake::Stuck,
+        };
+
+        match wake {
+            Wake::Line(Some(Line { text, stdout })) => {
+                last_output = std::time::Instant::now();
+                progress(&text);
+                if stdout {
+                    if stdout_text.len() < MAX_CAPTURE {
+                        stdout_text.push_str(&text);
+                        stdout_text.push('\n');
+                    }
+                } else if stderr_text.len() < MAX_CAPTURE {
+                    stderr_text.push_str(&text);
+                    stderr_text.push('\n');
+                }
+            }
+            // Every sender is gone, so both readers have finished -- but the child may
+            // have exited without either pipe reaching EOF first, so ask for its status
+            // rather than assuming.
+            Wake::Line(None) => {
+                break child.wait().await.context("cannot reap the command")?;
+            }
+            Wake::Exited(status) => {
+                break status.context("failed to collect command output")?;
+            }
+            Wake::TimedOut => {
+                return Err(anyhow!(
+                    "killed after {timeout_secs}s with no result. If it is genuinely slow, pass a \
+                     larger timeout_secs or write [timeout:N] before the command; if it is waiting \
+                     for input, it never will -- stdin is closed."
+                ));
+            }
+            Wake::WentQuiet => {
+                return Err(anyhow!(
+                    "no output for {IDLE_KILL_SECS}s, so it was killed. A command that keeps \
+                     printing is left alone however long it takes; one that has gone quiet has \
+                     usually stopped for good."
+                ));
+            }
+            Wake::Stuck => {
                 warned = true;
+                let how = if idle_kill {
+                    format!("it is killed after {IDLE_KILL_SECS}s of silence")
+                } else {
+                    format!("it is killed at {timeout_secs}s")
+                };
                 notice(&format!(
-                    "this command has been running for {} and may be stuck. It is killed at \
-                     {timeout_secs}s; pass a larger `timeout_secs`, or write [timeout:N] before \
-                     the command, if it is genuinely slow.",
+                    "this command has been running for {} and may be stuck. {how}; pass a larger \
+                     `timeout_secs`, or write [timeout:N] before the command, if it is genuinely slow.",
                     elapsed_label(started.elapsed())
                 ));
-                false
             }
-        };
-        if out_of_time {
-            // Returning drops the future, and `kill_on_drop` on the command is what makes
-            // that a kill: the child is terminated and reaped as the future goes out of
-            // scope. That is exactly why it is set -- `wait_with_output` owns the child,
-            // and the borrow checker is right that there is no way to also hold a `&mut`
-            // to kill it explicitly.
-            return Err(anyhow!(
-                "killed after {timeout_secs}s with no result. If it is genuinely slow, pass a \
-                 larger timeout_secs or write [timeout:N] before the command; if it is waiting \
-                 for input, it never will -- stdin is closed."
-            ));
         }
     };
 
-    let stdout = util::sanitize_output(&String::from_utf8_lossy(&output.stdout));
-    let stderr = util::sanitize_output(&String::from_utf8_lossy(&output.stderr));
-    let code = output.status.code().unwrap_or(-1);
+    // The readers may still be delivering the tail of the output after the child exits.
+    // A short grace period collects it, so a command's last lines are not lost at the
+    // finish line -- which is exactly where the interesting error message usually is.
+    for reader in readers {
+        let _ = reader.await;
+    }
+    let deadline = std::time::Instant::now() + Duration::from_millis(200);
+    while std::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(20), rx.recv()).await {
+            Ok(Some(Line { text, stdout })) => {
+                if stdout {
+                    stdout_text.push_str(&text);
+                    stdout_text.push('\n');
+                } else {
+                    stderr_text.push_str(&text);
+                    stderr_text.push('\n');
+                }
+            }
+            _ => break,
+        }
+    }
+
+    let stdout = util::sanitize_output(stdout_text.trim_end());
+    let stderr = util::sanitize_output(stderr_text.trim_end());
+    let code = status.code().unwrap_or(-1);
 
     let mut report = String::new();
     if !stdout.trim().is_empty() {
@@ -419,6 +601,56 @@ pub async fn run_command_detailed(
     Ok(CommandOutcome { report, code })
 }
 
+/// One line of a running command's output, and which pipe it came from.
+struct Line {
+    text: String,
+    stdout: bool,
+}
+
+/// Read a pipe line by line, forwarding each complete line. Never returns an error: a
+/// pipe that fails to read is the command's ending, not the read's problem.
+async fn pump_lines<R>(pipe: R, tx: tokio::sync::mpsc::UnboundedSender<Line>, stdout: bool)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncBufReadExt;
+    let mut reader = tokio::io::BufReader::new(pipe);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        // `\r` ends a line as much as `\n` does, and for progress it matters more.
+        //
+        // A progress bar redraws one line by returning the carriage and writing over
+        // itself; it never emits a newline until it is done. Splitting on `\n` alone
+        // therefore holds the entire transfer in the buffer -- reported as "no progress
+        // is shown", and worse, it fills the pipe so the command blocks writing to it.
+        match reader.read_until(b'\n', &mut buf).await {
+            Ok(0) => break,
+            Ok(_) => {
+                for chunk in split_progress_lines(&buf) {
+                    if tx.send(Line { text: chunk, stdout }).is_err() {
+                        return;
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+/// Split a read chunk into the separate things it is trying to say.
+///
+/// Both terminators end a line, empty pieces are dropped, and the result is trimmed --
+/// a progress redraw is often a dozen spaces followed by a carriage return, which says
+/// nothing and would otherwise be reported as the command's current activity.
+fn split_progress_lines(buf: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(buf)
+        .split(['\n', '\r'])
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 #[async_trait::async_trait]
 impl Tool for BashTool {
     fn name(&self) -> &str {
@@ -437,6 +669,12 @@ impl Tool for BashTool {
             "type": "object",
             "properties": {
                 "command": { "type": "string", "description": "The command line to execute." },
+                "download": {
+                    "type": "boolean",
+                    "description": "Set when the command fetches something over the network and \\
+                         the command line does not make that obvious. A download is not killed on \\
+                         a total time budget; it is killed only if it stops producing output."
+                },
                 "timeout_secs": {
                     "type": "integer",
                     "description": format!(
@@ -452,15 +690,29 @@ impl Tool for BashTool {
 
     async fn call(&self, args: &Value) -> Result<String> {
         let command = require_str(args, "command")?;
+        // The model may say a command is a download when the literal check cannot tell:
+        // a vendored script, a wrapper, a tool nobody has heard of. It is an *addition*
+        // to the heuristic, not a replacement for it -- relying on the model to remember
+        // a flag would make the behaviour depend on the model's diligence, and a missed
+        // flag would silently restore the two-minute kill.
+        let declared = args
+            .get("download")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let download = declared || looks_like_download(command);
+
         let timeout = match args.get("timeout_secs").and_then(Value::as_u64) {
             Some(explicit) => explicit,
-            // A command that installs, builds or downloads is expected to be slow, and
-            // killing `cargo install` at two minutes is not a safety feature -- it is a
-            // false alarm that teaches the model to work around the tool.
+            // A download is bounded by idleness rather than by a total budget: it may
+            // legitimately take an hour, and what matters is whether it is still moving.
+            None if download => DOWNLOAD_BASH_TIMEOUT,
+            // A command that installs or builds is expected to be slow, and killing
+            // `cargo install` at two minutes is not a safety feature -- it is a false
+            // alarm that teaches the model to work around the tool.
             None if looks_slow(command) => LONG_BASH_TIMEOUT,
             None => DEFAULT_BASH_TIMEOUT,
         }
-        .clamp(1, 3600);
+        .clamp(1, 24 * 3600);
 
         if self.readonly && !is_readonly_command(command) {
             return Err(anyhow!(
@@ -470,8 +722,9 @@ impl Tool for BashTool {
             ));
         }
 
-        let report = run_command_raw(&self.config, command, &self.cwd, timeout).await?;
-        Ok(util::truncate(&report, self.config.max_tool_output))
+        let outcome =
+            run_command_streaming(&self.config, command, &self.cwd, timeout, download).await?;
+        Ok(util::truncate(&outcome.report, self.config.max_tool_output))
     }
 }
 
@@ -1399,5 +1652,108 @@ mod glob_tests {
         assert!(glob_match("src/*", "src/anything"));
         assert!(glob_match("src/**", "src/a/b/c"));
         assert!(!glob_match("src/*", "src/a/b"));
+    }
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::looks_like_download;
+
+    #[test]
+    fn fetching_commands_are_recognised() {
+        for c in [
+            "curl -fsSL https://example.com/x.tar.gz -o /tmp/x",
+            "wget https://example.com/x",
+            "git clone https://github.com/a/b",
+            "git fetch origin",
+            "git pull",
+            "pip install requests",
+            "pip3 install -r req.txt",
+            "npm install",
+            "cargo install ripgrep",
+            "brew upgrade",
+            "apt-get install -y jq",
+            "docker pull ubuntu",
+            "rustup update",
+            "aria2c https://example.com/x",
+            "scp host:/a /b",
+        ] {
+            assert!(looks_like_download(c), "should be a download: {c}");
+        }
+    }
+
+    #[test]
+    fn local_commands_are_not_mistaken_for_downloads() {
+        // The cost of a miss here is only a longer leash, but a *false* positive on
+        // ordinary work would change behaviour the user did not ask for -- and these are
+        // the command lines most likely to be run all day.
+        for c in [
+            "ls -la",
+            "cargo build --release",
+            "cargo test",
+            "cargo run",
+            "git status",
+            "git log --oneline -5",
+            "git diff",
+            "pip list",
+            "npm ls",
+            "npm run build",
+            "grep -rn download .",
+            "cat download.txt",
+            "echo 'install later'",
+            "docker ps",
+            "rustup show",
+        ] {
+            assert!(!looks_like_download(c), "is not a download: {c}");
+        }
+    }
+
+    #[test]
+    fn a_tool_name_alone_does_not_decide_it() {
+        // `npm` and `cargo` fetch for some verbs and not others, so the verb is what
+        // matters -- flagging the tool would make every local build look like a transfer.
+        assert!(looks_like_download("npm install"));
+        assert!(!looks_like_download("npm run build"));
+        assert!(looks_like_download("cargo install x"));
+        assert!(!looks_like_download("cargo build"));
+        assert!(looks_like_download("git clone x"));
+        assert!(!looks_like_download("git commit -m x"));
+    }
+}
+
+#[cfg(test)]
+mod progress_parse_tests {
+    use super::split_progress_lines;
+
+    #[test]
+    fn a_carriage_return_separates_progress_updates() {
+        // A progress bar redraws one line by returning the carriage; without splitting on
+        // `\r` the whole transfer stays in one buffer and no progress is ever reported.
+        let chunk = b"\r  1% [=>          ]\r 45% [=====>     ]\r100% [===========]";
+        assert_eq!(
+            split_progress_lines(chunk),
+            vec!["1% [=>          ]", "45% [=====>     ]", "100% [===========]"]
+        );
+    }
+
+    #[test]
+    fn ordinary_lines_still_split_on_newline() {
+        let chunk = b"line one\nline two\n";
+        assert_eq!(split_progress_lines(chunk), vec!["line one", "line two"]);
+    }
+
+    #[test]
+    fn blank_and_whitespace_only_pieces_are_dropped() {
+        // A redraw is often a row of spaces then a carriage return. Reporting that as the
+        // command's activity would replace a useful line with nothing.
+        let chunk = b"\n   \r\t\r\nreal line\n";
+        assert_eq!(split_progress_lines(chunk), vec!["real line"]);
+    }
+
+    #[test]
+    fn a_chunk_with_no_terminator_is_still_reported() {
+        // The tail of the output usually arrives without one, and it is where the error
+        // message lives.
+        assert_eq!(split_progress_lines(b"last words"), vec!["last words"]);
     }
 }

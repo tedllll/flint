@@ -512,6 +512,43 @@ impl Term {
             .unwrap_or(false)
     }
 
+    /// Show a line of a running command's output on the status row.
+    ///
+    /// Replaces the activity's *name* rather than adding a line, so a download updating
+    /// its percentage does not scroll the transcript. The clock keeps running: the turn
+    /// has been going since it started, whatever the last line says.
+    pub fn activity_detail(&self, detail: &str) {
+        if !self.interactive {
+            return;
+        }
+        let shown = {
+            let mut activity = self.activity.lock().unwrap();
+            match activity.as_mut() {
+                Some(a) => {
+                    // Trimmed to what the row can hold: a status line that wraps is worse
+                    // than one that is cut, because the wrap lands on the input row.
+                    let cols = self.screen_cols.load(Ordering::Relaxed) as usize;
+                    let room = cols.saturating_sub(24).max(20);
+                    let mut text = detail.to_string();
+                    if text.chars().count() > room {
+                        text = text.chars().take(room.saturating_sub(1)).collect::<String>();
+                        text.push('\u{2026}');
+                    }
+                    if a.name == text {
+                        false
+                    } else {
+                        a.name = text;
+                        true
+                    }
+                }
+                None => false,
+            }
+        };
+        if shown {
+            self.paint_activity();
+        }
+    }
+
     /// How long the current activity has been running; zero when none is.
     ///
     /// Lets the caller tell a slow model from one that is not answering. The clock itself

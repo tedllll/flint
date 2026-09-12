@@ -380,6 +380,20 @@ async fn real_main() -> Result<i32> {
         tools::set_notice_sink(Box::new(move |message| sink_term.notice(message)));
     }
 
+    // A running command's progress goes to the status row, not the transcript: one line
+    // per percent of a download would bury the conversation under its own transport. The
+    // count of what it is doing is what the status row already exists to show.
+    {
+        let sink_term = std::sync::Arc::clone(&term);
+        tools::set_progress_sink(Box::new(move |line| {
+            let line = line.trim();
+            // Blank lines are the common case during a transfer, and they say nothing.
+            if !line.is_empty() {
+                sink_term.activity_detail(line);
+            }
+        }));
+    }
+
     // A provider that could not be configured is reported now that something can be
     // read, rather than having taken the whole process down before the terminal existed.
     if let Some(error) = &provider_error {
@@ -1261,6 +1275,21 @@ async fn handle_command(
             ));
             printer.term().line(format_args!("  verbose          = {}", cfg.verbose));
             printer.term().line(format_args!("  tool_detail      = {}", cfg.tool_detail));
+            // The value in force, not the value in the file.
+            //
+            // These differ whenever `--readonly` or `/readonly` is used, and reporting
+            // the file's value then describes a permission the session does not have: a
+            // real session was left hunting the config for a setting that was not the
+            // one in effect.
+            if agent.readonly() == cfg.readonly {
+                printer.term().line(format_args!("  readonly         = {}", cfg.readonly));
+            } else {
+                printer.term().line(format_args!(
+                    "  readonly         = {bold}{}{reset} {dim}(this run; the file says {}){reset}",
+                    agent.readonly(),
+                    cfg.readonly
+                ));
+            }
 
             if arg == "edit" {
                 // A small wizard, so the settings that matter when you are

@@ -168,6 +168,31 @@ makes getting your bearings in an unfamiliar tree a single step instead of a doz
 Tool output is capped at `max_tool_output` characters before going back to the
 model, with a `[truncated]` marker.
 
+### Downloads
+
+A command that fetches something over the network is treated differently from one
+that does not, because the two have nothing in common where time is concerned. An
+ordinary command is bounded by a total budget: nothing about `ls` is expected to
+take long, so two minutes means something is wrong. A download may legitimately take
+an hour, and the question that matters is not how long it has run but whether it is
+still moving. So a download is bounded by *silence*: it is left alone however long it
+takes, and killed after five minutes without a byte. A total budget cannot express
+that -- it kills the slow and tolerates the dead.
+
+Which commands those are is decided by the command line, in its fetching forms only:
+`curl`, `wget`, `git clone|fetch|pull|submodule`, `pip|npm|cargo|brew|apt* install`,
+and so on. The tool name alone never decides it -- `npm install` fetches and
+`npm run build` does not, and flagging the tool would make every local build look like
+a transfer. When the command line cannot say, the model can with the `download`
+argument; that is an addition to the check rather than a replacement for it, because
+behaviour that depends on the model remembering a flag is behaviour that silently
+stops working.
+
+Progress goes to the status row, not the transcript. A download's own progress
+frequently redraws one line with a carriage return rather than emitting newlines, so
+each redraw is read as a line and shown where the running clock already is. Printing
+one transcript line per percent would bury the conversation under its own transport.
+
 ## Context
 
 There is no automatic context management. `/usage` shows the size of your last
