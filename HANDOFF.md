@@ -49,14 +49,21 @@ index.
 
 ## Known unfinished
 
-**Windows is unverified.** Every fix above was developed and tested on macOS. The
-layout depends on DECSTBM scroll regions, which `conhost` and Windows Terminal do not
-handle identically, and the test suite cannot tell them apart — `scripts/vtscreen.js`
-is one model of one terminal. The cross-compile cannot even be type-checked here:
-`aws-lc-sys` (rustls's crypto backend) needs a Windows C toolchain. **CI does not run on
-push** — `.github/workflows/release.yml` triggers only on `v*` tags and
-`workflow_dispatch`, so a push to `main` checks nothing. Running that workflow by hand,
-or tagging a release, is the only way to exercise Windows.
+**Windows is unverified, and the next session is starting there.** Read
+[`docs/windows.md`](docs/windows.md) before touching anything — it has the specific
+mechanisms, what is measured versus merely reasoned, and the first things worth doing on
+that machine. The short version: the layout is built on terminal *behaviour* (scroll
+regions, absolute row addressing, what a newline does at the bottom margin), and
+`crossterm` sets only `ENABLE_VIRTUAL_TERMINAL_PROCESSING` — never
+`DISABLE_NEWLINE_AUTO_RETURN`, the bit that decides whether `\n` also returns the
+carriage, while `insert_history` counts on `\r\n` advancing exactly one row. The console
+output code page (`SetConsoleOutputCP`) is also never set, so non-ASCII text very likely
+prints as mojibake.
+
+**CI does not run on push** — `.github/workflows/release.yml` triggers only on `v*` tags
+and `workflow_dispatch`, so a push to `main` checks nothing on any platform. The
+cross-compile cannot even be type-checked here: `aws-lc-sys` (rustls's crypto backend)
+needs a Windows C toolchain, not just `rustup target add`.
 
 **Three `eprintln!` sites can still fire mid-turn**, which puts them inside the strip:
 `agent.rs` (cannot persist session event), `config.rs`, `session.rs`. They are rare
