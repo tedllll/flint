@@ -297,6 +297,12 @@ const IDLE_KILL_SECS: u64 = 300;
 /// because nothing else limits what a child may write.
 const MAX_CAPTURE: usize = 4 * 1024 * 1024;
 
+/// How often to report progress for a download that emits none of its own.
+///
+/// Frequent enough to be reassuring, rare enough that the status row is readable and the
+/// loop is not spinning.
+const PROGRESS_REPORT_SECS: u64 = 10;
+
 /// Budget for a download, which is bounded by idleness rather than by this.
 const DOWNLOAD_BASH_TIMEOUT: u64 = 2 * 3600;
 
@@ -472,16 +478,25 @@ pub async fn run_command_streaming(
     drop(tx);
 
     let total = Duration::from_secs(timeout_secs);
-    let stuck_at = Duration::from_secs(STUCK_AFTER_SECS);
+    let mut stuck_at_override: Option<Duration> = None;
     let started = std::time::Instant::now();
     let mut warned = false;
     let mut stdout_text = String::new();
     let mut stderr_text = String::new();
     let mut last_output = std::time::Instant::now();
+    // Reported progress of our own, for a download that emits none; kept apart from
+    // `last_output` because a report must not be mistaken for the transfer moving.
+    let mut last_report: Option<std::time::Instant> = None;
 
     // Each pass either yields a line, or ends the loop with the child's status.
     let status = loop {
-        let until_stuck = stuck_at.saturating_sub(started.elapsed());
+        let stuck_at = stuck_at_override.unwrap_or_else(|| Duration::from_secs(STUCK_AFTER_SECS));
+        // Measured from the last report when one has been made, so re-arming waits a full
+        // interval instead of firing again on the next pass.
+        let until_stuck = match last_report {
+            Some(at) => stuck_at.saturating_sub(at.elapsed()),
+            None => stuck_at.saturating_sub(started.elapsed()),
+        };
         let until_kill = total.saturating_sub(started.elapsed());
         let idle_deadline = Duration::from_secs(IDLE_KILL_SECS);
         let until_idle = idle_deadline.saturating_sub(last_output.elapsed());
@@ -542,16 +557,32 @@ pub async fn run_command_streaming(
             }
             Wake::Stuck => {
                 warned = true;
-                let how = if idle_kill {
-                    format!("it is killed after {IDLE_KILL_SECS}s of silence")
+                if idle_kill {
+                    // A download that says nothing is not necessarily stuck: `curl` and
+                    // `wget` suppress their own progress bars when stderr is not a
+                    // terminal, which it never is here, so a perfectly healthy transfer is
+                    // silent for its whole duration. Saying so -- and how big the output
+                    // has got -- is the only progress available in that case, and it beats
+                    // a status line that just counts seconds.
+                    progress(&format!(
+                        "downloading, {} so far{}",
+                        elapsed_label(started.elapsed()),
+                        output_size_note(command)
+                    ));
+                    // Re-arm, but only after a decent interval, and *not* by resetting the
+                    // idleness baseline: that is what decides whether the transfer is
+                    // dead, and a report of our own is not evidence of life.
+                    warned = false;
+                    stuck_at_override = Some(std::time::Duration::from_secs(PROGRESS_REPORT_SECS));
+                    last_report = Some(std::time::Instant::now());
                 } else {
-                    format!("it is killed at {timeout_secs}s")
-                };
-                notice(&format!(
-                    "this command has been running for {} and may be stuck. {how}; pass a larger \
-                     `timeout_secs`, or write [timeout:N] before the command, if it is genuinely slow.",
-                    elapsed_label(started.elapsed())
-                ));
+                    notice(&format!(
+                        "this command has been running for {} and may be stuck. It is killed at \
+                         {timeout_secs}s; pass a larger `timeout_secs`, or write [timeout:N] before \
+                         the command, if it is genuinely slow.",
+                        elapsed_label(started.elapsed())
+                    ));
+                }
             }
         }
     };
@@ -601,6 +632,47 @@ pub async fn run_command_streaming(
     Ok(CommandOutcome { report, code })
 }
 
+/// How large the file a download is writing to has become, if it can be told.
+///
+/// Best effort by design. Finding the destination means reading the command line, and a
+/// command line can put it anywhere -- `-o`, `-O`, a redirect, a tool that names its own
+/// temporary file. When it cannot be found the total is simply absent, which is better
+/// than guessing and reporting the size of something unrelated.
+fn output_size_note(command: &str) -> String {
+    for token in ["-o ", "--output ", "-O "] {
+        if let Some(rest) = command.split(token).nth(1) {
+            let path = rest
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_matches(['\'', '"']);
+            if path.is_empty() {
+                continue;
+            }
+            if let Ok(meta) = std::fs::metadata(path) {
+                return format!(", {} written to {}", human_bytes(meta.len()), path);
+            }
+        }
+    }
+    String::new()
+}
+
+/// Bytes as something a person reads at a glance.
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "K", "M", "G"];
+    let mut value = n as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{n} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
 /// One line of a running command's output, and which pipe it came from.
 struct Line {
     text: String,
@@ -613,41 +685,72 @@ async fn pump_lines<R>(pipe: R, tx: tokio::sync::mpsc::UnboundedSender<Line>, st
 where
     R: tokio::io::AsyncRead + Unpin,
 {
-    use tokio::io::AsyncBufReadExt;
-    let mut reader = tokio::io::BufReader::new(pipe);
-    let mut buf = Vec::new();
+    use tokio::io::AsyncReadExt;
+    // Read bytes, not lines, and cut them here.
+    //
+    // `read_until(b'\n')` reads until it *sees* a newline, so a progress bar -- which
+    // redraws one line with a carriage return and emits no newline until it is finished --
+    // produces nothing at all for the whole transfer. The download stalled rather than
+    // merely going unreported, because the reader was waiting and the pipe filled.
+    let mut reader = pipe;
+    let mut buf = [0u8; 8192];
+    // A read ends wherever the pipe ends, not where a line does: a chunk boundary can
+    // fall in the middle of a progress redraw, and emitting the halves separately would
+    // put half a percentage on screen twice. The tail is held until its terminator
+    // arrives, or until the pipe closes and it is all there is.
+    let mut carry: Vec<u8> = Vec::new();
     loop {
-        buf.clear();
-        // `\r` ends a line as much as `\n` does, and for progress it matters more.
-        //
-        // A progress bar redraws one line by returning the carriage and writing over
-        // itself; it never emits a newline until it is done. Splitting on `\n` alone
-        // therefore holds the entire transfer in the buffer -- reported as "no progress
-        // is shown", and worse, it fills the pipe so the command blocks writing to it.
-        match reader.read_until(b'\n', &mut buf).await {
+        match reader.read(&mut buf).await {
             Ok(0) => break,
-            Ok(_) => {
-                for chunk in split_progress_lines(&buf) {
-                    if tx.send(Line { text: chunk, stdout }).is_err() {
-                        return;
+            Ok(n) => {
+                carry.extend_from_slice(&buf[..n]);
+                let mut start = 0usize;
+                for i in 0..carry.len() {
+                    if carry[i] == b'\n' || carry[i] == b'\r' {
+                        if let Some(text) = clean_piece(&carry[start..i]) {
+                            if tx.send(Line { text, stdout }).is_err() {
+                                return;
+                            }
+                        }
+                        start = i + 1;
                     }
                 }
+                carry.drain(..start);
             }
             Err(_) => break,
         }
     }
+    if let Some(text) = clean_piece(&carry) {
+        let _ = tx.send(Line { text, stdout });
+    }
 }
 
-/// Split a read chunk into the separate things it is trying to say.
+/// One piece of a command's output, or `None` when it says nothing.
 ///
-/// Both terminators end a line, empty pieces are dropped, and the result is trimmed --
-/// a progress redraw is often a dozen spaces followed by a carriage return, which says
-/// nothing and would otherwise be reported as the command's current activity.
+/// A redraw is frequently a row of spaces followed by a carriage return. Reporting that
+/// as the command's current activity would replace a useful line with nothing.
+fn clean_piece(raw: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(raw).trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+/// Split a chunk on both terminators, dropping the pieces that say nothing.
+///
+/// Kept beside `clean_piece` so the rule is stated once and can be tested without a
+/// pipe: `\r` ends a line exactly as `\n` does, which is what makes a progress bar
+/// visible at all.
+#[cfg(test)]
 fn split_progress_lines(buf: &[u8]) -> Vec<String> {
     String::from_utf8_lossy(buf)
         .split(['\n', '\r'])
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .filter_map(|s| {
+            let t = s.trim();
+            if t.is_empty() { None } else { Some(t.to_string()) }
+        })
         .collect()
 }
 
