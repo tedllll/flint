@@ -106,9 +106,21 @@ fn same_call_three_times() -> String {
     ])
 }
 
-/// Frame sequence for a model that just answers.
-fn answer_only() -> String {
+/// Frame sequence for a tool call whose arguments never parse as JSON.
+///
+/// The inner string is `{"path": "C:\work"}` -- a Windows path written without escaping the
+/// backslash, which is the mistake models actually make. The *outer* frame is still valid
+/// JSON, so this reaches the agent as a real call with broken arguments.
+fn call_with_broken_arguments() -> String {
     sse(&[
+        r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_bad","function":{"name":"read","arguments":"{\"path\": \"C:\\work\"}"}}]}}]}"#,
+        r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+        "data: [DONE]",
+    ])
+}
+
+/// Frame sequence for a model that just answers.
+fn answer_only() -> String {    sse(&[
         r#"data: {"choices":[{"delta":{"content":"All done."}}]}"#,
         r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
         r#"data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3}}"#,
@@ -149,6 +161,60 @@ fn skill_workspace(tag: &str) -> PathBuf {
     )
     .expect("skill file");
     dir
+}
+
+/// A tool call whose arguments are not JSON is reported to the user, to the record and to
+/// the model -- and the turn goes on rather than stopping there.
+///
+/// The failure mode this guards against is a *silent* one: the call is announced, the model
+/// is told what was wrong, and no result event is ever emitted. In a transcript that reads
+/// as a call that is still running; in a `--json` stream it is a `tool.started` with no
+/// `tool.completed`, which a caller waiting for the pair never recovers from.
+#[tokio::test]
+async fn a_call_with_unparseable_arguments_still_reports_a_result() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(SseFixture {
+            body: call_with_broken_arguments(),
+        })
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(SseFixture {
+            body: answer_only(),
+        })
+        .mount(&server)
+        .await;
+
+    let mut agent = agent_for(&server, std::env::temp_dir()).await;
+    let mut results: Vec<(String, bool)> = Vec::new();
+    let mut warnings = 0;
+    agent
+        .run("read something", |ev| match ev {
+            Event::ToolResult { output, ok, .. } => results.push((output, ok)),
+            Event::Warning(_) => warnings += 1,
+            _ => {}
+        })
+        .await
+        .expect("the run itself must finish, not fail");
+
+    assert_eq!(results.len(), 1, "the broken call produced no result");
+    let (output, ok) = &results[0];
+    assert!(!ok, "a call that never ran reported success: {output}");
+    assert!(
+        output.contains("invalid JSON arguments"),
+        "the result does not say what was wrong: {output}"
+    );
+    assert_eq!(warnings, 1, "the user was not warned exactly once");
+
+    // And the model is told, so it can correct itself on the next round.
+    let requests = server.received_requests().await.expect("requests");
+    let follow_up = String::from_utf8_lossy(&requests[1].body).to_string();
+    assert!(
+        follow_up.contains("invalid JSON arguments"),
+        "the model never learned what was wrong: {follow_up}"
+    );
 }
 
 /// Direct probe of the shell execution path, independent of the agent.
@@ -315,6 +381,7 @@ fn fixtures_are_well_formed() {
         ("tool_then_answer", tool_then_answer()),
         ("answer_only", answer_only()),
         ("same_call_three_times", same_call_three_times()),
+        ("call_with_broken_arguments", call_with_broken_arguments()),
     ] {
         let mut saw_data_frame = false;
         for line in body.lines() {

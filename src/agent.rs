@@ -262,7 +262,16 @@ impl Agent {
                             call.name,
                             crate::util::truncate(&call.arguments, 400)
                         );
+                        // Both, and in this order: the warning is for the user, the result
+                        // is for the record and for the model. Announcing a call without
+                        // ever reporting how it ended leaves a transcript -- and a
+                        // `--json` stream -- with a call that appears to still be running.
                         sink(Event::Warning(msg.clone()));
+                        sink(Event::ToolResult {
+                            id: call.id.clone(),
+                            output: msg.clone(),
+                            ok: false,
+                        });
                         self.push_tool_result(call, &msg, false);
                         continue;
                     }
@@ -494,18 +503,12 @@ impl Agent {
                     arguments.clone()
                 },
             });
-            if !arguments.trim().is_empty() {
-                if serde_json::from_str::<serde_json::Value>(&arguments).is_err() {
-                    sink(Event::Warning(format!(
-                        "tool '{name}' returned malformed argument JSON: {}",
-                        crate::util::truncate(&arguments, 200)
-                    )));
-                }
-            } else {
-                sink(Event::Warning(format!(
-                    "tool '{name}' was requested with no arguments"
-                )));
-            }
+            // Nothing is said here about the arguments, on purpose. `run` reports a call
+            // whose arguments do not parse -- and feeds that error back to the model, which
+            // is what actually gets it fixed -- so warning here as well says the same thing
+            // twice, one line apart. And empty arguments are not a problem to report at all:
+            // `list`, `glob` and `grep` take none, and a tool that needs one names the
+            // missing argument itself.
             outcome.tool_calls.push(ToolCall {
                 id,
                 name,
