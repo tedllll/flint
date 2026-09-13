@@ -7,7 +7,7 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to
-`origin/main` (tip `a25a461`). `cargo test` is 144 passing (94 lib, 20 `agent_loop`,
+`origin/main` (tip `b84ca9d`). `cargo test` is 178 passing (127 lib, 21 `agent_loop`,
 12 `cli_output`, 18 `term_capture`), `cargo clippy --all-targets` is silent, and
 `node scripts/term-layout-test.js` passes every layout assertion.
 
@@ -42,6 +42,19 @@ Four commits, all pushed. The reasoning is in each commit message; this is the i
   cached, so `/reload` picks up a file written mid-session.
 - **The handoff itself.** This file had drifted: it claimed 106 tests, a clean tree at
   `8b0e788`, and a verification procedure whose counts no longer matched anything.
+- **The capture flake.** A capture test failed about one full-suite run in four with a
+  blank replay. The cause was the test harness: the tests redirected file descriptor 1 at
+  the capture file, which also collected the harness's own progress lines, and one of those
+  landing on the bottom row scrolled the transcript off the recorded screen. `Term` now
+  writes through a sink that is either `FLINT_TERM_CAPTURE_FILE=<path>` or stdout, and no
+  test moves a descriptor. Ten consecutive full runs, zero failures.
+- **Tool-loop quality.** `apply_patch` (Codex's format, atomic across files, hunks located
+  by their own lines); a read-before-mutate gate on `write`, `edit` and patch updates, with
+  mtime-and-length staleness so a file changed since it was read is caught; honest
+  truncation that keeps both ends and writes the whole answer to
+  `~/.flint/spill/<session>/<n>.txt`; argument validation that names a wrong type instead
+  of reporting it as missing or ignoring it; and a per-turn note at the 3rd, 5th and 8th
+  identical call. 150 tests to 178.
 
 ## Known unfinished
 
@@ -87,21 +100,15 @@ retry path has to reconcile what was already drawn — that was considered and n
 
 In the order agreed, with the design settled in discussion:
 
-1. **Tool-loop quality.** `apply_patch` in Codex's format (atomic across several files);
-   a read-before-mutate gate (in-process `HashMap<PathBuf, (mtime, len)>`, DSH's wording
-   for the error); honest truncation that spills the full output to
-   `~/.flint/spill/<session>/<n>.txt` and says where it went; argument validation that
-   reports a wrong type instead of ignoring it; and a non-blocking reminder when the same
-   call is repeated with identical arguments (thresholds 3/5/8).
-2. **The transcript as cells.** Three steps — measure, then paint only what changed, then
+1. **The transcript as cells.** Three steps — measure, then paint only what changed, then
    a real re-render on resize. This is also what deletes the interim state the last fix
    left behind: `begin_answer`, `last_segment_text`, the `committed` count and
    `fresh_segment` all exist because the strip is a text offset rather than a model.
-3. **Machine-readable runs.** `flint -p --json` emitting NDJSON (`session.started`,
+2. **Machine-readable runs.** `flint -p --json` emitting NDJSON (`session.started`,
    `turn.started`, `tool.started`, `tool.completed`, `message.completed`, `usage`,
    `turn.completed`, `turn.failed`, `error`), `docs/session-format.md`, and a
    `debug prompt-input` view of exactly what was sent.
-4. **Small, agreed, unscheduled.** `read`/`write`/`edit` taking `file_path` with `path`
+3. **Small, agreed, unscheduled.** `read`/`write`/`edit` taking `file_path` with `path`
    kept as an alias; `--fork`; the `HANDOFF`'s own warning about
    `examples/live_turn.rs` — it keeps a hand-maintained copy of `run_turn`'s event
    handling and has drifted twice, costing time chasing faults that were only in the
