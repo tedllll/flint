@@ -275,6 +275,17 @@ async fn a_timed_out_command_is_killed_not_abandoned() {
         message.contains("killed after"),
         "the error should say it was killed, got: {message}"
     );
+    // It used to add "or write [timeout:N] before the command", and nothing in flint has
+    // ever parsed that. A message that names a syntax the tool does not implement sends
+    // the model to write it, watch the same timeout happen, and conclude the tool lies.
+    assert!(
+        !message.contains("[timeout"),
+        "the error must not promise a marker nothing parses, got: {message}"
+    );
+    assert!(
+        message.contains("timeout_secs"),
+        "the error should name the argument that actually raises the budget, got: {message}"
+    );
     assert!(
         elapsed < std::time::Duration::from_secs(5),
         "it returned before the command would have finished on its own: {elapsed:?}"

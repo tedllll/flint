@@ -754,10 +754,13 @@ pub async fn run_command_streaming(
                 break status.context("failed to collect command output")?;
             }
             Wake::TimedOut => {
+                // No hint about a `[timeout:N]` marker in the command: nothing parses one.
+                // Telling the model to write a syntax that does not exist costs it a turn
+                // and teaches it that the tool's own messages cannot be believed. The
+                // argument is the only way to raise the budget.
                 return Err(anyhow!(
-                    "killed after {timeout_secs}s with no result. If it is genuinely slow, pass a \
-                     larger timeout_secs or write [timeout:N] before the command; if it is waiting \
-                     for input, it never will -- stdin is closed."
+                    "killed after {timeout_secs}s with no result. Pass a larger timeout_secs if it \
+                     is genuinely slow; if it is waiting for input, it never will -- stdin is closed."
                 ));
             }
             Wake::WentQuiet => {
@@ -790,8 +793,7 @@ pub async fn run_command_streaming(
                 } else {
                     notice(&format!(
                         "this command has been running for {} and may be stuck. It is killed at \
-                         {timeout_secs}s; pass a larger `timeout_secs`, or write [timeout:N] before \
-                         the command, if it is genuinely slow.",
+                         {timeout_secs}s; pass a larger `timeout_secs` if it is genuinely slow.",
                         elapsed_label(started.elapsed())
                     ));
                 }
