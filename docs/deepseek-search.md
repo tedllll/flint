@@ -1,7 +1,7 @@
 # DeepSeek search, measured
 
 Whether flint can give every model — including a local one — a working web search, and what
-that costs. This file exists because the answer is not what the obvious reading of DeepSeek's
+that costs. **This is implemented**: `src/search.rs`, and §4 is the design it was built to. This file exists because the answer is not what the obvious reading of DeepSeek's
 documentation says, and because the measurements here took a key and a few minutes that should
 not have to be spent twice.
 
@@ -138,9 +138,22 @@ can honestly do.
 call it. One sentence saying a search is a full model turn with tens of thousands of input
 tokens is the difference between a tool that is used and a tool that is abused.
 
-## 5. Still not measured
+## 5. What was built from this
 
-- Whether `max_uses` has any effect at all, or what it counts. One data point says no.
+`src/search.rs` is the implementation and §4 is the design it follows. The credential is
+inherited from a DeepSeek provider when there is one and named explicitly in `[search]` when
+there is not; the tool is registered only when it can actually work, and the reason is said
+once at startup when it cannot.
+
+One thing the first live run through the finished tool added: **the summary can be wrong.** It
+claimed Rust 1.97.1; the model cross-checked against `rustc --version` and `endoflife.date`,
+found 1.98.1, and said which of its sources was stale. That is the labelling in §2 doing its
+job, and it is the reason the summary is returned with its sources rather than on its own.
+
+## 6. Still not measured
+
+- Whether `max_uses` has any effect at all, or what it counts.
+- How often the summary is stale. One run out of one was.
 - Whether a second search provider is worth having. Brave or a self-hosted SearXNG would be
   cheap per call where this is expensive, and would work without a DeepSeek key — but neither
   is needed for the case this file was written for, and neither is free of deployment.

@@ -214,6 +214,39 @@ It is built by the same function the client posts, and there is a test that runs
 against a stub provider and asserts the preview equals the bytes the server received — so
 the command cannot quietly start describing something that is not sent.
 
+### Search
+
+`search` asks DeepSeek to look something up and returns a summary with its sources — so a
+local model can search too, because the search is a tool rather than a capability of whichever
+model is driving. DeepSeek performs it server-side on its Anthropic-compatible endpoint, so
+the search is **not** sent to the provider in `config.toml`: that surface ignores `web_search`
+and answers without searching.
+
+**It needs no configuration if you already have a DeepSeek provider.** The credential is
+inherited, resolved exactly the way that provider resolves it (`api_key_env` first, then the
+literal `api_key`). With no DeepSeek provider at all, name one:
+
+```toml
+[search]
+provider = "deepseek"        # borrow this provider's key and proxy
+# or, with no DeepSeek provider configured at all:
+api_key_env = "DEEPSEEK_API_KEY"
+model = "deepseek-flash"     # which model DeepSeek searches on, not yours
+max_uses = 1                 # how many searches one call may trigger
+enabled = true               # false turns it off
+```
+
+**It is not cheap, and the price is not per search.** There is no per-search fee anywhere in
+DeepSeek's pricing: the retrieved pages go into the context of the model turn doing the
+searching, and you pay for those input tokens. Measured: 16,561 input tokens for one search
+and 119,581 for a call that made two — roughly ¥0.02 to ¥0.13, halved outside DeepSeek's peak
+hours (09:00–12:00 and 14:00–18:00 Beijing time on weekdays). A model that treats `search` as
+cheap will spend real money.
+
+`docs/deepseek-search.md` is the full record of what was measured, including why the summary
+is labelled as untrusted: in the first live run the model used it, found it disagreed with the
+local toolchain, checked another source, and reported that the summary was stale.
+
 ## Permissions
 
 **Full by default.** There is no approval prompt; flint runs what it decides to
@@ -240,6 +273,7 @@ program and its verb rather than by re-reading a command line it never had. Use 
 | `glob` | find files by name pattern (`*.rs`, `**/test_*.py`), recursively |
 | `grep` | search file contents for a literal string, recursively, with line numbers |
 | `skill` | load the full instructions of a skill named in the catalog (only offered when skills exist) |
+| `search` | look something up on the web and get a summary with its sources (only offered when a search credential is configured) |
 
 `glob` and `grep` are built in rather than shelled out on purpose. Every other
 platform difference flint can paper over, but this one it cannot: `grep` does not
