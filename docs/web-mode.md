@@ -334,5 +334,26 @@ assertions. What follows is the part no test in this repository reaches.
 | A tool call is legible while collapsed | screenshot | the summary carries the name and the arguments, so a collapsed call still says what it was aimed at |
 | Multi-line answers keep their shape | a three-paragraph answer with an indented line | preserved, `pre-wrap`, no reflow of the indentation |
 | A narrow window | **not measured** | 1100px is what the fixture was taken at; nothing below it has been looked at |
-| A long turn, and backpressure | **not measured** | needs `GET /events`, which does not exist |
-| Reconnect after a sleep, replaying exactly once | **not measured** | needs `Last-Event-ID`, which does not exist |
+| A long turn, and backpressure | **measured**, and it found the limit of this design — see below | a stub provider on loopback, a real turn, `curl -N /events` |
+| Reconnect, replaying exactly once | **measured** against the ring and the reset boundary | a cursor older than the buffer gets `event: reset` and re-reads `/session` |
+| A page opened *during* a turn | **measured**, with a defect found and fixed | the status was blank; it is now sent as state on connect |
+| The status line during a slow model call | **measured** | the browser shows `no response yet — the network or the endpoint may be stuck`, the terminal's own words |
+| A turn on a browser that then reloads mid-turn | **not measured** | |
+| What 80 columns looks like next to a terminal | **not measured** | |
+
+### The limit that measuring found
+
+**Streamed output is buffered per attempt, so the browser gets no text until a model
+response has finished arriving.** This is not a web-mode defect and not new: `provider.rs`
+buffers a whole attempt's events so that a retry can discard them rather than leaving half an
+answer on screen, and `HANDOFF.md` has carried "streamed output arrives in one go" as a known
+limitation for several rounds. What is new is how visible it becomes here. With a local model
+that takes twenty seconds, a browser shows the status line and *nothing else* for those
+twenty seconds, and then the entire answer at once — where the terminal has the same
+behaviour and it bothers nobody, because the terminal is where the person already is.
+
+So the honest summary of level 2 is: **the browser is live about the run's phase and late
+about its text.** The status event is what keeps it from looking dead, which is exactly the
+job it was added for; making the text arrive as it is written is the other half, and it is the
+change `HANDOFF.md` describes as considered and not done. It is now the first thing worth
+doing next, because a browser makes the cost of not having it obvious.

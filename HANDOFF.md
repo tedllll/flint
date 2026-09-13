@@ -7,10 +7,10 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 208 passing (145 lib, 25
-`agent_loop`, 16 `cli_output`, 4 `json_output`, 18 `term_capture`), `cargo clippy
---all-targets` is silent, and `node scripts/term-layout-test.js` passes every layout
-assertion.
+As of the commit that carries this file, `cargo test` is 242 passing (172 lib, 25
+`agent_loop`, 18 `cli_output`, 4 `json_output`, 18 `term_capture`, 5 `web_view`), `cargo
+clippy --all-targets` is silent, and both `node scripts/term-layout-test.js` and `node
+scripts/web-view-test.js` pass.
 
 **This round was on macOS** (Darwin arm64, rustc 1.98.1). That is worth knowing before
 anything below: the rounds before it were on Windows, and every Windows-specific item still
@@ -27,6 +27,39 @@ The binary is held open by any running `flint`, so close those before replacing 
 `docs/windows.md` is the field notes for the Windows terminal.
 
 ## What was just done
+
+**Web mode, levels 1 and 2.** `flint --web` serves a browser view of the running process on
+loopback. Four commits, and `docs/web-mode.md` §9 and §11 are the reference: the static
+viewer (`web/view.html`, one file, no build, with a policy test over the embedded bytes and a
+Node harness that runs the renderer's pure half); the hand-rolled listener with the four
+constraints of §4 and `GET /`; `GET /session`; and `GET /events` as SSE with a cursor, replay
+and the `status` event. The §7 decision — hand-rolled, not `hyper` — is in `decisions.md`.
+
+Three things that came out of *measuring* rather than reasoning, all recorded in §11:
+
+- The viewer painted the system prompt expanded and pushed the conversation off the first
+  screen. One screenshot in headless Chrome found it.
+- The `status` event first went out *after* the text it announced, and carried the empty
+  activity name instead of the words on the row — which blanked the browser's status line at
+  the exact moment the wait began. A live capture found both.
+- A page opened in the middle of a turn has missed every status frame, and no cursor can
+  bring them back. The current status is now sent once on connect, as state rather than as a
+  change.
+
+**The limit that measuring found.** Streamed output is buffered per attempt, so the browser
+shows no text until a model response has finished — the same known limitation the terminal
+has, made obvious by a renderer that is not where the person already is. Level 2 is therefore
+*live about the phase and late about the text*, and making the text arrive as it is written is
+now the first thing worth doing next. `docs/web-mode.md` §11 says so at length.
+
+**`docs/deepseek-search.md`.** Two real requests, written down, because the documentation
+misled this session twice: DeepSeek searches on its **Anthropic** surface and not the
+chat-completions one, with the key already configured, so a local model can search with no
+second service. Also what it costs (16,561 input tokens for one search; 119,581 for a call
+that made two), that snippets do not exist, and that `max_uses: 1` did not stop a second
+query.
+
+### The round before
 
 Six commits, all pushed. The reasoning is in each commit message; this is the index.
 
