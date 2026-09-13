@@ -11,6 +11,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use crate::config::Config;
+use crate::context;
 use crate::util;
 
 #[async_trait::async_trait]
@@ -28,7 +29,10 @@ pub struct ToolBox {
 
 impl ToolBox {
     pub fn new(config: &Config, readonly: bool, cwd: PathBuf) -> Self {
-        let tools: Vec<Box<dyn Tool>> = vec![
+        // Skills are looked up in the same directories the prompt's catalog was built
+        // from, so the tool can never offer something the catalog did not name.
+        let skill_dirs = context::Workspace::discover(&cwd, &config.skill_dirs);
+        let mut tools: Vec<Box<dyn Tool>> = vec![
             Box::new(BashTool {
                 config: config.clone(),
                 readonly,
@@ -44,6 +48,13 @@ impl ToolBox {
             Box::new(GlobTool { cwd: cwd.clone() }),
             Box::new(GrepTool { cwd: cwd.clone() }),
         ];
+        // Offered only when there is something to load. A tool that can only ever answer
+        // "no skills are configured" spends a schema on every request to say nothing.
+        if !skill_dirs.skills.is_empty() {
+            tools.push(Box::new(SkillTool {
+                dirs: skill_dirs.skill_dirs,
+            }));
+        }
         let by_name = tools
             .iter()
             .enumerate()
@@ -1517,6 +1528,51 @@ fn glob_here(pat: &[char], txt: &[char]) -> bool {
 /// model down a wrong path.
 fn pattern_needs_prefix(pattern: &str) -> bool {
     !pattern.contains('/') && (pattern.contains('*') || pattern.contains('?'))
+}
+
+// ---------------------------------------------------------------------------
+// skill
+// ---------------------------------------------------------------------------
+
+/// The `skill` tool: load one skill's full instructions.
+///
+/// The prompt carries summaries only, and this is how the body arrives. Nothing is
+/// cached, so the directory is read on every call: a skill written or edited while flint
+/// is running is available on the next call, which is the same promise the rest of the
+/// tool set makes about the filesystem.
+pub struct SkillTool {
+    dirs: Vec<PathBuf>,
+}
+
+#[async_trait::async_trait]
+impl Tool for SkillTool {
+    fn name(&self) -> &str {
+        "skill"
+    }
+
+    fn description(&self) -> &str {
+        "Load the full instructions of a skill named in the system prompt's catalog. \
+         Call this before following a skill: the catalog carries only its summary. The \
+         body is re-read from disk on every call."
+    }
+
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Skill name, exactly as the catalog spells it."
+                }
+            },
+            "required": ["name"]
+        })
+    }
+
+    async fn call(&self, args: &Value) -> Result<String> {
+        let name = require_str(args, "name")?;
+        context::load_skill(&self.dirs, name.trim())
+    }
 }
 
 // ---------------------------------------------------------------------------

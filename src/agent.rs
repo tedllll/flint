@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::config::Config;
+use crate::context;
 use crate::event::{Event, Message, ToolCall, Usage};
 use crate::provider::Provider;
 use crate::session::{SessionEvent, SessionWriter};
@@ -82,7 +83,7 @@ mod platform {
 pub fn build_system_prompt(config: &Config, cwd: &std::path::Path) -> String {
     let shell = tools::probe_shell(&config.shell, &config.shell_args).join(" ");
 
-    format!(
+    let mut prompt = format!(
         "{SYSTEM_PROMPT}\n\n\
          Local facts:\n\
          - Shell: `{shell}`. {hint}\n\
@@ -94,7 +95,19 @@ pub fn build_system_prompt(config: &Config, cwd: &std::path::Path) -> String {
         sep = platform::PATH_SEPARATOR,
         config = crate::config::config_path().display(),
         sessions = crate::config::sessions_dir().display(),
-    )
+    );
+
+    // What the project has written down. Discovered here, once per agent, because the
+    // answer depends on the working directory -- and rebuilt by `/model` and friends,
+    // which is how a file added mid-session gets noticed without a restart.
+    let mode =
+        context::Instructions::parse(&config.instructions).unwrap_or(context::Instructions::Hint);
+    let note = context::Workspace::discover(cwd, &config.skill_dirs).prompt_note(mode);
+    if !note.is_empty() {
+        prompt.push_str("\n\n");
+        prompt.push_str(&note);
+    }
+    prompt
 }
 
 pub struct Agent {

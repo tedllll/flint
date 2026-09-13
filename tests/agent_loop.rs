@@ -58,6 +58,8 @@ fn test_config(base_url: &str) -> Config {
         proxy: None,
         verbose: false,
         tool_detail: false,
+        instructions: "hint".to_string(),
+        skill_dirs: Vec::new(),
         providers: vec![ProviderConfig {
             name: "stub".to_string(),
             base_url: base_url.to_string(),
@@ -107,6 +109,35 @@ async fn agent_for(server: &MockServer, cwd: PathBuf) -> Agent {
     let config = test_config(&server.uri());
     let provider = Provider::new(config.providers[0].clone()).unwrap();
     Agent::new(&config, provider, false, cwd, None)
+}
+
+/// Frame sequence for a model that loads a skill, then answers.
+fn skill_then_answer() -> String {
+    sse(&[
+        r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_s","function":{"name":"skill","arguments":"{\"name\":\"tidy-commits\"}"}}]}}]}"#,
+        r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+        "data: [DONE]",
+    ])
+}
+
+/// A temporary project with an instruction file and one skill in it.
+fn skill_workspace(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("flint-ctx-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join(".git")).expect("project dir");
+    std::fs::create_dir_all(dir.join(".flint").join("skills").join("tidy-commits"))
+        .expect("skills dir");
+    std::fs::write(
+        dir.join("AGENTS.md"),
+        "Run cargo test before claiming success.\n",
+    )
+    .expect("agents file");
+    std::fs::write(
+        dir.join(".flint").join("skills").join("tidy-commits").join("SKILL.md"),
+        "---\nname: tidy-commits\ndescription: Squash and reword the commits.\n---\n\nStep one: squash the fixups.\n",
+    )
+    .expect("skill file");
+    dir
 }
 
 /// Direct probe of the shell execution path, independent of the agent.
@@ -296,6 +327,126 @@ fn fixtures_are_well_formed() {
             "fixtures must terminate with [DONE]"
         );
     }
+}
+
+/// The prompt must carry what the project wrote down.
+///
+/// Asserted on the request the stub actually received, not on a helper's return value.
+/// The failure this catches is a note that is built correctly and never sent -- which is
+/// how a feature like this reaches a user as "flint ignored my AGENTS.md".
+#[tokio::test]
+async fn the_prompt_names_project_instructions_and_the_skill_catalog() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(SseFixture {
+            body: answer_only(),
+        })
+        .mount(&server)
+        .await;
+
+    let project = skill_workspace("prompt");
+    let mut agent = agent_for(&server, project.clone()).await;
+    agent.run("say ok", |_| {}).await.expect("run");
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("the stub records what it was sent");
+    assert_eq!(requests.len(), 1, "one model call expected");
+    let body = String::from_utf8_lossy(&requests[0].body).to_string();
+
+    assert!(
+        body.contains("AGENTS.md"),
+        "the instruction file is not named in the prompt: {body}"
+    );
+    assert!(
+        !body.contains("Run cargo test before claiming success."),
+        "hint mode must name the file, not paste it: {body}"
+    );
+    assert!(
+        body.contains("tidy-commits: Squash and reword the commits."),
+        "the skill catalog is missing from the prompt: {body}"
+    );
+    assert!(
+        body.contains("until it has been loaded"),
+        "the catalog must not be mistaken for the instructions: {body}"
+    );
+    assert!(
+        !body.contains("Step one: squash the fixups."),
+        "the skill body must not be in the prompt before it is loaded: {body}"
+    );
+
+    let _ = std::fs::remove_dir_all(&project);
+}
+
+/// The catalog is useless if loading what it names does not work.
+///
+/// Both halves are asserted: the tool result the model gets, and the request that follows
+/// it. A body returned to the loop but never sent back to the model would look identical
+/// from the outside.
+#[tokio::test]
+async fn the_skill_tool_returns_a_body_that_reaches_the_model() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(SseFixture {
+            body: skill_then_answer(),
+        })
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(SseFixture {
+            body: answer_only(),
+        })
+        .mount(&server)
+        .await;
+
+    let project = skill_workspace("skill-tool");
+    let mut agent = agent_for(&server, project.clone()).await;
+
+    let mut results: Vec<String> = Vec::new();
+    agent
+        .run("tidy the commits", |ev| {
+            if let Event::ToolResult { output, .. } = ev {
+                results.push(output);
+            }
+        })
+        .await
+        .expect("run");
+
+    assert_eq!(results.len(), 1, "the skill call must run once");
+    assert!(
+        results[0].contains("Step one: squash the fixups."),
+        "the tool did not return the body: {}",
+        results[0]
+    );
+
+    let requests = server.received_requests().await.expect("requests");
+    let follow_up = String::from_utf8_lossy(&requests[1].body).to_string();
+    assert!(
+        follow_up.contains("Step one: squash the fixups."),
+        "the loaded body never reached the model: {follow_up}"
+    );
+
+    let _ = std::fs::remove_dir_all(&project);
+}
+
+/// A project with no skills must not pay for a tool that can only say "none".
+#[tokio::test]
+async fn the_skill_tool_is_absent_when_there_are_no_skills() {
+    let server = MockServer::start().await;
+    let empty = std::env::temp_dir().join(format!("flint-no-skills-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&empty);
+    std::fs::create_dir_all(&empty).expect("temp dir");
+
+    let agent = agent_for(&server, empty.clone()).await;
+    assert!(
+        !agent.tool_names().iter().any(|n| n == "skill"),
+        "the skill tool is offered with nothing to load: {:?}",
+        agent.tool_names()
+    );
+
+    let _ = std::fs::remove_dir_all(&empty);
 }
 
 #[tokio::test]

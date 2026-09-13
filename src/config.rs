@@ -108,7 +108,28 @@ pub struct Config {
     #[serde(default)]
     pub tool_detail: bool,
 
+    /// What to do with project instruction files (`AGENTS.md`): `hint`, `paste` or `off`.
+    ///
+    /// Named rather than pasted by default, because naming is what the model can act on:
+    /// it reads the file with the `read` tool, so the prompt does not carry a document
+    /// that changes, and a long one does not spend context on every request. `paste`
+    /// exists for anyone who wants the contents in the prompt itself.
+    #[serde(default = "default_instructions")]
+    pub instructions: String,
+
+    /// Extra directories to look for skills in, on top of the standard two
+    /// (`<project>/.flint/skills` and the config directory's `skills`).
+    ///
+    /// Relative paths are resolved against the working directory, so a shared checkout
+    /// of house procedures can be named once and used from anywhere.
+    #[serde(default)]
+    pub skill_dirs: Vec<String>,
+
     pub providers: Vec<ProviderConfig>,
+}
+
+fn default_instructions() -> String {
+    crate::context::Instructions::DEFAULT_NAME.to_string()
 }
 
 fn default_max_tool_output() -> usize {
@@ -203,6 +224,8 @@ impl Default for Config {
             proxy: None,
             verbose: false,
             tool_detail: false,
+            instructions: default_instructions(),
+            skill_dirs: Vec::new(),
             providers: vec![
                 ProviderConfig {
                     name: "deepseek".to_string(),
@@ -370,7 +393,26 @@ impl Config {
             .with_context(|| format!("cannot read config {}", path.display()))?;
         let cfg: Config = toml::from_str(&text)
             .with_context(|| format!("cannot parse config {}", path.display()))?;
+        cfg.validate()?;
         Ok(cfg)
+    }
+
+    /// Reject a config that names something flint does not know.
+    ///
+    /// Checked when the file is read, not when the value is used, so a typo is reported
+    /// once with the valid values in the message -- instead of quietly behaving like the
+    /// default and surfacing later as "the model ignored my instruction file".
+    fn validate(&self) -> Result<()> {
+        if crate::context::Instructions::parse(&self.instructions).is_none() {
+            return Err(anyhow::anyhow!(
+                "unknown instructions mode '{}' in {}.\n\
+                 Use \"hint\" (name the instruction files), \"paste\" (put their contents \
+                 in the prompt) or \"off\".",
+                self.instructions,
+                config_path().display()
+            ));
+        }
+        Ok(())
     }
 
     pub fn save(&self) -> Result<()> {
@@ -386,5 +428,41 @@ impl Config {
         std::fs::write(&path, format!("{header}{body}"))
             .with_context(|| format!("cannot write config {}", path.display()))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file written before instruction files existed must keep working, and must get the
+    /// default mode rather than an empty string that means nothing.
+    #[test]
+    fn an_old_config_without_the_new_keys_still_loads() {
+        let cfg: Config = toml::from_str(
+            "default_provider = \"deepseek\"\n\n\
+             [[providers]]\n\
+             name = \"deepseek\"\n\
+             base_url = \"https://example.invalid/v1\"\n",
+        )
+        .expect("an older config must still parse");
+        assert_eq!(cfg.instructions, "hint");
+        assert!(cfg.skill_dirs.is_empty());
+        cfg.validate().expect("the default mode is valid");
+    }
+
+    /// A typo is reported with the values that would work, when the file is read -- rather
+    /// than being discovered later as "the model ignored my instruction file".
+    #[test]
+    fn an_unknown_instruction_mode_is_rejected_by_name() {
+        let cfg = Config {
+            instructions: "sometimes".to_string(),
+            ..Config::default()
+        };
+        let err = format!("{:#}", cfg.validate().unwrap_err());
+        assert!(err.contains("sometimes"), "{err}");
+        for mode in ["hint", "paste", "off"] {
+            assert!(err.contains(mode), "the error must offer {mode}: {err}");
+        }
     }
 }

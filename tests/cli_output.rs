@@ -646,6 +646,66 @@ async fn the_repl_names_the_open_session_and_refuses_to_delete_it() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// `/skills` has to show what the model would actually be handed.
+///
+/// The REPL is the only place a person can check that, and the check that matters is the
+/// body: a catalog naming a skill whose file cannot be read is worse than no catalog,
+/// because the model is then told to load something that is not there.
+#[cfg(debug_assertions)]
+#[test]
+fn the_repl_lists_skills_and_prints_one_the_way_the_model_gets_it() {
+    let home = test_home("repl-skills", "http://127.0.0.1:1/v1");
+    let work = home.join("work");
+    std::fs::create_dir_all(work.join(".git")).expect("project dir");
+    let skill_dir = work.join(".flint").join("skills").join("tidy-commits");
+    std::fs::create_dir_all(&skill_dir).expect("skills dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: tidy-commits\ndescription: Squash and reword the commits.\n---\n\nStep one: squash the fixups.\n",
+    )
+    .expect("skill file");
+
+    let mut child = binary()
+        .current_dir(&work)
+        .env("FLINT_HOME", &home)
+        .env("FLINT_TERM_CAPTURE", "1")
+        .env("FLINT_TERM_SIZE", "100x24")
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to run flint");
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().expect("no stdin handle");
+        stdin
+            .write_all(b"/skills\n/skills tidy-commits\n/exit\n")
+            .expect("failed to write stdin");
+    }
+    let out = child.wait_with_output().expect("flint did not finish");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+
+    assert!(
+        text.contains("tidy-commits"),
+        "the skill is not listed: {text:?}"
+    );
+    assert!(
+        text.contains("Squash and reword the commits."),
+        "the summary is not shown: {text:?}"
+    );
+    assert!(
+        text.contains("SKILL.md"),
+        "the listing does not say where the skill came from: {text:?}"
+    );
+    assert!(
+        text.contains("Step one: squash the fixups."),
+        "`/skills <name>` did not print the body: {text:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 /// The clock has to be running for the wait *after* a tool round, and not for the tools.
 /// Two things were wrong with it. A tool fast enough that the hold-back never expired
 /// still painted `── 0s <tool> ──`, because committing a transcript line repainted the

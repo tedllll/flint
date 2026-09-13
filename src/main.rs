@@ -10,7 +10,7 @@
 //! The `exec` mode is the last line of defence: when every provider is
 //! unreachable, flint still runs commands.
 
-use flint::{agent, config, display, event, provider, session, term, tools};
+use flint::{agent, config, context, display, event, provider, session, term, tools};
 
 use anyhow::{anyhow, Context, Result};
 use display::{Printer, BOLD, CHATTY, DIM, GREEN, NORMAL, QUIET, RED, RESET, YELLOW};
@@ -1028,6 +1028,7 @@ async fn handle_command(
   /detail [on|off]      print tool output (off: one line per result)
   /readonly [on|off]    toggle the write guard
   /tools                list available tools
+  /skills [name]        list skills, or print one as the model would see it
   /sessions             list past sessions, numbered
   /resume <n|id>        switch to one of them
   /name [text]          name this conversation
@@ -1348,6 +1349,33 @@ async fn handle_command(
             ));
             printer.term().line(format_args!("  verbose          = {}", cfg.verbose));
             printer.term().line(format_args!("  tool_detail      = {}", cfg.tool_detail));
+            let workspace = context::Workspace::discover(agent.cwd(), &cfg.skill_dirs);
+            printer.term().line(format_args!(
+                "  instructions     = {}{}",
+                cfg.instructions,
+                if workspace.instruction_files.is_empty() {
+                    format!(
+                        " {dim}(no AGENTS.md between {} and the project root){reset}",
+                        agent.cwd().display()
+                    )
+                } else {
+                    format!(
+                        " {dim}({}){reset}",
+                        workspace
+                            .instruction_files
+                            .iter()
+                            .map(|p| p.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+            ));
+            if !workspace.skills.is_empty() {
+                printer.term().line(format_args!(
+                    "  skills           = {} {dim}(.flint/skills or ~/.flint/skills){reset}",
+                    workspace.skills.len()
+                ));
+            }
             // The value in force, not the value in the file.
             //
             // These differ whenever `--readonly` or `/readonly` is used, and reporting
@@ -1407,6 +1435,45 @@ async fn handle_command(
 
         "/tools" => {
             printer.term().line(format_args!("{dim}tools:{reset} {}", agent.tool_names().join(", ")));
+        }
+
+        "/skills" => {
+            // Deliberately re-discovered here rather than remembered, and deliberately
+            // showing what the model would actually be given: `/skills <name>` prints the
+            // same body the `skill` tool returns, so "did it load what I wrote" is
+            // answerable without asking the model.
+            let workspace = context::Workspace::discover(agent.cwd(), &cfg.skill_dirs);
+            if arg.is_empty() {
+                if workspace.skills.is_empty() {
+                    printer.term().line(format_args!("{dim}no skills found{reset}"));
+                    printer.term().line(format_args!(
+                        "{dim}  a skill is <dir>/<name>/SKILL.md, with `name` and \
+                         `description` in front matter{reset}"
+                    ));
+                } else {
+                    printer.term().line(format_args!("{dim}skills:{reset}"));
+                    for skill in &workspace.skills {
+                        printer.term().line(format_args!(
+                            "  {:<20} {dim}{}{reset}",
+                            skill.name,
+                            skill.path.display()
+                        ));
+                        printer.term().line(format_args!("      {}", skill.description));
+                    }
+                }
+                let searched: Vec<String> = workspace
+                    .skill_dirs
+                    .iter()
+                    .map(|d| d.display().to_string())
+                    .collect();
+                printer
+                    .term()
+                    .line(format_args!("{dim}  searched: {}{reset}", searched.join(", ")));
+            } else {
+                for line in workspace.load(arg)?.lines() {
+                    printer.term().line(format_args!("{line}"));
+                }
+            }
         }
 
         "/sessions" => {

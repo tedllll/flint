@@ -20,6 +20,19 @@ pub fn preview(s: &str, max: usize) -> String {
     }
 }
 
+/// Take at most `max` characters, collapsed onto one line and marked if cut.
+///
+/// Unlike [`truncate`], this is for text that must stay a single line -- a catalog entry,
+/// a list item -- so it flattens whitespace and never reports a count.
+pub fn clip(s: &str, max: usize) -> String {
+    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= max {
+        return flat;
+    }
+    let head: String = flat.chars().take(max.saturating_sub(3)).collect();
+    format!("{}...", head.trim_end())
+}
+
 /// Collapse a JSON string / object into a compact one-line preview.
 pub fn json_preview(raw: &str, max: usize) -> String {
     match serde_json::from_str::<serde_json::Value>(raw) {

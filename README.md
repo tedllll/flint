@@ -72,6 +72,9 @@ max_tool_output = 30000   # cap on tool output fed back to the model
 max_steps = 100           # runaway-loop guard, not a work ration
 readonly = false          # true = refuse every write
 
+instructions = "hint"     # AGENTS.md: "hint" (name them) | "paste" | "off"
+skill_dirs = []           # extra skill directories, after the standard two
+
 [[providers]]
 name = "deepseek"
 base_url = "https://api.deepseek.com/v1"
@@ -129,6 +132,7 @@ Inside the REPL:
 | `/detail [on\|off]` | print tool output (default off: one line per result) |
 | `/readonly [on\|off]` | toggle the write guard |
 | `/tools` | list tools |
+| `/skills [name]` | list skills, or print one the way the model would get it |
 | `/sessions` | list past sessions, numbered |
 | `/resume <n\|id>` | switch to one of them, without restarting |
 | `/name [text]` | show or set a name for this conversation |
@@ -168,6 +172,7 @@ shell command. Use it when you want flint to look but not touch.
 | `list` | list a directory |
 | `glob` | find files by name pattern (`*.rs`, `**/test_*.py`), recursively |
 | `grep` | search file contents for a literal string, recursively, with line numbers |
+| `skill` | load the full instructions of a skill named in the catalog (only offered when skills exist) |
 
 `glob` and `grep` are built in rather than shelled out on purpose. Every other
 platform difference flint can paper over, but this one it cannot: `grep` does not
@@ -210,6 +215,64 @@ one transcript line per percent would bury the conversation under its own transp
 There is no automatic context management. `/usage` shows the size of your last
 prompt (that *is* your context) and the token accounting. If it grows too large,
 `/new` starts fresh.
+
+What flint does add to the prompt is what the project has written down, and nothing
+else.
+
+### Instruction files
+
+`AGENTS.md` files are found from the working directory upwards, outermost first, so the
+closest one to the work is the most specific. The search stops at the project root (the
+first directory with a `.git`) and never goes above your home directory. `~/.flint/AGENTS.md`
+applies everywhere and comes first.
+
+`instructions` in the config decides what happens to them:
+
+| Value | Effect |
+|---|---|
+| `hint` (default) | names the files and says to read them before changing anything |
+| `paste` | puts their contents in the prompt, up to 32 KiB, truncated with a marker |
+| `off` | says nothing |
+
+Naming is the default on purpose: the model reads the file with `read`, so the prompt
+does not carry a document that changes, and a long one costs nothing until it is
+relevant. `/config` shows the mode in force and which files were found, and `/reload`
+re-reads them (a file edited mid-session is picked up then, not at the next restart).
+
+### Skills
+
+A skill is a directory with a `SKILL.md` in it -- a procedure worth following step by
+step, kept where it can be edited by hand:
+
+```text
+<project>/.flint/skills/tidy-commits/SKILL.md
+~/.flint/skills/release-notes/SKILL.md
+```
+
+```markdown
+---
+name: tidy-commits
+description: Squash, reword and split commits in this repository.
+---
+
+Step one: ...
+```
+
+Both keys are optional (`name` falls back to the directory name, `description` to the
+first line of the body). The prompt gets one line per skill -- the name and the summary
+-- and the body arrives only when the model calls `skill` with that name. So a skill
+costs a line until it is used, and a repository with thirty of them does not spend a
+prompt on all thirty bodies. The catalog says explicitly that the summaries are not the
+instructions, because a model that follows a one-line summary and calls it done is
+worse than one that asks.
+
+`skill_dirs` in the config adds directories to search, after the standard two.
+`/skills` lists what was found and where; `/skills <name>` prints the body exactly as
+the model would receive it, which is the answer to "did it load what I wrote".
+
+Search is one level deep, `<dir>/<name>/SKILL.md` and no deeper: a recursive search
+would offer a project's test fixtures as procedures. The project's skills win a name
+conflict, then the working directory's, then yours, then `skill_dirs`.
 
 ## Build from source
 
