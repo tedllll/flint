@@ -436,6 +436,24 @@ check("nothing to carry is nothing to do", () => {
   eq(before.blocks.length, 1, "unchanged");
 });
 
+check("a delta with nothing in it does not open an answer", () => {
+  // Seen on a page reloaded while a turn was waiting on the model: a blank "flint" heading that
+  // no text ever arrived to fill, because the delta that opened it was empty.
+  const d = viewer.newDoc();
+  viewer.applyEvent(d, { type: "message.delta", text: "" });
+  eq(d.blocks.length, 0, "no block for an empty delta");
+  viewer.applyEvent(d, { type: "reasoning.delta" });
+  eq(d.blocks.length, 0, "no block for a delta with no text at all");
+  // But the first real piece still opens one.
+  viewer.applyEvent(d, { type: "message.delta", text: "hello" });
+  eq(d.blocks.length, 1, "the first real piece opens it");
+  eq(d.blocks[0].text, "hello", "with the text");
+  // And a later empty piece appends nothing without losing the block.
+  viewer.applyEvent(d, { type: "message.delta", text: "" });
+  eq(d.blocks.length, 1, "still one block");
+  eq(d.blocks[0].text, "hello", "unchanged");
+});
+
 if (failures) {
   console.log(`\n${failures} failed`);
   process.exit(1);

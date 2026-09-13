@@ -77,9 +77,17 @@
     overflow-y: auto; min-height: 0; padding: 12px 0 14px;
   }
   .side-head {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
     color: var(--dim); font-size: 11.5px; letter-spacing: .1em; text-transform: uppercase;
     padding: 0 14px 8px;
   }
+  #new-conversation {
+    font: inherit; text-transform: none; letter-spacing: 0;
+    color: var(--user); background: none; border: 1px solid var(--line); border-radius: 5px;
+    padding: 2px 7px; cursor: pointer;
+  }
+  #new-conversation:hover { border-color: var(--user); }
+  #new-conversation:disabled { color: var(--dim); border-color: var(--line); cursor: default; }
   #sessions { list-style: none; margin: 0; padding: 0; }
   /* One row per conversation, and the label ellipsised rather than wrapped: a list of
      conversations is for telling apart at a glance, and a row that wraps to two lines makes
@@ -174,7 +182,14 @@
      cannot keep. -->
 <div class="app plain" id="app">
   <aside id="sidebar" hidden>
-    <div class="side-head">conversations</div>
+    <div class="side-head">
+      <span>conversations</span>
+      <!-- The one thing the sidebar could not do. Switching between conversations was here and
+           making one was not, so the page could only ever show conversations that already
+           existed. It sends `/new` like everything else the page sends: the terminal's own
+           command, not a second implementation of starting a conversation. -->
+      <button id="new-conversation" type="button" title="start a new conversation">+ new</button>
+    </div>
     <ul id="sessions"><li class="waiting">reading the list…</li></ul>
   </aside>
   <div class="pane">
@@ -386,22 +401,30 @@ function applyEvent(doc, ev) {
       push(doc, { kind: "user", text: text(ev.prompt) });
       return;
 
+    // Both delta kinds open a block if there is not one, and both refuse to open one for a
+    // piece with nothing in it. A delta that says nothing is not the start of an answer, and
+    // opening a block for it left a blank "flint" heading that no text ever arrived to fill --
+    // seen on a page reloaded while a turn was waiting on the model.
     case "message.delta": {
+      const piece = text(ev.text);
       let answer = currentAnswer(doc);
       if (!answer) {
+        if (!piece) return;
         answer = push(doc, { kind: "assistant", text: "", reasoning: "", open: true });
       }
-      answer.text += text(ev.text);
+      answer.text += piece;
       touched(doc, answer);
       return;
     }
 
     case "reasoning.delta": {
+      const piece = text(ev.text);
       let answer = currentAnswer(doc);
       if (!answer) {
+        if (!piece) return;
         answer = push(doc, { kind: "assistant", text: "", reasoning: "", open: true });
       }
-      answer.reasoning += text(ev.text);
+      answer.reasoning += piece;
       touched(doc, answer);
       return;
     }
@@ -912,7 +935,11 @@ function setHint(text, bad) {
 /// The wording about interrupting is the terminal's own rule, said here because the page gives
 /// no other sign of it: a line sent while the model is working does not queue, it steers.
 function idleHint() {
-  return "Enter sends · Shift+Enter is a newline" + (doc.status ? " · sending now interrupts the turn" : "");
+  // The composer is a prompt, not just a message box: everything the terminal accepts works
+  // here, because what the page sends is text and the REPL decides what text means. Nothing on
+  // the page said so, so the one thing a person tries -- `/new` -- looked unavailable.
+  const base = "Enter sends · Shift+Enter is a newline · /help lists the commands";
+  return doc.status ? base + " · sending now interrupts the turn" : base;
 }
 
 function sizeComposer() {
@@ -1082,6 +1109,14 @@ if (typeof document !== "undefined" && document.getElementById) {
     document.getElementById("sidebar").hidden = false;
     document.getElementById("composer").hidden = false;
     setHint(idleHint());
+
+    document.getElementById("new-conversation").addEventListener("click", async (e) => {
+      // Disabled while it is in flight, because a second click before the process answers would
+      // start a second conversation and leave the sidebar showing whichever won the race.
+      e.target.disabled = true;
+      await sendText("/new");
+      e.target.disabled = false;
+    });
 
     const message = document.getElementById("message");
     message.addEventListener("input", sizeComposer);

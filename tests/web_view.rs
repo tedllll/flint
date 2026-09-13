@@ -180,3 +180,28 @@ fn the_composer_is_honest_about_what_it_sent() {
         "the input is cleared without checking what came back"
     );
 }
+
+/// The sidebar can start a conversation, not only switch between the ones that exist.
+///
+/// Reported as a basic gap after using the page: the list was there and "new" was not, so a page
+/// could only ever show conversations somebody had already begun. The button is the small half;
+/// the half worth testing is that it sends `/new` — the terminal's own command — rather than the
+/// page growing an opinion about what starting a conversation means.
+#[test]
+fn the_sidebar_can_start_a_conversation() {
+    let html = view();
+    assert!(
+        html.contains("id=\"new-conversation\""),
+        "there must be a way to start one from the page"
+    );
+    assert!(
+        html.contains("\"/new\""),
+        "it must go through the command the terminal already has"
+    );
+    // And the composer says so, because nothing on the page did: the one command a person
+    // reaches for is `/new`, and a composer that only looks like a message box hides the rest.
+    assert!(
+        html.contains("/help lists the commands"),
+        "the composer must say that commands work here"
+    );
+}

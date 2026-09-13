@@ -421,6 +421,13 @@ node on screen was a *new* node.
 | A page *loaded* in the middle of a turn | reload during a turn | **a defect.** A page starting fresh has no memory to carry, so it showed the answer from the middle. Fixed on the server: the answer so far is sent as a named `answer` event — state, like `status` — on connect and after a lagging reset. Verified: 280,522 characters on screen against the 279,900 the model produced |
 | A megabyte of answer | 5000 × 310-character deltas | **the limit, and it is a real one.** Painting cost is quadratic: about 85 KB/s rendered while the transcript was small, about 17 KB/s past a megabyte. Node reuse removed the DOM half of it; what is left is the browser laying out one very large text node on every frame. Worth knowing for scale rather than for alarm — a real model emits on the order of 300 **bytes** a second, two orders of magnitude below the slowest figure measured here. The fix, if it is ever needed, is to append to the text node rather than rewrite it, or to split it into chunks |
 
+**And two small ones found by looking at the page rather than by measuring it.** Switching
+between conversations was there and *starting* one was not — a page that could only ever show
+conversations somebody had already begun. `+ new` sends `/new`, the terminal's own command. And
+the composer said only what Enter does, which hid the fact that the whole command vocabulary
+works there: the hint now names `/help`. Neither is a design question; both are the kind of gap
+that only shows up when somebody uses the thing.
+
 **The fourth defect is the one worth remembering**, because it is the only one that destroyed
 something the reader had: the transcript on screen *went backwards*. It took a synthetic producer
 to reach it, and it would take a throttled tab or a sleeping laptop to reach it in ordinary use —
@@ -434,6 +441,7 @@ textarea, dispatch the events a person's typing produces, and then look at what 
 | Claim | How | Result |
 |---|---|---|
 | The sidebar lists the conversations | `GET /sessions`, eight real sessions | numbered newest-first, the open one marked, labels ellipsised to one row each |
+| The sidebar can start one | `+ new`, three times over | one click, one `POST /message`, one new conversation each time — the count was watched on disk as well as on the page, after an earlier run suggested a click could make several |
 | Enter sends | `keydown` Enter in the textarea | the message reached the transcript; the box cleared |
 | Clicking a row switches conversation | click on row 2 | `/resume 2` ran in the terminal, `/session` changed id, `current` moved to row 2 — **for free**, because the sidebar sends text and the REPL decides what text means |
 | A message typed into the page appears in the *terminal* | pty, side by side | `> hello from the browser`, then the answer |

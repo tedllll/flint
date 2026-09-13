@@ -235,7 +235,9 @@ Three things about the view are deliberate, and each one was a decision rather t
   Enter sends; Shift+Enter is a newline, because a prompt is a paragraph more often than a line.
 
   The sidebar lists them the way `/resume` numbers them — it reads the same listing — and
-  clicking one is exactly `flint`'s own `/sessions` followed by `/resume <n>`.
+  clicking one is exactly `flint`'s own `/sessions` followed by `/resume <n>`. `+ new` at the
+  top starts a conversation, and it is `/new`: the page has no separate idea of what starting
+  one means.
 
 What it shows is the conversation the process is in, read from the session file on disk, plus
 the live event stream — the same events `--json` writes, produced by the same code. So a tool
