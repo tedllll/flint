@@ -1539,14 +1539,23 @@ async fn handle_command(
             }
             let provider = provider::Provider::new(provider_cfg.clone())?;
             let writer = Some(session::SessionWriter::resume(&path)?);
+            let cwd = agent.cwd().clone();
             let mut new_agent = agent::Agent::new(
                 cfg,
                 provider,
                 agent.readonly(),
-                agent.cwd().clone(),
+                cwd.clone(),
                 writer,
             );
-            *new_agent.history_mut() = loaded.messages;
+            // Behind a *freshly built* system prompt, never the loaded messages as they
+            // stand. A session file holds the conversation and not the prompt -- the prompt
+            // is rebuilt at startup because it carries run-time facts, and a file written
+            // from another directory or by another build may carry one that is no longer
+            // true. Assigning the loaded messages directly dropped the fresh prompt
+            // entirely when the file had none, which left the model with no instructions at
+            // all and no sign that anything was wrong: the REPL looked normal, and the
+            // answers just got worse.
+            new_agent.splice_loaded_history(cfg, &cwd, loaded.messages);
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())

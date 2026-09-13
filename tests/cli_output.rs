@@ -891,3 +891,160 @@ fn an_unknown_debug_subcommand_names_the_ones_that_exist() {
         "a bare `debug` must name its subcommands too"
     );
 }
+
+/// Mount a stub provider that answers once, for a REPL run that makes one request.
+async fn answer_once(server: &MockServer) {
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(&[
+                    r#"data: {"choices":[{"delta":{"content":"STUB ANSWER"}}]}"#,
+                    r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+                    "data: [DONE]",
+                ])),
+        )
+        .mount(server)
+        .await;
+}
+
+/// Resume a one-session home in the REPL and return (stdout, the first request body).
+///
+/// The stub stands in for the provider so the test can read what was actually sent: the
+/// presence or absence of a system prompt is invisible anywhere else in the run.
+async fn resume_and_capture(
+    server: &MockServer,
+    tag: &str,
+    fixture: &[&str],
+) -> (String, serde_json::Value) {
+    // A home of its own per call: `test_home` keys on the process id, and two tests in
+    // this binary run at the same time, so a shared name means one deletes the other's
+    // fixture mid-run and the failure reads as a missing request.
+    let home = test_home(tag, &server.uri());
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("working directory");
+    write_session(&home.join("sessions"), "111-1.jsonl", fixture, 10);
+
+    let mut child = binary()
+        .current_dir(&work)
+        .env("FLINT_HOME", &home)
+        .env("FLINT_TERM_CAPTURE", "1")
+        .env("FLINT_TERM_SIZE", "100x24")
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to run flint");
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().expect("no stdin handle");
+        // By id, not by list number: the REPL creates its own session on startup, and that
+        // one is the newest, so `1` would resume the empty file this run just opened.
+        stdin
+            .write_all(b"/resume 111-1\nhello\n/exit\n")
+            .expect("failed to write stdin");
+    }
+    let out = child.wait_with_output().expect("flint did not finish");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+
+    // Read the bodies the stub was sent, after the child has finished: `Respond` needs an
+    // `Fn`, so the recording cannot happen inside the responder.
+    let requests = server.received_requests().await.expect("requests");
+    let body = requests
+        .first()
+        .map(|r| serde_json::from_slice(&r.body).expect("the request body is JSON"))
+        .expect("no request was made after /resume, so no prompt was ever sent");
+
+    let _ = std::fs::remove_dir_all(&home);
+    (stdout, body)
+}
+
+/// Resuming an ordinary session must send the model a system prompt.
+///
+/// A session file holds the conversation and **not** the prompt: the prompt is rebuilt at
+/// startup on purpose, because it carries run-time facts -- the shell dialect, the working
+/// directory, the instruction files -- that a transcript cannot be trusted to still be
+/// right about. `/resume` replaced the whole history with the loaded one, and since an
+/// ordinary file has no system message in it, that dropped the freshly built prompt and
+/// left the model with no instructions at all: no tool guidance, no "act, do not narrate",
+/// no note about where commands run.
+///
+/// Nothing in the run makes that visible. The REPL looks perfectly normal, the answers just
+/// quietly get worse, and the only place the loss shows up is the request itself -- which is
+/// what this reads.
+#[tokio::test]
+async fn resuming_a_session_keeps_a_system_prompt() {
+    let server = MockServer::start().await;
+    answer_once(&server).await;
+    let (_stdout, sent) = resume_and_capture(
+        &server,
+        "repl-resume-keeps",
+        &[
+            &meta_line("111-1"),
+            r#"{"type":"chat","message":{"role":"user","content":"the earlier question"}}"#,
+            r#"{"type":"chat","message":{"role":"assistant","content":"the earlier answer"}}"#,
+        ],
+    )
+    .await;
+
+    let messages = sent["messages"].as_array().expect("messages");
+    let roles: Vec<&str> = messages
+        .iter()
+        .map(|m| m["role"].as_str().unwrap_or("?"))
+        .collect();
+    assert_eq!(
+        roles.first().copied(),
+        Some("system"),
+        "the resumed conversation was sent with no system prompt at all: {roles:?}"
+    );
+    assert!(
+        messages[0]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("You are flint"),
+        "the first message is not flint's instructions: {}",
+        messages[0]
+    );
+    // The conversation itself must survive, which is the point of resuming at all.
+    assert!(
+        sent.to_string().contains("the earlier question"),
+        "the loaded conversation was dropped: {sent}"
+    );
+}
+
+/// A stored system prompt is replaced, not added to.
+///
+/// A hand-edited file, or one written by another build from another directory, can carry a
+/// system message of its own. Sending it beside the fresh one is worse than sending neither:
+/// the model is handed two sets of instructions and believes the one that is wrong.
+#[tokio::test]
+async fn resuming_does_not_send_a_stale_system_prompt() {
+    let server = MockServer::start().await;
+    answer_once(&server).await;
+    let (_stdout, sent) = resume_and_capture(
+        &server,
+        "repl-resume-stale",
+        &[
+            &meta_line("111-1"),
+            r#"{"type":"chat","message":{"role":"system","content":"STALE-PROMPT-MARKER working directory /nowhere-at-all"}}"#,
+            r#"{"type":"chat","message":{"role":"user","content":"the earlier question"}}"#,
+        ],
+    )
+    .await;
+
+    let messages = sent["messages"].as_array().expect("messages");
+    let systems = messages
+        .iter()
+        .filter(|m| m["role"] == "system")
+        .count();
+    assert_eq!(systems, 1, "expected exactly one system prompt: {sent}");
+    assert!(
+        !sent.to_string().contains("STALE-PROMPT-MARKER"),
+        "the stored system prompt reached the model: {sent}"
+    );
+    assert!(
+        sent.to_string().contains("the earlier question"),
+        "the loaded conversation was dropped: {sent}"
+    );
+}
