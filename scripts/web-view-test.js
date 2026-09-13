@@ -228,6 +228,24 @@ check("a warning and an error read differently", () => {
   eq(d.blocks.map((b) => b.level), ["warning", "error"], "levels");
 });
 
+console.log("where the lines come from");
+
+check("the token is read out of the URL that --web printed", () => {
+  eq(viewer.tokenFromSearch("?token=deadbeef"), "deadbeef", "the only parameter");
+  eq(viewer.tokenFromSearch("?a=1&token=deadbeef&b=2"), "deadbeef", "among others");
+  eq(viewer.tokenFromSearch(""), "", "no query at all");
+  eq(viewer.tokenFromSearch("?token="), "", "an empty token is no token");
+  eq(viewer.tokenFromSearch("?nottoken=deadbeef"), "", "a similarly named parameter");
+});
+
+check("a page from disk is the dropped-file level, and a served one is not", () => {
+  const at = (protocol, search) => ({ protocol, search });
+  ok(!viewer.servedByFlint(at("file:", "")), "file:// has nothing to fetch from");
+  ok(!viewer.servedByFlint(at("http:", "")), "served, but with no token to authenticate with");
+  ok(viewer.servedByFlint(at("http:", "?token=deadbeef")), "this is the --web case");
+  ok(!viewer.servedByFlint(null), "no location at all");
+});
+
 if (failures) {
   console.log(`\n${failures} failed`);
   process.exit(1);

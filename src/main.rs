@@ -509,7 +509,7 @@ async fn real_main() -> Result<i32> {
     // nothing while looking like it worked is the failure this project keeps designing
     // against.
     if args.web {
-        let window = web::Window::open(args.port.unwrap_or(0)).await?;
+        let window = web::Window::open(args.port.unwrap_or(0), agent.session_path()).await?;
         printer.term().line(format_args!(
             "{} {}",
             printer.dim("web:"),

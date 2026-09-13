@@ -40,6 +40,14 @@ const MAX_HEAD: usize = 8 * 1024;
 pub struct State {
     token: String,
     port: u16,
+    /// The conversation this window shows, when this run is writing one.
+    ///
+    /// A path and not its contents: `GET /session` re-reads the file every time it is
+    /// asked, because the file *is* the record and this process is appending to it while
+    /// the browser is looking. A cached body would be derived state, and it would be the
+    /// one copy that is wrong -- the session on disk is the only thing the terminal and
+    /// the browser can both be right about.
+    session: Option<std::path::PathBuf>,
 }
 
 /// A token for this run, unknown to anything that was not handed it.
@@ -280,6 +288,10 @@ pub fn respond(request: &Request, state: &State) -> Response {
             content_type: "text/html; charset=utf-8",
             body: VIEW_HTML.to_string(),
         },
+        // The conversation so far, as the session file's own lines. Not a summary and not a
+        // second format: the page is a reader of the same file the terminal is writing, and
+        // the moment this route rendered something of its own the two could disagree.
+        ("GET", "/session") => serve_session(state),
         ("GET", _) | ("HEAD", _) => Response::text(404, "Not Found", "no such route\n"),
         (_, "/") => Response::text(
             405,
@@ -287,6 +299,42 @@ pub fn respond(request: &Request, state: &State) -> Response {
             "the view is served, not written to\n",
         ),
         _ => Response::text(404, "Not Found", "no such route\n"),
+    }
+}
+
+/// The session file, exactly as it is on disk.
+///
+/// Read every time, synchronously, and the reasoning is worth stating because both halves
+/// look like mistakes. *Read every time* because nothing here is derived: the file is the
+/// record, this process appends to it, and a cached body would go stale exactly while
+/// someone is watching a turn. *Synchronously* because it is one local file of a few
+/// kilobytes, and `tools::walk_files` already reads directories the same way from inside the
+/// async tool loop -- a background read would be a task and a channel to avoid a millisecond.
+///
+/// Served **as it is**, including a last line with no newline after it. That case is a read
+/// that caught the file mid-append, and the tempting fix -- drop the unfinished line -- is
+/// wrong: `session::load` reads such a line, so dropping it here would make the browser show
+/// less than the terminal does. A torn read is transient; the next refresh has it whole.
+fn serve_session(state: &State) -> Response {
+    let Some(path) = &state.session else {
+        return Response::text(
+            404,
+            "Not Found",
+            "this run is not writing a session, so there is nothing to show\n",
+        );
+    };
+    match std::fs::read_to_string(path) {
+        Ok(body) => Response {
+            status: 200,
+            reason: "OK",
+            content_type: "application/x-ndjson; charset=utf-8",
+            body,
+        },
+        Err(e) => Response::text(
+            500,
+            "Internal Server Error",
+            format!("cannot read {}: {e}\n", path.display()),
+        ),
     }
 }
 
@@ -316,7 +364,7 @@ impl Window {
     /// The address is the literal `127.0.0.1`, never `0.0.0.0` and never a resolved
     /// "localhost" (§4.1). Remote access is not a feature of this program; it is a different
     /// program, and one with a much harder problem.
-    pub async fn open(port: u16) -> Result<Window> {
+    pub async fn open(port: u16, session: Option<std::path::PathBuf>) -> Result<Window> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
             .await
             .with_context(|| format!("cannot listen on 127.0.0.1:{port}"))?;
@@ -328,6 +376,7 @@ impl Window {
         let state = Arc::new(State {
             token: token.clone(),
             port,
+            session,
         });
         tokio::spawn(accept_loop(listener, state));
         Ok(Window { port, token })
@@ -407,6 +456,7 @@ mod tests {
         State {
             token: "0123456789abcdef0123456789abcdef".to_string(),
             port: 7777,
+            session: None,
         }
     }
 
@@ -542,8 +592,72 @@ mod tests {
         };
 
         assert_eq!(ask(&by_query("/?token=0123456789abcdef0123456789abcdef"), &state).status, 200);
-        // Same token, different route: the header would have worked, the query does not.
+        // Same token, a route that changes what a reader sees: the header would have
+        // worked, the query does not.
         assert_eq!(ask(&by_query("/session?token=0123456789abcdef0123456789abcdef"), &state).status, 403);
+    }
+
+    fn with_session(path: std::path::PathBuf) -> State {
+        State { session: Some(path), ..state() }
+    }
+
+    /// `/session` is the file, byte for byte -- not a summary and not a second format.
+    #[test]
+    fn the_session_route_serves_the_file_itself() {
+        let dir = std::env::temp_dir().join(format!("flint-web-session-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("1.jsonl");
+        // Shaped like a real one, including the trailing newline `writeln!` leaves.
+        let body = "{\"type\":\"meta\",\"v\":2,\"id\":\"1\"}\n{\"type\":\"chat\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n";
+        std::fs::write(&path, body).expect("write");
+
+        let state = with_session(path.clone());
+        let response = ask(&ours("/session"), &state);
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, body, "the route must not reformat anything");
+        assert!(
+            response.content_type.starts_with("application/x-ndjson"),
+            "the page reads it as lines of JSON: {}",
+            response.content_type
+        );
+
+        // Appended to between requests, and the next request sees it. This is the whole
+        // reason the route re-reads the file instead of caching what it read once.
+        let mut grown = body.to_string();
+        grown.push_str("{\"type\":\"chat\",\"message\":{\"role\":\"assistant\",\"content\":\"hello\"}}\n");
+        std::fs::write(&path, &grown).expect("append");
+        assert_eq!(ask(&ours("/session"), &state).body, grown);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A last line with no newline is a read that caught the file mid-append, and it is
+    /// served as it is.
+    ///
+    /// The tempting fix is to drop it. That would be wrong: `session::load` reads such a
+    /// line, so dropping it here would make the browser show a conversation one message
+    /// shorter than the terminal's -- the divergence this whole design exists to prevent.
+    #[test]
+    fn a_half_written_last_line_is_served_rather_than_hidden() {
+        let dir = std::env::temp_dir().join(format!("flint-web-torn-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("1.jsonl");
+        let torn = "{\"type\":\"meta\",\"v\":2}\n{\"type\":\"chat\",\"mess";
+        std::fs::write(&path, torn).expect("write");
+
+        let response = ask(&ours("/session"), &with_session(path), );
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, torn);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A run that writes no session says so, rather than serving an empty conversation.
+    #[test]
+    fn a_run_without_a_session_says_so() {
+        let response = ask(&ours("/session"), &state());
+        assert_eq!(response.status, 404);
+        assert!(response.body.contains("not writing a session"), "{}", response.body);
     }
 
     /// A path is never looked up on disk, so there is no traversal to get wrong (§6).
@@ -551,7 +665,7 @@ mod tests {
     fn an_unknown_route_is_a_404_and_the_method_is_checked() {
         let state = state();
         assert_eq!(ask(&ours("/../../etc/passwd"), &state).status, 404);
-        assert_eq!(ask(&ours("/session"), &state).status, 404, "not built yet");
+        assert_eq!(ask(&ours("/events"), &state).status, 404, "not built yet");
         assert_eq!(
             ask(
                 &format!("POST / HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nX-Flint-Token: {}\r\n\r\n", state.token),
@@ -621,7 +735,7 @@ mod socket_tests {
     /// The URL is the contract: whatever it says must be what the listener accepts.
     #[tokio::test]
     async fn the_url_that_is_printed_is_the_one_that_opens_the_window() {
-        let window = Window::open(0).await.expect("bind");
+        let window = Window::open(0, None).await.expect("bind");
         let url = window.url();
 
         // Taken apart rather than rebuilt, so the test fails if the URL stops naming the
@@ -647,7 +761,7 @@ mod socket_tests {
 
     #[tokio::test]
     async fn a_connection_without_the_token_gets_nothing_over_the_wire() {
-        let window = Window::open(0).await.expect("bind");
+        let window = Window::open(0, None).await.expect("bind");
         let host = format!("127.0.0.1:{}", window.port());
         let response = get(window.port(), "/", Some(&host), None).await;
         assert!(response.starts_with("HTTP/1.1 403"), "{response}");
@@ -658,8 +772,8 @@ mod socket_tests {
     /// anything: a token that repeated between runs would be a password written down.
     #[tokio::test]
     async fn every_run_gets_its_own_port_and_its_own_token() {
-        let first = Window::open(0).await.expect("bind");
-        let second = Window::open(0).await.expect("bind");
+        let first = Window::open(0, None).await.expect("bind");
+        let second = Window::open(0, None).await.expect("bind");
         assert_ne!(first.port(), second.port(), "two listeners cannot share a port");
         assert_ne!(first.token, second.token, "two runs must not share a token");
         assert_eq!(first.token.len(), 32, "128 bits, as hex");

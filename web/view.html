@@ -368,6 +368,29 @@ function clip(s, n) {
   return s.length > n ? s.slice(0, n) + "…" : s;
 }
 
+/// The token, out of the URL that `--web` printed.
+///
+/// It travels in the query string of the one route a person pastes into a browser --
+/// there is nowhere else to put it, and a page that cannot authenticate itself cannot
+/// fetch anything. From here on it is sent as a header instead, because a query string
+/// ends up in history, in logs and in any link that gets shared, and a header does not.
+function tokenFromSearch(search) {
+  const match = /[?&]token=([0-9A-Za-z_-]+)/.exec(search || "");
+  return match ? match[1] : "";
+}
+
+/// Whether this page was served by a running flint, rather than opened from disk.
+///
+/// The two levels differ in exactly this: a page from `file://` has no origin to fetch
+/// from and no token, so it renders a file you hand it; a page served by `--web` renders
+/// the conversation the process is writing. Nothing about the page changes -- same file,
+/// same renderer -- only where the lines come from.
+function servedByFlint(loc) {
+  const here = loc || (typeof location !== "undefined" ? location : null);
+  if (!here) return false;
+  return here.protocol !== "file:" && tokenFromSearch(here.search) !== "";
+}
+
 // ---------------------------------------------------------------------------
 // The view: a document in, elements out. Every text goes in through textContent.
 // ---------------------------------------------------------------------------
@@ -491,6 +514,25 @@ function load(whole) {
   document.getElementById("drop").hidden = true;
 }
 
+/// Ask the process for the conversation so far.
+///
+/// A relative URL with the token in a header. The body is the session file's own lines,
+/// which is the vocabulary the renderer above already reads -- so this is a change of
+/// source, not a second parser.
+function loadFromServer(where) {
+  const here = where || location;
+  const token = tokenFromSearch(here.search);
+  return fetch("/session", { headers: { "X-Flint-Token": token } })
+    .then((response) => {
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      return response.text();
+    })
+    .then((whole) => {
+      load(whole);
+      return true;
+    });
+}
+
 function readFile(file) {
   if (!file) return;
   const reader = new FileReader();
@@ -515,12 +557,27 @@ if (typeof document !== "undefined" && document.getElementById) {
   });
   document.addEventListener("dragover", (e) => e.preventDefault());
   document.addEventListener("drop", (e) => e.preventDefault());
-  paint(doc);
+
+  if (servedByFlint()) {
+    // Served by a running flint: there is nothing to drop, and the conversation is the
+    // process's. A failure is rendered rather than thrown, because a blank page and a
+    // page whose request was refused look identical and only one of them is a bug.
+    drop.hidden = true;
+    paint(doc);
+    loadFromServer().catch((e) => {
+      doc.blocks = [
+        { kind: "damage", text: "cannot read the session from flint: " + e.message },
+      ];
+      paint(doc);
+    });
+  } else {
+    paint(doc);
+  }
 }
 
 // For the Node test in scripts/web-view-test.js, and for the page's own console.
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { newDoc, applyLine, applyText, applyEvent };
+  module.exports = { newDoc, applyLine, applyText, applyEvent, tokenFromSearch, servedByFlint };
 }
 </script>
 </body>
