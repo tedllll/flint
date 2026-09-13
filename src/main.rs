@@ -834,10 +834,18 @@ async fn interactive(
         // Echo the message into the transcript. The input row is cleared as soon
         // as Enter is pressed, so without this the conversation above shows only
         // the answers and the questions scroll away unread.
-        printer.term().line(format_args!(
-            "{bold}> {reset}{}",
-            printer.style(BOLD, &input)
-        ));
+        //
+        // One `line` call per line, because a pasted block arrives with its line breaks
+        // intact and a single call carrying a newline would move the cursor down through
+        // the rows the layout has reserved. The continuation lines are indented under the
+        // prompt marker so the block still reads as one message rather than as several.
+        for (n, line) in input.lines().enumerate() {
+            let marker = if n == 0 { ">" } else { " " };
+            printer.term().line(format_args!(
+                "{bold}{marker} {reset}{}",
+                printer.style(BOLD, line)
+            ));
+        }
 
         match run_turn(agent, provider_cfg, &input, printer, input_rx, true, live).await {
             Ok(()) => {}

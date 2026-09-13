@@ -20,6 +20,7 @@
 
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Mutex;
@@ -523,12 +524,25 @@ impl Term {
                 // which outlives the `Term` it was installed by, and a panic path must
                 // not be the thing that fails.
                 let mut out = std::io::stdout();
-                let _ = write!(out, "\x1b[r\x1b[?25h\r\n");
+                let _ = write!(out, "\x1b[r\x1b[?25h\x1b[?2004l\r\n");
                 let _ = out.flush();
                 default_hook(info);
             }));
 
             enable_raw_mode()?;
+            // Bracketed paste, and this is the whole reason a paste works at all.
+            //
+            // Without it the terminal sends the pasted text one keystroke at a time, so
+            // every newline in it is an Enter: a three-line paste became three messages,
+            // and the second and third arrived while the first turn was running, which is
+            // the steering path -- so they *interrupted* it. Reported from a real session
+            // as "the model treats it as one sentence", which is what it looks like from
+            // the outside: only the first line was ever its message.
+            //
+            // The handler for `Event::Paste` below has been in this file all along and had
+            // never once run in a real terminal, because nothing asked the terminal to send
+            // the markers it depends on.
+            let _ = execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste);
         }
         if interactive {
             term.reclaim();
@@ -1513,14 +1527,24 @@ impl Term {
                 self.reclaim();
                 Key::Redraw
             }
-            Event::Paste(s) => {
-                let mut input = self.input.lock().unwrap();
-                for c in s.chars() {
-                    if c != '\r' && c != '\n' {
+            Event::Paste(text) => {
+                if !text.contains('\n') && !text.contains('\r') {
+                    // A path, a snippet, a word: it belongs in the line being typed.
+                    let mut input = self.input.lock().unwrap();
+                    for c in text.chars() {
                         input.insert(c);
                     }
+                    return Key::Redraw;
                 }
-                Key::Redraw
+                // A block is **one message, with its line breaks kept**. They are part of
+                // what was written, and joining them up makes a list, a poem or a stack
+                // trace arrive as a single run-on sentence -- which is exactly what a
+                // pasted prompt used to look like to the model.
+                //
+                // Submitted rather than put in the row: the row is one row, so showing a
+                // paragraph there would be showing the user something other than what
+                // pressing Enter sends.
+                Key::Enter(text.trim_end().to_string())
             }
             _ => Key::Ignore,
         }
@@ -1534,7 +1558,10 @@ impl Term {
         let mut out = self.sink();
         // Drop the scroll region, show the cursor, park below the input row so the
         // shell's next prompt starts on a fresh line.
-        let _ = write!(out, "\x1b[r\x1b[?25h");
+        // `?2004l` is bracketed paste off, and it has to be off before the shell's next
+        // prompt: a terminal left in bracketed paste mode wraps *every* subsequent paste,
+        // including into programs that know nothing about it.
+        let _ = write!(out, "\x1b[r\x1b[?25h\x1b[?2004l");
         let _ = write!(out, "\x1b[{};1H\r\x1b[2K", self.input_row.load(Ordering::Relaxed));
         let _ = write!(out, "\r\n");
         let _ = out.flush();
@@ -1672,13 +1699,32 @@ mod tests {
         assert!(t.input_mut().is_empty());
     }
 
-    /// A pasted block arrives as one event with newlines in it; those must not be
-    /// inserted, or the line breaks the input row.
+    /// A pasted block is one message, and its line breaks survive.
+    ///
+    /// This test used to assert the opposite -- that the newlines were stripped -- and it
+    /// was testing a path that could not run: bracketed paste was never enabled, so the
+    /// terminal never sent the event this handler is for. What actually happened to a
+    /// pasted prompt was one message per line, each interrupting the last.
     #[test]
-    fn paste_strips_newlines() {
+    fn a_pasted_block_is_one_message_with_its_line_breaks() {
         let t = Term::plain();
-        t.on_event(Event::Paste("one\ntwo\r\nthree".to_string()));
-        assert_eq!(t.input_mut().text(), "onetwothree");
+        match t.on_event(Event::Paste("one\ntwo\r\nthree".to_string())) {
+            Key::Enter(text) => assert_eq!(text, "one\ntwo\r\nthree"),
+            other => panic!("a block with line breaks in it must be submitted as one message: {other:?}"),
+        }
+        assert!(
+            t.input_mut().is_empty(),
+            "a submitted block must not also be left sitting in the input row"
+        );
+    }
+
+    /// A paste with no line break in it is just text, and goes into the line being typed.
+    #[test]
+    fn a_paste_without_a_line_break_joins_the_line() {
+        let t = Term::plain();
+        press(&t, KeyCode::Char('a'));
+        assert!(matches!(t.on_event(Event::Paste("/etc/hosts".to_string())), Key::Redraw));
+        assert_eq!(t.input_mut().text(), "a/etc/hosts");
     }
 
     #[test]
