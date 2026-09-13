@@ -6,10 +6,11 @@ of it.
 
 ## Where things stand
 
-Everything is committed, the working tree is clean, and `main` is pushed to
-`origin/main` (tip `d31c32d`). `cargo test` is 190 passing (134 lib, 22 `agent_loop`,
-12 `cli_output`, 4 `json_output`, 18 `term_capture`), `cargo clippy --all-targets` is
-silent, and `node scripts/term-layout-test.js` passes every layout assertion.
+Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
+As of the documentation commit that carries this file, `cargo test` is 190 passing (134 lib,
+22 `agent_loop`, 12 `cli_output`, 4 `json_output`, 18 `term_capture`), `cargo clippy
+--all-targets` is silent, and `node scripts/term-layout-test.js` passes every layout
+assertion.
 
 Build with:
 
@@ -122,40 +123,29 @@ retry path has to reconcile what was already drawn — that was considered and n
 
 ## Planned and not started
 
-In the order agreed, with the design settled in discussion:
+**[`ROADMAP.md`](ROADMAP.md) is the plan of record** — the ordered queue, what is done, what
+is next, the small agreed items and the not-doing list. It was written by folding this
+section into it, so the two do not drift. The shape of it:
 
-1. **The transcript as cells.** Three steps — measure, then paint only what changed, then
-   a real re-render on resize. This is also what deletes the interim state the last fix
-   left behind: `begin_answer`, `last_segment_text`, the `committed` count and
-   `fresh_segment` all exist because the strip is a text offset rather than a model.
-2. **`debug prompt-input`.** The last piece of machine-readable output: print exactly what
-   goes to the provider — the system prompt, the history and the tool schemas — without
-   sending it. The NDJSON stream and `docs/session-format.md` are done; this is the one
-   that needs a view of the request body, so it probably wants a `request_body`-shaped
-   function extracted from `provider.rs` rather than a copy of its serialisation.
-3. **Small, agreed, unscheduled.** `read`/`write`/`edit` taking `file_path` with `path`
-   kept as an alias; `--fork`; the `HANDOFF`'s own warning about
-   `examples/live_turn.rs` — it keeps a hand-maintained copy of `run_turn`'s event
-   handling and has drifted twice, costing time chasing faults that were only in the
-   example.
-4. **Windows tooling — the escaping problem.** Settled in discussion and written up in full
-   in [`docs/windows-tooling.md`](docs/windows-tooling.md): why a command string loses
-   quotes and backslashes on Windows (five parsers in a row, and `argv` is a fiction at the
-   `CreateProcess` boundary), the tool plan that deletes most of it (`exec` with an argument
-   array; `pwsh` with the script handed over as a file), the shared runner refactor they
-   need first, and the Windows adaptations that fall out of the same work — a killed command
-   does not kill its children, CP936 output decoded as UTF-8 becomes U+FFFD, `glob`/`grep`
-   silently miss a `\` pattern. **This is the active thread**; the order at the end of that
-   file is the order to work in.
-
-Deliberately not doing: subagents, `flint doctor`, approval prompts, MCP, sandboxes,
-SQLite, indexes, and any compressed or opaque state. State stays plain files a person can
-repair with `notepad`, and nothing derived is ever persisted.
+1. **The Windows command line** is the active thread, settled in full in
+   [`docs/windows-tooling.md`](docs/windows-tooling.md): why a command string loses quotes
+   and backslashes (five parsers in a row, and `argv` is a fiction at the `CreateProcess`
+   boundary), the tool plan that deletes most of it (`exec` with an argument array; `pwsh`
+   with the script handed over as a file), the shared runner refactor those need first, and
+   the Windows adaptations that fall out of the same work — a killed command does not kill
+   its children, CP936 output decoded as UTF-8 becomes U+FFFD, and `glob`/`grep` silently
+   miss a `\` pattern. The order at the end of that file is the order to work in.
+2. **`debug prompt-input`**, which finishes the machine-readable stream: print exactly what
+   goes to the provider without sending it, using one request-body function rather than a
+   second copy of the serialisation.
+3. **The transcript as cells** — measure, paint only what changed, then re-render for real on
+   resize — which is also what deletes the interim state the clock fix left behind:
+   `begin_answer`, `last_segment_text`, the `committed` count and `fresh_segment`.
 
 ## Verification without a terminal
 
 ```bash
-cargo test                            # 144 tests, including the real byte stream
+cargo test                            # the whole suite, including the real byte stream
 node scripts/term-layout-test.js      # replay the layout through a screen model
 node scripts/vtscreen.js raw.bin 24 100          # one raw dump, as a screen
 node scripts/vtscreen.js raw.bin 24 100 --prefill OLD   # ...onto a dirty screen

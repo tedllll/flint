@@ -43,6 +43,8 @@ whoever is changing the code — a person or a model driving it.
 | `docs/windows.md` | field notes on Windows terminal behaviour; read before touching layout |
 | `docs/windows-tooling.md` | the settled, unimplemented plan for command-line escaping on Windows; read before touching `probe_shell` or adding a tool |
 | `docs/session-format.md` | the session file format, for readers and for hand-editing |
+| `docs/decisions.md` | why flint is built this way, decision by decision |
+| `ROADMAP.md` | the plan of record: the ordered queue, and what is deliberately not done |
 | `HANDOFF.md` | state of the project at the end of the last working session |
 
 ## Where flint keeps its own state

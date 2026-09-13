@@ -381,6 +381,10 @@ cargo zigbuild --release --target x86_64-unknown-linux-musl
 Releases are built by GitHub Actions for Linux (x86_64/aarch64, musl), macOS
 (aarch64/x86_64) and Windows (x86_64).
 
+Where it is going, and what it deliberately will not do, is in
+[`ROADMAP.md`](ROADMAP.md); why it is built the way it is — decision by decision, with the
+reasoning — is in [`docs/decisions.md`](docs/decisions.md).
+
 ## Design notes
 
 Sessions are append-only JSONL at `~/.flint/sessions/<id>.jsonl`, one event per
