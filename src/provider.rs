@@ -107,6 +107,7 @@ fn ensure_tool_calls_are_answered(messages: &[Message]) -> Vec<Message> {
     out
 }
 
+/// How many times one completion is attempted before the turn is reported as failed.
 const MAX_ATTEMPTS: u32 = 4;
 
 /// How long to wait before attempt `n` (1-based: the wait after attempt 1 is the first).
@@ -154,6 +155,48 @@ enum AttemptError {
 /// the cases where giving up loses a turn that would have succeeded a second later.
 fn status_is_transient(status: reqwest::StatusCode) -> bool {
     status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+/// The body of one completion request.
+///
+/// A free function, and the *only* place the request is serialised, because `flint debug
+/// prompt-input` has to print exactly what would be sent. A second copy of this in the
+/// debug path would be a preview of something that is not going to be sent, and it would
+/// be wrong in the way that is hardest to notice: right on the day it was written.
+///
+/// `ensure_tool_calls_are_answered` is part of the body rather than a caller's job for the
+/// same reason -- it changes what the model is shown, so a preview that skipped it would
+/// be showing a conversation the provider never receives.
+pub fn request_body(
+    model: &str,
+    messages: &[Message],
+    tools: &[(String, String, Value)],
+) -> Value {
+    let tools_payload: Vec<Value> = tools
+        .iter()
+        .map(|(name, description, parameters)| {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": description,
+                    "parameters": parameters,
+                }
+            })
+        })
+        .collect();
+
+    let mut body = json!({
+        "model": model,
+        "messages": ensure_tool_calls_are_answered(messages),
+        "stream": true,
+        // Ask for a final usage frame; harmless for servers that ignore it.
+        "stream_options": { "include_usage": true },
+    });
+    if !tools_payload.is_empty() {
+        body["tools"] = json!(tools_payload);
+    }
+    body
 }
 
 impl Provider {
@@ -238,7 +281,6 @@ impl Provider {
         &self.config.name
     }
 
-/// How many times one completion is attempted before the turn is reported as failed.
     /// Stream one completion, invoking `on_event` for every incremental update.
     pub async fn stream_chat(
         &self,
@@ -246,31 +288,9 @@ impl Provider {
         tools: &[(String, String, Value)],
         mut on_event: impl FnMut(Event),
     ) -> Result<()> {
-
-        let tools_payload: Vec<Value> = tools
-            .iter()
-            .map(|(name, description, parameters)| {
-                json!({
-                    "type": "function",
-                    "function": {
-                        "name": name,
-                        "description": description,
-                        "parameters": parameters,
-                    }
-                })
-            })
-            .collect();
-
-        let mut body = json!({
-            "model": self.config.model,
-            "messages": ensure_tool_calls_are_answered(messages),
-            "stream": true,
-            // Ask for a final usage frame; harmless for servers that ignore it.
-            "stream_options": { "include_usage": true },
-        });
-        if !tools_payload.is_empty() {
-            body["tools"] = json!(tools_payload);
-        }
+        // Built by the same function `flint debug prompt-input` prints, so the preview
+        // cannot drift from the request that is actually sent.
+        let body = request_body(&self.config.model, messages, tools);
 
         let key = self.config.resolved_key();
 

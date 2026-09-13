@@ -1121,3 +1121,68 @@ fn retry_delays_grow_and_stay_bounded() {
         "the ladder must stay bounded: {delays:?}"
     );
 }
+
+/// What `debug prompt-input` prints is what the next request actually sends.
+///
+/// This is the only assertion that makes the command worth having. A preview that is
+/// *described* as faithful drifts the moment someone edits the real path, and it drifts in
+/// the direction nobody notices: it stays right about the obvious fields and goes wrong
+/// about the interesting ones -- the pruning, the tool schemas, the repair of a dangling
+/// tool call. So the comparison is against the bytes the stub server received, for the same
+/// message, from the same code.
+#[tokio::test]
+async fn the_prompt_preview_is_the_request_that_is_sent() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(SseFixture {
+            body: answer_only(),
+        })
+        .mount(&server)
+        .await;
+
+    let mut agent = agent_for(&server, std::env::temp_dir()).await;
+    let preview = agent.request_preview(Some("say something"));
+    agent.run("say something", |_| {}).await.expect("run");
+
+    let requests = server.received_requests().await.expect("requests");
+    let sent: serde_json::Value =
+        serde_json::from_slice(&requests[0].body).expect("the request body is JSON");
+    assert_eq!(
+        preview, sent,
+        "the preview and the request have drifted apart, which is the one failure this \
+         command must not have"
+    );
+}
+
+/// A preview with no message shows the conversation as it stands, and sends nothing.
+///
+/// A diagnostic that quietly made a request would be worse than no diagnostic: the run it
+/// describes would be a run it caused. The stub server is mounted with an expectation of
+/// zero calls for the same reason a request would be invisible otherwise -- an empty mock
+/// and an unreachable endpoint look identical.
+#[tokio::test]
+async fn a_preview_asks_for_no_message_and_sends_nothing() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(SseFixture {
+            body: answer_only(),
+        })
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let agent = agent_for(&server, std::env::temp_dir()).await;
+    let preview = agent.request_preview(None);
+
+    let messages = preview["messages"].as_array().expect("messages");
+    assert_eq!(
+        messages.len(),
+        1,
+        "an untouched conversation is the system prompt and nothing else: {messages:?}"
+    );
+    assert_eq!(messages[0]["role"], "system");
+    assert!(
+        !preview["tools"].as_array().expect("tools").is_empty(),
+        "the tool schemas are part of what the model is sent, so they belong in the preview"
+    );
+}

@@ -191,6 +191,45 @@ impl Agent {
         self.tools.names()
     }
 
+    /// The request body that the next round-trip would send, without sending it.
+    ///
+    /// Built from the same two things `step` builds -- the *pruned* history and the tool
+    /// specs -- through the same `provider::request_body` the client uses, because the
+    /// question this answers is not "what is in the session file". It is "what does the
+    /// model actually read", and those are different on purpose: request-side pruning drops
+    /// stale tool output that the session file keeps forever. A preview assembled any other
+    /// way would answer a different question, confidently.
+    ///
+    /// `user_input` is the message that would be sent next, so the command can show the
+    /// request for something the user is *about* to say, not only for what has been said.
+    pub fn request_preview(&self, user_input: Option<&str>) -> serde_json::Value {
+        let mut history = self.history.clone();
+        if let Some(text) = user_input {
+            history.push(Message::user(text));
+        }
+        crate::provider::request_body(
+            self.provider.model(),
+            &prune_tool_output(&history),
+            &self.tools.specs(),
+        )
+    }
+
+    /// Replace this conversation's history with a loaded one, behind a fresh system prompt.
+    ///
+    /// The stored prompt carries run-time facts -- the shell dialect, the working directory,
+    /// the instruction files -- that a transcript from another machine, or from another
+    /// directory, cannot be trusted to still be right about. So it is rebuilt and the stored
+    /// one is dropped rather than kept.
+    pub fn splice_loaded_history(&mut self, cfg: &Config, cwd: &std::path::Path, loaded: Vec<Message>) {
+        let mut merged = vec![Message::system(build_system_prompt(cfg, cwd))];
+        merged.extend(
+            loaded
+                .into_iter()
+                .filter(|m| !matches!(m, Message::System { .. })),
+        );
+        self.history = merged;
+    }
+
     /// The file this conversation is being appended to, when it is being saved at all.
     ///
     /// The commands that manage sessions need it to know which conversation they are

@@ -798,3 +798,96 @@ async fn a_tool_round_leaves_the_clock_running_for_the_model_call_after_it() {
         "a tool that finished inside the hold-back still got a clock:\n{text:?}"
     );
 }
+
+/// `flint debug prompt-input` prints the request it would send, and sends nothing.
+///
+/// The second half is the one worth asserting. A diagnostic that quietly created a session
+/// file would leave a conversation behind for a run that never happened -- it would appear
+/// in `/sessions`, and resuming it would open a transcript of nothing. So the check is not
+/// only that the JSON is right, but that the home directory it was pointed at is otherwise
+/// untouched.
+#[test]
+fn debug_prompt_input_prints_the_request_body_and_creates_no_session() {
+    let home = std::env::temp_dir().join(format!("flint-debug-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).expect("home directory");
+    // An endpoint that cannot be reached, on purpose: nothing in this command may talk to
+    // it, and a URL that answers would hide a request that should not have been made.
+    std::fs::write(
+        home.join("config.toml"),
+        "default_provider = \"stub\"\n\n\
+         [[providers]]\n\
+         name = \"stub\"\n\
+         base_url = \"http://127.0.0.1:1/v1\"\n\
+         api_key = \"test\"\n\
+         model = \"stub-model\"\n",
+    )
+    .expect("config file");
+
+    let out = binary()
+        .args(["debug", "prompt-input", "why is the build failing"])
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .output()
+        .expect("failed to run flint");
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "debug failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let body: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "the output is not one JSON document ({e}): {:?}",
+            String::from_utf8_lossy(&out.stdout)
+        )
+    });
+
+    let messages = body["messages"].as_array().expect("messages");
+    assert_eq!(messages[0]["role"], "system");
+    assert!(
+        messages[0]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("You are flint"),
+        "the system prompt is the first thing the model reads"
+    );
+    assert_eq!(
+        messages.last().expect("a last message")["content"],
+        "why is the build failing",
+        "the message after the subcommand is the one that would be sent"
+    );
+    assert_eq!(body["model"], "stub-model");
+    assert_eq!(body["stream"], true);
+    assert!(
+        !body["tools"].as_array().expect("tools").is_empty(),
+        "the tool schemas are part of what is sent"
+    );
+
+    assert_eq!(escape_count(&out.stdout), 0, "the JSON leaked escape codes");
+    assert!(
+        !home.join("sessions").exists(),
+        "a diagnostic that sends nothing created a session file"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// The `debug` namespace says what it knows rather than failing silently.
+#[test]
+fn an_unknown_debug_subcommand_names_the_ones_that_exist() {
+    let (code, out) = run(&["debug", "nonsense"]);
+    let text = String::from_utf8_lossy(&out);
+    assert_ne!(code, 0, "an unknown subcommand must not look like success");
+    assert!(
+        text.contains("prompt-input"),
+        "the error must name what exists: {text}"
+    );
+
+    let (code, out) = run(&["debug"]);
+    assert_ne!(code, 0);
+    assert!(
+        String::from_utf8_lossy(&out).contains("prompt-input"),
+        "a bare `debug` must name its subcommands too"
+    );
+}

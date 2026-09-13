@@ -52,6 +52,12 @@ struct Args {
     json: bool,
     list_sessions: bool,
     exec: Option<String>,
+    /// `debug <what>`, the words after the subcommand.
+    ///
+    /// A namespace rather than a flag per question -- `--debug-prompt-input` would be one
+    /// option per thing anyone ever wants to look at, and the next question is always about
+    /// something else. Nothing here sends anything or writes a session.
+    debug: Option<Vec<String>>,
     help: bool,
     cwd: Option<String>,
 }
@@ -355,6 +361,17 @@ async fn real_main() -> Result<i32> {
         }
     }
 
+    // ---- debug: answer a question about this run without making one ----
+    //
+    // Dispatched here, before the session writer and before the terminal, for two reasons
+    // that are both about honesty. A diagnostic must not create a session file: a run that
+    // sent nothing would leave a conversation behind, and it would be listed by
+    // `/sessions` as though something had happened. And its output is stdout, plainly --
+    // there is no status row to keep clear if the terminal was never started.
+    if let Some(debug) = &args.debug {
+        return run_debug(debug, &cfg, &provider_cfg, readonly, &cwd, history);
+    }
+
     // Built before the terminal only because the writer needs the model name; a failure
     // is *deferred*, not fatal.
     //
@@ -391,19 +408,7 @@ async fn real_main() -> Result<i32> {
 
     let mut agent = agent::Agent::new(&cfg, provider, readonly, cwd.clone(), writer);
     if !history.is_empty() {
-        // Drop the fresh system prompt, splice in the loaded conversation, and
-        // put a freshly built prompt back -- it carries run-time facts (the
-        // shell dialect, the working directory) that a stored transcript cannot
-        // be trusted to still be accurate about.
-        let mut merged = vec![event::Message::system(agent::build_system_prompt(
-            &cfg, &cwd,
-        ))];
-        merged.extend(
-            history
-                .into_iter()
-                .filter(|m| !matches!(m, event::Message::System { .. })),
-        );
-        *agent.history_mut() = merged;
+        agent.splice_loaded_history(&cfg, &cwd, history);
     }
 
     // ---- a run whose output is a stream of JSON objects ----
@@ -2071,6 +2076,52 @@ fn is_local_endpoint(base_url: &str) -> bool {
     provider::is_local_endpoint(base_url)
 }
 
+/// `flint debug <what>`: print something about this run without making one.
+///
+/// Nothing here contacts the provider, writes a session, or creates a terminal. What it
+/// prints comes from the same code the real path uses, which is the only way the answer
+/// stays true: a diagnostic that re-implements the thing it describes reports on the
+/// re-implementation, and is believed.
+fn run_debug(
+    words: &[String],
+    cfg: &config::Config,
+    provider_cfg: &config::ProviderConfig,
+    readonly: bool,
+    cwd: &std::path::Path,
+    history: Vec<event::Message>,
+) -> Result<i32> {
+    match words[0].as_str() {
+        "prompt-input" => {
+            // No session writer, so nothing is created on disk for a run that sends
+            // nothing. The provider is built for its model name and its body builder, not
+            // to talk to anything -- an unreachable endpoint is fine here, and a missing
+            // API key is not an error.
+            let provider = provider::Provider::new(provider_cfg.clone())?;
+            let mut agent = agent::Agent::new(cfg, provider, readonly, cwd.to_path_buf(), None);
+            if !history.is_empty() {
+                agent.splice_loaded_history(cfg, cwd, history);
+            }
+            // Everything after the subcommand is the message that would be sent, so this
+            // answers "what would the model read if I said this" as well as "what does it
+            // read now".
+            let said = words[1..].join(" ");
+            let next = if said.trim().is_empty() {
+                None
+            } else {
+                Some(said.as_str())
+            };
+            // Pretty-printed, unlike the one-object-per-line `--json` stream: whitespace
+            // between JSON tokens carries no meaning, and the whole point of this command
+            // is that a person can read the answer.
+            println!("{}", serde_json::to_string_pretty(&agent.request_preview(next))?);
+            Ok(0)
+        }
+        other => Err(anyhow!(
+            "unknown debug command '{other}'. Known: prompt-input [message]"
+        )),
+    }
+}
+
 /// Status-line labels, one per thing the turn can be waiting for.
 ///
 /// "Waiting" is not one state. The request going out, the model reasoning, the model
@@ -2158,6 +2209,15 @@ fn parse_args(argv: Vec<String>) -> Result<Args> {
                 }
                 args.exec = Some(rest.join(" "));
             }
+            "debug" => {
+                let rest: Vec<String> = iter.by_ref().collect();
+                if rest.is_empty() {
+                    return Err(anyhow!(
+                        "debug requires a subcommand. Known: prompt-input [message]"
+                    ));
+                }
+                args.debug = Some(rest);
+            }
             other if other.starts_with('-') => {
                 return Err(anyhow!("unknown flag '{other}'. Try --help."))
             }
@@ -2190,6 +2250,7 @@ fn print_help(color: bool, term: &Term) {
   flint --continue                 resume the most recent session
   flint --resume <n|id>            resume a particular session
   flint exec <command>             run a command directly (no model, no network)
+  flint debug prompt-input [msg]   print the request that would be sent, and send nothing
   flint --list-sessions            list saved sessions, numbered for --resume
   flint --name <text>              name this conversation (also: /name)
   flint --archive <n|id>           file a session away, out of the list

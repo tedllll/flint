@@ -193,6 +193,27 @@ The vocabulary is closed and small: `session.started`, `turn.started`, `message.
 is plain by contract because its output is the child's own bytes. Ctrl-C during a `--json`
 run ends the process; the session file keeps every event that was complete.
 
+### Seeing what the model is actually sent
+
+```bash
+flint debug prompt-input                        # the request as the conversation stands
+flint debug prompt-input "why is it failing"    # ...with that message appended
+flint debug prompt-input | jq .messages[-1]     # just the last thing it would read
+```
+
+It prints the request body — the system prompt, the history, the tool schemas — and exits
+without sending anything or writing a session.
+
+The reason this is worth a command is that the request is **not** the transcript. Tool
+results are pruned from the request once they are stale, so a turn that ran twenty commands
+sends the model recent output and drops the listings it has already summarised, while the
+session file keeps every byte. "Why did it forget what it read ten steps ago" and "why is
+the prompt this big" both have their answer in this output and nowhere else.
+
+It is built by the same function the client posts, and there is a test that runs a turn
+against a stub provider and asserts the preview equals the bytes the server received — so
+the command cannot quietly start describing something that is not sent.
+
 ## Permissions
 
 **Full by default.** There is no approval prompt; flint runs what it decides to
