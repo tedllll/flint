@@ -627,7 +627,11 @@ pub async fn run_command_detailed(
     run_command_streaming(config, command, cwd, timeout_secs, false).await
 }
 
-/// Run a command, reporting its output as it arrives.
+/// Run a shell command, reporting its output as it arrives.
+///
+/// The shell is only a *program plus arguments* here: this resolves which shell to use,
+/// hands it the command string as its one argument, and everything after that is
+/// [`run_program_streaming`]. `bash` is the special case, not the implementation.
 ///
 /// `idle_kill` changes what the clock means. An ordinary command is bounded by its total
 /// timeout, because nothing about it is expected to take long. A download is not: it may
@@ -643,13 +647,51 @@ pub async fn run_command_streaming(
     idle_kill: bool,
 ) -> Result<CommandOutcome> {
     let shell = probe_shell(&config.shell, &config.shell_args);
-    let mut cmd = tokio::process::Command::new(&shell[0]);
-    // Arguments are passed as argv, never concatenated into one string: that
-    // avoids a second round of quoting rules on Windows.
-    for arg in &shell[1..] {
-        cmd.arg(arg);
-    }
-    cmd.arg(command);
+    let (program, shell_args) = shell
+        .split_first()
+        .expect("probe_shell always names a program");
+    let mut argv: Vec<String> = shell_args.to_vec();
+    argv.push(command.to_string());
+    // No context is wrapped around the result: `killed after 120s` does not need to be
+    // prefixed with the shell that was running it, and a spawn that fails already names
+    // the program it could not start.
+    run_program_streaming(
+        config,
+        program,
+        &argv,
+        command,
+        cwd,
+        timeout_secs,
+        idle_kill,
+    )
+    .await
+}
+
+/// Run one program, with its arguments already separate, and report its output as it
+/// arrives.
+///
+/// The arguments are handed to the child as an array and **never** concatenated into a
+/// command line, here or by anything between. On Windows that is the whole difference
+/// between an argument arriving and an argument being re-parsed by whichever runtime
+/// happens to be in the middle; see `docs/windows-tooling.md` §1. This is the reason the
+/// function exists, and the reason `exec` and `bash` share it rather than each having
+/// their own runner: a fix to the timeout, the progress reporting, the spill or the kill
+/// is a fix for every tool that runs a process.
+///
+/// `label` is what a person would call this command -- the command string for `bash`, the
+/// joined arguments for `exec`. It is used in a notice and to guess the file a download is
+/// writing to. Nothing parses it, and nothing depends on it being exact.
+pub async fn run_program_streaming(
+    config: &Config,
+    program: &str,
+    argv: &[String],
+    label: &str,
+    cwd: &Path,
+    timeout_secs: u64,
+    idle_kill: bool,
+) -> Result<CommandOutcome> {
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(argv);
     cmd.current_dir(cwd);
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
@@ -674,7 +716,7 @@ pub async fn run_command_streaming(
     cmd.kill_on_drop(true);
     let mut child = cmd
         .spawn()
-        .with_context(|| format!("cannot spawn shell '{}'", shell[0]))?;
+        .with_context(|| format!("cannot spawn program '{program}'"))?;
 
     // Both pipes are read while the command runs, and the lines are funnelled through one
     // channel. `wait_with_output` cannot do this: it returns only when the child has
@@ -782,7 +824,7 @@ pub async fn run_command_streaming(
                     progress(&format!(
                         "downloading, {} so far{}",
                         elapsed_label(started.elapsed()),
-                        output_size_note(command)
+                        output_size_note(label)
                     ));
                     // Re-arm, but only after a decent interval, and *not* by resetting the
                     // idleness baseline: that is what decides whether the transfer is
