@@ -330,6 +330,21 @@ pub fn summarise_args_in(
     // `MAX_ATTEMPTS`. The one line the user gets about the call named the wrong thing.
     let picked = match name {
         "bash" => str_at("command"),
+        // A program and its arguments, as the line a person would have typed. Showing
+        // `program` alone -- which the fallback would do -- names `git` for a call whose
+        // point is which git verb, and says nothing about the files involved.
+        "exec" => str_at("program").map(|program| {
+            let mut line = program;
+            if let Some(items) = v.get("args").and_then(|a| a.as_array()) {
+                for item in items {
+                    if let Some(text) = item.as_str() {
+                        line.push(' ');
+                        line.push_str(text);
+                    }
+                }
+            }
+            line
+        }),
         "read" | "write" | "edit" | "list" => str_at("path"),
         "glob" => str_at("pattern"),
         // A patch is its file list. The text itself is dozens of lines, and the one thing
@@ -445,6 +460,31 @@ mod tests {
             summarise_args("mystery", r#"{"whatever":"visible"}"#, 100),
             "visible"
         );
+    }
+
+    /// An `exec` call reads as the line a person would have typed.
+    ///
+    /// The fallback would show the first string argument, which is `program` -- so a
+    /// `git commit` would appear in the transcript as `git`, twice in a row with different
+    /// arguments looking identical, and with nothing about the files it touches. The
+    /// arguments have to be in the line, and a `--long=value` pair kept whole.
+    #[test]
+    fn exec_shows_the_program_and_its_arguments() {
+        let args = r#"{"program":"git","args":["commit","-m","fix: something","--author=a b"]}"#;
+        assert_eq!(
+            summarise_args("exec", args, 100),
+            "git commit -m fix: something --author=a b"
+        );
+    }
+
+    /// A program with no arguments is just its name, and an argument holding a newline
+    /// cannot be allowed to break the one-line transcript.
+    #[test]
+    fn exec_survives_an_empty_list_and_a_multi_line_argument() {
+        assert_eq!(summarise_args("exec", r#"{"program":"date"}"#, 100), "date");
+        let out = summarise_args("exec", r#"{"program":"git","args":["commit","-m","a\nb"]}"#, 100);
+        assert_eq!(out.lines().count(), 1, "the summary must stay one line: {out:?}");
+        assert!(out.contains("a") && out.contains("b"), "{out}");
     }
 
     #[test]

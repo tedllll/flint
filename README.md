@@ -200,7 +200,8 @@ run. This is intentional — an approval dialog in an emergency is friction you 
 not want — but it means flint can damage your system.
 
 The one guard is `/readonly`, which refuses `write`, `edit`, and any mutating
-shell command. Use it when you want flint to look but not touch.
+shell command — and, for `exec`, any program that is not inspection only, judged by the
+program and its verb rather than by re-reading a command line it never had. Use it when you want flint to look but not touch.
 
 `--readonly` at startup turns it on for the whole run.
 
@@ -209,6 +210,7 @@ shell command. Use it when you want flint to look but not touch.
 | Tool | Purpose |
 |---|---|
 | `bash` | run a shell command (120s default timeout, `timeout_secs` to raise) |
+| `exec` | run a program with its arguments as an array — no shell, so nothing re-parses them |
 | `read` | read a file with line numbers, pageable via `offset`/`limit` |
 | `write` | create or overwrite a file |
 | `edit` | exact string replacement, unique-match enforced |
@@ -225,6 +227,27 @@ so on the platform where a rescue tool is most likely to be needed, "where is th
 file" and "where is this symbol" would have no working answer. They are also what
 makes getting your bearings in an unfamiliar tree a single step instead of a dozen
 `list` calls.
+
+`exec` exists because a command *line* is read again by every layer between flint and
+the program, and each layer's escaping is correct for itself and wrong for the next one.
+An array has no second reader. `exec` takes the program and one string per argument, so
+quotes, spaces, trailing backslashes, `$`, `%` and non-ASCII text inside an argument
+arrive exactly as written; the tool result is the program's own output, not a transcript
+of what a shell made of it. Shell syntax does not work there — no pipes, redirects, `&&`,
+variables or globbing — and that is what `bash` is still for. A payload that is not really
+an argument (a regex, a JSON body, a document) belongs in `stdin` or in a file whose path
+is passed, rather than on a command line at all.
+
+```json
+{
+  "program": "git",
+  "args": ["commit", "-m", "fix: a \"quoted\" message, and a path ending in C:\\dir\\"]
+}
+```
+
+`exec` is offered on every platform rather than only on Windows, because it is the right
+tool everywhere: the model stops writing a command line and starts writing a list, and
+`/readonly` gets to judge a program and its verb instead of guessing where the words are.
 
 Tool output is capped at `max_tool_output` characters before going back to the model. When
 it goes over, the whole of it is written to `~/.flint/spill/<session>/<n>.txt` and the

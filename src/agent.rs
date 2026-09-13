@@ -36,6 +36,12 @@ Rules:
   equivalents. `glob` finds files by name and `grep` searches file contents, both \
   recursively; they behave identically on every platform, which the shell does not. \
   Reach for them instead of `find`, `dir /s`, `findstr` or `grep -r`.
+- Prefer `exec` over `bash` for running a program. `exec` takes the program and one \
+  array of arguments, so nothing between you and the program re-reads what you wrote: \
+  quotes, spaces, backslashes and non-ASCII text inside an argument arrive intact. Use \
+  `bash` when you actually need shell syntax -- pipes, redirects, `&&`, variables, \
+  globbing -- and remember that a command string is parsed by the shell before the \
+  program sees it.
 
 About flint itself:
 - flint is the program you are running inside. It is normally an installed \

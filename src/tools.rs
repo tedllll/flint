@@ -48,6 +48,11 @@ impl ToolBox {
                 readonly,
                 cwd: cwd.clone(),
             }),
+            Box::new(ExecTool {
+                config: config.clone(),
+                readonly,
+                cwd: cwd.clone(),
+            }),
             Box::new(ReadTool {
                 cwd: cwd.clone(),
                 reads: reads.clone(),
@@ -238,6 +243,36 @@ fn optional_bool(args: &Value, key: &str) -> Result<bool> {
         Some(Value::Bool(flag)) => Ok(*flag),
         Some(other) => Err(anyhow!(
             "argument '{key}' must be true or false, but it is {}",
+            type_name(other)
+        )),
+    }
+}
+
+/// An optional array of strings, refusing anything else, element by element.
+///
+/// The wrong shape here is not hypothetical: a model writing `"args": "commit -m x"` has
+/// handed over one string where a list was wanted, and running it as a single argument
+/// would be a silent, plausible-looking failure. So the refusal names the element that was
+/// wrong, and says what the argument is for, because "must be an array" alone still leaves
+/// the model guessing whether it should have been one string of several words.
+fn optional_str_list(args: &Value, key: &str) -> Result<Vec<String>> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(items)) => items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| match item {
+                Value::String(text) => Ok(text.clone()),
+                other => Err(anyhow!(
+                    "argument '{key}' must be an array of strings, one entry per argument, \
+                     but its element {i} is {}",
+                    type_name(other)
+                )),
+            })
+            .collect(),
+        Some(other) => Err(anyhow!(
+            "argument '{key}' must be an array of strings, one entry per argument -- \
+             [\"commit\", \"-m\", \"message\"] -- but it is {}",
             type_name(other)
         )),
     }
@@ -659,12 +694,30 @@ pub async fn run_command_streaming(
         config,
         program,
         &argv,
-        command,
+        None,
         cwd,
         timeout_secs,
         idle_kill,
     )
     .await
+}
+
+/// What a person would call this command: the program, then its arguments.
+///
+/// A label and nothing else. It is never parsed back into arguments, never executed, and
+/// never handed to a shell -- it exists for the one heuristic that has to read a command as
+/// a line (`output_size_note`, which guesses the file a download is writing to). Deriving
+/// it in a single place is what keeps that guess from quietly disagreeing with the argv
+/// that actually runs.
+///
+/// The shape is approximate for `bash`, whose command string is one long argument: `sh -c
+/// "curl -o f url"` labels as several words, and is still a string a heuristic can read.
+/// Nothing downstream cares which form it came from.
+fn label_of(program: &str, argv: &[String]) -> String {
+    std::iter::once(program)
+        .chain(argv.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Run one program, with its arguments already separate, and report its output as it
@@ -678,22 +731,31 @@ pub async fn run_command_streaming(
 /// their own runner: a fix to the timeout, the progress reporting, the spill or the kill
 /// is a fix for every tool that runs a process.
 ///
-/// `label` is what a person would call this command -- the command string for `bash`, the
-/// joined arguments for `exec`. It is used in a notice and to guess the file a download is
-/// writing to. Nothing parses it, and nothing depends on it being exact.
+/// The label is derived from the argv rather than passed in, and `stdin` is the one payload
+/// that cannot be an argument: a document, a JSON body or a regex belongs on the child's
+/// standard input, where nothing re-parses it on the way.
 pub async fn run_program_streaming(
     config: &Config,
     program: &str,
     argv: &[String],
-    label: &str,
+    stdin: Option<&str>,
     cwd: &Path,
     timeout_secs: u64,
     idle_kill: bool,
 ) -> Result<CommandOutcome> {
+    let label = label_of(program, argv);
+    let label = label.as_str();
     let mut cmd = tokio::process::Command::new(program);
     cmd.args(argv);
     cmd.current_dir(cwd);
-    cmd.stdin(Stdio::null());
+    // Only piped when there is something to write; `null` is the honest default, since a
+    // program that waits for input on a terminal flint does not have would hang until the
+    // timeout, and the error it gets instead says exactly that.
+    cmd.stdin(if stdin.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
@@ -717,6 +779,23 @@ pub async fn run_program_streaming(
     let mut child = cmd
         .spawn()
         .with_context(|| format!("cannot spawn program '{program}'"))?;
+
+    // The caller's text goes in through the pipe, never through the command line.
+    if let Some(text) = stdin {
+        if let Some(mut pipe) = child.stdin.take() {
+            let bytes = text.as_bytes().to_vec();
+            // Detached, and not awaited: a program that never reads its input would
+            // otherwise block a runner that has not started its clock yet, and the timeout
+            // -- the one thing that would end the hang -- would never be armed. The task
+            // ends when the write fails, and closing the handle is what gives the child its
+            // EOF; a child that exits first simply makes the write fail.
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let _ = pipe.write_all(&bytes).await;
+                let _ = pipe.shutdown().await;
+            });
+        }
+    }
 
     // Both pipes are read while the command runs, and the lines are funnelled through one
     // channel. `wait_with_output` cannot do this: it returns only when the child has
@@ -1084,7 +1163,120 @@ impl Tool for BashTool {
     }
 }
 
-/// Conservative read-only classifier.
+// ---------------------------------------------------------------------------
+// exec
+// ---------------------------------------------------------------------------
+
+/// The `exec` tool: a program and its arguments, with no shell anywhere.
+///
+/// This exists because a command *line* is re-read by every layer between the model and
+/// the program, and each layer's escaping is correct for itself and wrong for the next.
+/// An array has no second reader. `docs/windows-tooling.md` §1 is the long version; the
+/// short one is that `git commit -m "a \"quoted\" message"` is a string that survives one
+/// parser and loses a character in the second, while `["commit", "-m", "a \"quoted\"
+/// message"]` is a JSON array whose elements are simply the arguments.
+///
+/// Registered on every platform, not just Windows. The reasoning that makes it necessary
+/// there makes it better here too: the model stops writing a command line and starts
+/// writing a list, and `readonly` gets to judge a program and a verb rather than guess
+/// where the words are.
+pub struct ExecTool {
+    config: Config,
+    readonly: bool,
+    cwd: PathBuf,
+}
+
+#[async_trait::async_trait]
+impl Tool for ExecTool {
+    fn name(&self) -> &str {
+        "exec"
+    }
+
+    fn description(&self) -> &str {
+        "Run one program with its arguments already separate, and return its combined \
+         output. Use this instead of `bash` for anything that is not shell syntax: no \
+         shell is involved, so every argument arrives exactly as written -- quotes, \
+         spaces, backslashes, `$`, `%` and non-ASCII text are all just characters. \
+         Shell features do not work here (`|`, `>`, `&&`, `$VAR`, globbing, `cd`); use \
+         `bash` for those. There is no approval prompt and nothing here can answer one, \
+         so a step that needs a password or an elevation prompt is the user's to run."
+    }
+
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "program": {
+                    "type": "string",
+                    "description": "The program to run: `git`, `cargo`, `python3`. A bare name is searched on PATH."
+                },
+                "args": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "One string per argument, in order, exactly as the program should receive it. No quoting and no escaping: [\"commit\", \"-m\", \"a message with spaces\"] is three arguments. Put a regex, a JSON body or any other long or quote-heavy text in `stdin`, or in a file whose path you pass."
+                },
+                "stdin": {
+                    "type": "string",
+                    "description": "Text to write to the program's standard input."
+                },
+                "timeout_secs": {
+                    "type": "integer",
+                    "description": format!(
+                        "Kill the program after this many seconds (default {DEFAULT_BASH_TIMEOUT} \
+                         for ordinary commands, {LONG_BASH_TIMEOUT} when it installs, builds or \
+                         downloads). Raise it for anything known to be slow."
+                    )
+                }
+            },
+            "required": ["program"]
+        })
+    }
+
+    async fn call(&self, args: &Value) -> Result<String> {
+        let program = require_str(args, "program")?;
+        if program.trim().is_empty() {
+            return Err(anyhow!("argument 'program' must name a program"));
+        }
+        let argv = optional_str_list(args, "args")?;
+        let stdin = optional_str(args, "stdin")?;
+
+        // The time and download heuristics read the call as a line, which is the only
+        // place an argument array is ever flattened. Nothing is executed from it: the
+        // runner below gets `program` and `argv` exactly as they arrived.
+        let label = label_of(program, &argv);
+        let download = looks_like_download(&label);
+
+        let timeout = match optional_u64(args, "timeout_secs")? {
+            Some(explicit) => explicit,
+            None if download => DOWNLOAD_BASH_TIMEOUT,
+            None if looks_slow(&label) => LONG_BASH_TIMEOUT,
+            None => DEFAULT_BASH_TIMEOUT,
+        }
+        .clamp(1, 24 * 3600);
+
+        if self.readonly && !exec_is_readonly(program, &argv) {
+            return Err(anyhow!(
+                "readonly mode is ON: refusing to run `{}`. \
+                 Turn it off with /readonly, or run a program that only inspects.",
+                util::preview(&label, 120)
+            ));
+        }
+
+        let outcome = run_program_streaming(
+            &self.config,
+            program,
+            &argv,
+            stdin,
+            &self.cwd,
+            timeout,
+            download,
+        )
+        .await?;
+        Ok(util::truncate(&outcome.report, self.config.max_tool_output))
+    }
+}
+
+/// Conservative read-only classifier for a command *line*.
 ///
 /// Two rules keep this honest:
 ///   * shell metacharacters (`>`, `&&`, `;`, `sudo`) always mean "not safe",
@@ -1096,12 +1288,14 @@ impl Tool for BashTool {
 /// Anything unrecognised is treated as NOT read-only. A false "safe" is far
 /// more expensive than a false "unsafe", and the user can always drop
 /// `/readonly`.
+///
+/// The metacharacter half is about the *string*, and it is the half `exec` must not
+/// inherit: see [`exec_is_readonly`].
 pub fn is_readonly_command(command: &str) -> bool {
     if command.trim().is_empty() {
         return false;
     }
-    let stripped = command.trim().to_string();
-    let lower = stripped.to_ascii_lowercase();
+    let lower = command.trim().to_ascii_lowercase();
 
     // Composition and privilege escalation always disqualify a command.
     for bad in [">", ">>", "&&", "||", ";", "|", "`", "$(", "sudo", "doas"] {
@@ -1109,13 +1303,24 @@ pub fn is_readonly_command(command: &str) -> bool {
             return false;
         }
     }
-    // `sed -i` rewrites files in place.
-    if lower.contains("sed -i") {
-        return false;
-    }
 
-    let words: Vec<&str> = lower.split_whitespace().collect();
-    let Some(first) = words.first().copied() else {
+    let words: Vec<String> = lower.split_whitespace().map(str::to_string).collect();
+    is_readonly_words(&words)
+}
+
+/// Whether a program and its already-separated words are inspection only.
+///
+/// Split out of the string form because `exec` hands over an array, and there the string
+/// rules would be answering a question nobody asked: a `>` in an argument is a
+/// greater-than sign rather than a redirect, and `&&` is two ampersands, because no shell
+/// ever sees that argv. What is left is the judgment that was always the useful one --
+/// which program this is, and for the ones that can both inspect and mutate, which verb.
+///
+/// The first word is expected lower-case and bare; a caller holding a path (`/usr/bin/git`,
+/// `git.exe`) reduces it to a program name first.
+fn is_readonly_words(words: &[String]) -> bool {
+    let word = |i: usize| words.get(i).map(String::as_str);
+    let Some(first) = word(0) else {
         return false;
     };
 
@@ -1127,12 +1332,12 @@ pub fn is_readonly_command(command: &str) -> bool {
     if READ_ONLY.contains(&first) {
         // `git` is the only entry here that can also mutate, so check the verb.
         if first == "git" {
-            return git_is_read_only(words.get(1).copied());
+            return git_is_read_only(word(1));
         }
         return true;
     }
 
-    let second = words.get(1).copied().unwrap_or("");
+    let second = word(1).unwrap_or("");
 
     // Service and container inspection.
     if first == "systemctl" {
@@ -1161,6 +1366,28 @@ pub fn is_readonly_command(command: &str) -> bool {
     }
 
     false
+}
+
+/// Whether `exec` may run a program in readonly mode.
+///
+/// The judgement is made on the arguments as they were sent, not on a string that has been
+/// joined and re-split: `git`, `["status"]` is inspection, and there is no way for a space
+/// inside an argument to look like a second word and change the answer.
+fn exec_is_readonly(program: &str, argv: &[String]) -> bool {
+    let mut words = vec![program_stem(program)];
+    words.extend(argv.iter().map(|a| a.to_ascii_lowercase()));
+    is_readonly_words(&words)
+}
+
+/// The bare, lower-case name of a program, from whatever the caller wrote.
+///
+/// `git`, `/usr/bin/git` and `C:\Program Files\Git\cmd\git.exe` are the same program, and
+/// the classifier only knows the first form.
+fn program_stem(program: &str) -> String {
+    Path::new(program)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_else(|| program.to_ascii_lowercase())
 }
 
 /// Read-only git verbs. Anything not listed (commit, push, checkout, reset,
@@ -2675,6 +2902,160 @@ mod arg_tests {
             .await
             .expect("list");
         assert!(listed.contains("f.txt"), "{listed}");
+    }
+}
+
+#[cfg(test)]
+mod exec_tests {
+    use super::test_support::TempDir;
+    use super::*;
+    use crate::config::Config;
+    use serde_json::json;
+
+    fn toolbox(dir: &Path, readonly: bool) -> ToolBox {
+        ToolBox::new(&Config::default(), readonly, dir.to_path_buf())
+    }
+
+    fn args_of(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The whole reason the tool exists: an argument arrives as it was written.
+    ///
+    /// `printf` is the child because it prints each argument verbatim, one per line for a
+    /// `%s\n` format, and it is on every Unix. The arguments are the ones a command line
+    /// loses -- a space, a double quote, a trailing backslash, a `$`, and non-ASCII text --
+    /// and each must come back byte for byte. A tool that joined the array into a string
+    /// and handed it to a shell fails this test on the second line.
+    ///
+    /// Deliberately not paired with a `cfg(windows)` half: the Windows equivalent needs a
+    /// real Windows session, and a guessed assertion would be worse than an absent one.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_argument_reaches_the_program_exactly_as_written() {
+        let dir = TempDir::new("exec-exact");
+        let out = toolbox(dir.path(), false)
+            .invoke(
+                "exec",
+                &json!({
+                    "program": "printf",
+                    "args": ["%s\n", "two words", "a \"quoted\" word", "C:\\dir\\", "$HOME", "中文 ok"]
+                }),
+            )
+            .await
+            .expect("printf should run");
+
+        assert_eq!(
+            out.lines().collect::<Vec<_>>(),
+            vec!["two words", "a \"quoted\" word", "C:\\dir\\", "$HOME", "中文 ok"],
+            "every argument must arrive exactly as written, one per line: {out:?}"
+        );
+    }
+
+    /// `stdin` is how a payload that is not an argument gets in, and the child must see the
+    /// end of it.
+    ///
+    /// The EOF matters as much as the bytes: a writer that left the pipe open would hang
+    /// `cat` until the timeout, so getting this wrong fails the test on the clock rather
+    /// than on the content.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdin_is_delivered_and_then_closed() {
+        let dir = TempDir::new("exec-stdin");
+        let out = toolbox(dir.path(), false)
+            .invoke("exec", &json!({ "program": "cat", "stdin": "one\ntwo\n" }))
+            .await
+            .expect("cat should run");
+        assert_eq!(out.trim(), "one\ntwo", "{out:?}");
+    }
+
+    /// A program that fails is a *result*, not an error, and the code must be visible.
+    ///
+    /// Exit 0 with nothing on stdout is the failure mode that costs the most: the model
+    /// reads a silent success and builds the next step on a command that did nothing.
+    #[tokio::test]
+    async fn a_failing_program_reports_its_exit_code() {
+        let dir = TempDir::new("exec-exit");
+        let (program, args) = if cfg!(windows) {
+            ("cmd", args_of(&["/C", "exit", "7"]))
+        } else {
+            ("sh", args_of(&["-c", "exit 7"]))
+        };
+        let out = toolbox(dir.path(), false)
+            .invoke("exec", &json!({ "program": program, "args": args }))
+            .await
+            .expect("the program runs; its failure belongs in the result");
+        assert!(out.contains("exit code: 7"), "{out:?}");
+    }
+
+    /// A command line where an argument list was wanted is refused.
+    ///
+    /// This is the one wrong shape that would otherwise *work*: the whole string becomes a
+    /// single argument, the program receives `commit -m x` as one word, and whether that is
+    /// an error depends on the program. Refusing it is the only way the model finds out.
+    #[tokio::test]
+    async fn a_command_line_is_not_accepted_as_an_argument_list() {
+        let dir = TempDir::new("exec-shape");
+        let err = toolbox(dir.path(), false)
+            .invoke("exec", &json!({ "program": "git", "args": "commit -m x" }))
+            .await
+            .expect_err("a string is not a list");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("must be an array of strings"), "{msg}");
+        assert!(msg.contains("one entry per argument"), "say what was wanted: {msg}");
+        assert!(msg.contains("a string"), "and say what arrived: {msg}");
+    }
+
+    /// A single bad element is named by position, not reported as a bad list.
+    #[tokio::test]
+    async fn a_non_string_element_is_named_by_position() {
+        let dir = TempDir::new("exec-element");
+        let err = toolbox(dir.path(), false)
+            .invoke("exec", &json!({ "program": "git", "args": ["commit", 7] }))
+            .await
+            .expect_err("a number is not an argument");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("element 1"), "{msg}");
+        assert!(msg.contains("a number"), "{msg}");
+    }
+
+    /// In readonly mode, a program and its verb decide, not a string that was re-split.
+    ///
+    /// The `>>` case is why `exec` does not reuse `is_readonly_command`: in an argv those
+    /// characters are text inside one argument, and a classifier reading a joined line has
+    /// no way to know that, so it refuses the whole call. Both halves are asserted here,
+    /// because the difference is the design decision rather than an implementation detail.
+    #[test]
+    fn readonly_reads_a_program_and_its_arguments() {
+        assert!(exec_is_readonly("git", &args_of(&["status"])));
+        assert!(exec_is_readonly("/usr/bin/git", &args_of(&["log", "--oneline"])));
+        assert!(
+            exec_is_readonly("git.exe", &args_of(&["status"])),
+            "a Windows program name is the same program"
+        );
+        assert!(!exec_is_readonly("git", &args_of(&["commit", "-m", "x"])));
+        assert!(!exec_is_readonly("git", &args_of(&[])), "no verb proves nothing");
+        assert!(!exec_is_readonly("rm", &args_of(&["-rf", "/"])));
+        assert!(!exec_is_readonly("npm", &args_of(&["install"])));
+        assert!(!exec_is_readonly("cargo", &args_of(&["build"])));
+
+        let log_with_a_redirect_in_a_pattern = args_of(&["log", "--grep=a>>b"]);
+        assert!(exec_is_readonly("git", &log_with_a_redirect_in_a_pattern));
+        assert!(!is_readonly_command("git log --grep=a>>b"));
+    }
+
+    /// The refusal happens before the program runs, and says which mode refused it.
+    #[tokio::test]
+    async fn readonly_refuses_a_mutating_program() {
+        let dir = TempDir::new("exec-readonly");
+        let err = toolbox(dir.path(), true)
+            .invoke(
+                "exec",
+                &json!({ "program": "git", "args": ["commit", "-m", "x"] }),
+            )
+            .await
+            .expect_err("readonly must refuse this");
+        assert!(format!("{err:#}").contains("readonly mode is ON"), "{err:#}");
     }
 }
 

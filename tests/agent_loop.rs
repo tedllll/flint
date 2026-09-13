@@ -521,6 +521,59 @@ async fn the_skill_tool_returns_a_body_that_reaches_the_model() {
     let _ = std::fs::remove_dir_all(&project);
 }
 
+/// `exec` reaches the model, and its schema asks for an array of arguments.
+///
+/// Asserted on the request body rather than on the toolbox, because a tool the model is
+/// never told about is a tool that does not exist -- and because the *shape* of `args` in
+/// the schema is what decides whether the model sends a list or a command line. A schema
+/// that said "array" while the tool expected a string would fail only in production.
+#[tokio::test]
+async fn exec_is_offered_to_the_model_with_an_argument_array() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(SseFixture {
+            body: answer_only(),
+        })
+        .mount(&server)
+        .await;
+
+    let mut agent = agent_for(&server, std::env::temp_dir()).await;
+    assert!(
+        agent.tool_names().iter().any(|n| n == "exec"),
+        "exec is not registered: {:?}",
+        agent.tool_names()
+    );
+    agent.run("say something", |_| {}).await.expect("run");
+
+    let requests = server.received_requests().await.expect("requests");
+    let body: serde_json::Value =
+        serde_json::from_slice(&requests[0].body).expect("the request body is JSON");
+    let exec = body["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .find(|t| t["function"]["name"] == "exec")
+        .expect("exec is not in the tools sent to the model");
+
+    let params = &exec["function"]["parameters"]["properties"];
+    assert_eq!(
+        params["args"]["type"], "array",
+        "the model must be told to send a list: {params}"
+    );
+    assert_eq!(
+        params["args"]["items"]["type"], "string",
+        "each element is one argument: {params}"
+    );
+    assert_eq!(
+        exec["function"]["parameters"]["required"][0], "program",
+        "program is the one thing that must be there"
+    );
+    assert!(
+        params["stdin"]["type"] == "string",
+        "a payload that is not an argument still needs somewhere to go: {params}"
+    );
+}
+
 /// A project with no skills must not pay for a tool that can only say "none".
 #[tokio::test]
 async fn the_skill_tool_is_absent_when_there_are_no_skills() {
