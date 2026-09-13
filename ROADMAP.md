@@ -152,15 +152,16 @@ looking frozen during a slow turn. **Not done:** `POST /message` (level 3, typin
 browser) and the measurement pass of step 7 — though `/web` itself is now measured end to end
 in a pty (§11), which is most of what that pass was for.
 
-**And `/web` is now how level 2 is actually reached.** `--web` has to be decided before the run
-starts, and the moment you want a real renderer is mid-answer; measured from a real session,
-the first thing anyone did was type `--web` *at the prompt*, where it is a flag and not a
-command, so it went to the model and came back as a sentence. `/web [port]` opens the same
-listener from inside a conversation, `/web` twice reports where the view already is rather than
-binding a second one, and `/new`, `/resume` and `/reload` move an open page to the conversation
-the terminal moved to. A bare flint flag typed at the prompt is now refused rather than sent,
-with the slash command that means it as the answer — the *exact* flag only, so a pasted bullet
-list and a sentence that mentions a flag both still reach the model.
+**And `/web` is now how level 2 is actually reached — and it opens the page.** `--web` has to be
+decided before the run starts, and the moment you want a real renderer is mid-answer. Measured
+from a real session, the first thing anyone did was type `--web` *at the prompt*, where it is a
+flag and not a command, so it went to the model and came back as a sentence — and the complaint
+was precisely that no page opened. So: a bare flint flag at the prompt is translated into the
+command it names (`--web` → `/web`, `--provider x` → `/provider x`), `/web [port]` opens the
+same listener from inside a conversation, `/web` twice reports where the view already is rather
+than binding a second one, the browser is actually launched, and `/new`, `/resume` and
+`/reload` move an open page to the conversation the terminal moved to. Only the *exact* flag is
+caught, so a pasted bullet list and a sentence that mentions a flag both still reach the model.
 
 **And the text now arrives while it is written.** Deltas used to be buffered per attempt so a
 retry could discard them, which meant a terminal, a browser and a `--json` reader all saw

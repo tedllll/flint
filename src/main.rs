@@ -536,9 +536,7 @@ async fn real_main() -> Result<i32> {
     };
     if let Some(viewer) = viewer.as_mut() {
         let url = viewer.open(0).await?;
-        printer
-            .term()
-            .line(format_args!("{} {url}", printer.dim("web:")));
+        announce_view(&printer, &url);
     }
 
     // Search is offered only when it can actually work, so when it cannot the reason has to
@@ -818,6 +816,26 @@ async fn interactive(
             continue;
         }
 
+        // A command-line flag typed at the prompt means the slash command it names, so
+        // `--web` opens the view rather than being sent to the model as a sentence. See
+        // `flag_at_the_prompt`: an exact flag is translated, a sentence containing one is
+        // left alone, and a flag with no equivalent inside a running process says so.
+        let input = match flag_at_the_prompt(&input) {
+            Some((command, why)) if !command.is_empty() => {
+                printer.term().line(format_args!(
+                    "{dim}{input} is a start-up flag — doing {command} instead ({why}){reset}"
+                ));
+                command
+            }
+            Some((_, why)) => {
+                printer
+                    .term()
+                    .line(format_args!("{yellow}{input}: {why}{reset}"));
+                continue;
+            }
+            None => input,
+        };
+
         if input.starts_with('/') {
             match handle_command(&input, cfg, agent, provider_cfg, printer, reader, viewer).await? {
                 Flow::Continue => continue,
@@ -828,11 +846,6 @@ async fn interactive(
                     continue;
                 }
             }
-        }
-
-        if let Some(hint) = flag_at_the_prompt(&input) {
-            printer.term().line(format_args!("{yellow}{hint}{reset}"));
-            continue;
         }
 
         // Echo the message into the transcript. The input row is cleared as soon
@@ -889,56 +902,119 @@ enum Flow {
     NewAgent(agent::Agent, config::ProviderConfig),
 }
 
-/// A command-line flag typed at the prompt, and what to type instead.
+/// Ask this machine to show a URL. Returns whether a program was started.
 ///
-/// Reported as a bug in exactly this shape: `--web` entered at the prompt, because it is the
-/// only name for the feature a person has met -- it is in `--help`, in the README and in this
-/// program's own error messages -- and nothing marks it as belonging to the command line
-/// rather than to the conversation. It went to the model, which answered it politely and at
-/// length. A run that looks like it worked is the failure this project keeps designing
-/// against, so this is a stop rather than a warning.
+/// **Best effort, and it has to be.** The URL is printed either way, so the failure mode here
+/// is "you paste it yourself", which is all the program did before this existed. Not waited
+/// on: a browser starting up is not something flint should block behind, and its exit code
+/// says nothing about whether a page appeared.
+///
+/// Called only when stdout is a terminal. Opening a window is a courtesy to a person, and a
+/// pipe is not a person -- without that check, `cargo test` would launch browsers.
+fn open_in_browser(url: &str) -> bool {
+    // Windows is the odd one: `start` is a `cmd` builtin, and its first quoted argument is
+    // taken as the *window title*. Passing an empty one is what keeps a URL containing `&`
+    // from being read as a command separator. Unverified from here -- see
+    // `docs/windows-tooling.md`.
+    let (program, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
+        ("open", &[url])
+    } else if cfg!(target_os = "windows") {
+        ("cmd", &["/C", "start", "", url])
+    } else {
+        ("xdg-open", &[url])
+    };
+    std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .is_ok()
+}
+
+/// Say where the view is, and open it when there is somebody there to look at it.
+///
+/// One function for `--web`, `/web` and `--web` typed at the prompt, because they are the same
+/// fact and three printings of it would drift. The URL goes to the transcript first, so it is
+/// selectable even in the case where the browser never appears.
+fn announce_view(printer: &Printer<'_>, url: &str) {
+    let dim = printer.pal.dim;
+    let reset = printer.pal.reset;
+    let opened = std::io::stdout().is_terminal() && open_in_browser(url);
+    if opened {
+        printer
+            .term()
+            .line(format_args!("{dim}web:{reset} {url}{dim}  (opening it){reset}"));
+    } else {
+        printer.term().line(format_args!("{dim}web:{reset} {url}"));
+    }
+}
+
+/// A command-line flag typed at the prompt, and what to do about it.
+///
+/// Reported as a bug in exactly this shape, twice over: `--web` entered at the prompt, because
+/// it is the only name for the feature a person has met -- it is in `--help`, in the README and
+/// in this program's own error messages -- and nothing marks it as belonging to the command
+/// line rather than to the conversation. It went to the model, which answered it politely and
+/// at length, and the run looked like it had worked.
+///
+/// **So a flag at the prompt is translated, not refused.** `--provider x` becomes `/provider x`,
+/// which is what was meant. Refusing it with an explanation was the first version and was the
+/// wrong answer: the person had already said what they wanted, and being told to say it again
+/// in a different spelling is not help.
 ///
 /// **Only an exact flag is caught, and that is the whole design.** `--web` alone is a typo;
 /// `why does --web need a token?` is a question and reaches the model untouched. A rule over
-/// anything starting with `-` was the obvious version and is wrong: a pasted bullet list
-/// starts that way, and swallowing it would be a worse bug than the one this fixes.
-///
-/// There is no escape hatch, because a sentence *is* one.
-fn flag_at_the_prompt(input: &str) -> Option<String> {
+/// anything starting with `-` was the obvious version and is wrong: a pasted bullet list starts
+/// that way, and swallowing it would be a worse bug than the one this fixes.
+fn flag_at_the_prompt(input: &str) -> Option<(String, String)> {
     let mut words = input.split_whitespace();
     let flag = words.next()?;
-    let n = words.next();
+    let one = words.next();
     if words.next().is_some() {
         return None;
     }
-    let only_a_number = n.is_none_or(|v| v.chars().all(|c| c.is_ascii_digit()));
-    let hint = match (flag, n, only_a_number) {
-        ("--web", None, _) => "/web opens the browser view of this conversation, right now.",
-        ("--port", _, true) => {
-            "/web [port] takes a port from in here. --port is only read at start-up."
-        }
-        ("--provider", Some(_), _) | ("--provider", None, _) => {
-            "use /provider <name> to switch, or /provider to list them."
-        }
-        ("--model", Some(_), _) | ("--model", None, _) => "use /model <name>.",
-        ("--readonly", None, _) => "use /readonly to toggle the write guard.",
-        ("--verbose", None, _) => "use /verbose [on|off|full].",
-        ("--resume", Some(_), _) => "use /resume <n|id>, or /sessions to list them.",
-        ("--continue", None, _) => "/sessions lists them numbered; /resume <n> picks one.",
-        ("--list-sessions", None, _) => "use /sessions.",
-        ("--name", Some(_), _) => "use /name <text>.",
-        ("--archive", Some(_), _) => "use /archive <n|id>.",
-        ("--delete", Some(_), _) => "use /delete <n|id>.",
-        ("--help" | "-h", None, _) => "use /help.",
-        ("--json" | "--no-color" | "--cwd", _, _) | ("-p", _, _) => {
-            "that one is only read when flint starts, so it has to be on the command line."
-        }
+    let number = one.is_some_and(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_digit()));
+    let named = one.is_some_and(|v| !v.is_empty() && !v.starts_with('-'));
+    let (command, why) = match flag {
+        "--web" if one.is_none() => ("/web".to_string(), "that flag opened it at start-up"),
+        "--port" if one.is_none() || number => (
+            format!("/web{}", one.map(|p| format!(" {p}")).unwrap_or_default()),
+            "--web takes the port",
+        ),
+        "--provider" if one.is_none() || named => (
+            format!("/provider{}", one.map(|p| format!(" {p}")).unwrap_or_default()),
+            "that flag chose one at start-up",
+        ),
+        "--model" if one.is_none() || named => (
+            format!("/model{}", one.map(|m| format!(" {m}")).unwrap_or_default()),
+            "that flag chose one at start-up",
+        ),
+        "--readonly" if one.is_none() => ("/readonly".to_string(), "that flag is a toggle"),
+        "--verbose" if one.is_none() => ("/verbose".to_string(), "that flag is a toggle"),
+        "--help" | "-h" if one.is_none() => ("/help".to_string(), "this is the list"),
+        "--list-sessions" if one.is_none() => ("/sessions".to_string(), "this is the list"),
+        "--resume" if named => (
+            format!("/resume {one}", one = one.unwrap_or_default()),
+            "this picks by number",
+        ),
+        "--name" if named => (
+            format!("/name {one}", one = one.unwrap_or_default()),
+            "this names the open conversation",
+        ),
+        "--continue" if one.is_none() => (
+            "/sessions".to_string(),
+            "this lists them numbered, and `/resume <n>` picks one",
+        ),
+        // No equivalent, because there is nothing to be equivalent to: these decide how the
+        // process is set up, and a process that is already running cannot be set up again.
+        "--json" | "--no-color" | "--cwd" | "-p" => (
+            String::new(),
+            "that one is only read when flint starts, so it has to be on the command line",
+        ),
         _ => return None,
     };
-    Some(format!(
-        "{flag} is a command-line flag, not a message. {hint} \
-         To send it to the model anyway, put it in a sentence."
-    ))
+    Some((command, why.to_string()))
 }
 
 /// Ask a question and wait for a line.///
@@ -1292,11 +1368,7 @@ async fn handle_command(
                 web::Viewer::asked(0, agent.session_path())
             });
             match asked.open(port).await {
-                Ok(url) => {
-                    printer
-                        .term()
-                        .line(format_args!("{} {url}", printer.dim("web:")));
-                }
+                Ok(url) => announce_view(printer, &url),
                 // Not fatal, unlike `--web`: there the view was the whole point of the run,
                 // and here it is one thing the user asked for that did not work out. Taking
                 // a conversation down over a busy port would be the worse answer.

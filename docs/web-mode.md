@@ -101,13 +101,24 @@ anyone has met — it is in `--help`, in the README and in flint's own error mes
 nothing marked it as belonging to the command line rather than to the conversation. It went to
 the model, which answered it politely, and the run looked like it had worked.
 
-So `/web [port]` is a command as well as a flag, and one `Viewer` backs both: the REPL carries
-it and it binds its listener the moment it is asked for, not at startup. Two consequences fall
-out of carrying it rather than reading a flag once. `/web` twice reports where the view already
-is rather than binding a second listener on a second port — the second URL would print, and the
-page a person already had open would be on neither. And `/new`, `/resume` and `/reload` move the
-page to the conversation the terminal moved to, because the session path is shared with the
-listener instead of copied when the socket is bound.
+So `/web [port]` is a command as well as a flag, one `Viewer` backs both, and **a bare flint
+flag typed at the prompt is read as the command it names** — `/web` becomes the view, the way
+`--provider x` becomes `/provider x`. The first version *refused* the flag with an explanation
+and that was the wrong answer, in the way the report made plain: the person had already said
+what they wanted, and being told to respell it is not help. What they wanted was the page.
+
+**And the page is opened, not just printed.** Printing a URL and waiting is the behaviour of a
+tool that assumes you are already at a browser; the report was "no page opened". The opener is
+`open` on macOS, `cmd /C start` on Windows and `xdg-open` elsewhere, launched detached, and
+called **only when stdout is a terminal** — a pipe is not a person, and without that check
+`cargo test` would open windows on whoever ran it. The test for that is an assertion that a
+redirected run does *not* print `(opening it)`, which is red if the check goes away.
+
+Two consequences fall out of the REPL carrying a `Viewer` rather than reading a flag once.
+`/web` twice reports where the view already is rather than binding a second listener on a second
+port — the second URL would print, and the page a person already had open would be on neither.
+And `/new`, `/resume` and `/reload` move the page to the conversation the terminal moved to,
+because the session path is shared with the listener instead of copied when the socket is bound.
 
 **L1 cannot be interactive, and the reason is not browser trivia.** At L1 there is no
 listener, so there is nothing to talk to: a page cannot start a process, and a page that was
@@ -379,10 +390,16 @@ carry `/web`, because `from_stdin` reads lines and never reaches the event reade
 | Step | Result |
 |---|---|
 | `/web` typed at the prompt | `web: http://127.0.0.1:58962/?token=7fc0…c47` — a live URL |
+| `--web` typed at the prompt | `--web is a start-up flag — doing /web instead`, then the URL with `(opening it)` |
+| `flint --web` at startup | the same line, and the opener called with the URL |
+| The opener actually called | `open` on `PATH` was replaced by a script that records its argument; it received the URL, in both cases above |
 | `GET /session` with that token | `{"type":"meta","v":2,"id":"1789309949-903",…}` — the conversation, as it is |
 | A `/events` listener attached, then `/new` | `event: reset` followed by an empty `data:` frame, exactly as designed |
 | `GET /session` after the `/new` | `id` changed to `1789309957-534` — the *new* file, so the page follows the run |
 | `/web` twice | one URL, printed twice; no second listener |
+
+Replacing `open` on `PATH` is the trick worth keeping: it measures the whole path — decision,
+program, argument — without a browser window appearing on the machine running the test.
 
 The pty also turned up a trap worth writing down: **in raw mode `\n` is Ctrl-J, not Enter.**
 `crossterm` reports the byte as `Char('j')` with a control modifier, so a script that drives

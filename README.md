@@ -205,11 +205,20 @@ terminal keeps working, and closing the tab loses nothing.
 web: http://127.0.0.1:58962/?token=7fc045f7ab4cd01377715fe0401a8c47
 ```
 
-That is the whole of it: `/web` from inside a conversation, paste the URL, done. `flint --web`
-does the same thing before the first turn if you know in advance, and `--port <n>` picks the
-port instead of taking whatever is free.
+That is the whole of it: `/web` from inside a conversation and the browser opens on the URL.
+`flint --web` does the same before the first turn if you know in advance, `--port <n>` picks the
+port instead of taking whatever is free, and **`--web` typed at the prompt works too** — a bare
+flint flag at the prompt is read as the command it names, so `--provider x` becomes
+`/provider x`. That last one is not politeness: `--web` is the only name for this feature
+anyone has met, since it is in `--help` and in the README, and without the translation it went
+to the model as a sentence.
 
-Three things about it are deliberate, and each one was a decision rather than a default:
+The browser is opened with `open` on macOS, `cmd /C start` on Windows and `xdg-open` elsewhere,
+and **only when stdout is a terminal** — a pipe is not a person, and without that check a test
+suite would launch windows. If the launch fails nothing is lost: the URL is printed either way,
+so the fallback is pasting it.
+
+Three things about the view are deliberate, and each one was a decision rather than a default:
 
 - **Loopback only.** The address is the literal `127.0.0.1`, never `0.0.0.0` and never a
   resolved `localhost`. Remote access is a different program with a much harder problem.

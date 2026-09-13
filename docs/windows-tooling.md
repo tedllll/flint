@@ -418,6 +418,22 @@ Then measure. §6.6 and the `-File` execution-policy wrinkle in §4.2 are the tw
 a real Windows session is required before any code is written; everything else in this file
 is settled enough to implement.
 
+### 6.10 Launching a browser from `/web` — `UNVERIFIED` on Windows
+
+`--web` and `/web` call the browser rather than only printing the URL. The command is
+`cmd /C start "" <url>` on Windows, and it is written from the documented behaviour rather than
+from a measurement: `start` is a `cmd` builtin rather than an executable, and its **first
+quoted argument is taken as the new window's title**, which is why the empty `""` is there —
+without it a URL containing `&` is read as a command separator and the rest of the address is
+run as a command. `std::process::Command` quoting into `cmd` is the exact class of problem the
+rest of this file is about.
+
+None of that has been tried on Windows. If it misbehaves the symptom is small and local — no
+window, and the URL is printed either way, so the fallback is a paste — but the check is worth
+making the first time somebody has a Windows session, alongside step 4. macOS (`open`) and
+Linux (`xdg-open`) are both exercised on this machine, by replacing the program on `PATH` with
+a script that records its argument.
+
 Deliberately not doing: a PowerShell *parser* (a tool that rewrites the model's quoting for
 it would be a large amount of code that is wrong in the cases that matter), `-EncodedCommand`
 (opaque state, against the repository's rules), and a permission layer for `exec` beyond the

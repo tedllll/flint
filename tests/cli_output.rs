@@ -1232,15 +1232,17 @@ async fn marker_provider(marker: &'static str) -> MockServer {
     server
 }
 
-/// `--web` typed at the prompt is a flag, not a message, and must not be sent to the model.
+/// `--web` typed at the prompt opens the view, and never reaches the model.
 ///
-/// Reported from a real session in exactly this shape: `--web` entered at the prompt, because
-/// it is the only name for the feature a person has met -- it is in `--help`, in the README
-/// and in flint's own error messages -- and nothing marks it as belonging to the command line
-/// rather than to the conversation. The model answered it politely and at length, so the run
-/// looked like it had worked. This is the whole reason `/web` exists as well.
+/// Reported from a real session in exactly this shape, and reported twice, because the first
+/// fix answered the wrong half: `--web` was entered at the prompt -- it is the only name for
+/// the feature a person has met, since it is in `--help`, in the README and in flint's own
+/// error messages -- and nothing marked it as belonging to the command line rather than to the
+/// conversation. What the person wanted was the page. So the flag is *translated*, not refused:
+/// refusing it with an explanation was the first version and was the wrong answer, because they
+/// had already said what they wanted and being told to respell it is not help.
 #[tokio::test]
-async fn a_flag_typed_at_the_prompt_does_not_reach_the_model() {
+async fn a_flag_typed_at_the_prompt_does_what_it_names() {
     let server = marker_provider("THE MODEL WAS REACHED").await;
     let home = test_home("prompt-flag", &server.uri());
 
@@ -1248,12 +1250,56 @@ async fn a_flag_typed_at_the_prompt_does_not_reach_the_model() {
     let _ = std::fs::remove_dir_all(&home);
 
     assert!(
-        text.contains("is a command-line flag, not a message"),
-        "the flag was not recognised as a flag: {text:?}"
+        text.contains("web: http://127.0.0.1:"),
+        "`--web` at the prompt did not open the view: {text:?}"
     );
     assert!(
         !text.contains("THE MODEL WAS REACHED"),
         "`--web` was sent to the model after all: {text:?}"
+    );
+    // A pipe is not a person, so nothing may be launched. This is the assertion that keeps
+    // `cargo test` from opening a browser window on whoever runs it.
+    assert!(
+        !text.contains("(opening it)"),
+        "a browser was launched with stdout redirected: {text:?}"
+    );
+}
+
+/// A flag with a slash equivalent is turned into that command.
+#[tokio::test]
+async fn a_flag_at_the_prompt_becomes_the_command_it_names() {
+    let server = marker_provider("THE MODEL WAS REACHED").await;
+    let home = test_home("flag-to-command", &server.uri());
+
+    let text = repl(&home, &["--help", "/exit"]);
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(
+        text.contains("/sessions"),
+        "`--help` did not become `/help`: {text:?}"
+    );
+    assert!(
+        !text.contains("THE MODEL WAS REACHED"),
+        "`--help` was sent to the model: {text:?}"
+    );
+}
+
+/// A flag that only exists at start-up says so, rather than being sent or half-applied.
+#[tokio::test]
+async fn a_start_up_only_flag_says_so() {
+    let server = marker_provider("THE MODEL WAS REACHED").await;
+    let home = test_home("flag-startup-only", &server.uri());
+
+    let text = repl(&home, &["--json", "/exit"]);
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(
+        text.contains("only read when flint starts"),
+        "the flag was not explained: {text:?}"
+    );
+    assert!(
+        !text.contains("THE MODEL WAS REACHED"),
+        "`--json` was sent to the model: {text:?}"
     );
 }
 
@@ -1269,6 +1315,10 @@ async fn the_web_command_opens_the_browser_view() {
     assert!(
         text.contains("web: http://127.0.0.1:"),
         "`/web` did not print a URL: {text:?}"
+    );
+    assert!(
+        !text.contains("(opening it)"),
+        "a browser was launched with stdout redirected: {text:?}"
     );
     assert!(
         text.contains("token="),
@@ -1323,7 +1373,7 @@ async fn a_sentence_about_a_flag_is_still_a_message() {
 
     for (what, text) in [("a sentence about a flag", sentence), ("a bullet", bullet)] {
         assert!(
-            !text.contains("is a command-line flag, not a message"),
+            !text.contains("is a start-up flag"),
             "the guard fired on {what}: {text:?}"
         );
         assert!(

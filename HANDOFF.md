@@ -7,8 +7,8 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 309 passing (226 lib, 28
-`agent_loop`, 24 `cli_output`, 4 `json_output`, 4 `search_tool`, 18 `term_capture`, 5
+As of the commit that carries this file, `cargo test` is 311 passing (226 lib, 28
+`agent_loop`, 26 `cli_output`, 4 `json_output`, 4 `search_tool`, 18 `term_capture`, 5
 `web_view`), `cargo clippy --all-targets` is silent, and both `node
 scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
 
@@ -27,6 +27,34 @@ The binary is held open by any running `flint`, so close those before replacing 
 `docs/windows.md` is the field notes for the Windows terminal.
 
 ## What was just done
+
+**`--web` now opens the page — that was the actual complaint.** The report was "I sent `--web`
+and no page opened", and the first attempt at it answered a different question: it made the flag
+*refused* with a note saying to type `/web`. True as far as it went, and not what was asked for.
+Someone who has already said what they want should not be told to say it again in another
+spelling, and what they wanted was a browser window.
+
+So two changes, and they are both about the same thing:
+
+- **A bare flint flag typed at the prompt is *translated*, not refused.** `--web` becomes
+  `/web`, `--provider x` becomes `/provider x`, `--help` becomes `/help`. Only an exact flag:
+  `why does --web need a token?` is a question and reaches the model untouched, and so does a
+  pasted bullet list, which is why a rule over anything starting with `-` would have been worse
+  than the bug. A flag with no equivalent inside a running process (`--json`, `--cwd`,
+  `--no-color`, `-p`) says which one it is.
+- **The view opens the browser.** `open` on macOS, `cmd /C start` on Windows, `xdg-open`
+  elsewhere; detached, best-effort, and the URL is printed either way so a failed launch costs
+  a paste and nothing else. **Only when stdout is a terminal** — a pipe is not a person, and
+  without that check a test run would open windows on whoever ran it. The assertion that keeps
+  that honest is that a redirected run must not print `(opening it)`.
+
+Verified in a pty with `open` on `PATH` replaced by a script that records its argument — which
+measures the whole path, decision, program and argument, without a browser appearing on this
+machine. It received the URL from `--web` typed at the prompt *and* from `flint --web` at
+startup. The terminal showed
+`--web is a start-up flag — doing /web instead (that flag opened it at start-up)` followed by
+`web: http://127.0.0.1:59331/?token=… (opening it)`.
+
 
 **`/web` — the browser view is now reachable from inside a conversation.** This came from a bug
 report, and the report was exact: *"I typed `--web` inside flint and the model answered it as a
