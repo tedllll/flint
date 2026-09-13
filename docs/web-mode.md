@@ -89,9 +89,25 @@ Four things in the current tree are most of the feature. None of them was writte
 | Level | Shape | Needs | Can you type and get an answer? |
 |---|---|---|---|
 | **L0** | `flint -p "..." --json \| jq` | nothing — **done** | No, but it is already scriptable |
-| **L1** | one static HTML file, a `.jsonl` dropped onto it | a text file in the repo | **No.** It can compose a command for you to paste |
-| **L2** | `flint --web`, live view | the listener of §6 | No — read-only |
+| **L1** | one static HTML file, a `.jsonl` dropped onto it | a text file in the repo — **done** | **No.** It can compose a command for you to paste |
+| **L2** | `--web` or `/web`, live view | the listener of §6 — **done** | No — read-only |
 | **L3** | `POST /message` into the steering channel | one more route | Yes |
+
+**L2 has two ways in, and the second one is the one people use.** `--web` has to be decided
+before the run starts, and the moment you want a real renderer is thirty seconds into an answer
+that is scrolling past faster than you can read it. Measured from a real session, the first
+thing that happened was `--web` typed *at the prompt*: it is the only name for the feature
+anyone has met — it is in `--help`, in the README and in flint's own error messages — and
+nothing marked it as belonging to the command line rather than to the conversation. It went to
+the model, which answered it politely, and the run looked like it had worked.
+
+So `/web [port]` is a command as well as a flag, and one `Viewer` backs both: the REPL carries
+it and it binds its listener the moment it is asked for, not at startup. Two consequences fall
+out of carrying it rather than reading a flag once. `/web` twice reports where the view already
+is rather than binding a second listener on a second port — the second URL would print, and the
+page a person already had open would be on neither. And `/new`, `/resume` and `/reload` move the
+page to the conversation the terminal moved to, because the session path is shared with the
+listener instead of copied when the socket is bound.
 
 **L1 cannot be interactive, and the reason is not browser trivia.** At L1 there is no
 listener, so there is nothing to talk to: a page cannot start a process, and a page that was
@@ -188,7 +204,11 @@ Four routes. No cookies, no HTTP/2, no TLS, no keep-alive, no streaming request 
 | `GET /` | the embedded HTML. Requires the token. |
 | `GET /session` | the session so far, as the session file's own lines (`NDJSON`) |
 | `GET /events` | SSE: replays from `Last-Event-ID`, then live events |
-| `POST /message` | one message from the browser, into the steering channel |
+| `POST /message` | one message from the browser, into the steering channel **(not built)** |
+
+The first three are implemented; the fourth is L3 and is the only route missing. `/session` and
+`/events` read the session path and the event feed through a shared handle, which is what lets
+`/new` and `/resume` move an open window to the conversation the terminal moved to.
 
 - **SSE framing is the existing format.** Each event goes out as `data: <one ndjson line>`
   followed by a blank line, and each carries `id: <session line number>`. A reconnect sends
@@ -349,6 +369,25 @@ assertions. What follows is the part no test in this repository reaches.
 | The status line during a slow model call | **measured** | the browser shows `no response yet — the network or the endpoint may be stuck`, the terminal's own words |
 | A turn on a browser that then reloads mid-turn | **not measured** | |
 | What 80 columns looks like next to a terminal | **not measured** | |
+
+### `/web` from a real session — measured in a pty, on the release binary
+
+The two ways into L2 were driven end to end rather than reasoned about: a pty (a pipe cannot
+carry `/web`, because `from_stdin` reads lines and never reaches the event reader), a scratch
+`FLINT_HOME`, and `curl` at the port the URL named.
+
+| Step | Result |
+|---|---|
+| `/web` typed at the prompt | `web: http://127.0.0.1:58962/?token=7fc0…c47` — a live URL |
+| `GET /session` with that token | `{"type":"meta","v":2,"id":"1789309949-903",…}` — the conversation, as it is |
+| A `/events` listener attached, then `/new` | `event: reset` followed by an empty `data:` frame, exactly as designed |
+| `GET /session` after the `/new` | `id` changed to `1789309957-534` — the *new* file, so the page follows the run |
+| `/web` twice | one URL, printed twice; no second listener |
+
+The pty also turned up a trap worth writing down: **in raw mode `\n` is Ctrl-J, not Enter.**
+`crossterm` reports the byte as `Char('j')` with a control modifier, so a script that drives
+flint through a pty has to send `\r`. The first attempt sent `/web\n` and the transcript read
+`> /webj` with the command sitting unsubmitted, which looks like a flint bug and is not one.
 
 ### The limit that measuring found — and then closed
 

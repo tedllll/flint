@@ -52,7 +52,11 @@ pub struct State {
     /// the browser is looking. A cached body would be derived state, and it would be the
     /// one copy that is wrong -- the session on disk is the only thing the terminal and
     /// the browser can both be right about.
-    session: Option<std::path::PathBuf>,
+    ///
+    /// Behind a lock because the answer changes while the window is open: `/new` and
+    /// `/resume` move the run to a different file, and a browser left reading the old one
+    /// would be showing a conversation that is not the one in the terminal.
+    session: Arc<Mutex<Option<std::path::PathBuf>>>,
     /// The run's event stream, when this run has one to give.
     ///
     /// `None` for a window opened by something that is not a run -- `debug`, a test -- and
@@ -78,13 +82,27 @@ const HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(20);
 #[derive(Clone)]
 struct Frame {
     seq: u64,
+    /// The SSE event name, for a frame that is about this *stream* rather than about the run.
+    ///
+    /// Empty for a run event, which is nearly all of them, and those are rendered as a bare
+    /// `data:` line so the page applies them with the same vocabulary `--json` writes. A
+    /// named frame is the transport talking about itself, and the page handles it before the
+    /// run vocabulary is consulted at all.
+    name: &'static str,
     line: String,
 }
 
 impl Frame {
     fn render(&self) -> String {
         // `id:` is what a reconnecting client sends back as `Last-Event-ID`.
-        format!("id: {}\ndata: {}\n\n", self.seq, self.line)
+        if self.name.is_empty() {
+            format!("id: {}\ndata: {}\n\n", self.seq, self.line)
+        } else {
+            format!(
+                "id: {}\nevent: {}\ndata: {}\n\n",
+                self.seq, self.name, self.line
+            )
+        }
     }
 }
 
@@ -162,8 +180,12 @@ impl Live {
     }
 
     fn push(&self, line: String) {
+        self.push_named("", line);
+    }
+
+    fn push_named(&self, name: &'static str, line: String) {
         let seq = self.next.fetch_add(1, Ordering::Relaxed);
-        let frame = Frame { seq, line };
+        let frame = Frame { seq, name, line };
         {
             let mut recent = self.recent.lock().unwrap_or_else(|e| e.into_inner());
             recent.push_back(frame.clone());
@@ -173,6 +195,27 @@ impl Live {
         }
         // An error means nobody is listening, which is the normal case.
         let _ = self.subscribers.send(frame);
+    }
+
+    /// Tell every reader that the conversation it is showing is not this one any more.
+    ///
+    /// Called when the run moves to a different session file -- `/new`, `/resume`. The frames
+    /// in the ring belong to the conversation being left, so they are **dropped** rather than
+    /// replayed: a page that applied them on top of the new file would show two conversations
+    /// spliced together, which is worse than showing none. Dropping them also makes every
+    /// reconnecting client's cursor too old to satisfy, which is the `reset` it needs; the
+    /// named frame below is for the clients that are connected *right now*, which no cursor
+    /// difference can reach.
+    ///
+    /// The status goes with them. It is the one piece of state here, and it describes a turn
+    /// in the conversation that is over.
+    pub fn restart(&self) {
+        self.recent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        *self.status.lock().unwrap_or_else(|e| e.into_inner()) = String::new();
+        self.push_named("reset", String::new());
     }
 
     /// A receiver that starts from *now*, with no backlog.
@@ -557,14 +600,22 @@ fn last_event_id(request: &Request) -> Option<u64> {
 /// wrong: `session::load` reads such a line, so dropping it here would make the browser show
 /// less than the terminal does. A torn read is transient; the next refresh has it whole.
 fn serve_session(state: &State) -> Response {
-    let Some(path) = &state.session else {
+    // Cloned out so the lock is not held across the file read: `restart` wants it while a
+    // `/new` is switching sessions, and a slow read of a large session file is exactly when
+    // it would want it.
+    let path = state
+        .session
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let Some(path) = path else {
         return Response::text(
             404,
             "Not Found",
             "this run is not writing a session, so there is nothing to show\n",
         );
     };
-    match std::fs::read_to_string(path) {
+    match std::fs::read_to_string(&path) {
         Ok(body) => {
             // Read *after* the file, deliberately: a frame at or below this number may
             // already be in the file and one above it cannot be, which is the direction
@@ -621,6 +672,19 @@ impl Window {
         session: Option<std::path::PathBuf>,
         live: Option<Arc<Live>>,
     ) -> Result<Window> {
+        Window::open_following(port, Arc::new(Mutex::new(session)), live).await
+    }
+
+    /// The same, for a caller whose session can change under it.
+    ///
+    /// The REPL is that caller: `/new` and `/resume` move the run to a different file with
+    /// the window still open, so the two of them share the path rather than the window
+    /// taking a copy at bind time.
+    pub async fn open_following(
+        port: u16,
+        session: Arc<Mutex<Option<std::path::PathBuf>>>,
+        live: Option<Arc<Live>>,
+    ) -> Result<Window> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
             .await
             .with_context(|| format!("cannot listen on 127.0.0.1:{port}"))?;
@@ -650,6 +714,76 @@ impl Window {
 
     pub fn port(&self) -> u16 {
         self.port
+    }
+}
+
+/// The browser view of this run, from the moment it is asked for.
+///
+/// **Two ways in, one handle.** `--web` opens a view before the first turn, and `/web` opens
+/// one in the middle of a conversation -- which is the way a person actually reaches for it,
+/// having discovered mid-session that the answer is long enough to want a real renderer. That
+/// is why the REPL carries this rather than reading a flag once at startup.
+///
+/// The two halves are separable on purpose. `live` exists as soon as the view is *asked* for,
+/// so a turn that begins while the socket is still being bound does not lose the frames it
+/// produces; `window` appears when the bind succeeds, and until then there is nothing to
+/// point a browser at. A `Viewer` with no window is not an error state -- it is a request
+/// that has not been honoured yet.
+pub struct Viewer {
+    live: Arc<Live>,
+    window: Option<Window>,
+    /// Shared with whichever listener is serving it, so `/new` and `/resume` are visible to a
+    /// browser that is already connected.
+    session: Arc<Mutex<Option<std::path::PathBuf>>>,
+    /// The port `--port` asked for, kept so `/web` with no argument means what the flag meant.
+    port: u16,
+}
+
+impl Viewer {
+    /// Ask for a view of `session`. Nothing is bound and nothing is listening yet.
+    pub fn asked(port: u16, session: Option<std::path::PathBuf>) -> Viewer {
+        Viewer {
+            live: Live::new(),
+            window: None,
+            session: Arc::new(Mutex::new(session)),
+            port,
+        }
+    }
+
+    /// The feed a turn copies its events into.
+    pub fn live(&self) -> &Live {
+        &self.live
+    }
+
+    /// Bind the listener if it is not bound, and return the URL to open.
+    ///
+    /// Idempotent, and it has to be: `/web` twice would otherwise leak a second listener on a
+    /// second port, with the printed URL and the one a browser is already on disagreeing about
+    /// which run it is showing. Asking again prints where it already is.
+    pub async fn open(&mut self, port: u16) -> Result<String> {
+        if let Some(window) = &self.window {
+            return Ok(window.url());
+        }
+        let port = if port == 0 { self.port } else { port };
+        let window =
+            Window::open_following(port, Arc::clone(&self.session), Some(Arc::clone(&self.live)))
+                .await?;
+        let url = window.url();
+        self.window = Some(window);
+        Ok(url)
+    }
+
+    /// Point the view at a different conversation.
+    ///
+    /// Called after `/new` and `/resume`. The session file changes first and the readers are
+    /// told second, so a page that re-reads on the `reset` reads the file the run is now
+    /// writing rather than the one it just left.
+    pub fn follow(&mut self, session: Option<std::path::PathBuf>) {
+        if *self.session.lock().unwrap_or_else(|e| e.into_inner()) == session {
+            return;
+        }
+        *self.session.lock().unwrap_or_else(|e| e.into_inner()) = session;
+        self.live.restart();
     }
 }
 
@@ -821,7 +955,7 @@ mod tests {
         State {
             token: "0123456789abcdef0123456789abcdef".to_string(),
             port: 7777,
-            session: None,
+            session: Arc::new(Mutex::new(None)),
             live: None,
         }
     }
@@ -964,7 +1098,7 @@ mod tests {
     }
 
     fn with_session(path: std::path::PathBuf) -> State {
-        State { session: Some(path), ..state() }
+        State { session: Arc::new(Mutex::new(Some(path))), ..state() }
     }
 
     /// `/session` is the file, byte for byte -- not a summary and not a second format.
@@ -1153,12 +1287,152 @@ mod socket_tests {
         let response = get(second.port(), "/", Some(&host), Some(&first.token)).await;
         assert!(response.starts_with("HTTP/1.1 403"), "{response}");
     }
+
+    /// `/new` and `/resume` move which file `/session` serves, with the window still open.
+    ///
+    /// Asserted through the route rather than through the field, because the field being
+    /// right is not the guarantee. The guarantee is that a browser re-reading after the
+    /// `reset` gets the conversation the terminal is in.
+    #[tokio::test]
+    async fn the_served_conversation_follows_the_run_to_a_new_file() {
+        let tag = std::process::id();
+        let first = std::env::temp_dir().join(format!("flint-web-follow-a-{tag}.jsonl"));
+        let second = std::env::temp_dir().join(format!("flint-web-follow-b-{tag}.jsonl"));
+        std::fs::write(&first, "{\"type\":\"meta\",\"id\":\"first\"}\n").expect("write");
+        std::fs::write(&second, "{\"type\":\"meta\",\"id\":\"second\"}\n").expect("write");
+
+        let mut viewer = Viewer::asked(0, Some(first.clone()));
+        let url = viewer.open(0).await.expect("bind");
+        let port: u16 = url
+            .trim_start_matches("http://127.0.0.1:")
+            .split('/')
+            .next()
+            .expect("port")
+            .parse()
+            .expect("the URL carries a port");
+        let token = url.split("token=").nth(1).expect("token").to_string();
+        let host = format!("127.0.0.1:{port}");
+
+        let before = get(port, "/session", Some(&host), Some(&token)).await;
+        assert!(before.contains("\"id\":\"first\""), "{before}");
+
+        viewer.follow(Some(second.clone()));
+        let after = get(port, "/session", Some(&host), Some(&token)).await;
+        assert!(
+            after.contains("\"id\":\"second\""),
+            "the window is still serving the conversation that was left: {after:?}"
+        );
+        assert!(
+            !after.contains("\"id\":\"first\""),
+            "the old conversation is still being served: {after:?}"
+        );
+
+        let _ = std::fs::remove_file(&first);
+        let _ = std::fs::remove_file(&second);
+    }
 }
 
 /// The live feed, driven directly: no socket, no timing.
 #[cfg(test)]
 mod live_tests {
     use super::*;
+
+    /// `/new` and `/resume` have to reach a browser that is already connected.
+    ///
+    /// Two mechanisms, and they cover different clients. One that is *connected* is told by a
+    /// frame, because no cursor difference can reach it: it is already current, so there is
+    /// nothing for it to notice. One that reconnects is told by its cursor going too old to
+    /// satisfy, which is why the ring is emptied rather than left in place -- the frames in
+    /// it belong to the conversation being left, and a page that replayed them on top of the
+    /// new session file would show two conversations spliced together.
+    #[test]
+    fn a_change_of_conversation_is_a_named_reset_and_drops_the_old_frames() {
+        let live = Live::new();
+        live.event(&Event::Text("from the old conversation".to_string()));
+        let before = live.current_seq();
+
+        let (mut rx, _) = live.follow(Some(before));
+        live.restart();
+
+        let frame = rx.try_recv().expect("the connected client must be told");
+        let rendered = frame.render();
+        assert!(
+            rendered.contains("event: reset"),
+            "the frame must be named, or the page applies it as a run event: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("from the old conversation"),
+            "the reset must not carry the conversation it replaces: {rendered:?}"
+        );
+
+        match live.follow(Some(before)).1 {
+            // A client that is one frame behind is handed the reset frame itself, which is
+            // the mechanism working: it re-reads `/session` and gets the new conversation.
+            // What it must never be handed is a frame of the old one.
+            Catch::Missed(frames) => {
+                assert_eq!(frames.len(), 1, "only the reset frame is left in the ring");
+                let only = frames[0].render();
+                assert!(only.contains("event: reset"), "{only:?}");
+                assert!(
+                    !only.contains("from the old conversation"),
+                    "the old conversation survived the restart: {only:?}"
+                );
+            }
+            Catch::Reset => panic!("a client one frame behind must be given the reset frame"),
+        }
+
+        // Further back than the ring can serve -- which is now every cursor from before the
+        // restart -- and the answer is to reload rather than to guess.
+        match live.follow(Some(before.saturating_sub(5))).1 {
+            Catch::Reset => {}
+            Catch::Missed(frames) => panic!(
+                "a cursor the ring cannot serve was answered with {} frame(s)",
+                frames.len()
+            ),
+        }
+    }
+
+    /// The status is state rather than history, so dropping the ring is not enough alone.
+    #[test]
+    fn a_change_of_conversation_forgets_what_the_old_one_was_waiting_for() {
+        let live = Live::new();
+        live.event(&Event::Status {
+            text: "waiting for the model".to_string(),
+            restarted: true,
+        });
+        assert_eq!(live.current_status(), "waiting for the model");
+        live.restart();
+        assert_eq!(
+            live.current_status(),
+            "",
+            "a new conversation must not open showing the old one's status"
+        );
+    }
+
+    /// `/web` twice must not leave two listeners running.
+    ///
+    /// The failure it prevents is quiet: a second bind succeeds on a second port, the second
+    /// URL is printed, and the browser a person already has open is showing a different
+    /// socket from the one the terminal just told them about. Nothing errors, and the two
+    /// disagree about which run they are watching.
+    #[tokio::test]
+    async fn asking_for_the_view_twice_opens_one_listener() {
+        let mut viewer = Viewer::asked(0, None);
+        let first = viewer.open(0).await.expect("bind");
+        let second = viewer.open(0).await.expect("bind again");
+        assert_eq!(first, second, "the second ask must report where it already is");
+    }
+
+    /// And a viewer that was only *asked* for is not broken -- it is unbound.
+    #[test]
+    fn a_viewer_that_has_not_been_opened_has_no_window() {
+        let viewer = Viewer::asked(0, None);
+        assert!(viewer.window.is_none());
+        // The feed exists anyway, which is the point of the split: a turn that starts while
+        // the socket is still being bound does not lose its frames.
+        viewer.live().event(&Event::Text("while binding".to_string()));
+        assert_eq!(viewer.live().current_seq(), 1);
+    }
 
     #[test]
     fn a_client_that_has_just_loaded_is_told_nothing_it_missed() {

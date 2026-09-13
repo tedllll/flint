@@ -149,7 +149,18 @@ the URL has to be printed anyway.
 **Done:** the static viewer (level 1), and level 2 — `--web [--port]`, `GET /`, `GET /session`,
 `GET /events` as SSE with a cursor and replay, and the `status` event that keeps a browser from
 looking frozen during a slow turn. **Not done:** `POST /message` (level 3, typing into the
-browser) and the measurement pass of step 7.
+browser) and the measurement pass of step 7 — though `/web` itself is now measured end to end
+in a pty (§11), which is most of what that pass was for.
+
+**And `/web` is now how level 2 is actually reached.** `--web` has to be decided before the run
+starts, and the moment you want a real renderer is mid-answer; measured from a real session,
+the first thing anyone did was type `--web` *at the prompt*, where it is a flag and not a
+command, so it went to the model and came back as a sentence. `/web [port]` opens the same
+listener from inside a conversation, `/web` twice reports where the view already is rather than
+binding a second one, and `/new`, `/resume` and `/reload` move an open page to the conversation
+the terminal moved to. A bare flint flag typed at the prompt is now refused rather than sent,
+with the slash command that means it as the answer — the *exact* flag only, so a pasted bullet
+list and a sentence that mentions a flag both still reach the model.
 
 **And the text now arrives while it is written.** Deltas used to be buffered per attempt so a
 retry could discard them, which meant a terminal, a browser and a `--json` reader all saw

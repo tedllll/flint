@@ -193,6 +193,42 @@ The vocabulary is closed and small: `session.started`, `turn.started`, `message.
 is plain by contract because its output is the child's own bytes. Ctrl-C during a `--json`
 run ends the process; the session file keeps every event that was complete.
 
+### Watching a run in a browser
+
+A terminal is a poor renderer for a long answer: the scroll region fights you, a tool call is
+one line, and selecting text across a redraw is a losing game. So flint can also serve a view
+of the **running process** on loopback — not a second mode, and not a file viewer. The
+terminal keeps working, and closing the tab loses nothing.
+
+```
+> /web
+web: http://127.0.0.1:58962/?token=7fc045f7ab4cd01377715fe0401a8c47
+```
+
+That is the whole of it: `/web` from inside a conversation, paste the URL, done. `flint --web`
+does the same thing before the first turn if you know in advance, and `--port <n>` picks the
+port instead of taking whatever is free.
+
+Three things about it are deliberate, and each one was a decision rather than a default:
+
+- **Loopback only.** The address is the literal `127.0.0.1`, never `0.0.0.0` and never a
+  resolved `localhost`. Remote access is a different program with a much harder problem.
+  Requests that did not come to this address, and requests from another origin, are refused.
+- **A token, in the URL.** 128 bits, minted per run. It is on `/` in the query string because
+  that is the URL you paste; every other route wants it in an `X-Flint-Token` header, so it
+  cannot leak through a `Referer`, a log or a screenshot. The page carries
+  `Referrer-Policy: no-referrer` for the same reason.
+- **The page is a viewer, not a composer.** There is no input box yet — `POST /message` is the
+  one route still missing (`docs/web-mode.md` §9 step 6). Typing stays in the terminal.
+
+What it shows is the conversation the process is in, read from the session file on disk, plus
+the live event stream — the same events `--json` writes, produced by the same code. So a tool
+call, a streamed answer, a reasoning delta and the status line all appear, and `/new`,
+`/resume` and `/reload` move the page to the conversation the terminal moved to.
+
+`flint debug prompt-input` is what to use when the question is what the *model* was given;
+this is for reading what happened.
+
 ### Seeing what the model is actually sent
 
 ```bash

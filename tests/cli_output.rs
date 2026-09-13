@@ -1187,3 +1187,176 @@ fn switching_provider_runs_the_engines_start_command() {
 
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// Run the interactive REPL with these lines on stdin and return all of its output.
+///
+/// Piped stdin is a first-class way to drive flint -- `/exit` ends it -- and it exercises the
+/// real command dispatch rather than a copy of it. A pty is needed only for the paths that
+/// read *keys*, which is why the paste fix is not covered here (see `HANDOFF.md`).
+fn repl(home: &std::path::Path, lines: &[&str]) -> String {
+    use std::io::Write;
+    let mut child = binary()
+        .env("FLINT_HOME", home)
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to run flint");
+    {
+        let stdin = child.stdin.as_mut().expect("no stdin handle");
+        stdin
+            .write_all(format!("{}\n", lines.join("\n")).as_bytes())
+            .expect("failed to write stdin");
+    }
+    let out = child.wait_with_output().expect("flint did not finish");
+    String::from_utf8_lossy(&out.stdout).to_string()
+}
+
+/// A stub that answers every request with a marker, so a test can tell whether the model was
+/// reached at all.
+async fn marker_provider(marker: &'static str) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(&[
+                    &format!(r#"data: {{"choices":[{{"delta":{{"content":"{marker}"}}}}]}}"#),
+                    r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+                    "data: [DONE]",
+                ])),
+        )
+        .mount(&server)
+        .await;
+    server
+}
+
+/// `--web` typed at the prompt is a flag, not a message, and must not be sent to the model.
+///
+/// Reported from a real session in exactly this shape: `--web` entered at the prompt, because
+/// it is the only name for the feature a person has met -- it is in `--help`, in the README
+/// and in flint's own error messages -- and nothing marks it as belonging to the command line
+/// rather than to the conversation. The model answered it politely and at length, so the run
+/// looked like it had worked. This is the whole reason `/web` exists as well.
+#[tokio::test]
+async fn a_flag_typed_at_the_prompt_does_not_reach_the_model() {
+    let server = marker_provider("THE MODEL WAS REACHED").await;
+    let home = test_home("prompt-flag", &server.uri());
+
+    let text = repl(&home, &["--web", "/exit"]);
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(
+        text.contains("is a command-line flag, not a message"),
+        "the flag was not recognised as a flag: {text:?}"
+    );
+    assert!(
+        !text.contains("THE MODEL WAS REACHED"),
+        "`--web` was sent to the model after all: {text:?}"
+    );
+}
+
+/// `/web` opens the browser view of the conversation that is already running.
+#[tokio::test]
+async fn the_web_command_opens_the_browser_view() {
+    let server = marker_provider("THE MODEL WAS REACHED").await;
+    let home = test_home("web-command", &server.uri());
+
+    let text = repl(&home, &["/web", "/exit"]);
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(
+        text.contains("web: http://127.0.0.1:"),
+        "`/web` did not print a URL: {text:?}"
+    );
+    assert!(
+        text.contains("token="),
+        "the printed URL carries no token, so it would not open: {text:?}"
+    );
+    assert!(
+        !text.contains("THE MODEL WAS REACHED"),
+        "`/web` was sent to the model: {text:?}"
+    );
+}
+
+/// Asking twice reports where the view already is, rather than opening a second one.
+///
+/// Two listeners would be a quiet failure: the second bind succeeds on a second port, a
+/// second URL is printed, and the page a person already has open is on neither.
+#[tokio::test]
+async fn the_web_command_twice_opens_one_listener() {
+    let server = marker_provider("THE MODEL WAS REACHED").await;
+    let home = test_home("web-twice", &server.uri());
+
+    let text = repl(&home, &["/web", "/web", "/exit"]);
+    let _ = std::fs::remove_dir_all(&home);
+
+    let urls: Vec<&str> = text
+        .lines()
+        .filter_map(|line| line.split_once("web: ").map(|(_, url)| url.trim()))
+        .collect();
+    assert_eq!(urls.len(), 2, "expected two URLs, one per `/web`: {text:?}");
+    assert_eq!(
+        urls[0], urls[1],
+        "the second `/web` opened a different listener: {text:?}"
+    );
+}
+
+/// The guard catches an exact flag and nothing else.
+///
+/// This is the design, not an accident of the check: a line that merely *contains* a flag is
+/// an ordinary question, and a pasted bullet list starts with a dash. A rule over anything
+/// beginning with `-` was the obvious version and would swallow both.
+#[tokio::test]
+async fn a_sentence_about_a_flag_is_still_a_message() {
+    let server = marker_provider("THE MODEL WAS REACHED").await;
+    let home = test_home("flag-sentence", &server.uri());
+
+    // One line per run, deliberately. With piped stdin every line is already in the pipe, so
+    // the second arrives while the first turn is running and is delivered as *steering* --
+    // which interrupts it. That is what typing during a turn is supposed to do, and it is why
+    // these are two processes rather than one script.
+    let sentence = repl(&home, &["why does --web need a token?", "/exit"]);
+    let bullet = repl(&home, &["- a pasted bullet", "/exit"]);
+    let _ = std::fs::remove_dir_all(&home);
+
+    for (what, text) in [("a sentence about a flag", sentence), ("a bullet", bullet)] {
+        assert!(
+            !text.contains("is a command-line flag, not a message"),
+            "the guard fired on {what}: {text:?}"
+        );
+        assert!(
+            text.contains("THE MODEL WAS REACHED"),
+            "{what} did not reach the model: {text:?}"
+        );
+    }
+}
+
+/// A busy port is reported, and the conversation survives it.
+///
+/// `/web` is not `--web`: there the view was the whole point of the run, so failing to bind is
+/// fatal. Here it is one thing the user asked for, and taking a conversation down over a busy
+/// port would be the worse answer.
+#[tokio::test]
+async fn the_web_command_survives_a_port_it_cannot_have() {
+    let server = marker_provider("THE MODEL WAS REACHED").await;
+    let home = test_home("web-busy", &server.uri());
+
+    // Hold a port, then ask `/web` for it. Port 1 needs privilege and is refused for a
+    // reason that has nothing to do with being busy, so a listener of our own is used.
+    let held = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind a decoy");
+    let port = held.local_addr().expect("addr").port();
+
+    let text = repl(&home, &[&format!("/web {port}"), "hello", "/exit"]);
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(
+        text.contains("cannot listen on 127.0.0.1"),
+        "the refused port was not reported: {text:?}"
+    );
+    assert!(
+        text.contains("THE MODEL WAS REACHED"),
+        "the conversation did not survive a refused port: {text:?}"
+    );
+}

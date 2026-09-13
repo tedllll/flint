@@ -7,8 +7,8 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 299 passing (221 lib, 28
-`agent_loop`, 19 `cli_output`, 4 `json_output`, 4 `search_tool`, 18 `term_capture`, 5
+As of the commit that carries this file, `cargo test` is 309 passing (226 lib, 28
+`agent_loop`, 24 `cli_output`, 4 `json_output`, 4 `search_tool`, 18 `term_capture`, 5
 `web_view`), `cargo clippy --all-targets` is silent, and both `node
 scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
 
@@ -27,6 +27,43 @@ The binary is held open by any running `flint`, so close those before replacing 
 `docs/windows.md` is the field notes for the Windows terminal.
 
 ## What was just done
+
+**`/web` — the browser view is now reachable from inside a conversation.** This came from a bug
+report, and the report was exact: *"I typed `--web` inside flint and the model answered it as a
+sentence."* Of course it did. `--web` is a command-line flag, and it is the only name for the
+feature anyone has met — it is in `--help`, in the README and in flint's own error messages —
+so there was nothing to mark it as belonging to the command line rather than to the
+conversation. The run looked like it had worked.
+
+Two changes, and the second one is the feature:
+
+- **`/web [port]` opens the listener now.** `Viewer` replaces the bare `Window` handle the CLI
+  used to hold: it is *asked* for (a feed, no socket), then *opened* (binds, returns the URL).
+  The split matters because a turn that starts while the socket is still being bound must not
+  lose the frames it produces. `/web` twice reports where the view already is rather than
+  binding a second listener — two would be a quiet failure, since the second bind succeeds, a
+  second URL prints, and the page already open is on neither.
+- **A bare flint flag typed at the prompt is refused, not sent.** Only the *exact* flag:
+  `why does --web need a token?` is a question and reaches the model untouched, and so does a
+  pasted bullet list. A rule over anything starting with `-` was the obvious version and is
+  wrong, because a paste starts that way. There is no escape hatch, because a sentence is one.
+
+**And an open window follows the run.** `/new`, `/resume` and `/reload` move the session the
+page is showing, which needed `State.session` to become a shared handle rather than a path
+copied when the socket was bound, and a new named SSE frame — `event: reset`, which the page
+already knew how to handle — because a *connected* client is current and so no cursor
+difference can reach it. The ring is emptied at the same time: those frames belong to the
+conversation being left, and replaying them on top of the new file would splice two
+conversations together.
+
+**Verified in a pty against the release binary**, because a pipe cannot carry `/web`
+(`from_stdin` reads lines and never reaches the event reader): `/web` printed a live URL,
+`GET /session` served the conversation, a `/events` listener attached across a `/new` received
+`event: reset` and then the *new* file at the same URL, and `/web` twice printed one URL twice.
+The pty also found a trap worth knowing — **in raw mode `\n` is Ctrl-J, not Enter**, so a
+script driving flint must send `\r`; the first attempt read `> /webj` and looked like a flint
+bug.
+
 
 **A pasted block is one message again, and keeps its line breaks.** Reported from a real
 session as "it treats it as one sentence", and the report was accurate. Two faults were

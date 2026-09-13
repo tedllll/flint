@@ -525,21 +525,20 @@ async fn real_main() -> Result<i32> {
     // warning: `--web` was the whole point of the run, and a run that quietly served
     // nothing while looking like it worked is the failure this project keeps designing
     // against.
-    // Created whether or not `--web` is on, so the turn's plumbing does not change shape
-    // between the two: a `None` feed is one branch in `run_turn` and nothing else.
-    let live = if args.web { Some(web::Live::new()) } else { None };
-    if args.web {
-        let window = web::Window::open(
-            args.port.unwrap_or(0),
-            agent.session_path(),
-            live.clone(),
-        )
-        .await?;
-        printer.term().line(format_args!(
-            "{} {}",
-            printer.dim("web:"),
-            window.url()
-        ));
+    //
+    // `/web` opens the same thing later, so this is a `Viewer` and not a `Window`: the REPL
+    // holds it and can bind it part-way through, and a run started without `--web` differs
+    // only in that nobody has asked yet.
+    let mut viewer = if args.web {
+        Some(web::Viewer::asked(args.port.unwrap_or(0), agent.session_path()))
+    } else {
+        None
+    };
+    if let Some(viewer) = viewer.as_mut() {
+        let url = viewer.open(0).await?;
+        printer
+            .term()
+            .line(format_args!("{} {url}", printer.dim("web:")));
     }
 
     // Search is offered only when it can actually work, so when it cannot the reason has to
@@ -575,7 +574,7 @@ async fn real_main() -> Result<i32> {
             &printer,
             &mut input_rx,
             false,
-            live.as_deref(),
+            viewer.as_ref().map(web::Viewer::live),
         )
         .await?;
         println!();
@@ -591,7 +590,7 @@ async fn real_main() -> Result<i32> {
         key_missing,
         &reader,
         &mut input_rx,
-        live.as_deref(),
+        &mut viewer,
     )
     .await;
     term.stop();
@@ -758,7 +757,7 @@ async fn interactive(
     key_missing: bool,
     reader: &InputReader,
     input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<InputMsg>,
-    live: Option<&web::Live>,
+    viewer: &mut Option<web::Viewer>,
 ) -> Result<()> {
 
     // Colour codes as this terminal should show them: the names below shadow the
@@ -820,7 +819,7 @@ async fn interactive(
         }
 
         if input.starts_with('/') {
-            match handle_command(&input, cfg, agent, provider_cfg, printer, reader).await? {
+            match handle_command(&input, cfg, agent, provider_cfg, printer, reader, viewer).await? {
                 Flow::Continue => continue,
                 Flow::Exit => break,
                 Flow::NewAgent(new_agent, new_provider) => {
@@ -829,6 +828,11 @@ async fn interactive(
                     continue;
                 }
             }
+        }
+
+        if let Some(hint) = flag_at_the_prompt(&input) {
+            printer.term().line(format_args!("{yellow}{hint}{reset}"));
+            continue;
         }
 
         // Echo the message into the transcript. The input row is cleared as soon
@@ -847,7 +851,16 @@ async fn interactive(
             ));
         }
 
-        match run_turn(agent, provider_cfg, &input, printer, input_rx, true, live).await {
+        match run_turn(
+            agent,
+            provider_cfg,
+            &input,
+            printer,
+            input_rx,
+            true,
+            viewer.as_ref().map(web::Viewer::live),
+        )
+        .await {
             Ok(()) => {}
             Err(e) => {
                 printer.term().blank();
@@ -876,8 +889,59 @@ enum Flow {
     NewAgent(agent::Agent, config::ProviderConfig),
 }
 
-/// Ask a question and wait for a line.
+/// A command-line flag typed at the prompt, and what to type instead.
 ///
+/// Reported as a bug in exactly this shape: `--web` entered at the prompt, because it is the
+/// only name for the feature a person has met -- it is in `--help`, in the README and in this
+/// program's own error messages -- and nothing marks it as belonging to the command line
+/// rather than to the conversation. It went to the model, which answered it politely and at
+/// length. A run that looks like it worked is the failure this project keeps designing
+/// against, so this is a stop rather than a warning.
+///
+/// **Only an exact flag is caught, and that is the whole design.** `--web` alone is a typo;
+/// `why does --web need a token?` is a question and reaches the model untouched. A rule over
+/// anything starting with `-` was the obvious version and is wrong: a pasted bullet list
+/// starts that way, and swallowing it would be a worse bug than the one this fixes.
+///
+/// There is no escape hatch, because a sentence *is* one.
+fn flag_at_the_prompt(input: &str) -> Option<String> {
+    let mut words = input.split_whitespace();
+    let flag = words.next()?;
+    let n = words.next();
+    if words.next().is_some() {
+        return None;
+    }
+    let only_a_number = n.is_none_or(|v| v.chars().all(|c| c.is_ascii_digit()));
+    let hint = match (flag, n, only_a_number) {
+        ("--web", None, _) => "/web opens the browser view of this conversation, right now.",
+        ("--port", _, true) => {
+            "/web [port] takes a port from in here. --port is only read at start-up."
+        }
+        ("--provider", Some(_), _) | ("--provider", None, _) => {
+            "use /provider <name> to switch, or /provider to list them."
+        }
+        ("--model", Some(_), _) | ("--model", None, _) => "use /model <name>.",
+        ("--readonly", None, _) => "use /readonly to toggle the write guard.",
+        ("--verbose", None, _) => "use /verbose [on|off|full].",
+        ("--resume", Some(_), _) => "use /resume <n|id>, or /sessions to list them.",
+        ("--continue", None, _) => "/sessions lists them numbered; /resume <n> picks one.",
+        ("--list-sessions", None, _) => "use /sessions.",
+        ("--name", Some(_), _) => "use /name <text>.",
+        ("--archive", Some(_), _) => "use /archive <n|id>.",
+        ("--delete", Some(_), _) => "use /delete <n|id>.",
+        ("--help" | "-h", None, _) => "use /help.",
+        ("--json" | "--no-color" | "--cwd", _, _) | ("-p", _, _) => {
+            "that one is only read when flint starts, so it has to be on the command line."
+        }
+        _ => return None,
+    };
+    Some(format!(
+        "{flag} is a command-line flag, not a message. {hint} \
+         To send it to the model anyway, put it in a sentence."
+    ))
+}
+
+/// Ask a question and wait for a line.///
 /// The answer comes from the same channel as everything else the user types.
 /// Reading stdin directly would race the key thread -- and on a real terminal it
 /// would echo into the middle of the model's output, which is the problem the
@@ -1149,6 +1213,7 @@ async fn handle_command(
     provider_cfg: &mut config::ProviderConfig,
     printer: &Printer<'_>,
     reader: &InputReader,
+    viewer: &mut Option<web::Viewer>,
 ) -> Result<Flow> {
 
     // Colour codes as this terminal should show them: the names below shadow the
@@ -1189,6 +1254,7 @@ async fn handle_command(
   /archive <n|id>       file one away, out of the list
   /delete <n|id>        delete one
   /new                  start a fresh conversation
+  /web [port]           open the browser view of this conversation
   /reload               re-read the config file (after editing it yourself)
   !<command>            run a shell command without the model
 {dim}while the model is working{reset}
@@ -1200,6 +1266,47 @@ async fn handle_command(
   Config file: {reset}{}",
                 config::config_path().display()
             ));
+        }
+
+        // The browser view, opened from inside a conversation.
+        //
+        // This is the way a person actually reaches for it: `--web` has to be decided before
+        // the run starts, and the moment you want a real renderer is thirty seconds into an
+        // answer that is scrolling past faster than you can read. Reported as a bug in
+        // exactly that shape -- `--web` typed at the prompt, which is a flag and not a
+        // command, so it went to the model and came back as a sentence about web modes.
+        "/web" => {
+            let port = match arg {
+                "" => 0,
+                _ => match arg.parse::<u16>() {
+                    Ok(port) => port,
+                    Err(_) => {
+                        printer.term().line(format_args!(
+                            "{red}/web takes a port number or nothing{reset} — got {arg:?}"
+                        ));
+                        return Ok(Flow::Continue);
+                    }
+                },
+            };
+            let asked = viewer.get_or_insert_with(|| {
+                web::Viewer::asked(0, agent.session_path())
+            });
+            match asked.open(port).await {
+                Ok(url) => {
+                    printer
+                        .term()
+                        .line(format_args!("{} {url}", printer.dim("web:")));
+                }
+                // Not fatal, unlike `--web`: there the view was the whole point of the run,
+                // and here it is one thing the user asked for that did not work out. Taking
+                // a conversation down over a busy port would be the worse answer.
+                Err(e) => {
+                    printer.term().line(format_args!(
+                        "{} {e:#}",
+                        printer.style(RED, "web:")
+                    ));
+                }
+            }
         }
 
         "/provider" => {
@@ -1696,6 +1803,9 @@ async fn handle_command(
             // all and no sign that anything was wrong: the REPL looked normal, and the
             // answers just got worse.
             new_agent.splice_loaded_history(cfg, &cwd, loaded.messages);
+            if let Some(viewer) = viewer.as_mut() {
+                viewer.follow(new_agent.session_path());
+            }
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -1731,6 +1841,9 @@ async fn handle_command(
             )?);
             let new_agent =
                 agent::Agent::new(cfg, provider, agent.readonly(), agent.cwd().clone(), writer);
+            if let Some(viewer) = viewer.as_mut() {
+                viewer.follow(new_agent.session_path());
+            }
             let state = if target.resolved_key().trim().is_empty()
                 && !is_local_endpoint(&target.base_url)
             {
@@ -1811,6 +1924,11 @@ async fn handle_command(
             )?);
             let new_agent =
                 agent::Agent::new(cfg, provider, agent.readonly(), agent.cwd().clone(), writer);
+            // Before the browser is told, so a page that re-reads on the `reset` reads the
+            // file this run is about to write rather than the one it just left.
+            if let Some(viewer) = viewer.as_mut() {
+                viewer.follow(new_agent.session_path());
+            }
             printer.term().line(format_args!("started a new session"));
             return Ok(Flow::NewAgent(new_agent, provider_cfg.clone()));
         }
@@ -2506,6 +2624,7 @@ fn print_help(color: bool, term: &Term) {
   --readonly          refuse writes and mutating commands
   --json              with -p: write the run as NDJSON on stdout
   --web               also serve a browser view of this run on 127.0.0.1
+                      (/web opens the same thing from inside a conversation)
   --port <n>          the port for --web (default 0: any free one)
   --cwd <dir>         working directory for tools
   --no-color          disable ANSI colour (also honours NO_COLOR)
