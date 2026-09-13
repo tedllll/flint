@@ -25,8 +25,12 @@ measured machine:
 | `DOCUMENTED` | stated by a specification or by MDN, linked |
 | `UNVERIFIED` | reasoning that has not been tried in a browser |
 
-**Nothing in this file has been run in a browser.** That is the first thing to fix, and §10
-says how.
+**Some of this file has now been run in a browser.** §9 step 2's viewer was rendered in
+headless Chrome and looked at, and §11 records what that measured. It is a weaker thing than
+a test and a stronger thing than reasoning: it immediately found a defect that no amount of
+reading would have. Everything about the *listener* — §4's boundary, §6's routes, and every
+question about backpressure and reconnection — is still unmeasured, because the listener does
+not exist yet.
 
 ---
 
@@ -274,3 +278,21 @@ The page cannot be unit-tested by `cargo test`, so the tests go around it rather
 What stays uncovered is the DOM, and the honest response is to keep the JS small enough to
 read in one sitting and to record what was measured in §9 step 7, in the style of
 [`docs/windows.md`](windows.md): labelled, dated, and not confused with a test.
+
+## 11. What has been measured
+
+In the style of [`windows.md`](windows.md): labelled, dated, and not confused with a test.
+Everything here was measured on macOS with headless Chrome at 1100px, against the viewer of
+§9 step 2 with a fixture session file. The *logic* of the renderer is tested — it is the half
+that touches no DOM, and `scripts/web-view-test.js` runs it under Node with fifteen
+assertions. What follows is the part no test in this repository reaches.
+
+| Claim | How | Result |
+|---|---|---|
+| The transcript reads in the order it happened | fixture session file, one screenshot | instructions, user, thinking, the tool call, the answer — in that order |
+| The instructions must be collapsed | the first render had them expanded | **a defect, found here:** the system prompt is a few thousand characters and pushed the whole conversation off the first screen. The terminal does not print it for the same reason. Fixed, and re-measured |
+| A tool call is legible while collapsed | screenshot | the summary carries the name and the arguments, so a collapsed call still says what it was aimed at |
+| Multi-line answers keep their shape | a three-paragraph answer with an indented line | preserved, `pre-wrap`, no reflow of the indentation |
+| A narrow window | **not measured** | 1100px is what the fixture was taken at; nothing below it has been looked at |
+| A long turn, and backpressure | **not measured** | needs `GET /events`, which does not exist |
+| Reconnect after a sleep, replaying exactly once | **not measured** | needs `Last-Event-ID`, which does not exist |

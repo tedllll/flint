@@ -437,10 +437,22 @@ function paint(doc) {
       root.appendChild(box);
       continue;
     }
+    if (block.kind === "system") {
+      // Collapsed, and for the same reason the terminal does not print it: the
+      // instructions are a few thousand characters that are nearly the same in every
+      // session, so expanded they push the actual conversation off the first screen. They
+      // are in the document because "what was the model actually told" is one of the
+      // questions this page exists to answer -- and this was measured rather than
+      // assumed: the first version painted it open, and one screenshot was enough.
+      const box = el("details", "system");
+      box.appendChild(el("summary", "", "instructions"));
+      box.appendChild(el("div", "body", block.text));
+      root.appendChild(box);
+      continue;
+    }
     const turn = el("div", "turn " + block.kind);
     if (block.kind === "user") turn.appendChild(el("div", "who", "you"));
     if (block.kind === "assistant") turn.appendChild(el("div", "who", "flint"));
-    if (block.kind === "system") turn.appendChild(el("div", "who", "instructions"));
     if (block.reasoning) {
       const r = el("details", "reasoning");
       r.appendChild(el("summary", "", "thinking"));
