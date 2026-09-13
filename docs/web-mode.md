@@ -268,6 +268,25 @@ In order, each one its own commit. Everything before step 4 is useful on its own
 5. **Live** — `GET /events`: the same `ndjson::Sink` output, framed as SSE, with `id:` and
    `Last-Event-ID`. The test asserts the frames parse as NDJSON and that the terminal still
    sees the same turn.
+
+   **This step and the `status` event are one commit, and the reason is worth knowing before
+   starting.** The browser needs to be told what the turn is waiting for — without it, a
+   browser shows nothing at all between `turn.started` and the first delta, which with a
+   local model is minutes and reads as a hung program. The phase is decided in `run_turn`,
+   which today calls `printer.term().activity_started/named(...)` directly, so sharing one
+   source of truth means:
+
+   - a `Live` handle (a broadcast channel plus an `ndjson::Sink`) threaded into `run_turn`;
+   - the turn's event closure feeding that sink as well as the terminal, which is also what
+     `GET /events` relays — so one channel carries both the status and the stream;
+   - `Term::activity_started` and `Term::activity_named` returning whether the clock
+     actually restarted, so the event reports what happened rather than what a caller
+     guessed. The browser's clock has to start over exactly when the terminal's does, and
+     only `Term` knows that (`activity_started` deliberately keeps the original start time
+     for a repeated name, and `activity_named` deliberately does nothing when no wait is
+     running).
+   - a `status` event carrying `restarted`, because a *rename* — `waiting for the model` to
+     `writing the answer` thirty seconds in — must not reset the browser's clock to zero.
 6. **Input** — `POST /message` into `InputMsg::Line`, through the steering path, with its own
    test: a message typed into the browser steers a turn that is already running.
 7. **Measure, and write it down here** — what a long turn does to the browser (backpressure,
