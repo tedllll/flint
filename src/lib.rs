@@ -15,3 +15,4 @@ pub mod session;
 pub mod term;
 pub mod tools;
 pub mod util;
+pub mod web;

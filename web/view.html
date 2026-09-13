@@ -1,0 +1,515 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>flint — a session</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  One file, no build step, no external request. This is the renderer for a flint
+  conversation at three levels, and it is deliberately the same file at all of them:
+
+    L1  drop a ~/.flint/sessions/*.jsonl on it
+    L2  fed by `flint --web` over GET /session and GET /events
+    L3  ...and POST /message, which is the same document again
+
+  Two rules hold it together.
+
+  Nothing from the model goes in as markup. Tool output is attacker-influenced text --
+  a file's contents, a program's stderr, a fetched page -- so every piece of it is set
+  through textContent, and there is no Markdown renderer. A renderer is a parser, a
+  parser is a dependency, and one that emits HTML is a script-injection hole in a
+  program that can run commands.
+
+  It understands two vocabularies, because it is fed by two sources. A session file is
+  one *message* per line (`meta`, `chat`, `usage`, `title`); the NDJSON stream that
+  `flint -p --json` writes and `--web` relays is one *event* per line. Note that `usage`
+  is a type in both with different shapes, which is the kind of thing that is only
+  obvious once it is written down.
+
+  An unknown type is skipped in silence, and a known type that will not parse is shown
+  as damage -- the same two rules the session format asks of any reader.
+-->
+<style>
+  :root {
+    --bg: #14161a;
+    --fg: #d6dae0;
+    --dim: #8b939f;
+    --line: #262a31;
+    --user: #7aa2f7;
+    --ok: #86c88a;
+    --bad: #e5837c;
+    --warn: #d9b06a;
+    --panel: #1b1e24;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.55 ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  header {
+    position: sticky; top: 0; z-index: 2;
+    background: var(--bg);
+    border-bottom: 1px solid var(--line);
+    padding: 10px 18px 8px;
+  }
+  h1 { font-size: 15px; margin: 0 0 4px; font-weight: 600; }
+  .meta { color: var(--dim); font-size: 12.5px; word-break: break-all; }
+  .meta span { margin-right: 14px; white-space: nowrap; }
+  main { padding: 14px 18px 45vh; max-width: 110ch; }
+  .drop {
+    border: 1px dashed var(--line); border-radius: 8px;
+    padding: 28px 18px; margin: 14px 18px; color: var(--dim); text-align: center;
+  }
+  .drop.over { border-color: var(--user); color: var(--fg); }
+  .drop button {
+    font: inherit; color: var(--user); background: none; border: 0;
+    padding: 0; cursor: pointer; text-decoration: underline;
+  }
+  .turn { border-top: 1px solid var(--line); margin-top: 16px; padding-top: 12px; }
+  .turn:first-child { border-top: 0; margin-top: 0; }
+  .who { color: var(--dim); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
+  .user .body { color: var(--user); }
+  .body { white-space: pre-wrap; word-wrap: break-word; margin: 2px 0 0; }
+  .reasoning { color: var(--dim); font-style: italic; }
+  details {
+    border: 1px solid var(--line); border-radius: 6px;
+    margin: 8px 0; background: var(--panel);
+  }
+  summary {
+    cursor: pointer; padding: 6px 10px; color: var(--dim); font-size: 13px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  summary .name { color: var(--fg); }
+  summary .bad { color: var(--bad); }
+  summary .ok { color: var(--ok); }
+  details[open] > summary { border-bottom: 1px solid var(--line); }
+  details > pre {
+    margin: 0; padding: 10px; overflow-x: auto; white-space: pre-wrap;
+    word-wrap: break-word; font-size: 13px; max-height: 60vh; overflow-y: auto;
+  }
+  .notice { color: var(--warn); font-size: 13.5px; margin: 8px 0; }
+  .notice.error { color: var(--bad); }
+  .notice.damage { color: var(--bad); border-left: 2px solid var(--bad); padding-left: 8px; }
+  #status {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 2;
+    background: var(--panel); border-top: 1px solid var(--line);
+    color: var(--dim); font-size: 13px; padding: 6px 18px;
+  }
+  #status b { color: var(--fg); font-weight: 600; }
+  .empty { color: var(--dim); }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">flint</h1>
+  <div class="meta" id="meta"></div>
+</header>
+
+<div class="drop" id="drop">
+  Drop a session <code>.jsonl</code> here — or
+  <button id="pick" type="button">choose one</button>.
+  <input type="file" id="file" accept=".jsonl,.json,application/jsonl,text/plain" hidden>
+</div>
+
+<main id="transcript"><p class="empty">Nothing loaded yet.</p></main>
+<div id="status" hidden></div>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------------------
+// The model: lines in, a document out. No DOM here, on purpose.
+//
+// `scripts/web-view-test.js` runs exactly this half under Node, because a viewer whose
+// only test is "the file contains no markup assignment" is a viewer nobody has run. Keeping
+// the two vocabularies apart from the painting is what makes that possible.
+// ---------------------------------------------------------------------------
+
+// Both vocabularies at once. A type in here that will not parse is damage; a type that is
+// not in here belongs to another build and is skipped in silence.
+const KNOWN = new Set([
+  // A session file: ~/.flint/sessions/<id>.jsonl
+  "meta", "chat", "usage", "title",
+  // The NDJSON stream: `flint -p --json`, relayed by `--web`
+  "session.started", "turn.started", "message.delta", "reasoning.delta",
+  "message.completed", "tool.started", "tool.args", "tool.completed",
+  "warning", "turn.completed", "error", "status",
+]);
+
+function newDoc() {
+  return { meta: {}, title: "", usage: null, status: "", blocks: [] };
+}
+
+function push(doc, block) {
+  doc.blocks.push(block);
+  return block;
+}
+
+// The assistant message the deltas are currently arriving into, if any.
+function currentAnswer(doc) {
+  const last = doc.blocks[doc.blocks.length - 1];
+  return last && last.kind === "assistant" && last.open ? last : null;
+}
+
+function toolById(doc, id) {
+  for (let i = doc.blocks.length - 1; i >= 0; i--) {
+    if (doc.blocks[i].kind === "tool" && doc.blocks[i].id === id) return doc.blocks[i];
+  }
+  return null;
+}
+
+function text(value) {
+  return typeof value === "string" ? value : "";
+}
+
+/// One already-parsed event object. Returns nothing; the document is mutated.
+function applyEvent(doc, ev) {
+  switch (ev.type) {
+    // ---- a session file -----------------------------------------------------
+    case "meta":
+      doc.meta = { id: ev.id, created: ev.created, cwd: ev.cwd, provider: ev.provider, model: ev.model };
+      return;
+
+    case "title":
+      doc.title = text(ev.name);           // the last title in the file is the one in force
+      return;
+
+    case "chat": {
+      const m = ev.message;
+      if (!m || typeof m.role !== "string") {
+        push(doc, { kind: "damage", text: "a chat line with no message role" });
+        return;
+      }
+      if (m.role === "system") {
+        push(doc, { kind: "system", text: text(m.content) });
+      } else if (m.role === "user") {
+        push(doc, { kind: "user", text: text(m.content) });
+      } else if (m.role === "assistant") {
+        if (text(m.content) || text(m.reasoning)) {
+          push(doc, { kind: "assistant", text: text(m.content), reasoning: text(m.reasoning), open: false });
+        }
+        // The calls are placed where they were asked for; the results arrive later as
+        // their own `tool` messages and are matched back by id, so the file order is the
+        // reading order.
+        for (const call of m.tool_calls || []) {
+          push(doc, {
+            kind: "tool", id: call && call.id, name: callName(call),
+            args: callArgs(call), output: "", ok: true, done: false,
+          });
+        }
+      } else if (m.role === "tool") {
+        const slot = toolById(doc, m.tool_call_id);
+        if (slot) {
+          slot.output = text(m.content);
+          slot.done = true;
+        } else {
+          // A trimmed file, or a result whose call was dropped. Showing it is better than
+          // losing it: the format explicitly allows hand-editing.
+          push(doc, {
+            kind: "tool", id: m.tool_call_id, name: "(unmatched result)",
+            args: "", output: text(m.content), ok: true, done: true,
+          });
+        }
+      } else {
+        push(doc, { kind: "damage", text: "a chat line with an unknown role: " + m.role });
+      }
+      return;
+    }
+
+    // ---- the NDJSON stream --------------------------------------------------
+    case "session.started":
+      doc.meta = { id: ev.session, cwd: ev.cwd, model: ev.model };
+      return;
+
+    case "turn.started":
+      push(doc, { kind: "user", text: text(ev.prompt) });
+      return;
+
+    case "message.delta": {
+      let answer = currentAnswer(doc);
+      if (!answer) {
+        answer = push(doc, { kind: "assistant", text: "", reasoning: "", open: true });
+      }
+      answer.text += text(ev.text);
+      return;
+    }
+
+    case "reasoning.delta": {
+      let answer = currentAnswer(doc);
+      if (!answer) {
+        answer = push(doc, { kind: "assistant", text: "", reasoning: "", open: true });
+      }
+      answer.reasoning += text(ev.text);
+      return;
+    }
+
+    case "message.completed": {
+      const answer = currentAnswer(doc);
+      if (answer) {
+        // Only a block the deltas never filled is given this text, and the reason is
+        // worth stating: `message.completed` carries the whole *turn* -- every round
+        // concatenated, because the sink accumulates across a turn -- while the deltas
+        // arrive round by round. Writing it into the last block would pull the first
+        // round's narration down past the tool calls that happened in between, and the
+        // transcript would no longer say what happened in what order.
+        if (!answer.text) answer.text = text(ev.text);
+        answer.open = false;
+      } else if (text(ev.text)) {
+        push(doc, { kind: "assistant", text: text(ev.text), reasoning: "", open: false });
+      }
+      return;
+    }
+
+    case "tool.started":
+      push(doc, {
+        kind: "tool", id: ev.id, name: text(ev.name), args: "",
+        output: "", ok: true, done: false,
+      });
+      return;
+
+    case "tool.args": {
+      const slot = toolById(doc, ev.id);
+      if (slot) {
+        slot.args = text(ev.arguments);
+        if (text(ev.name)) slot.name = text(ev.name);
+      } else {
+        push(doc, {
+          kind: "tool", id: ev.id, name: text(ev.name), args: text(ev.arguments),
+          output: "", ok: true, done: false,
+        });
+      }
+      return;
+    }
+
+    case "tool.completed": {
+      const slot = toolById(doc, ev.id);
+      if (slot) {
+        slot.output = text(ev.output);
+        slot.ok = ev.ok !== false;
+        slot.done = true;
+      } else {
+        push(doc, {
+          kind: "tool", id: ev.id, name: text(ev.name), args: "",
+          output: text(ev.output), ok: ev.ok !== false, done: true,
+        });
+      }
+      return;
+    }
+
+    case "status":
+      doc.status = text(ev.text);
+      return;
+
+    case "turn.completed":
+      doc.status = "";
+      for (const b of doc.blocks) if (b.kind === "assistant") b.open = false;
+      return;
+
+    // `usage` is a type in both vocabularies and the numbers sit in different places:
+    // a session file wraps them (`{"type":"usage","usage":{...}}`) and the stream does
+    // not. Reading whichever is there costs one line and is the whole reason this is
+    // commented rather than clever.
+    case "usage":
+      doc.usage = ev.usage && typeof ev.usage === "object" ? ev.usage : ev;
+      return;
+
+    case "warning":
+      push(doc, { kind: "notice", level: "warning", text: text(ev.message) });
+      return;
+
+    case "error":
+      push(doc, { kind: "notice", level: "error", text: text(ev.message) });
+      return;
+
+    default:
+      return;   // another build's event: skipped in silence, by the format's own rule
+  }
+}
+
+function callName(call) {
+  return call && call.function && typeof call.function.name === "string" ? call.function.name : "";
+}
+
+// The arguments are a *string* on the wire -- that is how providers stream them -- so they
+// are shown as one rather than re-serialised. Deliberately not reduced to a per-tool
+// summary: `display.rs` in the terminal owns that decision, and a second implementation
+// here would disagree with it about which argument names the call.
+function callArgs(call) {
+  return call && call.function && typeof call.function.arguments === "string" ? call.function.arguments : "";
+}
+
+/// Parse one line into the document. Returns nothing: damage becomes a block, not a throw.
+function applyLine(doc, line) {
+  const trimmed = line.trim();
+  if (!trimmed) return;
+  let ev;
+  try {
+    ev = JSON.parse(trimmed);
+  } catch (e) {
+    push(doc, { kind: "damage", text: "a line that is not JSON: " + clip(trimmed, 200) });
+    return;
+  }
+  if (!ev || typeof ev.type !== "string") {
+    push(doc, { kind: "damage", text: "a line with no type: " + clip(trimmed, 200) });
+    return;
+  }
+  applyEvent(doc, ev);
+}
+
+/// A whole file, or a whole stream: one object per line, and never anything else.
+function applyText(doc, whole) {
+  for (const line of whole.split("\n")) applyLine(doc, line);
+  return doc;
+}
+
+function clip(s, n) {
+  return s.length > n ? s.slice(0, n) + "…" : s;
+}
+
+// ---------------------------------------------------------------------------
+// The view: a document in, elements out. Every text goes in through textContent.
+// ---------------------------------------------------------------------------
+
+function el(tag, className, textContent) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (textContent !== undefined) node.textContent = textContent;
+  return node;
+}
+
+/// One line describing a tool call, without interpreting its arguments.
+function toolSummary(block) {
+  const parts = [];
+  parts.push(el("span", "name", block.name || "(tool)"));
+  if (block.args) parts.push(document.createTextNode(" " + clip(block.args.replace(/\s+/g, " "), 160)));
+  return parts;
+}
+
+function toolBlock(block) {
+  const box = el("details", "tool");
+  const summary = el("summary");
+  summary.appendChild(el("span", block.ok ? "ok" : "bad", block.done ? (block.ok ? "✓ " : "✗ ") : "… "));
+  for (const part of toolSummary(block)) summary.appendChild(part);
+  box.appendChild(summary);
+  if (block.args) box.appendChild(el("pre", "", block.args));
+  if (block.output) box.appendChild(el("pre", "", block.output));
+  return box;
+}
+
+function paint(doc) {
+  document.getElementById("title").textContent = doc.title || "flint";
+  const meta = document.getElementById("meta");
+  meta.textContent = "";
+  const m = doc.meta || {};
+  for (const [label, value] of [
+    ["model", m.model], ["cwd", m.cwd], ["provider", m.provider],
+    ["id", m.id], ["created", m.created],
+  ]) {
+    if (value) meta.appendChild(el("span", "", label + " " + value));
+  }
+  if (doc.usage) {
+    const p = doc.usage.prompt_tokens, c = doc.usage.completion_tokens;
+    if (p !== undefined || c !== undefined) {
+      meta.appendChild(el("span", "", "tokens " + (p || 0) + "+" + (c || 0)));
+    }
+  }
+
+  const root = document.getElementById("transcript");
+  root.textContent = "";
+  if (!doc.blocks.length) {
+    root.appendChild(el("p", "empty", "Nothing loaded yet."));
+  }
+  for (const block of doc.blocks) {
+    if (block.kind === "tool") {
+      root.appendChild(toolBlock(block));
+      continue;
+    }
+    if (block.kind === "notice") {
+      root.appendChild(el("div", "notice " + (block.level || ""), block.text));
+      continue;
+    }
+    if (block.kind === "damage") {
+      const box = el("div", "notice damage");
+      box.appendChild(el("b", "", "damaged line — "));
+      box.appendChild(document.createTextNode(block.text));
+      root.appendChild(box);
+      continue;
+    }
+    const turn = el("div", "turn " + block.kind);
+    if (block.kind === "user") turn.appendChild(el("div", "who", "you"));
+    if (block.kind === "assistant") turn.appendChild(el("div", "who", "flint"));
+    if (block.kind === "system") turn.appendChild(el("div", "who", "instructions"));
+    if (block.reasoning) {
+      const r = el("details", "reasoning");
+      r.appendChild(el("summary", "", "thinking"));
+      r.appendChild(el("div", "body", block.reasoning));
+      turn.appendChild(r);
+    }
+    turn.appendChild(el("div", "body", block.text));
+    root.appendChild(turn);
+  }
+
+  const status = document.getElementById("status");
+  if (doc.status) {
+    status.textContent = "";
+    status.appendChild(el("b", "", "flint"));
+    status.appendChild(document.createTextNode("  " + doc.status));
+    status.hidden = false;
+  } else {
+    status.hidden = true;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Wiring. L1 only: a dropped file. `--web` feeds the same model from `/session`.
+// ---------------------------------------------------------------------------
+
+const doc = newDoc();
+
+function load(whole) {
+  const fresh = newDoc();
+  applyText(fresh, whole);
+  doc.meta = fresh.meta;
+  doc.title = fresh.title;
+  doc.usage = fresh.usage;
+  doc.blocks = fresh.blocks;
+  paint(doc);
+  document.getElementById("drop").hidden = true;
+}
+
+function readFile(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => load(String(reader.result));
+  reader.readAsText(file);
+}
+
+if (typeof document !== "undefined" && document.getElementById) {
+  const drop = document.getElementById("drop");
+  const picker = document.getElementById("file");
+  document.getElementById("pick").addEventListener("click", () => picker.click());
+  picker.addEventListener("change", () => readFile(picker.files[0]));
+  for (const name of ["dragenter", "dragover"]) {
+    drop.addEventListener(name, (e) => { e.preventDefault(); drop.classList.add("over"); });
+  }
+  for (const name of ["dragleave", "drop"]) {
+    drop.addEventListener(name, (e) => { e.preventDefault(); drop.classList.remove("over"); });
+  }
+  drop.addEventListener("drop", (e) => {
+    const item = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    readFile(item);
+  });
+  document.addEventListener("dragover", (e) => e.preventDefault());
+  document.addEventListener("drop", (e) => e.preventDefault());
+  paint(doc);
+}
+
+// For the Node test in scripts/web-view-test.js, and for the page's own console.
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = { newDoc, applyLine, applyText, applyEvent };
+}
+</script>
+</body>
+</html>
