@@ -76,6 +76,11 @@ impl ToolBox {
             Box::new(GlobTool { cwd: cwd.clone() }),
             Box::new(GrepTool { cwd: cwd.clone() }),
         ];
+        // Always offered: reading a URL needs no credential, and this is the safe path to
+        // the open web -- the alternative is `bash` and `curl`, which puts a page's raw
+        // markup against the output budget and shows the model `<head>`. It is a boundary
+        // around *this tool* and not around flint: `bash` reaches whatever the machine can.
+        tools.push(Box::new(crate::fetch::FetchTool::new(config.proxy.clone())));
         // Offered only when it can actually search. A tool that always fails costs a schema
         // on every request and teaches the model that this tool is broken; the reason it is
         // missing is said once at startup instead (`search::Availability::Unavailable`).

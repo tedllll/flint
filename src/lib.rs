@@ -10,6 +10,7 @@ pub mod ndjson;
 pub mod patch;
 pub mod display;
 pub mod event;
+pub mod fetch;
 pub mod provider;
 pub mod search;
 pub mod session;
