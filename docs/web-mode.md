@@ -454,6 +454,22 @@ textarea, dispatch the events a person's typing produces, and then look at what 
 The three defects are the reason this section exists. None of them is visible in the source: the
 first two need a turn to be in flight, and the third needs a window with a status line in it.
 
+**A harness trap that reaches outside the terminal, and cost the most time of anything here.**
+`--web` and `/web` open a browser — that is what they are for. A harness that runs flint therefore
+opens a tab in the browser of whoever is sitting at the machine, once per run, and the person at
+the keyboard has no way to know they are looking at a scratch instance with `FLINT_HOME` under
+`/tmp` rather than at their own flint. That is exactly what happened: several tabs, someone
+clicking around in one of them, and a report of extra conversations that sent me looking for a bug
+in `/new` for a while. There was none — the conversations had been made by hand, in a directory the
+harness owned.
+
+So: **replace `open` on `PATH` with a script that records its argument** before any run that has a
+browser in it. One line of setup, and it is the same trick the opener row above uses to measure
+the launcher without a window appearing. Two further traps are already written down — a driver
+that stops reading the pty deadlocks the program under test the moment it writes a streamed
+answer (HANDOFF), and in raw mode `\n` is Ctrl-J rather than Enter (below) — but this is the only
+one whose damage lands on somebody else's screen.
+
 ### `/web` from a real session — measured in a pty, on the release binary
 
 The two ways into L2 were driven end to end rather than reasoned about: a pty (a pipe cannot
