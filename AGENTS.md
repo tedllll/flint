@@ -41,7 +41,7 @@ whoever is changing the code — a person or a model driving it.
 | `tests/` | `agent_loop` (stub provider), `cli_output` (real binary, raw bytes), `term_capture` (byte-exact terminal) |
 | `scripts/` | Node replay tools: `vtscreen.js`, `term-layout-test.js`, `layout-trace.js` |
 | `docs/windows.md` | field notes on Windows terminal behaviour; read before touching layout |
-| `docs/windows-tooling.md` | the settled, unimplemented plan for command-line escaping on Windows; read before touching `probe_shell` or adding a tool |
+| `docs/windows-tooling.md` | the plan for command-line escaping on Windows, half built (`exec` and the shared runner are in; the PowerShell half needs a Windows session); read before touching `probe_shell` or adding a tool |
 | `docs/session-format.md` | the session file format, for readers and for hand-editing |
 | `docs/web-mode.md` | the settled, unimplemented plan for the browser view over a running flint; read before touching the listener or the page |
 | `docs/decisions.md` | why flint is built this way, decision by decision |
@@ -123,8 +123,10 @@ model asks for runs as your user, with your environment, on your machine, immedi
 
 The only switch is `readonly` (`/readonly`, or in the config), and it is all-or-nothing: it
 refuses `write`, `edit`, `apply_patch` and mutating shell commands, while still allowing
-inspection. Useful for a first look around an unfamiliar machine; not a safety net for
-ordinary work.
+inspection. For `exec` it refuses any program that is not inspection only, judged from the
+program and its verb rather than from a command line — see `exec_is_readonly` and
+`is_readonly_words` in `src/tools.rs`. Useful for a first look around an unfamiliar machine;
+not a safety net for ordinary work.
 
 The read-before-mutate gate — `write`, `edit` and patch updates refuse a file this run has
 not read, or one that changed since it was read — is a guard against *mistakes*, not a
@@ -155,6 +157,13 @@ cargo test                      # the lib, the loop, raw CLI bytes, the terminal
 cargo clippy --all-targets      # expected to be silent, and worth keeping that way
 node scripts/term-layout-test.js
 ```
+
+`flint debug prompt-input` prints the request body that would be sent — system prompt,
+history, tool schemas — without sending it or needing a key. It is built by the same
+`provider::request_body` the client posts, so it is the honest way to check what the model is
+actually given after changing the prompt, a tool schema or the request-side pruning. The
+request is *not* the transcript: the session file keeps every byte, and pruning drops stale
+tool output from the request only.
 
 `HANDOFF.md` has the current counts and the state of the tree as the last session left it;
 the count in this file would only be a date. Keep the tests honest instead: write the test

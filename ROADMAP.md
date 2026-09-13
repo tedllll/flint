@@ -53,34 +53,56 @@ staleness. Honest truncation that keeps both ends and spills the whole answer to
 reporting it as missing or quietly ignoring it. A non-blocking note at the 3rd, 5th and 8th
 identical call in one turn.
 
-### 4. Machine-readable runs — **started**
+### 4. Machine-readable runs — **done**
 
 `flint -p "..." --json` writes the run as one JSON object per line on stdout, and nothing
 else goes there. The session file is still written, so a streamed run resumes like any
 other. Reference: the README section, and `src/ndjson.rs`.
 
-**Left in this stream: `debug prompt-input`.** Print exactly what would be sent — system
-prompt, history, tool schemas — without sending it. It wants the request body built by the
-same function the client uses, extracted from `provider.rs`, rather than a second copy of
-the serialisation that can drift from the real one. The temptation to write a "quick"
-duplicate is the whole risk of this item.
+`debug prompt-input` finishes the stream, and answers the question it cannot: the request is
+**not** the transcript, because request-side pruning drops stale tool output the session file
+keeps forever. It prints the body the client would post and sends nothing, built by
+`provider::request_body` — the one place the request is serialised, which is what stops the
+preview from describing something that is not sent. A test runs a turn against the stub
+provider and requires the preview to equal the bytes the server received.
 
 ## Next
 
-### 5. The Windows command line — **settled, not implemented**
+### 5. The Windows command line — **step 1, 2 and one fix done; the rest needs the machine**
 
 [`docs/windows-tooling.md`](docs/windows-tooling.md) is the full design: why a command
 string loses quotes and backslashes, what a tool can and cannot delete from the problem, and
-five commits in order — extract `run_program_streaming`, add `exec` (arguments as an array),
-add `pwsh` (script to a BOM'd `.ps1`, in through `-File`), the three small fixes
-(`\` normalisation in `glob`/`grep`, process-tree kill, child output encoding), then the
-PowerShell facts in the system prompt.
+five commits in order.
 
-This is first because the failures it addresses are **silent**: the model sends a command,
-a character disappears, and nothing anywhere says so, so it never learns. It is also the
-stream where the design work is already done and each commit is independently verifiable.
-Two places need a real Windows session before code is written — §6.6 and the `-File`
-execution-policy wrinkle — and both are marked as such in the document.
+**Done, and verifiable off Windows:**
+
+- the shared runner: `run_program_streaming` is the implementation, `BashTool` its special
+  case, so the timeout, the progress reporting, the spill and the kill have one owner;
+- **`exec`** — a program and its arguments as an array, on every platform rather than
+  Windows only, with `stdin` for payloads that are not arguments. This is the largest single
+  item in the queue and the one that deletes the most of the problem rather than working
+  around it;
+- the `\` separator fix in `glob`/`grep` (§6.3), which was a wrong answer rather than an
+  error — the expensive kind — and which the document itself described incorrectly in two of
+  the three places it named.
+
+**Left, and it wants a real Windows session before any code is written:**
+
+- `pwsh`, the script handed over as a BOM'd `.ps1` through `-File` (§4.2) — the
+  execution-policy wrinkle is unresolved;
+- the process-tree kill (§6.1) and the child output encoding (§6.2), both Windows-only
+  behaviour that cannot be observed from a Unix machine;
+- the PowerShell facts in the system prompt (§6.9);
+- §6.6's reserved names, trailing dots and long paths.
+
+The two Windows assertions that would matter most are also unwritten for the same reason:
+that an argument survives the round trip, and that killing a command kills its children.
+
+**If the session is not on Windows, do not start 5's remainder — start 6 or 7.** The order
+below is the order for a Windows machine. 6 and 7 are platform-independent, and each is a
+larger piece of work than anything left in 5, so waiting for the right machine to do the
+small item first is the wrong trade. What 5's remainder needs is written down in full,
+labelled, and waiting; what 6 and 7 need is a session with room to hold a design in mind.
 
 ### 6. The transcript as cells — **designed, not implemented**
 
