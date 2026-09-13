@@ -6,6 +6,7 @@
 pub mod agent;
 pub mod config;
 pub mod context;
+pub mod ndjson;
 pub mod patch;
 pub mod display;
 pub mod event;

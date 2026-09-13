@@ -10,7 +10,7 @@
 //! The `exec` mode is the last line of defence: when every provider is
 //! unreachable, flint still runs commands.
 
-use flint::{agent, config, context, display, event, provider, session, term, tools};
+use flint::{agent, config, context, display, event, ndjson, provider, session, term, tools};
 
 use anyhow::{anyhow, Context, Result};
 use display::{Printer, BOLD, CHATTY, DIM, GREEN, NORMAL, QUIET, RED, RESET, YELLOW};
@@ -18,7 +18,7 @@ use display::{Printer, BOLD, CHATTY, DIM, GREEN, NORMAL, QUIET, RED, RESET, YELL
 use display::Palette;
 use event::Event;
 use std::collections::HashMap;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use term::Term;
 
@@ -45,6 +45,11 @@ struct Args {
     model: Option<String>,
     readonly: bool,
     no_color: bool,
+    /// Write the run as NDJSON on stdout instead of prose, for a program to read.
+    ///
+    /// Only meaningful with a prompt: an interactive session has no stream to write, and
+    /// `exec` is plain by contract because its output is the child's own bytes.
+    json: bool,
     list_sessions: bool,
     exec: Option<String>,
     help: bool,
@@ -399,6 +404,20 @@ async fn real_main() -> Result<i32> {
                 .filter(|m| !matches!(m, event::Message::System { .. })),
         );
         *agent.history_mut() = merged;
+    }
+
+    // ---- a run whose output is a stream of JSON objects ----
+    //
+    // Dispatched here, before the terminal exists, because in this mode stdout *is* the
+    // stream and nothing else may touch it: no status row, no warning line, no trailing
+    // `println!()`. Threading a flag through `run_turn` would mean re-deciding every choice
+    // it makes -- the clock, the answer strip, the redraw, the interrupt prompt -- and every
+    // one of them is wrong for a program reading the output.
+    if args.json {
+        let prompt = args.prompt.as_deref().ok_or_else(|| {
+            anyhow!("--json needs a prompt: `flint -p \"...\" --json`. Try --help.")
+        })?;
+        return run_json_turn(&mut agent, &provider_cfg, provider_error.as_deref(), prompt).await;
     }
 
     // The terminal comes first: it decides whether there is an input row to keep
@@ -1674,6 +1693,67 @@ fn ensure_usable(provider_cfg: &config::ProviderConfig) -> Result<()> {
     Ok(())
 }
 
+/// One turn, written as NDJSON on stdout.
+///
+/// The session file is written exactly as in any other run -- the stream is a view of the
+/// turn, not a replacement for the record -- so a `--json` run can be listed, resumed and
+/// read afterwards like anything else.
+///
+/// The one thing this mode does not carry over is the interrupt handling in `run_turn`:
+/// there is no keyboard to press and no strip to prompt on. Ctrl-C ends the process, and
+/// the session file keeps every event that was complete when it did.
+async fn run_json_turn(
+    agent: &mut agent::Agent,
+    provider_cfg: &config::ProviderConfig,
+    provider_error: Option<&str>,
+    prompt: &str,
+) -> Result<i32> {
+    ensure_usable(provider_cfg)?;
+
+    let mut out = std::io::stdout();
+    // Flushed per line: a consumer may be reading the stream as it arrives, and a
+    // block-buffered pipe would deliver the whole run at the end, which is the one thing a
+    // stream must not do.
+    let mut emit = |line: String| {
+        let _ = writeln!(out, "{line}");
+        let _ = out.flush();
+    };
+
+    emit(ndjson::session_started(
+        agent.session_path().as_deref(),
+        agent.cwd(),
+        &provider_cfg.model,
+    ));
+    // A provider that could not be configured is a warning, not a failure: the run may
+    // still work, and saying so on the stream is how a caller learns why nothing came back.
+    if let Some(error) = provider_error {
+        emit(ndjson::warning(error));
+    }
+    emit(ndjson::turn_started(prompt));
+
+    let mut sink = ndjson::Sink::new();
+    let result = agent
+        .run(prompt, |event| {
+            if let Some(line) = sink.line(&event) {
+                emit(line);
+            }
+        })
+        .await;
+
+    match result {
+        Ok(()) => {
+            emit(ndjson::turn_completed(agent.last_usage()));
+            Ok(0)
+        }
+        // The failure goes on the stream as well as the exit code: a caller that reads
+        // stdout should not have to also read stderr to find out what happened.
+        Err(e) => {
+            emit(ndjson::error(&format!("{e:#}")));
+            Ok(1)
+        }
+    }
+}
+
 async fn run_turn(
     agent: &mut agent::Agent,
     provider_cfg: &config::ProviderConfig,
@@ -2037,6 +2117,7 @@ fn parse_args(argv: Vec<String>) -> Result<Args> {
             }
             "--readonly" | "--no-edit" => args.readonly = true,
             "--no-color" => args.no_color = true,
+            "--json" => args.json = true,
             "--list-sessions" => args.list_sessions = true,
             "--name" => {
                 args.name = Some(
@@ -2096,6 +2177,7 @@ fn print_help(color: bool, term: &Term) {
 {b}USAGE{r}
   flint                            interactive session
   flint -p \"<prompt>\"              one-shot, prints the answer and exits
+  flint -p \"<prompt>\" --json       the same run as one JSON object per line
   flint <words...>                 same as -p
   flint --continue                 resume the most recent session
   flint --resume <n|id>            resume a particular session
@@ -2109,6 +2191,7 @@ fn print_help(color: bool, term: &Term) {
   --provider <name>   use a specific provider          (config: default_provider)
   --model <name>      override the model for this run
   --readonly          refuse writes and mutating commands
+  --json              with -p: write the run as NDJSON on stdout
   --cwd <dir>         working directory for tools
   --no-color          disable ANSI colour (also honours NO_COLOR)
   -h, --help          this message

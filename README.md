@@ -148,7 +148,48 @@ input. Ctrl-C clears a half-typed line, and quits when the line is already
 empty. Ctrl-D quits.
 
 Flags: `--provider`, `--model`, `--readonly`, `--cwd`, `--no-color` (or
-`NO_COLOR`), `--continue`, `--name`, `--archive`, `--delete`.
+`NO_COLOR`), `--continue`, `--name`, `--archive`, `--delete`, `--json`.
+
+### Reading a run from a program
+
+`flint -p "..." --json` writes the run as one JSON object per line on stdout, and nothing
+else goes there — no banner, no status row, no summary line — so a script can read the
+stream without filtering prose out of it:
+
+```bash
+flint -p "why is my dsh broken" --json | while read -r line; do
+  echo "$line" | jq -r 'select(.type == "tool.completed") | "\(.name): \(.ok)"'
+done
+```
+
+```json
+{"cwd":"C:\\work","model":"deepseek-chat","session":"C:\\Users\\me\\.flint\\sessions\\1789290-1.jsonl","type":"session.started"}
+{"prompt":"why is my dsh broken","type":"turn.started"}
+{"text":"Let me look.","type":"message.delta"}
+{"id":"call_1","name":"bash","type":"tool.started"}
+{"arguments":"{\"command\":\"dsh --version\"}","id":"call_1","name":"bash","type":"tool.args"}
+{"id":"call_1","name":"bash","ok":true,"output":"1.2.3","type":"tool.completed"}
+{"text":"Let me look. It is version 1.2.3.","type":"message.completed"}
+{"prompt_tokens":1204,"completion_tokens":88,"type":"turn.completed"}
+```
+
+The vocabulary is closed and small: `session.started`, `turn.started`, `message.delta`,
+`reasoning.delta`, `message.completed`, `tool.started`, `tool.args`, `tool.completed`,
+`usage`, `warning`, `turn.completed`, `error`. Three things about it are worth knowing:
+
+- **A line is always a line.** Tool output containing newlines, quotes and escape codes is
+  JSON-escaped, never printed raw, so splitting the stream on `\n` cannot cut an object in
+  half. `message.completed` carries the whole answer, for a reader that would rather not
+  reassemble the fragments.
+- **The stream is a view, not the record.** The session file is written exactly as in any
+  other run, and `session.started` names it, so a `--json` run can be resumed, listed and
+  read afterwards like anything else.
+- **A failure is on the stream too**, as an `error` line plus a non-zero exit code, so a
+  caller reading stdout does not also have to read stderr to find out what happened.
+
+`--json` needs a prompt: an interactive session has no stream to write, and `flint exec`
+is plain by contract because its output is the child's own bytes. Ctrl-C during a `--json`
+run ends the process; the session file keeps every event that was complete.
 
 ## Permissions
 
