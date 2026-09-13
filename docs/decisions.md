@@ -172,6 +172,22 @@ has bought so far: no YAML crate (the front matter of a `SKILL.md` is parsed by 
 date library (`epoch:<seconds>`), no TUI framework beyond crossterm's raw mode, no
 `preserve_order`, and a `reqwest` configured with rustls rather than pulling in OpenSSL.
 
+**The loopback listener is hand-rolled, not `hyper`.** This was `docs/web-mode.md` §7, the
+one question that document deliberately left open, and it is recorded here because it is a
+dependency decision and those live in one place. `hyper`, `hyper-util`, `http-body-util` and
+`tokio-util` are **already in the lock file**, pulled in by `reqwest`, so the usual argument
+against a dependency — build time, binary size, a longer supply chain — does not apply. The
+argument that does is API surface: the routes are four, two of them are a string comparison
+each, and `Connection: close` removes keep-alive, pipelining, chunked encoding and request
+framing from the problem entirely. What is left is reading to a blank line and writing a
+status line. Enabling `tokio`'s `net` feature for it compiles nothing new either: `mio` is
+already there through `process` on Unix, which `Cargo.lock` confirms by not changing.
+
+The counter-argument is real and is not waved away: HTTP has more corners than the `SKILL.md`
+front matter this reasoning is modelled on, and this is the one place in flint that listens
+on a socket. If a route ever needs framing this file does not have, the answer is `hyper` and
+not a hand-rolled chunked decoder.
+
 ## Not doing
 
 Subagents, a permission layer, `flint doctor`, MCP (deferred rather than refused), indexes,

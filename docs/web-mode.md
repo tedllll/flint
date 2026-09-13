@@ -10,8 +10,10 @@ second mode.** flint starts exactly as it does now and additionally serves a vie
 process on loopback. The terminal keeps working. The browser is a client of the process, not
 of a file, and closing the tab loses nothing.
 
-The design here is **settled and not implemented**, with one exception called out in §7.
-The order at the end is the plan.
+**Steps 2 and 3 of §9 are implemented** — the static viewer and the `--web` listener with
+`GET /` — and §7 is now decided. Steps 4 to 6 (`/session`, `/events`, `/message`) are not,
+and §11 records what has been measured in a browser versus what has not. The order at the end
+is the plan.
 
 ## How to read the labels
 
@@ -196,9 +198,16 @@ Four routes. No cookies, no HTTP/2, no TLS, no keep-alive, no streaming request 
 
 ---
 
-## 7. The one open question: hand-rolled HTTP, or `hyper`
+## 7. The one open question: hand-rolled HTTP, or `hyper` — **decided**
 
-Not settled, and the plan does not start until it is. The honest form of it:
+**Hand-rolled, and the decision is recorded in [`decisions.md`](decisions.md#dependencies)
+where the other dependency decisions live.** It went that way for the reason the
+recommendation below gave: the surface is small enough to read in one sitting, `Connection:
+close` deletes the corners we do not need, and `tokio`'s `net` feature compiles nothing new
+because `mio` is already in the lock file. The counter-argument stands as written and is the
+thing to re-read if a route ever needs request framing this file does not have.
+
+The reasoning, kept as it was written before the decision was made:
 
 - **`hyper` is already in the tree.** `Cargo.lock` has `hyper`, `hyper-util`,
   `http-body-util` and `tokio-util` today, pulled in by `reqwest`. A direct dependency would
@@ -244,11 +253,16 @@ In order, each one its own commit. Everything before step 4 is useful on its own
    `AGENTS.md`.
 2. **The static viewer** — `web/view.html`, one file, no build: drop a `.jsonl` on it, render
    the conversation with collapsible tool calls and no external requests. Plus the policy test
-   of §10. Useful immediately, and it is the renderer everything later reuses.
+   of §10. Useful immediately, and it is the renderer everything later reuses. — **done**
 3. **The window in the CLI** — `--web [--port]`, printing the URL and the token; the listener
    with `GET /` only, plus the token, `Host` and `Origin` checks of §4 and their tests. A run
    without `--web` must be byte-identical to today, which the existing terminal tests already
-   assert.
+   assert. — **done**, with two additions worth knowing: the default port is **ephemeral**
+   (`--port 0`), because a fixed one collides with whatever else is on loopback — a local model
+   server on 11434, 1234 or 8080 — and the URL has to be printed anyway; and the responses
+   carry `Content-Security-Policy: default-src 'none'` with `connect-src 'self'`, which makes
+   "loads nothing external". §5's rule, something the browser enforces rather than something a
+   test hopes for.
 4. **History** — `GET /session`, and the viewer switching from a dropped file to a fetch. The
    first commit that needs §7 decided.
 5. **Live** — `GET /events`: the same `ndjson::Sink` output, framed as SSE, with `id:` and

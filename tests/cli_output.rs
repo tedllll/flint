@@ -1048,3 +1048,70 @@ async fn resuming_does_not_send_a_stale_system_prompt() {
         "the loaded conversation was dropped: {sent}"
     );
 }
+
+/// `--web` says where it is serving, and `--port` without it is refused.
+///
+/// The socket tests prove the listener answers correctly; nothing in them can see whether the
+/// CLI ever bound it or ever told anyone where. A flag that is parsed and dropped is the
+/// failure this catches, and it is the one that looks most like success.
+#[cfg(debug_assertions)]
+#[test]
+fn the_web_flag_prints_the_url_it_is_serving() {
+    let home = test_home("cli-web", "http://127.0.0.1:1/v1");
+    let mut child = binary()
+        .args(["--web"])
+        .env("FLINT_HOME", &home)
+        .env("FLINT_TERM_CAPTURE", "1")
+        .env("FLINT_TERM_SIZE", "120x24")
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to run flint");
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().expect("no stdin handle");
+        stdin.write_all(b"/exit\n").expect("failed to write stdin");
+    }
+    let out = child.wait_with_output().expect("flint did not finish");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let _ = std::fs::remove_dir_all(&home);
+
+    let start = text
+        .find("http://127.0.0.1:")
+        .unwrap_or_else(|| panic!("--web printed no URL at all: {text:?}"));
+    let url = &text[start..];
+    let (authority, rest) = url.split_once("/?token=").unwrap_or_else(|| {
+        panic!(
+            "the URL must carry the token in a query string, got {:?}",
+            &url[..url.len().min(80)]
+        )
+    });
+    let port: u16 = authority
+        .trim_start_matches("http://127.0.0.1:")
+        .parse()
+        .unwrap_or_else(|e| panic!("the URL must name a port: {authority:?} ({e})"));
+    assert!(port > 0, "a bound port is never 0, whatever was asked for");
+
+    // The token is the credential, so its shape is worth asserting: 128 bits of hex.
+    let token: String = rest.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+    assert_eq!(
+        token.len(),
+        32,
+        "expected a 32-hex-digit token, got {token:?} in {:?}",
+        &url[..url.len().min(80)]
+    );
+}
+
+/// `--port` on its own is a mistake worth naming rather than ignoring.
+#[test]
+fn a_port_without_web_is_refused() {
+    let (code, out) = run(&["--port", "8080"]);
+    let text = String::from_utf8_lossy(&out);
+    assert_ne!(code, 0, "`--port` alone must not look like success: {text}");
+    assert!(
+        text.contains("--port needs --web"),
+        "the error must say what is missing: {text}"
+    );
+}

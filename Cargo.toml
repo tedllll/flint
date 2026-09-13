@@ -30,6 +30,11 @@ tokio = { version = "1", features = [
     "io-util",
     "io-std",
     "sync",
+    # For the loopback listener behind `--web`. A feature and not a dependency: `mio` is
+    # already in the lock file via `process` on Unix, so this compiles nothing new.
+    # `docs/web-mode.md` §7 is the argument for hand-rolling the HTTP instead of adding
+    # `hyper`, which is also already in the tree.
+    "net",
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -10,7 +10,7 @@
 //! The `exec` mode is the last line of defence: when every provider is
 //! unreachable, flint still runs commands.
 
-use flint::{agent, config, context, display, event, ndjson, provider, session, term, tools};
+use flint::{agent, config, context, display, event, ndjson, provider, session, term, tools, web};
 
 use anyhow::{anyhow, Context, Result};
 use display::{Printer, BOLD, CHATTY, DIM, GREEN, NORMAL, QUIET, RED, RESET, YELLOW};
@@ -52,6 +52,18 @@ struct Args {
     json: bool,
     list_sessions: bool,
     exec: Option<String>,
+    /// Serve a browser view of *this* run on loopback.
+    ///
+    /// A window and not a mode (`docs/web-mode.md` §1): flint starts exactly as it does
+    /// without this, and additionally answers a browser. The terminal keeps working, the
+    /// process stays the only writer of the session file, and closing the tab loses nothing.
+    web: bool,
+    /// The port for that listener. Zero -- the default -- means "whatever is free".
+    ///
+    /// Ephemeral by default because a fixed port collides with whatever else is on loopback
+    /// (a local model server on 11434, 1234 or 8080, most often) and the URL has to be
+    /// printed anyway, so making it guessable buys nothing.
+    port: Option<u16>,
     /// `debug <what>`, the words after the subcommand.
     ///
     /// A namespace rather than a flag per question -- `--debug-prompt-input` would be one
@@ -486,6 +498,23 @@ async fn real_main() -> Result<i32> {
                 sink_term.activity_detail(line);
             }
         }));
+    }
+
+    // ---- the browser window, if it was asked for ----
+    //
+    // Started after the terminal exists, so the URL lands in the transcript where a person
+    // can select it, and before any turn runs, so a message typed into the browser arrives
+    // at a conversation that is already there. A failure to bind is fatal rather than a
+    // warning: `--web` was the whole point of the run, and a run that quietly served
+    // nothing while looking like it worked is the failure this project keeps designing
+    // against.
+    if args.web {
+        let window = web::Window::open(args.port.unwrap_or(0)).await?;
+        printer.term().line(format_args!(
+            "{} {}",
+            printer.dim("web:"),
+            window.url()
+        ));
     }
 
     // A provider that could not be configured is reported now that something can be
@@ -2186,6 +2215,17 @@ fn parse_args(argv: Vec<String>) -> Result<Args> {
             "--readonly" | "--no-edit" => args.readonly = true,
             "--no-color" => args.no_color = true,
             "--json" => args.json = true,
+            "--web" => args.web = true,
+            "--port" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| anyhow!("--port requires a number (0 means any free port)"))?;
+                args.port = Some(
+                    value
+                        .parse()
+                        .map_err(|_| anyhow!("--port needs a number from 0 to 65535, not '{value}'"))?,
+                );
+            }
             "--list-sessions" => args.list_sessions = true,
             "--name" => {
                 args.name = Some(
@@ -2240,6 +2280,15 @@ fn parse_args(argv: Vec<String>) -> Result<Args> {
             }
         }
     }
+
+    // An argument-consistency check, so it belongs with the arguments: a person who typed
+    // `--port 8080` meant to be served something. Ignoring the flag would leave them with a
+    // run that looks like it worked and a browser that cannot connect.
+    if args.port.is_some() && !args.web {
+        return Err(anyhow!(
+            "--port needs --web: it chooses the port the browser view listens on"
+        ));
+    }
     Ok(args)
 }
 
@@ -2270,6 +2319,8 @@ fn print_help(color: bool, term: &Term) {
   --model <name>      override the model for this run
   --readonly          refuse writes and mutating commands
   --json              with -p: write the run as NDJSON on stdout
+  --web               also serve a browser view of this run on 127.0.0.1
+  --port <n>          the port for --web (default 0: any free one)
   --cwd <dir>         working directory for tools
   --no-color          disable ANSI colour (also honours NO_COLOR)
   -h, --help          this message
