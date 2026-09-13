@@ -167,10 +167,74 @@ fn resolve_path(cwd: &Path, raw: &str) -> PathBuf {
     }
 }
 
+/// The JSON name of a value's type, for an error that says what was actually sent.
+///
+/// "missing required string argument 'path'" is a lie when `path` was sent as a number,
+/// and the lie costs a turn: the model reads the message, concludes it did pass the
+/// argument, and sends the same call again.
+fn type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
+    }
+}
+
 fn require_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
-    args.get(key)
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("missing required string argument '{key}'"))
+    match args.get(key) {
+        Some(Value::String(text)) => Ok(text),
+        Some(other) => Err(anyhow!(
+            "argument '{key}' must be a string, but it is {}",
+            type_name(other)
+        )),
+        None => Err(anyhow!("missing required string argument '{key}'")),
+    }
+}
+
+/// An optional string argument, refusing a value of the wrong type.
+///
+/// The distinction matters in one direction only: absent is a choice the caller made,
+/// whereas a value of the wrong type is an instruction that is about to be dropped. Read
+/// as "absent", a mistyped `"path": 5` silently searches the working directory instead.
+fn optional_str<'a>(args: &'a Value, key: &str) -> Result<Option<&'a str>> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text)),
+        Some(other) => Err(anyhow!(
+            "argument '{key}' must be a string, but it is {}",
+            type_name(other)
+        )),
+    }
+}
+
+/// An optional whole-number argument, refusing a value of the wrong type.
+fn optional_u64(args: &Value, key: &str) -> Result<Option<u64>> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(number)) => number
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| anyhow!("argument '{key}' must be a whole number, but it is {number}")),
+        Some(other) => Err(anyhow!(
+            "argument '{key}' must be a number, but it is {}",
+            type_name(other)
+        )),
+    }
+}
+
+/// An optional boolean argument, refusing a value of the wrong type.
+fn optional_bool(args: &Value, key: &str) -> Result<bool> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(flag)) => Ok(*flag),
+        Some(other) => Err(anyhow!(
+            "argument '{key}' must be true or false, but it is {}",
+            type_name(other)
+        )),
+    }
 }
 
 /// What this run has read, so a write can tell whether it is overwriting something the
@@ -940,13 +1004,10 @@ impl Tool for BashTool {
         // to the heuristic, not a replacement for it -- relying on the model to remember
         // a flag would make the behaviour depend on the model's diligence, and a missed
         // flag would silently restore the two-minute kill.
-        let declared = args
-            .get("download")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        let declared = optional_bool(args, "download")?;
         let download = declared || looks_like_download(command);
 
-        let timeout = match args.get("timeout_secs").and_then(Value::as_u64) {
+        let timeout = match optional_u64(args, "timeout_secs")? {
             Some(explicit) => explicit,
             // A download is bounded by idleness rather than by a total budget: it may
             // legitimately take an hour, and what matters is whether it is still moving.
@@ -1112,12 +1173,8 @@ impl Tool for ReadTool {
 
     async fn call(&self, args: &Value) -> Result<String> {
         let path = resolve_path(&self.cwd, require_str(args, "path")?);
-        let offset = args
-            .get("offset")
-            .and_then(Value::as_u64)
-            .unwrap_or(1)
-            .max(1) as usize;
-        let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(2000) as usize;
+        let offset = optional_u64(args, "offset")?.unwrap_or(1).max(1) as usize;
+        let limit = optional_u64(args, "limit")?.unwrap_or(2000) as usize;
 
         let bytes = tokio::fs::read(&path)
             .await
@@ -1265,10 +1322,7 @@ impl Tool for EditTool {
         let path = resolve_path(&self.cwd, require_str(args, "path")?);
         let old = require_str(args, "old_string")?;
         let new = require_str(args, "new_string")?;
-        let replace_all = args
-            .get("replace_all")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        let replace_all = optional_bool(args, "replace_all")?;
 
         if old.is_empty() {
             return Err(anyhow!("old_string must not be empty"));
@@ -1346,7 +1400,7 @@ impl Tool for ListTool {
 
     async fn call(&self, args: &Value) -> Result<String> {
         // The list tool is always allowed, even in readonly mode.
-        let raw = args.get("path").and_then(Value::as_str).unwrap_or(".");
+        let raw = optional_str(args, "path")?.unwrap_or(".");
         let path = PathBuf::from(raw);
         let mut entries = tokio::fs::read_dir(&path)
             .await
@@ -1766,7 +1820,7 @@ impl Tool for GlobTool {
 
     async fn call(&self, args: &Value) -> Result<String> {
         let pattern = require_str(args, "pattern")?;
-        let raw = args.get("path").and_then(Value::as_str).unwrap_or(".");
+        let raw = optional_str(args, "path")?.unwrap_or(".");
         let root = resolve_path(&self.cwd, raw);
 
         let files = walk_files(&root, WALK_LIMIT * 10);
@@ -1826,13 +1880,10 @@ impl Tool for GrepTool {
         if needle.is_empty() {
             return Err(anyhow!("grep pattern must not be empty"));
         }
-        let raw = args.get("path").and_then(Value::as_str).unwrap_or(".");
+        let raw = optional_str(args, "path")?.unwrap_or(".");
         let root = resolve_path(&self.cwd, raw);
-        let file_glob = args.get("glob").and_then(Value::as_str);
-        let ignore_case = args
-            .get("ignore_case")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        let file_glob = optional_str(args, "glob")?;
+        let ignore_case = optional_bool(args, "ignore_case")?;
 
         // A single file is the common case when following up on a `glob` result.
         let candidates: Vec<String> = if root.is_file() {
@@ -2351,5 +2402,112 @@ mod gate_tests {
             .expect("an edit after our own write");
 
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "two\n");
+    }
+}
+
+#[cfg(test)]
+mod arg_tests {
+    use super::test_support::TempDir;
+    use super::*;
+    use crate::config::Config;
+    use serde_json::json;
+
+    fn tools(dir: &Path) -> ToolBox {
+        ToolBox::new(&Config::default(), false, dir.to_path_buf())
+    }
+
+    /// A wrong type is named as a wrong type, not reported as missing.
+    ///
+    /// The message is what the model has to act on. "Missing required string argument
+    /// 'path'" sends it to fix a problem it does not have: it did pass `path`, and the
+    /// next turn is spent sending the same call again with the same type.
+    #[tokio::test]
+    async fn a_wrong_argument_type_is_reported_as_a_type_error() {
+        let dir = TempDir::new("args-type");
+        let err = tools(dir.path())
+            .invoke("read", &json!({ "path": 5 }))
+            .await
+            .expect_err("a number is not a path");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("'path' must be a string"), "{msg}");
+        assert!(msg.contains("a number"), "it must say what it got: {msg}");
+        assert!(
+            !msg.contains("missing"),
+            "an argument that was sent is not missing: {msg}"
+        );
+    }
+
+    /// An optional number of the wrong type is refused instead of being ignored.
+    ///
+    /// Read as absent, `"limit": "5"` asks for five lines and gets two thousand, with
+    /// nothing anywhere saying the argument was dropped.
+    #[tokio::test]
+    async fn an_optional_number_of_the_wrong_type_is_not_ignored() {
+        let dir = TempDir::new("args-number");
+        let file = dir.path().join("f.txt");
+        std::fs::write(&file, "one\ntwo\n").unwrap();
+
+        let err = tools(dir.path())
+            .invoke(
+                "read",
+                &json!({ "path": file.to_str().unwrap(), "limit": "5" }),
+            )
+            .await
+            .expect_err("a string is not a limit");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("'limit' must be a number"), "{msg}");
+        assert!(msg.contains("a string"), "it must say what it got: {msg}");
+    }
+
+    /// The same for a boolean: a mistyped `replace_all` must not read as `false`.
+    #[tokio::test]
+    async fn an_optional_boolean_of_the_wrong_type_is_not_ignored() {
+        let dir = TempDir::new("args-bool");
+        let file = dir.path().join("f.txt");
+        std::fs::write(&file, "x\n").unwrap();
+
+        let err = tools(dir.path())
+            .invoke(
+                "edit",
+                &json!({
+                    "path": file.to_str().unwrap(),
+                    "old_string": "x",
+                    "new_string": "y",
+                    "replace_all": "yes"
+                }),
+            )
+            .await
+            .expect_err("a string is not a boolean");
+        assert!(
+            format!("{err:#}").contains("'replace_all' must be true or false"),
+            "{err:#}"
+        );
+    }
+
+    /// Optional arguments that are simply absent still take their defaults.
+    ///
+    /// This is the other half of the check above: a validator that made every optional
+    /// argument required would pass those tests and break every ordinary call. `list` is
+    /// given an explicit path because it resolves relative ones against the process's
+    /// working directory rather than the toolbox's -- which is the same directory in a real
+    /// run, and not something a test in this process can change for itself.
+    #[tokio::test]
+    async fn absent_optional_arguments_keep_their_defaults() {
+        let dir = TempDir::new("args-absent");
+        let file = dir.path().join("f.txt");
+        std::fs::write(&file, "one\ntwo\n").unwrap();
+        let tools = tools(dir.path());
+
+        let out = tools
+            .invoke("read", &json!({ "path": file.to_str().unwrap() }))
+            .await
+            .expect("read with no offset or limit");
+        assert!(out.contains("one") && out.contains("two"), "{out}");
+
+        let listed = tools
+            .invoke("list", &json!({ "path": dir.path().to_str().unwrap() }))
+            .await
+            .expect("list");
+        assert!(listed.contains("f.txt"), "{listed}");
     }
 }

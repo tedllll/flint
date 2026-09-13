@@ -199,6 +199,12 @@ itself counts as known — the tool produced those exact bytes. `bash` is delibe
 gated: a shell command can write anything it likes, and a guarantee that held only for
 `write` and `edit` would be worse than no guarantee at all.
 
+A tool argument of the wrong type is refused and named — `argument 'path' must be a
+string, but it is a number` — rather than reported as missing or quietly read as absent.
+For an optional argument the second half matters most: a mistyped `"limit": "5"` read as
+"no limit" asks for five lines and gets two thousand, with nothing saying the instruction
+was dropped.
+
 The same call with the same arguments three times in one turn gets a one-line note saying
 so -- and again at five and eight. Nothing is refused, because a repeat is sometimes right
 (a file another process is writing, a command whose answer really has changed); what is
