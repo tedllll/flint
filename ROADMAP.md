@@ -8,6 +8,7 @@ the queue. The reasoning for each design lives next to the design itself:
 | [`HANDOFF.md`](HANDOFF.md) | what state the tree is in, and what the last session learned |
 | [`docs/decisions.md`](docs/decisions.md) | why flint is built the way it is, decision by decision |
 | [`docs/windows-tooling.md`](docs/windows-tooling.md) | the settled, unimplemented plan for the Windows command line |
+| [`docs/web-mode.md`](docs/web-mode.md) | the settled, unimplemented plan for the browser view (`--web`) |
 | [`docs/session-format.md`](docs/session-format.md) | the session file, for readers and for hand-editing |
 | [`docs/windows.md`](docs/windows.md) | field notes on the Windows terminal, labelled by what was measured |
 | [`AGENTS.md`](AGENTS.md) | the ground rules, and where flint keeps its own state |
@@ -90,6 +91,22 @@ because the strip is a text offset rather than a model. Deliberately after the W
 stream: it is a rewrite of the rendering core, it touches the byte-exact terminal tests, and
 it wants a session with room to hold the whole layout in mind.
 
+### 7. Web mode: a window onto the running process — **settled, not implemented**
+
+[`docs/web-mode.md`](docs/web-mode.md) is the design, and the decision at its centre is that
+`--web` is **a window, not a mode**: flint starts exactly as it does now and additionally
+serves a view of *this* process on loopback, so the terminal keeps working, the process stays
+the only writer of the session file, and closing the tab loses nothing. The browser is the
+fourth renderer over the event funnel that already has three, the SSE payload is the NDJSON
+that `--json` already produces, and a typed message goes into the `InputMsg` channel the
+terminal already steers with.
+
+It is **independent of 5 and 6**, and its first three steps need no decision: the static
+viewer is one HTML file with no build step that you drop a `.jsonl` on, useful the day it
+lands and reusable as the renderer for everything after it. The one open question — a
+hand-rolled HTTP server or `hyper`, which is already in the tree via `reqwest` — is §7 of that
+document and is the only thing blocking step 4.
+
 ## Small, agreed, unscheduled
 
 - `read`/`write`/`edit` taking `file_path`, with `path` kept as an alias so nothing breaks.
@@ -127,3 +144,8 @@ measured and what was not.
   is parsed by hand; timestamps are `epoch:<seconds>`; NDJSON keys come out in a stable order
   rather than a chosen one.
 - **A PowerShell parser, and `-EncodedCommand`** — reasons in §7 of the tooling document.
+- **A remote or multi-user web view, and a build step for the page** — the browser view binds
+  to loopback with a per-run token and an `Origin`/`Host` check, none of it configurable,
+  because a listener on a program with no approval prompts is the one place where the quiet
+  boundary has to be a real one. The page itself stays one hand-editable file with no pnpm,
+  no bundler and no framework; the reasons are §4 and §5 of [`docs/web-mode.md`](docs/web-mode.md).
