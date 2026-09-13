@@ -11,6 +11,7 @@ pub mod patch;
 pub mod display;
 pub mod event;
 pub mod provider;
+pub mod search;
 pub mod session;
 pub mod term;
 pub mod tools;

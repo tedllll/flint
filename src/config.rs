@@ -42,6 +42,94 @@ pub struct ProviderConfig {
     pub proxy: Option<String>,
 }
 
+/// Web search: where a `search` tool gets its answers.
+///
+/// Optional, and normally absent. With no block at all, flint inherits the credential of a
+/// provider pointed at DeepSeek -- the key is taken exactly the way that provider takes it,
+/// which is what "configured once, used twice" should mean. The block exists for the case
+/// that has no such provider: a machine running only a local model, where the search is a
+/// separate service with its own key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchConfig {
+    /// `false` turns search off even when a credential could be inherited.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Take the key (and the proxy) from this provider, by name.
+    ///
+    /// Deliberately the *credential* and not the address: a provider's `base_url` is a
+    /// chat-completions endpoint and search is not served there. See
+    /// [`crate::search::DEEPSEEK_ANTHROPIC`] and `docs/deepseek-search.md` §1.
+    #[serde(default)]
+    pub provider: String,
+
+    /// Override the search endpoint. Empty means DeepSeek's Anthropic-compatible one.
+    #[serde(default)]
+    pub base_url: String,
+
+    /// Override the model the search runs on. Empty means [`crate::search::DEFAULT_MODEL`].
+    ///
+    /// The model is not the one driving the conversation: DeepSeek performs the search inside
+    /// a model turn of its own, and this is which model that is.
+    #[serde(default)]
+    pub model: String,
+
+    /// How many searches one call may trigger. Zero means the default.
+    ///
+    /// Not a hard limit -- measured: a call asking for one made two (`docs/deepseek-search.md`
+    /// §3) -- but it is the only dial there is.
+    #[serde(default)]
+    pub max_uses: u32,
+
+    /// A key written here, or the name of the variable holding it.
+    ///
+    /// Both are honoured in the same order a provider honours them: the variable first, then
+    /// the literal. Used when `provider` names nothing.
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub api_key_env: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Written out rather than derived, because a derived `Default` would give
+/// `enabled: false` while the serde default for the same field is `true` -- so a block
+/// deserialised from a file and a block built in code would disagree about whether search
+/// is on. The two defaults have to be the same one.
+impl Default for SearchConfig {
+    fn default() -> Self {
+        SearchConfig {
+            enabled: true,
+            provider: String::new(),
+            base_url: String::new(),
+            model: String::new(),
+            max_uses: 0,
+            api_key: String::new(),
+            api_key_env: String::new(),
+        }
+    }
+}
+
+impl SearchConfig {
+    /// The key this block holds itself, ignoring any provider it might name.
+    ///
+    /// Resolved the way [`ProviderConfig::resolved_key`] resolves one, and for the same
+    /// reason: the environment variable wins, so a key can be kept out of the file.
+    pub fn own_key(&self) -> String {
+        if !self.api_key_env.trim().is_empty() {
+            if let Ok(value) = std::env::var(self.api_key_env.trim()) {
+                if !value.trim().is_empty() {
+                    return value;
+                }
+            }
+        }
+        self.api_key.clone()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// Which provider is used when `--provider` is not given.
@@ -124,6 +212,10 @@ pub struct Config {
     /// of house procedures can be named once and used from anywhere.
     #[serde(default)]
     pub skill_dirs: Vec<String>,
+
+    /// Web search, when it is configured at all. See [`SearchConfig`].
+    #[serde(default)]
+    pub search: Option<SearchConfig>,
 
     pub providers: Vec<ProviderConfig>,
 }
@@ -226,6 +318,9 @@ impl Default for Config {
             tool_detail: false,
             instructions: default_instructions(),
             skill_dirs: Vec::new(),
+            // Absent on purpose: with no block, search inherits the credential of the
+            // DeepSeek provider below, which is what "configured once" should mean.
+            search: None,
             providers: vec![
                 ProviderConfig {
                     name: "deepseek".to_string(),

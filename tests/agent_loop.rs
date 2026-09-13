@@ -60,6 +60,7 @@ fn test_config(base_url: &str) -> Config {
         tool_detail: false,
         instructions: "hint".to_string(),
         skill_dirs: Vec::new(),
+        search: None,
         providers: vec![ProviderConfig {
             name: "stub".to_string(),
             base_url: base_url.to_string(),

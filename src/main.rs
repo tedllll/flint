@@ -10,7 +10,7 @@
 //! The `exec` mode is the last line of defence: when every provider is
 //! unreachable, flint still runs commands.
 
-use flint::{agent, config, context, display, event, ndjson, provider, session, term, tools, web};
+use flint::{agent, config, context, display, event, ndjson, provider, search, session, term, tools, web};
 
 use anyhow::{anyhow, Context, Result};
 use display::{Printer, BOLD, CHATTY, DIM, GREEN, NORMAL, QUIET, RED, RESET, YELLOW};
@@ -523,6 +523,13 @@ async fn real_main() -> Result<i32> {
             printer.dim("web:"),
             window.url()
         ));
+    }
+
+    // Search is offered only when it can actually work, so when it cannot the reason has to
+    // be said once. Otherwise a `[search]` block that is missing a key is indistinguishable
+    // from a flint that has no search at all, and the model simply never has the tool.
+    if let search::Availability::Unavailable(why) = search::resolve(&cfg) {
+        printer.term().line(format_args!("{} {why}", printer.dim("search:")));
     }
 
     // A provider that could not be configured is reported now that something can be

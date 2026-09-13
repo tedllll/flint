@@ -76,6 +76,12 @@ impl ToolBox {
             Box::new(GlobTool { cwd: cwd.clone() }),
             Box::new(GrepTool { cwd: cwd.clone() }),
         ];
+        // Offered only when it can actually search. A tool that always fails costs a schema
+        // on every request and teaches the model that this tool is broken; the reason it is
+        // missing is said once at startup instead (`search::Availability::Unavailable`).
+        if let crate::search::Availability::Ready(backend) = crate::search::resolve(config) {
+            tools.push(Box::new(crate::search::SearchTool::new(*backend)));
+        }
         // Offered only when there is something to load. A tool that can only ever answer
         // "no skills are configured" spends a schema on every request to say nothing.
         if !skill_dirs.skills.is_empty() {
@@ -194,7 +200,7 @@ fn type_name(value: &Value) -> &'static str {
     }
 }
 
-fn require_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
+pub(crate) fn require_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     match args.get(key) {
         Some(Value::String(text)) => Ok(text),
         Some(other) => Err(anyhow!(
