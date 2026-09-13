@@ -4,7 +4,10 @@ Why a model driving `cmd.exe` and `powershell.exe` keeps losing quotes and backs
 what a flint tool could actually do about it, and the other Windows adaptations that fall
 out of the same work.
 
-The design here is **settled and not implemented**. The order at the end is the plan.
+The design here is **partly implemented**. Steps 1, 2 and one of the step-4 fixes are in the
+tree and marked `done` below; everything Windows-specific is still unbuilt, because nothing
+in this file has been measured on a Windows machine and those items are exactly the ones that
+cannot be written from reasoning alone. The order at the end is the plan.
 
 ## How to read the labels
 
@@ -314,7 +317,7 @@ in the command and `PYTHONIOENCODING=utf-8` / `[Console]::OutputEncoding` in the
 environment. Note that `docs/windows.md` §3 records the same root cause on flint's *own*
 output side; this is the input side of it.
 
-### 6.3 `glob` and `grep` silently miss a backslash pattern — `VERIFIED`
+### 6.3 `glob` and `grep` silently miss a backslash pattern — **done**
 
 `walk_files` normalises every separator to `/` (`src/tools.rs:1769`) and `glob_match` is
 documented as matching the `/`-separated relative path so it behaves the same on both
@@ -322,8 +325,22 @@ platforms (`src/tools.rs:1783-1789`). A model that writes `src\*.rs` — which i
 Windows, from the path separator flint itself states in the prompt (`src/agent.rs:70-73`) —
 gets `no files matching 'src\*.rs'`.
 
-A wrong answer rather than an error is the expensive kind here. One-line fix at both entry
-points: normalise `\` to `/` in the `pattern` and `path` arguments.
+A wrong answer rather than an error is the expensive kind here. Fixed by translating the
+separator at the tool's door (`normalise_glob`), which is where the pattern's meaning is
+known.
+
+**This section used to say "normalise `\` to `/` in the `pattern` and `path` arguments",
+which was wrong three ways, and the difference matters more than the fix:**
+
+- `grep`'s `pattern` is **literal text to search for**, not a glob. Normalising it would
+  make it impossible to search for a backslash — in a Windows path, in a regex, in code
+  that quotes one. Only the `glob` *filter* argument is a pattern.
+- A `path` argument goes to the filesystem through `std::path`, which already accepts
+  either separator on Windows. On Unix a `\` in a filename is a legal character, and
+  rewriting it would silently redirect the call to a different file.
+- The glob dialect has no escape mechanism, so `\` never means anything but itself. That is
+  what makes the translation safe: it can only turn a pattern that matches nothing into one
+  that matches.
 
 ### 6.4 CRLF is invisible to `read` and `edit` — `VERIFIED`, decision needed
 
@@ -384,13 +401,18 @@ whether it is on 5.1 or 7.3 rather than writing `\"` from habit.
 In order, each one its own commit:
 
 1. **Extract `run_program_streaming`,** with `BashTool` as its special case. Pure refactor;
-   existing tests pass unchanged. (§5)
-2. **`exec`,** arguments as an array. (§4.1)
-3. **`pwsh`,** script to a BOM'd `.ps1` and in through `-File`. Windows only. (§4.2)
-4. **The three small fixes,** in one round: `\` normalisation in `glob`/`grep` (§6.3), the
-   process-tree kill (§6.1), and child output encoding (§6.2).
+   existing tests pass unchanged. (§5) — **done**
+2. **`exec`,** arguments as an array. (§4.1) — **done**, registered on every platform
+   rather than Windows only, with `stdin` for payloads that are not arguments (§4.3) and a
+   `readonly` judgement made on the program and its verb rather than on a command line.
+3. **`pwsh`,** script to a BOM'd `.ps1` and in through `-File`. Windows only. (§4.2) —
+   **not started**, and deliberately so: §4.2's execution-policy wrinkle and §6.6 both want
+   measurements from a real Windows session before any code is written.
+4. **The three small fixes:** `\` normalisation in `glob`/`grep` (§6.3) — **done**; the
+   process-tree kill (§6.1) and child output encoding (§6.2) — **not started**, both of them
+   Windows-only behaviour that cannot be observed from a Unix machine.
 5. **The facts in the system prompt:** PowerShell version and
-   `$PSNativeCommandArgumentPassing`. (§6.9)
+   `$PSNativeCommandArgumentPassing`. (§6.9) — **not started**, same reason.
 
 Then measure. §6.6 and the `-File` execution-policy wrinkle in §4.2 are the two places where
 a real Windows session is required before any code is written; everything else in this file

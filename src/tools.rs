@@ -2132,6 +2132,27 @@ fn pattern_needs_prefix(pattern: &str) -> bool {
     !pattern.contains('/') && (pattern.contains('*') || pattern.contains('?'))
 }
 
+/// Translate a glob pattern's separators to the `/` that `glob_match` matches against.
+///
+/// `walk_files` builds every path with `/`, deliberately, so the same pattern means the
+/// same thing on both platforms. A pattern written with `\` therefore matches nothing at
+/// all -- and the answer it produces, "no files matching 'src\*.rs'", does not read as "your
+/// pattern used the wrong separator"; it reads as "there is no such directory", which sends
+/// the model looking for a different explanation of a tree it can see.
+///
+/// The model writes `\` on Windows because flint's own system prompt states that platform's
+/// path separator. `\` is not an escape character in this glob dialect -- there is no escape
+/// mechanism at all -- so translating it can only turn a pattern that matches nothing into
+/// one that matches, never change which files an existing pattern finds.
+///
+/// Only *patterns* are translated. `grep`'s `pattern` is literal text to search for, where a
+/// backslash is a character in a file rather than a separator, and a `path` goes to the
+/// filesystem through `std::path`, which already accepts either separator on Windows and
+/// must not have the meaning of a Unix filename rewritten on the way.
+fn normalise_glob(pattern: &str) -> String {
+    pattern.replace('\\', "/")
+}
+
 // ---------------------------------------------------------------------------
 // skill
 // ---------------------------------------------------------------------------
@@ -2212,7 +2233,11 @@ impl Tool for GlobTool {
     }
 
     async fn call(&self, args: &Value) -> Result<String> {
-        let pattern = require_str(args, "pattern")?;
+        let written = require_str(args, "pattern")?;
+        // A pattern is matched against `/`-separated relative paths, so a Windows-style one
+        // has to be translated first. The message at the end keeps what the caller wrote,
+        // because that is the thing it has to correct.
+        let pattern = normalise_glob(written);
         let raw = optional_str(args, "path")?.unwrap_or(".");
         let root = resolve_path(&self.cwd, raw);
 
@@ -2220,14 +2245,14 @@ impl Tool for GlobTool {
         let mut hits: Vec<String> = files
             .into_iter()
             .filter(|p| {
-                glob_match(pattern, p)
-                    || (pattern_needs_prefix(pattern) && glob_match(&format!("**/{pattern}"), p))
+                glob_match(&pattern, p)
+                    || (pattern_needs_prefix(&pattern) && glob_match(&format!("**/{pattern}"), p))
             })
             .collect();
         hits.truncate(WALK_LIMIT);
 
         if hits.is_empty() {
-            return Ok(format!("no files matching '{pattern}' under {}", root.display()));
+            return Ok(format!("no files matching '{written}' under {}", root.display()));
         }
         let mut out = hits.join("\n");
         out.push_str(&format!("\n({} file(s))", hits.len()));
@@ -2275,7 +2300,10 @@ impl Tool for GrepTool {
         }
         let raw = optional_str(args, "path")?.unwrap_or(".");
         let root = resolve_path(&self.cwd, raw);
-        let file_glob = optional_str(args, "glob")?;
+        // A file filter is a glob against the same `/`-separated paths `walk_files`
+        // produces, so it is translated the same way `glob`'s pattern is. `pattern` above
+        // is *not*: there it is literal text to search for.
+        let file_glob = optional_str(args, "glob")?.map(normalise_glob);
         let ignore_case = optional_bool(args, "ignore_case")?;
 
         // A single file is the common case when following up on a `glob` result.
@@ -2292,7 +2320,7 @@ impl Tool for GrepTool {
 
         for rel in candidates {
             let path = if rel.is_empty() { root.clone() } else { root.join(&rel) };
-            if let Some(g) = file_glob {
+            if let Some(g) = &file_glob {
                 let target = if rel.is_empty() {
                     path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
                 } else {
@@ -2410,6 +2438,67 @@ mod glob_tests {
         assert!(glob_match("src/*", "src/anything"));
         assert!(glob_match("src/**", "src/a/b/c"));
         assert!(!glob_match("src/*", "src/a/b"));
+    }
+
+    /// A pattern written with the Windows separator finds the same files as a slash one.
+    ///
+    /// `walk_files` normalises every path to `/` and `glob_match` matches *those*, so
+    /// `src\*.rs` matched nothing whatsoever -- and the result, "no files matching
+    /// 'src\*.rs'", does not read as "your pattern used the wrong separator". It reads as
+    /// "there is no such directory", which sends the model looking for a different
+    /// explanation of a working tree it can see perfectly well.
+    ///
+    /// The model writes the backslash because flint's own prompt tells it the platform's
+    /// path separator, which on Windows is `\`. So the fix belongs at the tool's door, not
+    /// in `glob_match`: that function is handed a pattern by `glob` and a *path* by
+    /// `grep`'s filter, and neither caller should have to know which it has.
+    #[tokio::test]
+    async fn a_backslash_pattern_finds_the_same_files_as_a_slash_pattern() {
+        let dir = super::test_support::TempDir::new("glob-backslash");
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src").join("main.rs"), "fn main() {}\n").unwrap();
+
+        let tools = ToolBox::new(&Config::default(), false, dir.path().to_path_buf());
+        let with_slash = tools
+            .invoke("glob", &json!({ "pattern": "src/*.rs" }))
+            .await
+            .expect("glob");
+        let with_backslash = tools
+            .invoke("glob", &json!({ "pattern": r"src\*.rs" }))
+            .await
+            .expect("glob");
+        assert!(with_slash.contains("src/main.rs"), "{with_slash}");
+        assert_eq!(
+            with_backslash, with_slash,
+            "a Windows-style pattern must find the same files"
+        );
+    }
+
+    /// And the same for `grep`'s file filter, which is a glob against the same `/`-separated
+    /// paths -- while `grep`'s own `pattern` is *literal text to search for*, and must keep
+    /// every backslash it was given.
+    #[tokio::test]
+    async fn grep_filters_by_a_backslash_glob_without_touching_the_search_text() {
+        let dir = super::test_support::TempDir::new("grep-backslash");
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src").join("main.rs"), "let x = a\\b;\n").unwrap();
+
+        let tools = ToolBox::new(&Config::default(), false, dir.path().to_path_buf());
+        let filtered = tools
+            .invoke("grep", &json!({ "pattern": "a", "glob": r"src\*.rs" }))
+            .await
+            .expect("grep");
+        assert!(filtered.contains("src/main.rs"), "{filtered}");
+
+        // The backslash in the search text is a character in the file, not a separator.
+        let literal = tools
+            .invoke("grep", &json!({ "pattern": r"a\b" }))
+            .await
+            .expect("grep");
+        assert!(
+            literal.contains("src/main.rs"),
+            "the search text must not be normalised: {literal}"
+        );
     }
 }
 
