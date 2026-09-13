@@ -47,6 +47,18 @@ impl Sink {
         Self::default()
     }
 
+    /// What the turn in flight has said so far, without taking it.
+    ///
+    /// The accumulator `message.completed` drains at the end of a turn is also the only record
+    /// of an answer *during* one, and the browser needs it for exactly that window: `/session`
+    /// serves the session file, and the file gets the assistant message when the turn ends. A
+    /// page that loads, reconnects or is told `reset` in the middle of a turn would otherwise
+    /// have no way to learn what has already been said -- measured by reloading a page during a
+    /// turn and watching the answer start from the middle.
+    pub fn answer_so_far(&self) -> &str {
+        &self.answer
+    }
+
     /// The line for an event, or `None` for the ones that are already fully described by
     /// another event.
     pub fn line(&mut self, event: &Event) -> Option<String> {

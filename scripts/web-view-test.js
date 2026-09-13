@@ -46,18 +46,45 @@ function ok(cond, what) {
 // Run the page's own script, with the smallest DOM that lets it finish.
 // ---------------------------------------------------------------------------
 
+/// The smallest node that lets the page's own `paint` finish.
+///
+/// It grew when `paint` stopped rebuilding the whole transcript: an incremental paint needs the
+/// relationships between nodes -- who is whose parent, and how to swap one out -- so the stub
+/// has to have them. Keeping a real parent pointer is the whole of it; there is still no layout,
+/// no styling and no events.
 function fakeNode() {
-  return {
+  const node = {
     children: [],
     textContent: "",
     className: "",
     hidden: false,
     files: [],
+    parentNode: null,
+    open: false,
+    scrollTop: 0,
+    scrollHeight: 0,
+    clientHeight: 0,
     classList: { add() {}, remove() {} },
-    appendChild(child) { this.children.push(child); return child; },
+    get firstChild() { return node.children[0] || null; },
+    appendChild(child) { child.parentNode = node; node.children.push(child); return child; },
+    removeChild(child) {
+      const at = node.children.indexOf(child);
+      if (at >= 0) node.children.splice(at, 1);
+      child.parentNode = null;
+      return child;
+    },
+    replaceChild(fresh, old) {
+      const at = node.children.indexOf(old);
+      if (at >= 0) node.children[at] = fresh; else node.children.push(fresh);
+      fresh.parentNode = node;
+      old.parentNode = null;
+      return old;
+    },
+    remove() { if (node.parentNode) node.parentNode.removeChild(node); },
     addEventListener() {},
     click() {},
   };
+  return node;
 }
 
 function loadViewer() {
@@ -348,6 +375,65 @@ check("a message is the shape the route reads", () => {
   // Including the ones that look like commands: the route must carry them, not interpret them.
   eq(JSON.parse(viewer.messageBody("/resume 3")).text, "/resume 3", "a slash command");
   eq(JSON.parse(viewer.messageBody('line one\nline two')).text, "line one\nline two", "a block");
+});
+
+console.log("\nwhat a mid-turn reset must not destroy");
+
+check("the answer being streamed is kept when the file is behind", () => {
+  // `/session` is the file, and the file gets the assistant message when the turn *ends* -- so
+  // a reset during a turn re-reads a document without the answer in it. Measured: 1,424,691
+  // characters on screen became 64,999.
+  const d = viewer.newDoc();
+  viewer.applyEvent(d, { type: "turn.started", prompt: "ask" });
+  viewer.applyEvent(d, { type: "message.delta", text: "the answer so far" });
+  const streaming = viewer.streamingAnswer(d);
+  eq(streaming.text, "the answer so far", "what was on screen");
+
+  // The file, meanwhile, only knows the question.
+  const reloaded = viewer.newDoc();
+  viewer.applyEvent(reloaded, { type: "turn.started", prompt: "ask" });
+  viewer.carryStreaming(reloaded, streaming);
+  eq(reloaded.blocks.length, 2, "the answer is back");
+  eq(reloaded.blocks[1].text, "the answer so far", "whole");
+  eq(reloaded.blocks[1].open, true, "and still taking deltas");
+});
+
+check("the file's own copy is preferred once it has one", () => {
+  // The turn ended and wrote the answer; the page's memory of it is then the older copy, and
+  // adding it would duplicate the answer instead of rescuing it.
+  const d = viewer.newDoc();
+  viewer.applyEvent(d, { type: "turn.started", prompt: "ask" });
+  viewer.applyEvent(d, { type: "message.delta", text: "half" });
+  const streaming = viewer.streamingAnswer(d);
+
+  const reloaded = viewer.newDoc();
+  viewer.applyEvent(reloaded, { type: "turn.started", prompt: "ask" });
+  viewer.applyEvent(reloaded, { type: "chat", message: { role: "assistant", content: "half and the rest" } });
+  viewer.carryStreaming(reloaded, streaming);
+  eq(reloaded.blocks.length, 2, "nothing appended");
+  eq(reloaded.blocks[1].text, "half and the rest", "the file's copy stands");
+});
+
+check("a longer stream wins over a shorter file", () => {
+  // The exact race the prefix test is for: the file has a partial answer, the page has more.
+  const d = viewer.newDoc();
+  viewer.applyEvent(d, { type: "turn.started", prompt: "ask" });
+  viewer.applyEvent(d, { type: "message.delta", text: "one two three" });
+  const streaming = viewer.streamingAnswer(d);
+  const reloaded = viewer.newDoc();
+  viewer.applyEvent(reloaded, { type: "turn.started", prompt: "ask" });
+  viewer.applyEvent(reloaded, { type: "chat", message: { role: "assistant", content: "one two" } });
+  viewer.carryStreaming(reloaded, streaming);
+  eq(reloaded.blocks.length, 2, "still one answer");
+  eq(reloaded.blocks[1].text, "one two three", "the longer one");
+});
+
+check("nothing to carry is nothing to do", () => {
+  const d = viewer.newDoc();
+  const before = viewer.newDoc();
+  viewer.applyEvent(before, { type: "turn.started", prompt: "ask" });
+  viewer.carryStreaming(before, viewer.streamingAnswer(d));
+  eq(before.blocks.length, 1, "unchanged");
 });
 
 if (failures) {

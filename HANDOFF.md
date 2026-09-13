@@ -7,7 +7,7 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 326 passing (237 lib, 28
+As of the commit that carries this file, `cargo test` is 328 passing (239 lib, 28
 `agent_loop`, 28 `cli_output`, 4 `json_output`, 4 `search_tool`, 18 `term_capture`, 7
 `web_view`), `cargo clippy --all-targets` is silent, and both `node
 scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
@@ -27,6 +27,35 @@ The binary is held open by any running `flint`, so close those before replacing 
 `docs/windows.md` is the field notes for the Windows terminal.
 
 ## What was just done
+
+**The step 7 measurement pass, and the four defects it found.** `docs/web-mode.md` §11 has the
+numbers; the short version is that three of the four had one cause — `paint` rebuilt the whole
+transcript on every frame, so every node on screen was a new node, and the scroll position, which
+`details` were open and any selected text went with the old ones. **Selecting the answer is the
+promise this page exists to keep**, and a full repaint cannot keep it. The paint is incremental
+now: a `rev` per block, nodes reused when the revision has not changed, and the expansion state
+kept in the block so even a rebuild restores it.
+
+**The fourth was worse and had a different cause.** A `reset` in the middle of a turn *destroyed*
+what the page was showing — measured at 1,424,691 characters on screen, 64,999 after — because
+`/session` serves the file and the file gets the assistant message when the turn *ends*. Two
+mechanisms now cover it: the page carries the streaming block across its own re-read (only when
+the file's copy is a prefix, so a finished turn cannot be duplicated), and the server sends the
+answer so far as a named `answer` event — state, like `status` — on connect and after a lagging
+reset, which is what a page *loading* mid-turn needs. Verified: 280,522 characters on screen
+against the 279,900 the model produced.
+
+**The limit, recorded rather than fixed:** painting is still quadratic in the size of the answer,
+about 85 KB/s rendered when small and 17 KB/s past a megabyte, because the browser lays out one
+very large text node on every frame. A real model emits ~300 bytes a second, so it is two orders
+of magnitude from mattering; the fix would be to append to the text node instead of rewriting it.
+
+**And the harness matters as much as the result.** Two bugs in it each looked like a flint bug
+first: a driver that stops reading the pty **deadlocks the program under test** the moment it
+writes a streamed answer, and a measurement script that kept typing interrupted the very turn it
+was measuring. Both are written into `docs/web-mode.md` §11 so the next person does not pay for
+them again.
+
 
 **L3: the browser page is a composer, with a sidebar of conversations.** This is the last of
 `docs/web-mode.md` §9, and it was built against a real browser rather than reasoned about —

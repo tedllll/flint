@@ -151,8 +151,16 @@ the URL has to be printed anyway.
 browser from looking frozen during a slow turn — and level 3, `POST /message` and `GET
 /sessions`: the page is a composer with a sidebar of conversations. Step 7's measurement pass is
 done too, in a pty and in a real browser over the DevTools protocol, and it is what found the
-three defects §11 of that document records — a sidebar click during a turn doing nothing, the
-status bar sitting on the composer, and two sends 150 ms apart wiping each other's text.
+**seven** defects §11 of that document records. Three came from one decision — `paint` rebuilt
+the whole transcript on every frame, which cost the scroll position, the open `details` and any
+selected text, and *selecting the answer* is the promise the page exists to keep. One was worse:
+a `reset` mid-turn destroyed what the page was showing (1,424,691 characters on screen, 64,999
+after), because `/session` serves a file that cannot have an in-flight answer in it yet.
+
+**One limit is recorded rather than fixed**: painting is still quadratic in the size of the
+answer — 85 KB/s rendered when small, 17 KB/s past a megabyte — because the browser lays out one
+very large text node every frame. A real model emits ~300 bytes a second, so it is two orders of
+magnitude from mattering.
 
 
 **And `/web` is now how level 2 is actually reached — and it opens the page.** `--web` has to be

@@ -396,13 +396,35 @@ assertions. What follows is the part no test in this repository reaches.
 | The instructions must be collapsed | the first render had them expanded | **a defect, found here:** the system prompt is a few thousand characters and pushed the whole conversation off the first screen. The terminal does not print it for the same reason. Fixed, and re-measured |
 | A tool call is legible while collapsed | screenshot | the summary carries the name and the arguments, so a collapsed call still says what it was aimed at |
 | Multi-line answers keep their shape | a three-paragraph answer with an indented line | preserved, `pre-wrap`, no reflow of the indentation |
-| A narrow window | **not measured** | 1100px is what the fixture was taken at; nothing below it has been looked at |
+| A narrow window | **measured**, 1200/900/700/520 px | no horizontal overflow at any of them; the composer stays pinned to the bottom edge; the sidebar holds its 250px and the transcript takes the rest, so 520px leaves the transcript a cramped 270px and nothing breaks |
 | A long turn, and backpressure | **measured**, and it found the limit of this design — see below | a stub provider on loopback, a real turn, `curl -N /events` |
 | Reconnect, replaying exactly once | **measured** against the ring and the reset boundary | a cursor older than the buffer gets `event: reset` and re-reads `/session` |
 | A page opened *during* a turn | **measured**, with a defect found and fixed | the status was blank; it is now sent as state on connect |
 | The status line during a slow model call | **measured** | the browser shows `no response yet — the network or the endpoint may be stuck`, the terminal's own words |
-| A turn on a browser that then reloads mid-turn | **not measured** | |
-| What 80 columns looks like next to a terminal | **not measured** | |
+| A turn on a browser that then reloads mid-turn | **measured** — a defect, fixed | the reloaded page showed the answer from the middle; now it is given the whole of what has streamed. 280,522 characters on screen against the 279,900 the model produced |
+| What 80 columns looks like next to a terminal | **measured** | 80 columns is about 640px, which sits between the two widths above: no overflow, nothing clipped, and the transcript is 390px — narrow enough that code wraps, which is what the terminal does too |
+| A reconnect after the stream is cut | **measured**, no duplicates | the response is re-read and the stream resumed; every message appears exactly once |
+
+### Reading a run, measured: four defects, and the reason they existed
+
+The §9 step 7 pass, driven over the DevTools protocol against the real page, with a stub provider
+whose speed and size are knobs. Everything below was found by measuring, and three of the four
+came from the same decision -- `paint` rebuilt the whole transcript on every frame, so every
+node on screen was a *new* node.
+
+| Claim | How | Result |
+|---|---|---|
+| The answer arrives where you are looking | a long answer, scroll sampled every 0.9s | **a defect.** The transcript stayed pinned at the top while the answer grew 55,000px below the fold: you ask something and watch the question. Now the page follows the bottom if it was already there, and does not if the reader has scrolled up |
+| An expanded block stays expanded | open the thinking block, then a repaint | **a defect.** Every repaint rebuilt the node, so `open` went back to its default. The collapsible tool call — the reason this page exists — could not be read while anything was happening. Now the node is reused when the block has not changed, and the state lives in the block as well, so even a full rebuild puts it back |
+| Text can be selected and copied | select an answer, force a repaint | **a defect.** 102 characters selected, 0 after. This is the promise the whole page is for. Same cause and same fix |
+| A `reset` in the middle of a turn | 5000 deltas, watch the length | **a defect, and the worst one.** 1,424,691 characters on screen became **64,999**: the page threw away what it was showing and re-read a file that cannot have the answer yet, because the file gets the assistant message when the turn *ends*. Fixed by carrying the streaming block across the re-read, and only when the file's copy is a prefix of it — anything else means the file has moved on and adding the memory back would duplicate the answer |
+| A page *loaded* in the middle of a turn | reload during a turn | **a defect.** A page starting fresh has no memory to carry, so it showed the answer from the middle. Fixed on the server: the answer so far is sent as a named `answer` event — state, like `status` — on connect and after a lagging reset. Verified: 280,522 characters on screen against the 279,900 the model produced |
+| A megabyte of answer | 5000 × 310-character deltas | **the limit, and it is a real one.** Painting cost is quadratic: about 85 KB/s rendered while the transcript was small, about 17 KB/s past a megabyte. Node reuse removed the DOM half of it; what is left is the browser laying out one very large text node on every frame. Worth knowing for scale rather than for alarm — a real model emits on the order of 300 **bytes** a second, two orders of magnitude below the slowest figure measured here. The fix, if it is ever needed, is to append to the text node rather than rewrite it, or to split it into chunks |
+
+**The fourth defect is the one worth remembering**, because it is the only one that destroyed
+something the reader had: the transcript on screen *went backwards*. It took a synthetic producer
+to reach it, and it would take a throttled tab or a sleeping laptop to reach it in ordinary use —
+but a page that loses the answer it was showing is a page that cannot be trusted to show one.
 
 ### L3 in a real browser — measured, and it found three defects
 

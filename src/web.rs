@@ -190,6 +190,19 @@ impl Live {
         }
     }
 
+    /// What the turn in flight has written so far, or empty between turns.
+    ///
+    /// Read out of the sink rather than accumulated separately: it is the same string
+    /// `message.completed` drains, so there is one place the answer grows and no way for two
+    /// copies of it to disagree.
+    fn answer_so_far(&self) -> String {
+        self.sink
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .answer_so_far()
+            .to_string()
+    }
+
     /// One already-rendered line of the run's vocabulary, to every reader of the stream.
     ///
     /// For a frame that no `Event` produces. `turn.started` is the one, and it is the same line
@@ -1090,12 +1103,38 @@ Referrer-Policy: no-referrer\r\n\
 /// without a cursor.
 const SSE_STATUS_SNAPSHOT: &str = "event: status\n";
 
+/// The answer a turn in flight has written so far, as state rather than as change.
+///
+/// The second of the two things a cursor cannot express, and the sharper one. `/session` serves
+/// the session file, and the file gets the assistant message when the turn **ends** -- so a page
+/// that loads, reconnects, or is told `reset` in the middle of a turn would re-read a document
+/// that does not contain the answer being written, and start the answer from the middle.
+/// Measured by reloading a page during a turn.
+///
+/// The data is a JSON *string* rather than the raw text, unlike `status`: an answer has newlines
+/// in it and a `data:` line does not.
+const SSE_ANSWER_SNAPSHOT: &str = "event: answer\n";
+
 /// Tell a client its document is stale, so it re-reads the session.
 ///
 /// A *named* SSE event rather than a line in the NDJSON vocabulary. Every `data:` line on
 /// this stream is a fact about the run, and "your transcript is out of date" is a fact about
 /// the *transport* -- the vocabulary is deliberately closed, and this does not belong in it.
 const SSE_RESET: &str = "event: reset\ndata: {}\n\n";
+
+/// The answer so far, if there is one, as the named event that says it is state.
+async fn write_answer_snapshot(stream: &mut TcpStream, live: &Live) -> Result<()> {
+    let answer = live.answer_so_far();
+    if answer.is_empty() {
+        return Ok(());
+    }
+    // Escaped, so it is one line whatever the answer contains.
+    let data = serde_json::json!(answer).to_string();
+    stream
+        .write_all(format!("{SSE_ANSWER_SNAPSHOT}data: {data}\n\n").as_bytes())
+        .await?;
+    Ok(())
+}
 
 /// Write what a client missed, then everything as it happens, until it goes away.
 async fn stream_events(mut stream: TcpStream, state: &State, last: Option<u64>) -> Result<()> {
@@ -1139,6 +1178,7 @@ async fn stream_events(mut stream: TcpStream, state: &State, last: Option<u64>) 
             .write_all(format!("{SSE_STATUS_SNAPSHOT}data: {status}\n\n").as_bytes())
             .await?;
     }
+    write_answer_snapshot(&mut stream, live).await?;
 
     let mut heartbeat = tokio::time::interval(HEARTBEAT);
     // The first tick of an interval is immediate; a heartbeat now would be noise on a
@@ -1155,6 +1195,16 @@ async fn stream_events(mut stream: TcpStream, state: &State, last: Option<u64>) 
                     // it and nothing to indicate one -- and re-subscribing from *now* is
                     // what stops the frames still buffered from arriving twice.
                     stream.write_all(SSE_RESET.as_bytes()).await?;
+                    // The two snapshots go with it, and the answer one is what makes this
+                    // survivable: the frames that were dropped were the deltas of an answer
+                    // the file does not have yet.
+                    let status = live.current_status();
+                    if !status.is_empty() {
+                        stream
+                            .write_all(format!("{SSE_STATUS_SNAPSHOT}data: {status}\n\n").as_bytes())
+                            .await?;
+                    }
+                    write_answer_snapshot(&mut stream, live).await?;
                     rx = live.subscribe();
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
@@ -2170,8 +2220,14 @@ mod stream_tests {
 
         // The cursor, as the reconnecting client sends it.
         let raw = read_stream(&window, "?last=1").await;
-        assert!(!raw.contains("first"), "it already had frame 1: {raw}");
-        assert!(raw.contains("second"), "it is missing frame 2: {raw}");
+        // Asserted on the *frame*, not on the text: the answer snapshot carries everything said
+        // so far and is sent to every client, so `first` appears in this response whatever the
+        // cursor was. The cursor is the thing under test -- frame 1 must not be replayed.
+        assert!(
+            !raw.contains("id: 1\ndata: "),
+            "it already had frame 1: {raw}"
+        );
+        assert!(raw.contains("id: 2\ndata: "), "it is missing frame 2: {raw}");
         assert!(!raw.contains("event: reset"), "nothing was lost, so nothing to reload: {raw}");
     }
 
@@ -2292,6 +2348,48 @@ mod snapshot_tests {
         assert!(
             !raw.contains("event: status"),
             "the turn is over, so there is nothing to report: {raw}"
+        );
+    }
+
+    /// The answer already written is state, and a page arriving mid-turn cannot get it anywhere
+    /// else.
+    ///
+    /// `/session` serves the session file, and the file gets the assistant message when the turn
+    /// *ends* -- so this is the only way a page that loads, reconnects or is reset in the middle
+    /// of a turn can show the part of the answer that streamed before it was listening.
+    #[tokio::test]
+    async fn a_page_opened_mid_answer_is_told_what_has_been_said() {
+        let live = Live::new();
+        let window = Window::open(0, None, Some(Arc::clone(&live)))
+            .await
+            .expect("bind");
+
+        live.event(&Event::Text("the first half. ".to_string()));
+        live.event(&Event::Text("the second half.".to_string()));
+
+        let raw = read_stream_of(&window).await;
+        assert!(
+            raw.contains("event: answer\ndata: \"the first half. the second half.\""),
+            "a page opened mid-answer must be told what has been said: {raw}"
+        );
+    }
+
+    /// And between turns there is nothing to say, because the file has it.
+    #[tokio::test]
+    async fn a_page_opened_between_turns_is_not_given_a_stale_answer() {
+        let live = Live::new();
+        let window = Window::open(0, None, Some(Arc::clone(&live)))
+            .await
+            .expect("bind");
+
+        live.event(&Event::Text("a finished answer".to_string()));
+        // `message.completed` is what drains the accumulator the snapshot reads.
+        live.event(&Event::Done);
+
+        let raw = read_stream_of(&window).await;
+        assert!(
+            !raw.contains("event: answer"),
+            "the turn is over and the file has the answer: {raw}"
         );
     }
 

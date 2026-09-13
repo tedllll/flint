@@ -227,11 +227,30 @@ const KNOWN = new Set([
 ]);
 
 function newDoc() {
-  return { meta: {}, title: "", usage: null, status: "", blocks: [] };
+  return { meta: {}, title: "", usage: null, status: "", blocks: [], rev: 0 };
+}
+
+/// Note that a block changed, so the next paint redraws it and only it.
+///
+/// This exists because of a measurement, and the measurement is worth keeping. The transcript
+/// used to be rebuilt from scratch on every frame -- `root.textContent = ""` and then every
+/// block again -- which is quadratic in the size of the answer. Measured against a stub
+/// provider: about 85 KB/s of answer painted while the transcript was small, about 17 KB/s once
+/// it passed a megabyte. And a page that cannot keep up is a page that is eventually told
+/// `reset` and loses what it was showing, which is what the megabyte run did at fifteen
+/// seconds: 1,424,691 characters on screen, then 64,999.
+///
+/// It also cost three things that are not about speed, because a rebuilt node is a *new* node:
+/// the scroll position, which `details` were expanded, and any selected text all went with it.
+/// This page exists to be the better renderer for reading a run, and "you cannot select the
+/// answer" is not a promise a full repaint can keep.
+function touched(doc, block) {
+  block.rev = ++doc.rev;
+  return block;
 }
 
 function push(doc, block) {
-  doc.blocks.push(block);
+  doc.blocks.push(touched(doc, block));
   return block;
 }
 
@@ -239,6 +258,57 @@ function push(doc, block) {
 function currentAnswer(doc) {
   const last = doc.blocks[doc.blocks.length - 1];
   return last && last.kind === "assistant" && last.open ? last : null;
+}
+
+/// The answer a turn is streaming into right now, if one is.
+///
+/// Kept because a `reset` mid-turn is *destructive* without it. `/session` is the file, and the
+/// file gets the assistant message when the turn **ends** -- so re-reading it during a turn
+/// returns a document that does not contain the answer being written. Measured against a stub
+/// provider: 1,424,691 characters on screen became 64,999. The reader watches the answer
+/// disappear and start again.
+function streamingAnswer(from) {
+  const source = from || doc;
+  const last = source.blocks[source.blocks.length - 1];
+  if (!last || last.kind !== "assistant") return null;
+  return { text: last.text || "", reasoning: last.reasoning || "" };
+}
+
+/// Put that answer back after the document has been re-read.
+///
+/// Deliberately additive and never blind: the block is only reused when what the file holds is
+/// a *prefix* of what was on screen, because that is the case where the file is simply behind.
+/// Anything else means the file has moved on -- the turn ended and wrote its own copy -- and
+/// adding the memory of it would duplicate the answer rather than rescue it.
+function carryStreaming(into, kept) {
+  if (!kept || !kept.text) return;
+  const last = into.blocks[into.blocks.length - 1];
+  if (last && last.kind === "assistant" && kept.text.startsWith(last.text || "")) {
+    last.text = kept.text;
+    if (!last.reasoning) last.reasoning = kept.reasoning;
+    // Still arriving: the block has to keep taking deltas, or the rest of the answer would
+    // start a second block and the turn would read as two.
+    last.open = true;
+    touched(into, last);
+    return;
+  }
+  if (last && last.kind === "assistant") return;
+  push(into, { kind: "assistant", text: kept.text, reasoning: kept.reasoning, open: true });
+}
+
+/// Put the answer-so-far into the block that is streaming, making it if there is not one.
+///
+/// `open: true` is what makes the deltas that follow append to this block rather than start a
+/// second one, and the turn would read as two answers without it.
+function setStreamingAnswer(into, text) {
+  if (!text) return;
+  let answer = into.blocks[into.blocks.length - 1];
+  if (!answer || answer.kind !== "assistant") {
+    answer = push(into, { kind: "assistant", text: "", reasoning: "", open: true });
+  }
+  answer.text = text;
+  answer.open = true;
+  touched(into, answer);
 }
 
 function toolById(doc, id) {
@@ -292,6 +362,7 @@ function applyEvent(doc, ev) {
         if (slot) {
           slot.output = text(m.content);
           slot.done = true;
+          touched(doc, slot);
         } else {
           // A trimmed file, or a result whose call was dropped. Showing it is better than
           // losing it: the format explicitly allows hand-editing.
@@ -321,6 +392,7 @@ function applyEvent(doc, ev) {
         answer = push(doc, { kind: "assistant", text: "", reasoning: "", open: true });
       }
       answer.text += text(ev.text);
+      touched(doc, answer);
       return;
     }
 
@@ -330,6 +402,7 @@ function applyEvent(doc, ev) {
         answer = push(doc, { kind: "assistant", text: "", reasoning: "", open: true });
       }
       answer.reasoning += text(ev.text);
+      touched(doc, answer);
       return;
     }
 
@@ -344,6 +417,7 @@ function applyEvent(doc, ev) {
         // transcript would no longer say what happened in what order.
         if (!answer.text) answer.text = text(ev.text);
         answer.open = false;
+        touched(doc, answer);
       } else if (text(ev.text)) {
         push(doc, { kind: "assistant", text: text(ev.text), reasoning: "", open: false });
       }
@@ -377,6 +451,7 @@ function applyEvent(doc, ev) {
         slot.output = text(ev.output);
         slot.ok = ev.ok !== false;
         slot.done = true;
+        touched(doc, slot);
       } else {
         push(doc, {
           kind: "tool", id: ev.id, name: text(ev.name), args: "",
@@ -605,6 +680,61 @@ function schedulePaint() {
   });
 }
 
+/// One block as an element. Pure: it reads the block and builds a node.
+///
+/// Split out of `paint` so that `paint` can decide *which* blocks to rebuild rather than
+/// rebuilding all of them. Everything this returns is text through `textContent`, which is the
+/// policy the tests check.
+function renderBlock(block) {
+  if (block.kind === "tool") return toolBlock(block);
+  if (block.kind === "notice") return el("div", "notice " + (block.level || ""), block.text);
+  if (block.kind === "damage") {
+    const box = el("div", "notice damage");
+    box.appendChild(el("b", "", "damaged line — "));
+    box.appendChild(document.createTextNode(block.text));
+    return box;
+  }
+  if (block.kind === "system") {
+    // Collapsed, and for the same reason the terminal does not print it: the instructions are
+    // a few thousand characters that are nearly the same in every session, so expanded they
+    // push the actual conversation off the first screen. They are in the document because "what
+    // was the model actually told" is one of the questions this page exists to answer -- and
+    // that was measured rather than assumed: the first version painted it open, and one
+    // screenshot was enough.
+    const box = el("details", "system");
+    box.open = block.open === true;
+    box.appendChild(el("summary", "", "instructions"));
+    box.appendChild(el("div", "body", block.text));
+    // The block remembers, so even a rebuild -- `load`, which replaces the document -- puts it
+    // back the way the reader left it.
+    box.addEventListener("toggle", () => { block.open = box.open; });
+    return box;
+  }
+  const turn = el("div", "turn " + block.kind);
+  if (block.kind === "user") turn.appendChild(el("div", "who", "you"));
+  if (block.kind === "assistant") turn.appendChild(el("div", "who", "flint"));
+  if (block.reasoning) {
+    const r = el("details", "reasoning");
+    r.open = block.reasoningOpen === true;
+    r.appendChild(el("summary", "", "thinking"));
+    r.appendChild(el("div", "body", block.reasoning));
+    r.addEventListener("toggle", () => { block.reasoningOpen = r.open; });
+    turn.appendChild(r);
+  }
+  turn.appendChild(el("div", "body", block.text));
+  return turn;
+}
+
+/// The "nothing loaded yet" paragraph, while it is on screen.
+let placeholder = null;
+
+/// The nodes currently on screen, parallel to the document's blocks.
+///
+/// `{ rev, node }`, and the revision is the whole of the comparison: a block whose `rev` has not
+/// changed has not changed, so its node is still right and is left alone. Leaving it alone is
+/// what keeps a selection, an open `details` and the reader's place on the page.
+let painted = [];
+
 function paint(doc) {
   document.getElementById("title").textContent = doc.title || "flint";
   const meta = document.getElementById("meta");
@@ -624,51 +754,45 @@ function paint(doc) {
   }
 
   const root = document.getElementById("transcript");
-  root.textContent = "";
+  // Read before anything is touched. "Was the reader at the bottom" is the question the page
+  // has to answer for itself, and it is answered here because this is the last moment the old
+  // layout exists. Measured: with no such handling the transcript stayed pinned at the top
+  // while an answer streamed past 55,000 pixels below the fold -- you ask something, and watch
+  // the question while the answer arrives out of sight.
+  const slack = 40;
+  const wasAtBottom = root.scrollTop + root.clientHeight >= root.scrollHeight - slack;
+  const wasAt = root.scrollTop;
+
   if (!doc.blocks.length) {
-    root.appendChild(el("p", "empty", "Nothing loaded yet."));
+    root.textContent = "";
+    painted = [];
+    placeholder = el("p", "empty", "Nothing loaded yet.");
+    root.appendChild(placeholder);
   }
-  for (const block of doc.blocks) {
-    if (block.kind === "tool") {
-      root.appendChild(toolBlock(block));
-      continue;
-    }
-    if (block.kind === "notice") {
-      root.appendChild(el("div", "notice " + (block.level || ""), block.text));
-      continue;
-    }
-    if (block.kind === "damage") {
-      const box = el("div", "notice damage");
-      box.appendChild(el("b", "", "damaged line — "));
-      box.appendChild(document.createTextNode(block.text));
-      root.appendChild(box);
-      continue;
-    }
-    if (block.kind === "system") {
-      // Collapsed, and for the same reason the terminal does not print it: the
-      // instructions are a few thousand characters that are nearly the same in every
-      // session, so expanded they push the actual conversation off the first screen. They
-      // are in the document because "what was the model actually told" is one of the
-      // questions this page exists to answer -- and this was measured rather than
-      // assumed: the first version painted it open, and one screenshot was enough.
-      const box = el("details", "system");
-      box.appendChild(el("summary", "", "instructions"));
-      box.appendChild(el("div", "body", block.text));
-      root.appendChild(box);
-      continue;
-    }
-    const turn = el("div", "turn " + block.kind);
-    if (block.kind === "user") turn.appendChild(el("div", "who", "you"));
-    if (block.kind === "assistant") turn.appendChild(el("div", "who", "flint"));
-    if (block.reasoning) {
-      const r = el("details", "reasoning");
-      r.appendChild(el("summary", "", "thinking"));
-      r.appendChild(el("div", "body", block.reasoning));
-      turn.appendChild(r);
-    }
-    turn.appendChild(el("div", "body", block.text));
-    root.appendChild(turn);
+  // It is a block nothing owns, so it goes when the first real one arrives.
+  if (placeholder && doc.blocks.length) {
+    if (placeholder.parentNode === root) root.removeChild(placeholder);
+    placeholder = null;
   }
+
+  while (painted.length > doc.blocks.length) {
+    const gone = painted.pop();
+    if (gone.node.parentNode === root) root.removeChild(gone.node);
+  }
+  for (let i = 0; i < doc.blocks.length; i++) {
+    const block = doc.blocks[i];
+    const existing = painted[i];
+    if (existing && existing.rev === block.rev && existing.node.parentNode === root) continue;
+    const node = renderBlock(block);
+    if (existing && existing.node.parentNode === root) root.replaceChild(node, existing.node);
+    else root.appendChild(node);
+    painted[i] = { rev: block.rev, node };
+  }
+
+  // An answer that is arriving follows the bottom of the page only if the reader was already
+  // there: scrolling somebody back down while they are reading further up is the other half of
+  // this behaviour, and the half that is easy to forget.
+  root.scrollTop = wasAtBottom ? root.scrollHeight : wasAt;
 
   const status = document.getElementById("status");
   if (doc.status) {
@@ -806,6 +930,13 @@ function load(whole) {
   doc.title = fresh.title;
   doc.usage = fresh.usage;
   doc.blocks = fresh.blocks;
+  // A whole document, not a delta: every node the page was holding belongs to the document
+  // that has just been replaced, so none of them may be reused. Without this the incremental
+  // paint would compare revisions across two different documents and keep stale nodes --
+  // which is the one way this optimisation can be *wrong* rather than merely slow.
+  painted = [];
+  document.getElementById("transcript").textContent = "";
+  doc.rev = fresh.rev;
   paint(doc);
   document.getElementById("drop").hidden = true;
 }
@@ -862,11 +993,15 @@ async function follow() {
           // A named event, not a line of the run's vocabulary: it means this page's
           // document is stale, so it re-reads rather than trying to catch up.
           if (frame.event === "reset") {
-            // `/new`, `/resume` and `/reload` all land here, from the terminal as much as from
-            // this page. The sidebar is re-read too, because which conversation is *current* has
-            // just changed and only the process knows to which.
+            // Two different reasons arrive as the same frame, and the page cannot tell them
+            // apart: `/new` and `/resume` moved the conversation, or this connection fell
+            // behind and the frames in between are gone. So both are handled -- re-read, and
+            // carry over an answer the file cannot have yet.
+            const streaming = streamingAnswer(doc);
             await readSession();
+            carryStreaming(doc, streaming);
             await readSessions();
+            schedulePaint();
             continue;
           }
           // The other named event, and the pair of them are the two things a cursor cannot
@@ -876,6 +1011,20 @@ async function follow() {
           if (frame.event === "status") {
             doc.status = frame.data;
             setHint(doc.status ? "" : idleHint());
+            schedulePaint();
+            continue;
+          }
+          // The third named event, and the other half of what a cursor cannot express: what the
+          // turn in flight has written so far. State, applied without a cursor -- and the only
+          // way a page that loaded, reconnected or was reset mid-turn can learn the part of the
+          // answer that streamed before it was listening. `/session` cannot tell it, because the
+          // file gets the assistant message when the turn ends.
+          if (frame.event === "answer") {
+            try {
+              setStreamingAnswer(doc, JSON.parse(frame.data));
+            } catch (e) {
+              // Not worth a damage block: the next delta will rebuild the answer anyway.
+            }
             schedulePaint();
             continue;
           }
@@ -979,7 +1128,7 @@ if (typeof document !== "undefined" && document.getElementById) {
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     newDoc, applyLine, applyText, applyEvent, tokenFromSearch, servedByFlint, sseFrames,
-    sessionsFrom, messageBody, resumeLine,
+    sessionsFrom, messageBody, resumeLine, streamingAnswer, carryStreaming, setStreamingAnswer,
   };
 }
 </script>
