@@ -38,12 +38,15 @@ whoever is changing the code — a person or a model driving it.
 | `src/session.rs` | reading and writing `sessions/*.jsonl`, listing, archiving |
 | `src/context.rs` | `AGENTS.md` discovery and the skill catalog |
 | `src/config.rs` | config load/save and the paths under `FLINT_HOME` |
-| `tests/` | `agent_loop` (stub provider), `cli_output` (real binary, raw bytes), `term_capture` (byte-exact terminal) |
+| `src/search.rs` | web search: where the credential comes from, and DeepSeek's search endpoint |
+| `src/web.rs` | `--web`: the embedded viewer and the loopback listener that serves it |
+| `tests/` | `agent_loop` (stub provider), `cli_output` (real binary, raw bytes), `term_capture` (byte-exact terminal), `search_tool` (stub search endpoint), `web_view` (the page's policy) |
 | `scripts/` | Node replay tools: `vtscreen.js`, `term-layout-test.js`, `layout-trace.js` |
 | `docs/windows.md` | field notes on Windows terminal behaviour; read before touching layout |
 | `docs/windows-tooling.md` | the plan for command-line escaping on Windows, half built (`exec` and the shared runner are in; the PowerShell half needs a Windows session); read before touching `probe_shell` or adding a tool |
 | `docs/session-format.md` | the session file format, for readers and for hand-editing |
-| `docs/web-mode.md` | the settled, unimplemented plan for the browser view over a running flint; read before touching the listener or the page |
+| `docs/web-mode.md` | the browser view over a running flint; levels 1 and 2 are built and §11 records what was measured in a browser |
+| `docs/deepseek-search.md` | web search: what was measured about DeepSeek's search, and what it costs |
 | `docs/decisions.md` | why flint is built this way, decision by decision |
 | `ROADMAP.md` | the plan of record: the ordered queue, and what is deliberately not done |
 | `HANDOFF.md` | state of the project at the end of the last working session |

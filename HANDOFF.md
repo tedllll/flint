@@ -7,10 +7,10 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 242 passing (172 lib, 25
-`agent_loop`, 18 `cli_output`, 4 `json_output`, 18 `term_capture`, 5 `web_view`), `cargo
-clippy --all-targets` is silent, and both `node scripts/term-layout-test.js` and `node
-scripts/web-view-test.js` pass.
+As of the commit that carries this file, `cargo test` is 260 passing (188 lib, 25
+`agent_loop`, 18 `cli_output`, 4 `json_output`, 18 `term_capture`, 5 `web_view`, 4
+`search_tool`), `cargo clippy --all-targets` is silent, and both `node
+scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
 
 **This round was on macOS** (Darwin arm64, rustc 1.98.1). That is worth knowing before
 anything below: the rounds before it were on Windows, and every Windows-specific item still
@@ -27,6 +27,32 @@ The binary is held open by any running `flint`, so close those before replacing 
 `docs/windows.md` is the field notes for the Windows terminal.
 
 ## What was just done
+
+**Web search: `search`, backed by DeepSeek.** The point of it is that search is a *tool* and
+not a capability of whichever model is driving, so a configuration running only a local model
+can search, with nothing deployed on any machine that has a DeepSeek key. The credential is
+**inherited** from a provider pointed at DeepSeek when there is one — resolved exactly the way
+that provider resolves it — and named explicitly in a `[search]` block when there is not. The
+tool is offered only when it can actually work, and the reason is said once at startup when it
+cannot.
+
+Four things came out of measuring rather than reading, and
+[`docs/deepseek-search.md`](docs/deepseek-search.md) is the record:
+
+- **The endpoint is not the provider's.** Search is on DeepSeek's *Anthropic-compatible*
+  surface; the chat-completions one ignores `web_search` and answers without searching,
+  saying nothing about it. A tool that reused `base_url` would look like it worked.
+- **There is no per-search fee.** The retrieved pages are billed as *input tokens* on the
+  model turn doing the searching — 16,561 for one search, 119,581 for a call that made two.
+  Roughly ¥0.02–0.13 a call, halved outside peak hours. The number is in the README because
+  a model that treats `search` as cheap will spend real money.
+- **Snippets do not exist.** DSH builds them from `citations[]`, and DeepSeek returns none:
+  its compatibility table lists `citations` as *Ignored*, and the citations are markdown links
+  in the prose. So the answer is the url list plus DeepSeek's own summary.
+- **The summary can be wrong.** In the first live run through the finished tool it claimed
+  Rust 1.97.1; the model cross-checked against `rustc --version` and `endoflife.date`, found
+  1.98.1, and said which source was stale. That is the label doing its job, and the argument
+  for returning the summary *with* its sources.
 
 **Web mode, levels 1 and 2.** `flint --web` serves a browser view of the running process on
 loopback. Four commits, and `docs/web-mode.md` §9 and §11 are the reference: the static
