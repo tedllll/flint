@@ -7,9 +7,9 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to
-`origin/main` (tip `b84ca9d`). `cargo test` is 178 passing (127 lib, 21 `agent_loop`,
-12 `cli_output`, 18 `term_capture`), `cargo clippy --all-targets` is silent, and
-`node scripts/term-layout-test.js` passes every layout assertion.
+`origin/main` (tip `6e961ab`). `cargo test` is 189 passing (134 lib, 22 `agent_loop`,
+12 `cli_output`, 3 `json_output`, 18 `term_capture`), `cargo clippy --all-targets` is
+silent, and `node scripts/term-layout-test.js` passes every layout assertion.
 
 Build with:
 
@@ -22,7 +22,8 @@ Development happens on Windows now; `docs/windows.md` is the field notes for it.
 
 ## What was just done
 
-Four commits, all pushed. The reasoning is in each commit message; this is the index.
+Five commits this round, all pushed. The reasoning is in each commit message; this is the
+index.
 
 - **Narration and the clock.** `last_segment_text` outlived the turn it described, so
   the next turn's first round recommitted the previous answer; the strip is now reset
@@ -55,6 +56,29 @@ Four commits, all pushed. The reasoning is in each commit message; this is the i
   `~/.flint/spill/<session>/<n>.txt`; argument validation that names a wrong type instead
   of reporting it as missing or ignoring it; and a per-turn note at the 3rd, 5th and 8th
   identical call. 150 tests to 178.
+- **`AGENTS.md` for this repository**, which flint reads itself: where every piece of
+  flint's own state lives, every config key and its default, and a blunt section on there
+  being no permission layer at all — no prompt, no sandbox, no undo, `bash` not gated, and
+  `readonly` all-or-nothing. A guard against mistakes, not a boundary.
+- **`flint -p --json`.** The same run as one JSON object per line on stdout, and nothing
+  else on stdout: `session.started`, `turn.started`, `message.delta`, `reasoning.delta`,
+  `message.completed`, `tool.started`, `tool.args`, `tool.completed`, `usage`, `warning`,
+  `turn.completed`, `error`. The mapping is a pure function in `src/ndjson.rs`; dispatch
+  happens before the terminal is created, so "stdout is the stream" is structural. A line is
+  always one line (tool output is escaped, never printed raw) and the session file is still
+  written, so a `--json` run can be resumed like any other.
+- **A tool call that never ran is now reported.** Writing the stream exposed it: a call
+  whose arguments did not parse was announced, the error was pushed into the conversation,
+  and no result was ever emitted — a `tool.started` with no `tool.completed`, which a caller
+  waiting for the pair never recovers from. The same mistake was also being reported twice,
+  once by `step` and once by `run`; the first is gone, along with its "requested with no
+  arguments" warning, which fired for calls that need none.
+- **`docs/session-format.md`.** The format written down for the person who has to repair a
+  session by hand, plus what a reader must keep doing (unknown types skipped, known types
+  that will not parse reported as damage). Writing it from the real files caught two things
+  the doc would otherwise have got wrong: `created` is `epoch:<seconds>` — the function
+  behind it was misnamed `now_iso8601` and is now `now_stamp` — and a file from before
+  naming existed has no `v` key at all rather than `v: 1`.
 
 ## Known unfinished
 
@@ -104,10 +128,11 @@ In the order agreed, with the design settled in discussion:
    a real re-render on resize. This is also what deletes the interim state the last fix
    left behind: `begin_answer`, `last_segment_text`, the `committed` count and
    `fresh_segment` all exist because the strip is a text offset rather than a model.
-2. **Machine-readable runs.** `flint -p --json` emitting NDJSON (`session.started`,
-   `turn.started`, `tool.started`, `tool.completed`, `message.completed`, `usage`,
-   `turn.completed`, `turn.failed`, `error`), `docs/session-format.md`, and a
-   `debug prompt-input` view of exactly what was sent.
+2. **`debug prompt-input`.** The last piece of machine-readable output: print exactly what
+   goes to the provider — the system prompt, the history and the tool schemas — without
+   sending it. The NDJSON stream and `docs/session-format.md` are done; this is the one
+   that needs a view of the request body, so it probably wants a `request_body`-shaped
+   function extracted from `provider.rs` rather than a copy of its serialisation.
 3. **Small, agreed, unscheduled.** `read`/`write`/`edit` taking `file_path` with `path`
    kept as an alias; `--fork`; the `HANDOFF`'s own warning about
    `examples/live_turn.rs` — it keeps a hand-maintained copy of `run_turn`'s event
