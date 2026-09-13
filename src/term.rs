@@ -200,6 +200,23 @@ const STATUS_ROWS: u16 = 1;
 /// The input row, the status row and the answer strip.
 const RESERVED: u16 = ANSWER_ROWS + STATUS_ROWS + 1;
 
+/// Whether a debug build was asked to behave as if it had a terminal.
+///
+/// `FLINT_TERM_CAPTURE` makes a run take the interactive path with its output going
+/// wherever stdout points, so the byte stream can be recorded and replayed. Release
+/// builds do not compile the escape hatch at all: a stray variable must never be able
+/// to change how a real run lays itself out.
+pub fn capture_requested() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        std::env::var_os("FLINT_TERM_CAPTURE").is_some()
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        false
+    }
+}
+
 /// What is running right now.
 struct Activity {
     /// The tool name, or empty while the model is thinking rather than running one.
@@ -391,10 +408,7 @@ impl Term {
         // builds do not compile this at all, so it cannot be used to confuse a real
         // run. Raw mode and the window-size query still need a real terminal, so
         // those stay keyed on `tty` below.
-        #[cfg(debug_assertions)]
-        let interactive = tty || std::env::var_os("FLINT_TERM_CAPTURE").is_some();
-        #[cfg(not(debug_assertions))]
-        let interactive = tty;
+        let interactive = tty || capture_requested();
 
         let term = Term {
             interactive,
@@ -494,8 +508,9 @@ impl Term {
         };
         if renamed {
             // Repaint now rather than at the next second: the point of the change is
-            // that the line said the wrong thing until it was corrected.
-            self.paint_activity();
+            // that the line said the wrong thing until it was corrected. Only if it is
+            // already on screen, though -- see `repaint_if_visible`.
+            self.repaint_if_visible();
         }
     }
 
@@ -545,6 +560,20 @@ impl Term {
             }
         };
         if shown {
+            self.repaint_if_visible();
+        }
+    }
+
+    /// Repaint the status row, but only if it is showing something already.
+    ///
+    /// The hold-back in `tick` exists so an activity that is over in a moment never
+    /// appears at all. A rename or a progress line arrives inside that window, and
+    /// painting it immediately is what put `── 0s writing the answer ──` on screen for a
+    /// model that answered in fifty milliseconds -- the fast tool's fault, one line up.
+    /// The next tick draws it with whatever name it has by then, which is the point of
+    /// holding back in the first place.
+    fn repaint_if_visible(&self) {
+        if self.activity_painted.load(Ordering::Relaxed) {
             self.paint_activity();
         }
     }
@@ -810,6 +839,38 @@ impl Term {
         self.close_stream();
     }
 
+    /// Start a new answer, ending any that is still in progress.
+    ///
+    /// `run_turn` accumulates one answer per turn and streams the whole of it on each
+    /// fragment, so the strip recognises a restatement by comparing the incoming text
+    /// against the running record of what this answer has already put in the transcript.
+    /// That record belongs to one turn and has to be dropped when the next one starts.
+    ///
+    /// Left over, it never matches again -- the new turn's text begins at nothing, not at
+    /// the end of the previous answer -- so no head is ever stripped and every round of
+    /// the new turn commits everything said so far, one longer block per tool round:
+    ///
+    /// ```text
+    /// > ask something else
+    /// Looking at the config first.
+    /// ✓ bash
+    /// Looking at the config first. It has not changed, so the key is still missing.
+    /// ```
+    ///
+    /// A process's first turn is unaffected, because its record starts empty, and that is
+    /// why the fault only ever appeared on the second turn and later.
+    pub fn begin_answer(&self) {
+        if !self.interactive {
+            return;
+        }
+        // Anything still streaming is real output, so it is committed before the record
+        // it contributed to is thrown away.
+        self.close_stream();
+        self.committed.store(0, Ordering::Relaxed);
+        self.stream_rows.lock().unwrap().clear();
+        self.last_segment_text.lock().unwrap().clear();
+    }
+
     /// Insert history lines `lines` above the answer strip.
     ///
     /// This is Codex's inline-viewport idea, and it is the whole reason the layout
@@ -866,23 +927,19 @@ impl Term {
     }
 
     /// One line of committed output.
+    ///
+    /// The transcript is written inside the scroll region, which stops one row above the
+    /// answer strip, so nothing here can disturb the status line: it used to clear and
+    /// repaint that row on every committed line, on the theory that inserting a row
+    /// pushed the clock up the screen. It cannot -- the region it scrolls is above both
+    /// -- and the repaint was drawn without waiting out `ACTIVITY_DELAY`, which is what
+    /// put a `── 0s read ──` on screen for every tool fast enough that the wait was not
+    /// supposed to show a clock at all.
     fn emit_history(&self, text: &str) {
         if !self.interactive {
             return;
         }
-        // The status line lives on a row *below* the scroll region, so inserting a row
-        // above it pushes it up the screen -- leaving a stale clock stranded in the middle
-        // of the transcript until the next tick. Clear it first; the caller repaints.
-        let row = self.input_row.load(Ordering::Relaxed).saturating_sub(1);
-        if self.activity.lock().unwrap().is_some() {
-            let mut out = std::io::stdout();
-            let _ = write!(out, "\x1b[{};1H\x1b[2K", row);
-            let _ = out.flush();
-        }
         self.insert_history(&[text.to_string()]);
-        if self.activity.lock().unwrap().is_some() {
-            self.paint_activity();
-        }
     }
 
     /// Render a streamed answer into the answer strip.
@@ -922,6 +979,7 @@ impl Term {
         // `close_stream` commits from it, so leaving `stream_text` holding the unstripped
         // text applies one text's row offsets to another's rows.
         let incoming = text;
+
         let stripped;
         let text = {
             let head = self.last_segment_text.lock().unwrap();
@@ -1213,12 +1271,17 @@ impl Term {
     }
 
     /// Blank the answer strip, so a finished answer is not left on screen twice.
+    ///
+    /// The strip only: the row below it is the running status line, which belongs to the
+    /// clock rather than to the answer. Erasing it here wiped a clock that was still
+    /// counting, and the repaint that followed is what made a fast tool flicker through
+    /// `── 0s read ──` on its way past.
     fn clear_viewport(&self) {
-
         let top = self.viewport_top.load(Ordering::Relaxed);
-        let input = self.input_row.load(Ordering::Relaxed);
+        // The status row is `input_row - 1`, so the strip ends one row above it.
+        let last = self.input_row.load(Ordering::Relaxed).saturating_sub(1);
         let mut out = std::io::stdout();
-        for row in top..input {
+        for row in top..last {
             let _ = write!(out, "\x1b[{};1H\x1b[2K", row);
         }
         let _ = out.flush();

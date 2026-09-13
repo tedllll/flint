@@ -509,6 +509,68 @@ fn the_running_clock_does_not_land_on_the_answers_last_row() {
     let _ = bytes;
 }
 
+/// The clock waits out `ACTIVITY_DELAY`, even when lines are committed while it runs.
+///
+/// The status row sits *below* the scroll region, so a committed line cannot disturb it
+/// and there is nothing to repaint. Repainting anyway -- which is what `emit_history`
+/// did -- skipped the hold-back that exists so a tool finishing in milliseconds shows no
+/// clock at all, and put a `── 0s read ──` on screen for every fast tool: the row read
+/// as a timer that had measured nothing, which is how it was reported.
+#[test]
+fn a_committed_line_does_not_paint_a_clock_that_has_not_waited() {
+    let _guard = stdout_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("term-clock-delay.bin");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let restore = redirect_stdout(&path);
+
+    std::env::set_var("FLINT_TERM_CAPTURE", "1");
+    std::env::set_var("FLINT_TERM_SIZE", "70x24");
+    let term = Term::start().expect("term");
+
+    // A tool starts, and its call line is committed well inside the delay. This is the
+    // shape of every fast tool: `activity_started` first, then a line through history.
+    term.activity_started("read");
+    term.line(format_args!("  \u{2713} read small.txt 4 lines"));
+    let early = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).to_string();
+    // The clock is the only thing that draws a box rule; the transcript line does not.
+    assert!(
+        !early.contains('\u{2500}'),
+        "a clock was painted before the delay was up:\n{early:?}"
+    );
+
+    // Past the delay it does appear: this is a hold-back, not a ban. The margin over the
+    // delay is what keeps the test from depending on how fast the machine is.
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    term.tick();
+    let late = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).to_string();
+    assert!(
+        late.contains("0s read \u{2500}\u{2500}"),
+        "the clock never appeared, so the delay became a ban:\n{late:?}"
+    );
+
+    // And the tool finishing takes it away again, leaving no timer on the status row.
+    term.activity_done();
+    restore();
+    std::env::remove_var("FLINT_TERM_CAPTURE");
+    std::env::remove_var("FLINT_TERM_SIZE");
+
+    let screen = replay(&path, 24, 70);
+    // The last row is the input row, so the status row is the one above it.
+    let status = screen.get(screen.len().saturating_sub(2)).cloned().unwrap_or_default();
+    assert!(
+        !status.contains('\u{2500}'),
+        "the clock was left behind after the tool finished:\n{}",
+        screen.join("\n")
+    );
+    assert!(
+        screen.iter().any(|r| r.contains("read small.txt 4 lines")),
+        "the committed line is missing from the transcript:\n{}",
+        screen.join("\n")
+    );
+}
+
 /// Replay a captured byte stream through the screen model and return its rows.
 fn replay(path: &std::path::Path, rows: usize, cols: usize) -> Vec<String> {
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1077,4 +1139,95 @@ fn narration_is_not_recommitted_each_tool_round() {
         copies, 1,
         "the narration opening was committed {copies} times, once per round:\n{rows:#?}"
     );
+}
+
+/// A turn that follows another one must not recommit the earlier turn's narration.
+///
+/// `run_turn` accumulates one answer per *turn* and streams the whole of it on every
+/// fragment, so the strip has to drop the part the transcript already holds. It does
+/// that by comparing the incoming text against the running prefix of the answer --
+/// which is only the answer at all if it is emptied where the accumulation restarts.
+/// That happens when the user says something new, a case no single-turn test reaches:
+/// the leftover prefix never matches again, no head is ever stripped, and every round
+/// of every later turn commits everything said so far:
+///
+///   Second turn: the same check, after the user asked again.
+///   ✓ bash round 0 3 lines
+///   Second turn: the same check, after the user asked again. Everything checks out.
+///
+/// Each block is longer than the last, one per tool round, which is what a real session
+/// looked like. The first turn of a process is unaffected -- there the prefix is empty --
+/// so this is also why it looked like it only ever happened later on.
+#[test]
+fn a_later_turn_does_not_recommit_the_earlier_turns_narration() {
+    let _guard = stdout_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("term-turns.bin");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let restore = redirect_stdout(&path);
+
+    std::env::set_var("FLINT_TERM_CAPTURE", "1");
+    std::env::set_var("FLINT_TERM_SIZE", "70x24");
+    let term = Term::start().expect("term");
+
+    // Two turns in one process, driven the way `run_turn` does: the accumulator is
+    // rebuilt per turn, and a round's text is only ever an addition to it.
+    let turns = [
+        [
+            "First turn: reading the two files.",
+            " The provider is a stub. Nothing to fix here.",
+        ],
+        [
+            "Second turn: the same check, after the user asked again.",
+            " Everything checks out now.",
+        ],
+    ];
+    for (t, parts) in turns.iter().enumerate() {
+        term.line(format_args!("> prompt {t}"));
+        let mut acc = String::new();
+        term.begin_answer();
+        for (n, part) in parts.iter().enumerate() {
+            for ch in part.chars() {
+                acc.push(ch);
+                term.stream(&acc);
+            }
+            term.line(format_args!("  \u{2713} bash round {n} 3 lines"));
+        }
+        term.end_stream();
+    }
+
+    restore();
+    std::env::remove_var("FLINT_TERM_CAPTURE");
+    std::env::remove_var("FLINT_TERM_SIZE");
+
+    let text = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).to_string();
+    let rows = history_rows(&text);
+
+    // Neither turn's opening may appear at the head of another row: that is the
+    // accumulation being committed a second time.
+    for opening in [
+        "First turn: reading the two files.",
+        "Second turn: the same check, after the user asked again.",
+    ] {
+        let copies = rows
+            .iter()
+            .filter(|r| r.as_str().starts_with(opening))
+            .count();
+        assert_eq!(
+            copies, 1,
+            "the narration opening {opening:?} was committed {copies} times:\n{rows:#?}"
+        );
+    }
+    // And each round's own addition is still there, exactly once.
+    for addition in [
+        " The provider is a stub. Nothing to fix here.",
+        " Everything checks out now.",
+    ] {
+        let copies = rows.iter().filter(|r| r.as_str() == addition).count();
+        assert_eq!(
+            copies, 1,
+            "the round's own text {addition:?} was committed {copies} times:\n{rows:#?}"
+        );
+    }
 }

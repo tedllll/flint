@@ -346,7 +346,14 @@ async fn real_main() -> Result<i32> {
     //
     // One-shot mode has no input row to reserve -- the caller wants the text and
     // nothing else -- so it leaves the terminal alone.
-    let interactive_mode = args.prompt.is_none();
+    //
+    // Except under `FLINT_TERM_CAPTURE`, which is the only way to record the
+    // interactive byte stream without a keyboard: the REPL's own input path needs a
+    // real console to read, so a one-shot prompt is the only turn a test can drive.
+    // Without this the strip, the status row and the transcript machinery are
+    // unreachable from a test, which is exactly how they came to be checked only by
+    // hand.
+    let interactive_mode = args.prompt.is_none() || term::capture_requested();
     let term = std::sync::Arc::new(if interactive_mode {
         term::Term::start()?
     } else {
@@ -356,7 +363,10 @@ async fn real_main() -> Result<i32> {
     // Lets transcript lines show `src/term.rs` instead of the full path the model wrote.
     term.set_cwd(&cwd.to_string_lossy());
 
-    let (reader, mut input_rx) = if term.interactive() {
+    // The capture harness draws the interactive layout but has no console to read keys
+    // from -- crossterm would block on one that is not there -- so its input still comes
+    // from the pipe, which is what lets a script drive a whole session.
+    let (reader, mut input_rx) = if term.interactive() && !term::capture_requested() {
         InputReader::from_terminal(std::sync::Arc::clone(&term))
     } else {
         InputReader::from_stdin()
@@ -1515,11 +1525,18 @@ async fn run_turn(
 
     loop {
         let mut tool_names: HashMap<String, (String, String)> = HashMap::new();
+        // The calls of the current round, in the order they were announced, so the clock
+        // can move to the next one as each result arrives.
+        let mut round_calls: Vec<String> = Vec::new();
         let mut streamed_text = false;
         // The answer so far. Streamed output is redrawn in full on every fragment,
         // because a fragment is not a line: it can stop in the middle of a word,
         // and only the whole text can be placed correctly.
         let mut answer = String::new();
+        // The accumulator above belongs to this turn, and so does the terminal's record
+        // of what has already been committed: starting the next turn has to start that
+        // record over too, or the answer is measured against the previous turn's text.
+        printer.term().begin_answer();
 
         // A tool round is another wait: the step starts by asking the model again, and
         // the clock has to be running for it or the pause after every tool call looks
@@ -1575,7 +1592,15 @@ async fn run_turn(
                     // Start the clock as soon as the tool is known, not when its
                     // arguments have finished streaming: the wait begins here, and a
                     // tool that never returns is exactly the case this is for.
-                    printer.term().activity_started(&name);
+                    //
+                    // Only for the first call of the round, though. Every call in a round
+                    // is announced before any of them runs, so naming the clock on each
+                    // announcement claimed the *last* call was the one being waited for,
+                    // and reset the elapsed time of a tool that had not started yet.
+                    if round_calls.is_empty() {
+                        printer.term().activity_started(&name);
+                    }
+                    round_calls.push(id.clone());
                     tool_names.insert(id, (name, String::new()));
                 }
                 Event::ToolArgs { id, args } => {
@@ -1595,13 +1620,24 @@ async fn run_turn(
                     // The name comes from the matching ToolStart: the result is
                     // reported as "鉁?read" or "鉁?bash", so the transcript says what
                     // happened rather than just that something did.
-                    printer.term().activity_done();
                     let (name, args) = tool_names
                         .get(&id)
                         .cloned()
                         .unwrap_or_else(|| (String::new(), String::new()));
                     printer.tool_result(&name, &args, &output, ok);
                     tool_names.remove(&id);
+                    round_calls.retain(|call| call != &id);
+                    // The clock belongs to whatever is being waited for now: the next call
+                    // in the round, or -- once they have all run -- the model that has to
+                    // be asked for the round after this one. Clearing it here instead left
+                    // the rest of a multi-call round and the whole following model call
+                    // with no clock at all, which is the pause a user actually stares at.
+                    let next = round_calls
+                        .first()
+                        .and_then(|next| tool_names.get(next))
+                        .map(|(name, _)| name.clone())
+                        .unwrap_or_default();
+                    printer.term().activity_started(&next);
                 }
                 Event::Usage(_) => {}
                 Event::Warning(w) => {

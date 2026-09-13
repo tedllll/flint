@@ -320,3 +320,96 @@ fn exec_works_without_a_config_and_creates_none() {
 
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// The clock has to be running for the wait *after* a tool round, and not for the tools.
+/// Two things were wrong with it. A tool fast enough that the hold-back never expired
+/// still painted `── 0s <tool> ──`, because committing a transcript line repainted the
+/// status row without waiting; and the first tool result stopped the clock outright, so a
+/// round of several calls ran mostly untimed and the model call that followed it showed
+/// no clock at all -- the pause a user is actually staring at.
+///
+/// Driven through the real binary because this is the wiring, not the drawing: the events
+/// that start and stop the clock come from the agent loop, and no test of `Term` alone
+/// can see which of them arrive when.
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn a_tool_round_leaves_the_clock_running_for_the_model_call_after_it() {
+    let server = MockServer::start().await;
+
+    // The round: one tool call. `echo` is the one command both `cmd /C` and `sh -c`
+    // understand, which keeps the test from depending on the platform's shell.
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(&[
+                    r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_0","function":{"name":"bash","arguments":"{\"command\":\"echo hi\"}"}}]}}]}"#,
+                    r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+                    "data: [DONE]",
+                ])),
+        )
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    // The model call after the tool, slow enough for the clock to tick.
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_delay(std::time::Duration::from_millis(2000))
+                .set_body_string(sse(&[
+                    r#"data: {"choices":[{"delta":{"content":"done"}}]}"#,
+                    r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+                    "data: [DONE]",
+                ])),
+        )
+        .mount(&server)
+        .await;
+
+    let home = std::env::temp_dir().join(format!("flint-clock-{}", std::process::id()));
+    let work = home.join("work");
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&work).expect("temp dirs");
+    std::fs::write(
+        home.join("config.toml"),
+        format!(
+            "default_provider = \"stub\"\n\n\
+             [[providers]]\n\
+             name = \"stub\"\n\
+             base_url = \"{}\"\n\
+             model = \"stub-model\"\n\
+             api_key = \"not-a-real-key\"\n",
+            server.uri()
+        ),
+    )
+    .expect("failed to write the test config");
+
+    let out = binary()
+        .args(["-p", "run it", "--cwd"])
+        .arg(&work)
+        .env("FLINT_HOME", &home)
+        // The interactive layout: the status row only exists in that one, and the size
+        // decides where every row lands in the bytes asserted on below.
+        .env("FLINT_TERM_CAPTURE", "1")
+        .env("FLINT_TERM_SIZE", "80x24")
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("failed to run flint");
+    let _ = std::fs::remove_dir_all(&home);
+
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        text.contains("waiting for the model \u{2500}\u{2500}"),
+        "the model call after the tool round has no clock:\n{text:?}"
+    );
+    assert!(
+        text.contains("1s waiting for the model \u{2500}\u{2500}"),
+        "the clock stopped instead of counting while the model was waited for:\n{text:?}"
+    );
+    assert!(
+        !text.contains("bash \u{2500}\u{2500}"),
+        "a tool that finished inside the hold-back still got a clock:\n{text:?}"
+    );
+}
