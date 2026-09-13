@@ -138,6 +138,15 @@ In the order agreed, with the design settled in discussion:
    `examples/live_turn.rs` — it keeps a hand-maintained copy of `run_turn`'s event
    handling and has drifted twice, costing time chasing faults that were only in the
    example.
+4. **Windows tooling — the escaping problem.** Settled in discussion and written up in full
+   in [`docs/windows-tooling.md`](docs/windows-tooling.md): why a command string loses
+   quotes and backslashes on Windows (five parsers in a row, and `argv` is a fiction at the
+   `CreateProcess` boundary), the tool plan that deletes most of it (`exec` with an argument
+   array; `pwsh` with the script handed over as a file), the shared runner refactor they
+   need first, and the Windows adaptations that fall out of the same work — a killed command
+   does not kill its children, CP936 output decoded as UTF-8 becomes U+FFFD, `glob`/`grep`
+   silently miss a `\` pattern. **This is the active thread**; the order at the end of that
+   file is the order to work in.
 
 Deliberately not doing: subagents, `flint doctor`, approval prompts, MCP, sandboxes,
 SQLite, indexes, and any compressed or opaque state. State stays plain files a person can
