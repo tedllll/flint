@@ -1069,15 +1069,100 @@ async fn a_transient_status_is_retried_and_the_turn_succeeds() {
         .await
         .expect("a 503 must not fail the turn");
 
-    // The retry must not double up. A failed attempt's events are buffered and dropped,
-    // so only the attempt that completed contributes -- and because the agent assembles
-    // the answer from accumulated deltas, seeing the text twice here would produce a
-    // doubled sentence on screen.
+    // The retry must not double up. This 503 never reached the body, so nothing was drawn
+    // and the retry is free -- which is the rule now: the ladder stops at the first drawn
+    // character, and everything before it is still retried and still leaves no trace.
     let joined = seen.join("");
     assert!(!joined.is_empty(), "no text reached the callback at all");
     assert!(
         joined.matches("你好").count() <= 1,
         "the answer was delivered more than once, so a failed attempt leaked its events: {joined:?}"
+    );
+}
+
+/// A stream that ends without the provider's completion signal is a broken answer, not a
+/// short one.
+///
+/// This is the shape a dropped connection usually takes: the body ends, and a body ending
+/// looks exactly like a response being over. Nothing asked about the completion signal
+/// before this -- `parser.done` was only ever used to leave the read loop early -- so a half
+/// answer became *the* answer and the turn read as a success.
+///
+/// Retried here, because nothing had been drawn: this attempt produced only reasoning, which
+/// goes to the status line and gets repainted anyway.
+#[tokio::test]
+async fn a_stream_that_stops_early_is_not_taken_for_an_answer() {
+    let server = MockServer::start().await;
+    // A reasoning fragment and then nothing: no `finish_reason`, no `[DONE]`.
+    Mock::given(method("POST"))
+        .respond_with(SseFixture {
+            body: sse(&[
+                r#"data: {"choices":[{"delta":{"reasoning_content":"thinking about it"}}]}"#,
+            ]),
+        })
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(SseFixture {
+            body: answer_only(),
+        })
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let mut agent = agent_for(&server, std::env::temp_dir()).await;
+    let mut seen = String::new();
+    agent
+        .run("hello", |event| {
+            if let Event::Text(t) = event {
+                seen.push_str(&t);
+            }
+        })
+        .await
+        .expect("a truncated stream that drew nothing must be retried, not reported");
+
+    assert!(seen.contains("All done."), "the retry never produced an answer: {seen:?}");
+}
+
+/// Once the answer has started arriving, a failure is reported rather than retried.
+///
+/// This is the price of streaming, and it is paid here rather than by buffering the whole
+/// answer: a second attempt would be written *after* the first, because nothing in the chain
+/// can take text back -- a terminal has scrolled the line, a pipe has emitted it, the browser
+/// has already rendered it. What the reader gets instead is what arrived, plus an error that
+/// says what happened.
+#[tokio::test]
+async fn a_stream_that_dies_after_the_answer_started_is_not_retried() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(SseFixture {
+            body: sse(&[r#"data: {"choices":[{"delta":{"content":"half an ans"}}]}"#]),
+        })
+        .mount(&server)
+        .await;
+
+    let mut agent = agent_for(&server, std::env::temp_dir()).await;
+    let error = agent.run("hello", |_| {}).await.unwrap_err();
+    let message = format!("{error:#}");
+
+    assert!(
+        message.contains("before it was finished"),
+        "it must say the stream was cut short: {message}"
+    );
+    assert!(
+        message.contains("already begun to arrive"),
+        "and that this is why it was not retried: {message}"
+    );
+
+    // One request, not four. The ladder stopping is the whole point: four would have printed
+    // the answer four times.
+    let requests = server.received_requests().await.expect("requests");
+    assert_eq!(
+        requests.len(),
+        1,
+        "the retry ladder ran after text had been drawn, which doubles the answer"
     );
 }
 
@@ -1189,4 +1274,76 @@ async fn a_preview_asks_for_no_message_and_sends_nothing() {
         !preview["tools"].as_array().expect("tools").is_empty(),
         "the tool schemas are part of what the model is sent, so they belong in the preview"
     );
+}
+
+/// A server that writes one delta, waits, then finishes.
+///
+/// A raw socket because no mock in the tree can hold a response open and dribble it out, and
+/// holding it open is the whole of what is being tested: a client that buffers cannot report
+/// the first delta until the wait is over.
+async fn a_server_that_writes_slowly() -> (String, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind a port");
+    let port = listener.local_addr().expect("a port").port();
+    let handle = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept");
+        let mut head = [0u8; 4096];
+        let _ = socket.read(&mut head).await;
+        let _ = socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n\
+                  data: {\"choices\":[{\"delta\":{\"content\":\"first \"}}]}\n\n",
+            )
+            .await;
+        let _ = socket.flush().await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let _ = socket
+            .write_all(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"second\"}}]}\n\n\
+                  data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+                  data: [DONE]\n\n",
+            )
+            .await;
+        let _ = socket.flush().await;
+        let _ = socket.shutdown().await;
+    });
+    (format!("http://127.0.0.1:{port}"), handle)
+}
+
+/// The answer arrives while the model is still writing it.
+///
+/// This is the feature, and it is only observable in time. The server sends one delta and
+/// then sits on the connection for a second and a half, so a client that buffers the whole
+/// response cannot report the first delta until the wait is over — which is exactly what
+/// used to happen, and what made a local model feel slower than it is: a reasoning model
+/// spends most of a turn producing text nobody could see.
+#[tokio::test]
+async fn the_answer_arrives_while_the_model_is_still_writing_it() {
+    let (base_url, server) = a_server_that_writes_slowly().await;
+    let config = test_config(&base_url);
+    let provider = Provider::new(config.providers[0].clone()).expect("provider");
+    let mut agent = Agent::new(&config, provider, false, std::env::temp_dir(), None);
+
+    let started = std::time::Instant::now();
+    let mut first_at: Option<std::time::Duration> = None;
+    agent
+        .run("hello", |event| {
+            if matches!(event, Event::Text(_)) && first_at.is_none() {
+                first_at = Some(started.elapsed());
+            }
+        })
+        .await
+        .expect("the turn must finish");
+
+    let first_at = first_at.expect("no text reached the callback at all");
+    assert!(
+        first_at < std::time::Duration::from_millis(1000),
+        "the first delta did not arrive for {first_at:?}, which is the whole response's worth \
+         of waiting — the stream is still being collected rather than passed on"
+    );
+    let _ = server.await;
 }

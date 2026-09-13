@@ -7,8 +7,8 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 260 passing (188 lib, 25
-`agent_loop`, 18 `cli_output`, 4 `json_output`, 18 `term_capture`, 5 `web_view`, 4
+As of the commit that carries this file, `cargo test` is 298 passing (220 lib, 28
+`agent_loop`, 19 `cli_output`, 4 `json_output`, 18 `term_capture`, 5 `web_view`, 4
 `search_tool`), `cargo clippy --all-targets` is silent, and both `node
 scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
 
@@ -27,6 +27,31 @@ The binary is held open by any running `flint`, so close those before replacing 
 `docs/windows.md` is the field notes for the Windows terminal.
 
 ## What was just done
+
+**Text now arrives while it is being written.** Deltas used to be collected per attempt and
+handed over only when that attempt completed, so that a retry could discard them — which meant
+a terminal, a browser and a `--json` reader all saw *nothing* until a whole response had
+arrived. Measured before the change: 128 `message.delta` frames arriving as a single burst;
+after it, the same 128 spread over 5.5 seconds, the first at 1.9s.
+
+This mattered most for a local model, and the numbers say why: on a real question, Ornith-1.5
+spent 341 completion tokens of which 292 characters were the answer, and gemma4-12b spent 436
+tokens of which 49 characters were — **most of a turn is reasoning, and reasoning was
+invisible**, shown only as one word on the status line. So a twenty-second turn looked like a
+twenty-second freeze followed by a short answer, and the model was blamed for it. Measured the
+other way round: MLX was *faster* than the 12B gemma, 19.2s against 33.7s.
+
+**The retry rule is now explicit: the ladder stops at the first drawn character.** Before it —
+a connection that never opened, a 503, a stream that died during the reasoning — is still
+retried and still leaves no trace. After it, the failure is reported, because a second attempt
+would be written after the first: a terminal has scrolled the line, a pipe has emitted it, the
+browser has rendered it, and nothing in the chain can take text back.
+
+**And a defect fell out of the change.** A stream that ended without the provider's completion
+signal was accepted as an answer: `parser.done` was only ever used to leave the read loop
+early, never asked afterwards. A dropped connection usually shows up as a body simply ending,
+so a half answer became *the* answer and the turn read as a success. It is a transport failure
+now.
 
 **Web search: `search`, backed by DeepSeek.** The point of it is that search is a *tool* and
 not a capability of whichever model is driving, so a configuration running only a local model
@@ -163,10 +188,13 @@ output (`prune_tool_output` in `agent.rs`): the four most recent results, anythi
 and every failure are kept; older long output is replaced with a note. The session file
 keeps every byte. `flint debug prompt-input` is how to see the difference.
 
-**Streamed output arrives in one go**, because events are buffered per attempt to make
-retries safe. The status line is what tells the user work is happening. If real
-token-by-token output is wanted back, the buffer has to be flushed as it fills and the
-retry path has to reconcile what was already drawn — that was considered and not done.
+**A stream that ends without a completion signal used to be taken for an answer.** Found
+while making the text stream: `parser.done` was only ever used to leave the read loop early,
+and nothing asked about it afterwards — so a connection that dropped mid-answer, which shows
+up as a body simply ending, produced a half answer that read as a complete one. It is a
+transport failure now, which is also what puts a mid-answer drop back on the retry ladder
+when nothing has been drawn.
+
 
 ## Planned and not started
 

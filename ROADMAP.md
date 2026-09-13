@@ -151,11 +151,13 @@ the URL has to be printed anyway.
 looking frozen during a slow turn. **Not done:** `POST /message` (level 3, typing into the
 browser) and the measurement pass of step 7.
 
-**What level 2 cannot do yet, and it is the next thing worth doing.** A browser shows the run's
-*phase* live and its *text* late, because streamed output is buffered per attempt so that a
-retry can discard it. `docs/web-mode.md` §11 has the measurement. Flushing deltas as they
-arrive is now the highest-value item for anything with a user interface, and it is also what
-would make `--json` a stream a program can actually follow instead of a burst at the end.
+**And the text now arrives while it is written.** Deltas used to be buffered per attempt so a
+retry could discard them, which meant a terminal, a browser and a `--json` reader all saw
+nothing until a whole response had arrived — measured at 128 deltas over 5.5 seconds arriving
+as one burst at the end, and it made a local reasoning model feel far slower than it is, since
+most of a turn is text nobody could see. The retry rule is now explicit: the ladder stops at
+the first drawn character, because nothing in the chain can take text back. `docs/web-mode.md`
+§11 has the measurement; `src/provider.rs` has the rule.
 
 ## Small, agreed, unscheduled
 
@@ -171,7 +173,7 @@ would make `--json` a stream a program can actually follow instead of a burst at
 Five known defects are not repeated here, so that the list cannot drift apart from the
 state of the tree: Windows newline and code-page behaviour, CI that checks nothing on push,
 three `eprintln!` sites that can land inside the answer strip, a transcript that is not
-trimmed by construction, and streamed output that arrives in one go.
+and a transcript that is not trimmed by construction.
 [`HANDOFF.md`](HANDOFF.md#known-unfinished) has each in detail, labelled by what was
 measured and what was not.
 

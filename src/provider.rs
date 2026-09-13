@@ -302,11 +302,17 @@ impl Provider {
         // throws away everything the model had already produced -- including, often, the
         // part that says what it was doing.
         //
-        // Retrying is only safe because events are buffered per attempt and flushed once
-        // that attempt has *completed*. Handing a fragment to `on_event` is irreversible:
-        // a retry would then render the retried text under the partial text already on
-        // screen, and the answer would appear twice. Buffering costs one attempt's worth
-        // of text and buys a retry the user never sees.
+        // **The retry is only free while nothing has been drawn.** Events go out as they
+        // arrive, because a terminal, a browser and a `--json` reader all want the answer
+        // while it is being written -- and that makes each one of them irreversible: a
+        // terminal has already scrolled the line, a pipe has already emitted it, the browser
+        // has already rendered it. Retrying after that prints the second attempt after the
+        // first, and the answer appears twice.
+        //
+        // So the ladder stops at the first drawn character. Everything before it -- the
+        // connection that never opened, the 503, the stream that died during the *reasoning*
+        // -- is still retried and still leaves no trace, which is where the retries were
+        // most of their value anyway.
         let mut attempt = 0u32;
         let mut last_error: Option<anyhow::Error>;
 
@@ -317,26 +323,44 @@ impl Provider {
                 req = req.bearer_auth(&key);
             }
 
-            let mut pending: Vec<Event> = Vec::new();
-            let outcome = self.attempt_stream(req, &mut pending).await;
+            // Whether this attempt put text in front of someone, and therefore whether a
+            // retry is still free.
+            let mut drawn = false;
+            let outcome = self
+                .attempt_stream(req, &mut |event| {
+                    if matches!(event, Event::Text(_)) {
+                        drawn = true;
+                    }
+                    on_event(event);
+                })
+                .await;
 
             match outcome {
-                Ok(()) => {
-                    // The attempt completed, so everything it produced is real and can be
-                    // handed over now. `finish` runs here rather than inside the attempt,
-                    // because the assembled tool calls are only meaningful once the whole
-                    // response has arrived.
-                    for event in pending {
-                        on_event(event);
-                    }
-                    return Ok(());
-                }
+                Ok(()) => return Ok(()),
                 Err(e) => {
                     let retryable = matches!(e, AttemptError::Transport(_) | AttemptError::Status(_));
                     last_error = Some(match e {
                         AttemptError::Transport(m) | AttemptError::Status(m) => anyhow::anyhow!(m),
                         AttemptError::Fatal(e) => e,
                     });
+
+                    // Only *text* stops a retry. Reasoning goes to the status line, which is
+                    // a word and a clock that get repainted anyway -- and on a reasoning
+                    // model it arrives within a second of the request, so treating it as
+                    // drawn would disable the ladder for exactly the models that spend the
+                    // longest producing an answer.
+                    if drawn {
+                        let why = last_error
+                            .as_ref()
+                            .map(|e| format!("{e:#}"))
+                            .unwrap_or_default();
+                        return Err(anyhow::anyhow!(
+                            "{why}\n(the answer had already begun to arrive, so it was not \
+                             retried -- a second attempt would have been written after the \
+                             first. What arrived is above; ask again for the rest.)"
+                        ));
+                    }
+
                     if !retryable || attempt >= MAX_ATTEMPTS {
                         break;
                     }
@@ -374,7 +398,7 @@ impl Provider {
     async fn attempt_stream(
         &self,
         req: reqwest::RequestBuilder,
-        pending: &mut Vec<Event>,
+        on_event: &mut dyn FnMut(Event),
     ) -> std::result::Result<(), AttemptError> {
         // A dead network has to be *named*, and so does the proxy in front of it. The
         // reader's question is whether to wait, fix the cable, start the proxy, or clear
@@ -435,8 +459,10 @@ impl Provider {
             while let Some(pos) = buffer.find('\n') {
                 let line = buffer[..pos].trim_end_matches('\r').to_string();
                 buffer.drain(..=pos);
+                // Handed over as they are parsed, not collected: this is what makes the
+                // answer appear while it is being written.
                 for event in parser.feed_line(&line) {
-                    pending.push(event);
+                    on_event(event);
                 }
                 if parser.done {
                     break;
@@ -448,8 +474,27 @@ impl Provider {
             }
         }
 
-        // Surface the fully assembled tool calls so the agent can execute them.
-        pending.extend(parser.finish());
+        // A stream that ended without the provider's completion signal is not a short
+        // answer, it is a broken one, and this is the shape a dropped connection usually
+        // takes: an interrupted stream, a proxy that gave up, a server that died -- they all
+        // end the body, and a body ending looks exactly like a response being over. Without
+        // this the half answer that arrived becomes *the* answer, and the turn reads as a
+        // success. Found while making the same code stream: `parser.done` was only ever used
+        // to leave the read loop early, never asked afterwards.
+        if !parser.done {
+            return Err(AttemptError::Transport(format!(
+                "the response from {} ended before it was finished -- no completion signal \
+                 arrived, so what came back is only part of an answer",
+                self.config.endpoint()
+            )));
+        }
+
+        // Surface the fully assembled tool calls so the agent can execute them. `finish`
+        // runs here rather than at the caller because the calls are only complete once the
+        // whole response has arrived, and nothing before that point knows what they are.
+        for event in parser.finish() {
+            on_event(event);
+        }
         Ok(())
     }
 }

@@ -341,19 +341,31 @@ assertions. What follows is the part no test in this repository reaches.
 | A turn on a browser that then reloads mid-turn | **not measured** | |
 | What 80 columns looks like next to a terminal | **not measured** | |
 
-### The limit that measuring found
+### The limit that measuring found — and then closed
 
-**Streamed output is buffered per attempt, so the browser gets no text until a model
-response has finished arriving.** This is not a web-mode defect and not new: `provider.rs`
-buffers a whole attempt's events so that a retry can discard them rather than leaving half an
-answer on screen, and `HANDOFF.md` has carried "streamed output arrives in one go" as a known
-limitation for several rounds. What is new is how visible it becomes here. With a local model
-that takes twenty seconds, a browser shows the status line and *nothing else* for those
-twenty seconds, and then the entire answer at once — where the terminal has the same
-behaviour and it bothers nobody, because the terminal is where the person already is.
+**Streamed output used to be buffered per attempt, so a browser got no text until a model
+response had finished arriving.** Not a web-mode defect: `provider.rs` buffered a whole
+attempt's events so that a retry could discard them, and `HANDOFF.md` carried "streamed output
+arrives in one go" as a known limitation for several rounds. What was new here is how visible a
+browser made it — a page showing a status line and *nothing else* for twenty seconds, then the
+entire answer at once.
 
-So the honest summary of level 2 is: **the browser is live about the run's phase and late
-about its text.** The status event is what keeps it from looking dead, which is exactly the
-job it was added for; making the text arrive as it is written is the other half, and it is the
-change `HANDOFF.md` describes as considered and not done. It is now the first thing worth
-doing next, because a browser makes the cost of not having it obvious.
+Fixed, and the measurement is what says so: 128 `message.delta` frames from a local model
+arrived over 5.5 seconds, the first at 1.9s and the last at 7.4s. Buffered, all 128 arrived at
+7.4s. A test asserts the same thing against a server that writes one delta and then sits on
+the connection for a second and a half — the first delta must arrive before the wait is over,
+and with the buffering restored it arrives at 1.504s.
+
+The retry rule changed with it, and that is the part worth knowing: **the ladder stops at the
+first drawn character.** Everything before it — a connection that never opened, a 503, a
+stream that died during the *reasoning* — is still retried and still leaves no trace. After
+it, the failure is reported instead, because a second attempt would be written after the
+first: a terminal has scrolled the line, a pipe has emitted it, the browser has rendered it,
+and nothing in the chain can take text back.
+
+One defect came out of making this change, and it was the reason the old retry had a hole in
+it: **a stream that ended without the provider's completion signal was accepted as an
+answer.** `parser.done` was only ever used to leave the read loop early and never asked
+afterwards — so a dropped connection, which usually shows up as a body simply ending, produced
+a half answer that read as a complete one. It is now a transport failure, which is what puts a
+mid-answer drop back on the retry ladder when nothing has been drawn.
