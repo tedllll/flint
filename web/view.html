@@ -379,6 +379,44 @@ function tokenFromSearch(search) {
   return match ? match[1] : "";
 }
 
+/// Split an SSE buffer into the frames that are complete, and the tail still arriving.
+///
+/// Pure, and tested in Node, because this is where a stream is most easily lost: a network
+/// read ends wherever it ends, not where a frame does. A parser that assumed otherwise would
+/// drop every frame that straddles a chunk boundary -- silently, and only under load.
+///
+/// Per the SSE grammar: `field: value`, a leading `:` is a comment, and a blank line ends the
+/// frame. The `id` is the cursor and `event` is the name; an unnamed frame is a run event.
+function sseFrames(buffer) {
+  const frames = [];
+  let rest = buffer;
+  for (;;) {
+    const cut = rest.indexOf("\n\n");
+    if (cut < 0) break;
+    const block = rest.slice(0, cut);
+    rest = rest.slice(cut + 2);
+    const frame = { event: "message", id: null, data: "" };
+    let sawData = false;
+    for (const line of block.split("\n")) {
+      if (line.startsWith(":")) continue;   // the heartbeat
+      const colon = line.indexOf(":");
+      const field = colon < 0 ? line : line.slice(0, colon);
+      let value = colon < 0 ? "" : line.slice(colon + 1);
+      if (value.startsWith(" ")) value = value.slice(1);
+      if (field === "event") frame.event = value;
+      else if (field === "id") frame.id = value;
+      else if (field === "data") {
+        frame.data += (sawData ? "\n" : "") + value;
+        sawData = true;
+      }
+    }
+    // A block with no `data:` field carries no event -- which is what a heartbeat comment
+    // is, and what the SSE specification says about a dispatch with an empty data buffer.
+    if (sawData) frames.push(frame);
+  }
+  return { frames, rest };
+}
+
 /// Whether this page was served by a running flint, rather than opened from disk.
 ///
 /// The two levels differ in exactly this: a page from `file://` has no origin to fetch
@@ -419,6 +457,23 @@ function toolBlock(block) {
   if (block.args) box.appendChild(el("pre", "", block.args));
   if (block.output) box.appendChild(el("pre", "", block.output));
   return box;
+}
+
+/// Repaint at most once per animation frame.
+///
+/// `message.delta` arrives per fragment -- hundreds of them for one answer -- and repainting
+/// per fragment would rebuild the whole transcript hundreds of times to show text that is
+/// still arriving. Coalescing is safe because the paint is always a full render of the
+/// document: it is slower to be wrong than to be late.
+let repaintQueued = false;
+function schedulePaint() {
+  if (repaintQueued) return;
+  repaintQueued = true;
+  const soon = typeof requestAnimationFrame === "function" ? requestAnimationFrame : (fn) => fn();
+  soon(() => {
+    repaintQueued = false;
+    paint(doc);
+  });
 }
 
 function paint(doc) {
@@ -514,23 +569,87 @@ function load(whole) {
   document.getElementById("drop").hidden = true;
 }
 
-/// Ask the process for the conversation so far.
+/// The token, as every request after the first one sends it.
+function authHeader() {
+  return { "X-Flint-Token": tokenFromSearch(location.search) };
+}
+
+/// The highest frame this page has applied. Everything at or below it is already on screen.
+let applied = 0;
+
+/// Re-read the conversation from the process, and take its cursor.
 ///
-/// A relative URL with the token in a header. The body is the session file's own lines,
-/// which is the vocabulary the renderer above already reads -- so this is a change of
-/// source, not a second parser.
-function loadFromServer(where) {
-  const here = where || location;
-  const token = tokenFromSearch(here.search);
-  return fetch("/session", { headers: { "X-Flint-Token": token } })
-    .then((response) => {
+/// The response says which event frame the file it just returned is current as of, and that
+/// number is the whole reason the file and the stream can be two sources without disagreeing:
+/// frames at or below it may already be in the file, and frames above it cannot be -- they
+/// were emitted after the read. So a page that renders this and then applies the rest loses
+/// nothing and shows nothing twice, whatever the timing was.
+async function readSession() {
+  const response = await fetch("/session", { headers: authHeader() });
+  if (!response.ok) throw new Error("HTTP " + response.status);
+  const cursor = Number(response.headers.get("X-Flint-Event-Seq") || 0);
+  const whole = await response.text();
+  load(whole);
+  applied = cursor;
+}
+
+/// Follow the live feed, reconnecting for as long as the page is open.
+///
+/// The stream is opened *before* the file is read, and that order is what makes the pair
+/// safe: the server subscribes before it sends these headers, so by the time this await
+/// returns, every frame from here on is already being buffered for this connection. Reading
+/// the file first would leave a window in which a frame belonged to neither source.
+async function follow() {
+  let delay = 500;
+  for (;;) {
+    try {
+      const response = await fetch("/events?last=" + applied, { headers: authHeader() });
       if (!response.ok) throw new Error("HTTP " + response.status);
-      return response.text();
-    })
-    .then((whole) => {
-      load(whole);
-      return true;
-    });
+      await readSession();
+      delay = 500;
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const cut = sseFrames(buffer);
+        buffer = cut.rest;
+        for (const frame of cut.frames) {
+          // A named event, not a line of the run's vocabulary: it means this page's
+          // document is stale, so it re-reads rather than trying to catch up.
+          if (frame.event === "reset") {
+            await readSession();
+            continue;
+          }
+          // The other named event, and the pair of them are the two things a cursor cannot
+          // express. This one is *state*: what the turn is waiting for right now, sent once
+          // because a page opened mid-turn has missed every change there has been. Applied
+          // without a cursor, because it is not a change -- it is where things are.
+          if (frame.event === "status") {
+            doc.status = frame.data;
+            schedulePaint();
+            continue;
+          }
+          const seq = Number(frame.id);
+          if (!(seq > applied)) continue;
+          applied = seq;
+          if (frame.data) applyLine(doc, frame.data);
+          schedulePaint();
+        }
+      }
+      throw new Error("the stream ended");
+    } catch (e) {
+      // Reconnecting is the normal case, not an error worth shouting about: the usual
+      // reasons are a flint that is being restarted and a laptop that was asleep.
+      doc.status = "live feed: " + e.message + " — reconnecting";
+      paint(doc);
+    }
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    delay = Math.min(delay * 2, 10000);
+  }
 }
 
 function readFile(file) {
@@ -564,9 +683,9 @@ if (typeof document !== "undefined" && document.getElementById) {
     // page whose request was refused look identical and only one of them is a bug.
     drop.hidden = true;
     paint(doc);
-    loadFromServer().catch((e) => {
+    follow().catch((e) => {
       doc.blocks = [
-        { kind: "damage", text: "cannot read the session from flint: " + e.message },
+        { kind: "damage", text: "cannot follow this flint: " + e.message },
       ];
       paint(doc);
     });
@@ -577,7 +696,7 @@ if (typeof document !== "undefined" && document.getElementById) {
 
 // For the Node test in scripts/web-view-test.js, and for the page's own console.
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { newDoc, applyLine, applyText, applyEvent, tokenFromSearch, servedByFlint };
+  module.exports = { newDoc, applyLine, applyText, applyEvent, tokenFromSearch, servedByFlint, sseFrames };
 }
 </script>
 </body>

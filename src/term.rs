@@ -259,6 +259,20 @@ impl std::io::Write for Sink<'_> {
     }
 }
 
+/// The words the status row uses for an activity, named or not.
+///
+/// One function because the terminal and the browser have to say the same thing: an unnamed
+/// wait is `waiting for the model` on screen, and a stream carrying the raw empty name would
+/// leave the browser with nothing to show during exactly the wait `--web` exists to make
+/// visible.
+fn activity_words(name: &str) -> String {
+    if name.is_empty() {
+        "waiting for the model".to_string()
+    } else {
+        name.to_string()
+    }
+}
+
 /// What is running right now.
 struct Activity {
     /// The tool name, or empty while the model is thinking rather than running one.
@@ -525,28 +539,37 @@ impl Term {
         Ok(term)
     }
 
-    /// Note that a tool has started, so the status line can say what is running.
-    pub fn activity_started(&self, name: &str) {
-        if !self.interactive {
-            return;
-        }
+    /// Note that something started, so the status line can say what is being waited for.
+    ///
+    /// Returns whether the clock actually **started over**, which is not the same as
+    /// "this was called": a repeated name keeps the original start time, deliberately, so
+    /// a tool that reports itself in stages does not reset its own clock and never appear
+    /// to take long. The return value exists for the second renderer -- the browser behind
+    /// `--web` -- which has its own clock and has to start it over at exactly the moments
+    /// this one does. It is answered even when there is no terminal, because a browser
+    /// watching a piped run still needs to be told.
+    pub fn activity_started(&self, name: &str) -> bool {
         // Keep the original start time for a repeated name: a tool that reports itself
         // in stages would otherwise reset its own clock and never appear to take long.
-        let mut activity = self.activity.lock().unwrap();
-        let keep = matches!(&*activity, Some(a) if a.name == name);
-        if !keep {
-            *activity = Some(Activity {
-                name: name.to_string(),
-                started: std::time::Instant::now(),
-            });
-            // A sentinel, not zero. `tick` repaints only when the displayed second
-            // changes, and the first second of any activity *is* zero -- so starting
-            // from zero means the very first paint is suppressed as a no-op, and the
-            // status line cannot appear until the clock reaches one second. That is the
-            // whole window in which a fast-but-not-instant turn needs to say something.
-            self.activity_shown.store(u16::MAX, Ordering::Relaxed);
-            self.activity_painted.store(false, Ordering::Relaxed);
-        }
+        let started_over = {
+            let mut activity = self.activity.lock().unwrap();
+            let keep = matches!(&*activity, Some(a) if a.name == name);
+            if !keep {
+                *activity = Some(Activity {
+                    name: name.to_string(),
+                    started: std::time::Instant::now(),
+                });
+                // A sentinel, not zero. `tick` repaints only when the displayed second
+                // changes, and the first second of any activity *is* zero -- so starting
+                // from zero means the very first paint is suppressed as a no-op, and the
+                // status line cannot appear until the clock reaches one second. That is the
+                // whole window in which a fast-but-not-instant turn needs to say something.
+                self.activity_shown.store(u16::MAX, Ordering::Relaxed);
+                self.activity_painted.store(false, Ordering::Relaxed);
+            }
+            !keep
+        };
+        started_over
     }
 
     /// Rename what is running without restarting its clock.
@@ -554,10 +577,10 @@ impl Term {
     /// Used when a wait turns into something more specific -- the model is no longer
     /// being waited for, it is thinking -- and the elapsed time should keep counting
     /// from when the wait began rather than from the moment the name changed.
-    pub fn activity_named(&self, name: &str) {
-        if !self.interactive {
-            return;
-        }
+    ///
+    /// Returns whether anything changed. `false` means the caller should say nothing to a
+    /// second renderer either: a rename that did not happen is not news.
+    pub fn activity_named(&self, name: &str) -> bool {
         let renamed = {
             let mut activity = self.activity.lock().unwrap();
             match activity.as_mut() {
@@ -570,12 +593,24 @@ impl Term {
                 _ => false,
             }
         };
-        if renamed {
+        if renamed && self.interactive {
             // Repaint now rather than at the next second: the point of the change is
             // that the line said the wrong thing until it was corrected. Only if it is
             // already on screen, though -- see `repaint_if_visible`.
             self.repaint_if_visible();
         }
+        renamed
+    }
+
+    /// The words the status row is showing, or an empty string when nothing is running.
+    ///
+    /// The browser behind `--web` is told exactly this, rather than the name the caller
+    /// passed. The two are not the same: an empty name is shown as `waiting for the model`,
+    /// and a renderer given the raw name would have to invent that phrase -- or, worse,
+    /// blank its status line at the exact moment the wait began.
+    pub fn activity_label(&self) -> String {
+        let activity = self.activity.lock().unwrap();
+        activity.as_ref().map(|a| activity_words(&a.name)).unwrap_or_default()
     }
 
     /// Whether the activity is still the initial wait, with no name yet.
@@ -719,11 +754,7 @@ impl Term {
         let line = {
             let activity = self.activity.lock().unwrap();
             activity.as_ref().map(|a| {
-                let what = if a.name.is_empty() {
-                    "waiting for the model".to_string()
-                } else {
-                    a.name.clone()
-                };
+                let what = activity_words(&a.name);
                 format!(
                     "\u{2500}\u{2500} {} {} \u{2500}\u{2500}",
                     elapsed_label(a.started.elapsed()),

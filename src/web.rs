@@ -19,12 +19,17 @@
 /// that document, and puts every piece of text in through `textContent`.
 pub const VIEW_HTML: &str = include_str!("../web/view.html");
 
+use std::collections::VecDeque;
 use std::net::Ipv4Addr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::broadcast;
+
+use crate::event::Event;
 
 /// The most of a request head this server will read before giving up on it.
 ///
@@ -48,6 +53,167 @@ pub struct State {
     /// one copy that is wrong -- the session on disk is the only thing the terminal and
     /// the browser can both be right about.
     session: Option<std::path::PathBuf>,
+    /// The run's event stream, when this run has one to give.
+    ///
+    /// `None` for a window opened by something that is not a run -- `debug`, a test -- and
+    /// for those `/events` says so rather than pretending to be a stream that will never
+    /// say anything.
+    live: Option<Arc<Live>>,
+}
+
+/// How many recent frames are kept for a client that reconnects.
+///
+/// A bound and not a log: this is a transport buffer, not a record. Nothing here is
+/// persisted, nothing is derived from it, and losing all of it costs one `reset` and a
+/// re-read of the session file -- which is the same thing the page does when it loads.
+const RECENT_FRAMES: usize = 512;
+
+/// How often an idle stream says something, even when there is nothing to say.
+///
+/// A comment, which SSE readers ignore. Middleboxes and browsers drop an idle connection
+/// first, and a dropped stream looks exactly like a turn that has not started.
+const HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// One frame of the event stream: its sequence number and the line it carries.
+#[derive(Clone)]
+struct Frame {
+    seq: u64,
+    line: String,
+}
+
+impl Frame {
+    fn render(&self) -> String {
+        // `id:` is what a reconnecting client sends back as `Last-Event-ID`.
+        format!("id: {}\ndata: {}\n\n", self.seq, self.line)
+    }
+}
+
+/// What a new subscriber has to be told before it is up to date.
+enum Catch {
+    /// The frames it missed, in order. Empty when it is already current.
+    Missed(Vec<Frame>),
+    /// We cannot prove we still have what it missed, so it should re-read the session.
+    Reset,
+}
+
+/// The live side of a `--web` run.
+///
+/// One funnel, two readers. The terminal is fed directly by `run_turn`, and this carries the
+/// same events to a browser: the line it pushes is exactly what `flint -p --json` would print
+/// for the same event, because it is produced by the same `ndjson::Sink`. That is the whole
+/// reason the browser is a fourth renderer rather than a second implementation.
+pub struct Live {
+    recent: Mutex<VecDeque<Frame>>,
+    next: AtomicU64,
+    subscribers: broadcast::Sender<Frame>,
+    sink: Mutex<crate::ndjson::Sink>,
+    /// What the turn is waiting for *now*.
+    ///
+    /// State rather than history, and kept apart from the ring for that reason: a page that
+    /// is opened in the middle of a turn has missed every status frame so far, and the ring
+    /// only helps a client that says where it got to. It is sent once on connect and is the
+    /// difference between a browser that says what it is waiting for and one that says
+    /// nothing at all -- measured, not assumed: the first live capture of a six-second model
+    /// call showed a page with no status line.
+    status: Mutex<String>,
+}
+
+impl Live {
+    pub fn new() -> Arc<Live> {
+        // The channel's capacity is per-subscriber buffering, not history: a browser that
+        // falls this far behind is told to reset rather than fed a backlog it cannot use.
+        let (subscribers, _) = broadcast::channel(RECENT_FRAMES);
+        Arc::new(Live {
+            recent: Mutex::new(VecDeque::new()),
+            next: AtomicU64::new(1),
+            subscribers,
+            sink: Mutex::new(crate::ndjson::Sink::new()),
+            status: Mutex::new(String::new()),
+        })
+    }
+
+    /// One event of the run, to every reader of the stream.
+    ///
+    /// Called from `run_turn`'s event closure -- the one place every event passes -- which
+    /// is what makes the browser's stream the same stream `--json` writes rather than a
+    /// description of it.
+    pub fn event(&self, event: &Event) {
+        if let Event::Status { text, .. } = event {
+            *self.status.lock().unwrap_or_else(|e| e.into_inner()) = text.clone();
+        }
+        let line = self
+            .sink
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .line(event);
+        if let Some(line) = line {
+            self.push(line);
+        }
+    }
+
+    /// The sequence number of the last frame, `0` when there has not been one.
+    ///
+    /// A snapshot, not a promise: frames can be pushed a moment later, and a client that
+    /// treats this as a cursor is safe precisely because the direction of the error is
+    /// known -- anything above it is newer than the read, and anything at or below it is
+    /// dropped rather than applied twice.
+    fn current_seq(&self) -> u64 {
+        self.next.load(Ordering::Relaxed).saturating_sub(1)
+    }
+
+    fn push(&self, line: String) {
+        let seq = self.next.fetch_add(1, Ordering::Relaxed);
+        let frame = Frame { seq, line };
+        {
+            let mut recent = self.recent.lock().unwrap_or_else(|e| e.into_inner());
+            recent.push_back(frame.clone());
+            while recent.len() > RECENT_FRAMES {
+                recent.pop_front();
+            }
+        }
+        // An error means nobody is listening, which is the normal case.
+        let _ = self.subscribers.send(frame);
+    }
+
+    /// A receiver that starts from *now*, with no backlog.
+    fn subscribe(&self) -> broadcast::Receiver<Frame> {
+        self.subscribers.subscribe()
+    }
+
+    /// What the turn is waiting for, or empty when it is waiting for nothing.
+    fn current_status(&self) -> String {
+        self.status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Everything a client that last saw `last` needs.
+    ///
+    /// The subscription is taken **before** the recent frames are read, so a frame pushed
+    /// in between is delivered by the channel rather than lost in the gap. Losing one there
+    /// would be silent, which is the failure this route exists to prevent.
+    fn follow(&self, last: Option<u64>) -> (broadcast::Receiver<Frame>, Catch) {
+        let rx = self.subscribe();
+        let recent = self.recent.lock().unwrap_or_else(|e| e.into_inner());
+        let catch = match last {
+            // No id: the client has just loaded, and `/session` is what it read.
+            None => Catch::Missed(Vec::new()),
+            Some(id) => {
+                let oldest = recent.front().map(|f| f.seq);
+                let newest = recent.back().map(|f| f.seq);
+                match (oldest, newest) {
+                    // It needs frames we have already dropped.
+                    (Some(oldest), _) if id + 1 < oldest => Catch::Reset,
+                    // Ahead of anything we have: a stale id, or a restarted process.
+                    (_, Some(newest)) if id > newest => Catch::Reset,
+                    (None, _) => Catch::Reset,
+                    _ => Catch::Missed(recent.iter().filter(|f| f.seq > id).cloned().collect()),
+                }
+            }
+        };
+        (rx, catch)
+    }
 }
 
 /// A token for this run, unknown to anything that was not handed it.
@@ -219,7 +385,20 @@ pub struct Response {
     reason: &'static str,
     content_type: &'static str,
     body: String,
+    /// Headers a particular route has to add. One so far, and it is a cursor rather than a
+    /// security header: see `X-FLINT_EVENT_SEQ`.
+    extra: Vec<(String, String)>,
 }
+
+/// The event frame the file it accompanies is current as of.
+///
+/// This is what makes the file and the stream one conversation rather than two views of one
+/// that can disagree. A client reads `/session`, notes this number, and then applies only the
+/// frames above it: frames at or below it may already be in the file, and frames above it
+/// cannot be -- they were emitted after the read. Without it, a client that rendered the file
+/// and then connected would either double-count a frame or lose one, and which of the two
+/// depended on timing.
+const X_FLINT_EVENT_SEQ: &str = "X-Flint-Event-Seq";
 
 impl Response {
     fn text(status: u16, reason: &'static str, body: impl Into<String>) -> Response {
@@ -228,7 +407,13 @@ impl Response {
             reason,
             content_type: "text/plain; charset=utf-8",
             body: body.into(),
+            extra: Vec::new(),
         }
+    }
+
+    fn with_header(mut self, name: &str, value: String) -> Response {
+        self.extra.push((name.to_string(), value));
+        self
     }
 
     /// One of the four refusals. The reason is short and honest: it is a person debugging
@@ -239,6 +424,11 @@ impl Response {
     }
 
     fn render(&self) -> Vec<u8> {
+        let extra: String = self
+            .extra
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}\r\n"))
+            .collect();
         let mut out = format!(
             "HTTP/1.1 {} {}\r\n\
              Content-Type: {}\r\n\
@@ -249,7 +439,7 @@ impl Response {
              Referrer-Policy: no-referrer\r\n\
              Content-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; \
              style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:\r\n\
-             \r\n",
+             {extra}\r\n",
             self.status,
             self.reason,
             self.content_type,
@@ -260,38 +450,75 @@ impl Response {
     }
 }
 
+/// What a request turned into.
+///
+/// Two shapes because one of them has no `Content-Length` and cannot be a `Response`: the
+/// event stream ends when the client goes away. Authorisation and routing still happen in
+/// one function either way -- a second place that decided who may connect would be a second
+/// place to get §4 wrong.
+pub enum Answer {
+    /// One response, then close.
+    Once(Response),
+    /// The live feed, for a client that last saw `last`.
+    Events { last: Option<u64> },
+}
+
+impl Answer {
+    /// The response, for the routes that have exactly one. Panics on a stream, which is a
+    /// programming error rather than a client's.
+    ///
+    /// Test-only: the server itself matches on the two shapes, because for one of them
+    /// there is nothing to return.
+    #[cfg(test)]
+    fn once(self) -> Response {
+        match self {
+            Answer::Once(response) => response,
+            Answer::Events { .. } => panic!("this route streams and has no single response"),
+        }
+    }
+}
+
 /// One request, one response -- and every rule of §4 in one place.
 ///
 /// Pure, so the boundary can be tested without a socket and without timing. The order is
 /// deliberate: `Host` before anything else, because it is the check that decides whether the
 /// browser's same-origin protection applies at all, and a request that fails it is not from
 /// a page of ours however good its token looks.
-pub fn respond(request: &Request, state: &State) -> Response {
+pub fn respond(request: &Request, state: &State) -> Answer {
     if !host_is_ours(request.header("host"), state.port) {
-        return Response::refused("this listener answers only to 127.0.0.1 (check the Host header)");
+        return Answer::Once(Response::refused(
+            "this listener answers only to 127.0.0.1 (check the Host header)",
+        ));
     }
     if !origin_is_ours(request.header("origin"), state.port) {
-        return Response::refused("this request came from another origin");
+        return Answer::Once(Response::refused("this request came from another origin"));
     }
     let allowed = match request.offered_token() {
         Some(offered) => token_matches(offered, &state.token),
         None => false,
     };
     if !allowed {
-        return Response::refused("missing or wrong token (it is in the URL `--web` printed)");
+        return Answer::Once(Response::refused(
+            "missing or wrong token (it is in the URL `--web` printed)",
+        ));
     }
 
-    match (request.method.as_str(), request.path()) {
+    Answer::Once(match (request.method.as_str(), request.path()) {
         ("GET", "/") => Response {
             status: 200,
             reason: "OK",
             content_type: "text/html; charset=utf-8",
             body: VIEW_HTML.to_string(),
+            extra: Vec::new(),
         },
         // The conversation so far, as the session file's own lines. Not a summary and not a
         // second format: the page is a reader of the same file the terminal is writing, and
         // the moment this route rendered something of its own the two could disagree.
         ("GET", "/session") => serve_session(state),
+        // Everything since, and then everything as it happens.
+        ("GET", "/events") => return Answer::Events {
+            last: last_event_id(request),
+        },
         ("GET", _) | ("HEAD", _) => Response::text(404, "Not Found", "no such route\n"),
         (_, "/") => Response::text(
             405,
@@ -299,7 +526,21 @@ pub fn respond(request: &Request, state: &State) -> Response {
             "the view is served, not written to\n",
         ),
         _ => Response::text(404, "Not Found", "no such route\n"),
-    }
+    })
+}
+
+/// Which frame the client last saw, from the header SSE defines for it.
+///
+/// A query parameter is accepted as well, and for a mundane reason: the page reads this
+/// stream with `fetch` rather than with `EventSource`, because `EventSource` cannot send the
+/// token header that §4.2 requires -- and a hand-written client should not have to gamble on
+/// which headers a browser lets it set. It is a cursor, not a credential, so putting it in
+/// the URL costs nothing.
+fn last_event_id(request: &Request) -> Option<u64> {
+    request
+        .header("last-event-id")
+        .or_else(|| request.query("last"))
+        .and_then(|value| value.trim().parse().ok())
 }
 
 /// The session file, exactly as it is on disk.
@@ -324,12 +565,23 @@ fn serve_session(state: &State) -> Response {
         );
     };
     match std::fs::read_to_string(path) {
-        Ok(body) => Response {
-            status: 200,
-            reason: "OK",
-            content_type: "application/x-ndjson; charset=utf-8",
-            body,
-        },
+        Ok(body) => {
+            // Read *after* the file, deliberately: a frame at or below this number may
+            // already be in the file and one above it cannot be, which is the direction
+            // that risks a duplicate rather than a hole -- and a duplicate delta shows up
+            // as doubled text, while a hole shows up as nothing at all.
+            let mut response = Response {
+                status: 200,
+                reason: "OK",
+                content_type: "application/x-ndjson; charset=utf-8",
+                body,
+                extra: Vec::new(),
+            };
+            if let Some(live) = &state.live {
+                response = response.with_header(X_FLINT_EVENT_SEQ, live.current_seq().to_string());
+            }
+            response
+        }
         Err(e) => Response::text(
             500,
             "Internal Server Error",
@@ -364,7 +616,11 @@ impl Window {
     /// The address is the literal `127.0.0.1`, never `0.0.0.0` and never a resolved
     /// "localhost" (§4.1). Remote access is not a feature of this program; it is a different
     /// program, and one with a much harder problem.
-    pub async fn open(port: u16, session: Option<std::path::PathBuf>) -> Result<Window> {
+    pub async fn open(
+        port: u16,
+        session: Option<std::path::PathBuf>,
+        live: Option<Arc<Live>>,
+    ) -> Result<Window> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
             .await
             .with_context(|| format!("cannot listen on 127.0.0.1:{port}"))?;
@@ -377,6 +633,7 @@ impl Window {
             token: token.clone(),
             port,
             session,
+            live,
         });
         tokio::spawn(accept_loop(listener, state));
         Ok(Window { port, token })
@@ -436,14 +693,122 @@ async fn serve(mut stream: TcpStream, state: &State) -> Result<()> {
     }
 
     let head = String::from_utf8_lossy(&buf);
-    let response = match Request::parse(&head) {
+    let answer = match Request::parse(&head) {
         Some(request) => respond(&request, state),
-        None => Response::text(400, "Bad Request", "not an HTTP/1.1 request\n"),
+        None => Answer::Once(Response::text(400, "Bad Request", "not an HTTP/1.1 request\n")),
     };
-    stream.write_all(&response.render()).await?;
+
+    match answer {
+        Answer::Once(response) => {
+            stream.write_all(&response.render()).await?;
+        }
+        Answer::Events { last } => {
+            stream_events(stream, state, last).await?;
+            return Ok(());
+        }
+    }
     // `Connection: close` is not a suggestion: the response is over when the socket is, and
     // that is what removes keep-alive, pipelining and request framing from this file (§6).
     let _ = stream.shutdown().await;
+    Ok(())
+}
+
+/// The headers of an event stream: everything a small response has, except a length.
+///
+/// No `Content-Length`, because the response ends when the client goes away rather than at a
+/// byte count -- which is the one case §6's "a small, complete response" does not cover, and
+/// the reason this route writes its own headers instead of going through `Response`.
+const SSE_HEADERS: &str = "\
+HTTP/1.1 200 OK\r\n\
+Content-Type: text/event-stream\r\n\
+Cache-Control: no-store\r\n\
+Connection: close\r\n\
+X-Content-Type-Options: nosniff\r\n\
+Referrer-Policy: no-referrer\r\n\
+\r\n";
+
+/// The words the status row is showing, sent once when a client connects.
+///
+/// A *named* event, and this one is the mirror of `SSE_RESET`: the run's vocabulary carries
+/// changes, and a change a page never saw is not a change it can catch up on. What a turn is
+/// waiting for is state, so it is sent as state -- once, outside the numbering, and applied
+/// without a cursor.
+const SSE_STATUS_SNAPSHOT: &str = "event: status\n";
+
+/// Tell a client its document is stale, so it re-reads the session.
+///
+/// A *named* SSE event rather than a line in the NDJSON vocabulary. Every `data:` line on
+/// this stream is a fact about the run, and "your transcript is out of date" is a fact about
+/// the *transport* -- the vocabulary is deliberately closed, and this does not belong in it.
+const SSE_RESET: &str = "event: reset\ndata: {}\n\n";
+
+/// Write what a client missed, then everything as it happens, until it goes away.
+async fn stream_events(mut stream: TcpStream, state: &State, last: Option<u64>) -> Result<()> {
+    let Some(live) = &state.live else {
+        let response = Response::text(404, "Not Found", "this run has no live feed\n");
+        stream.write_all(&response.render()).await?;
+        return Ok(());
+    };
+
+    // Subscribed *before* the headers go out, and that order is load-bearing: the client
+    // reads `/session` as soon as it sees these headers, and anything emitted between the
+    // subscription and that read is buffered for it. Subscribing afterwards would open a
+    // window -- small, and exactly the kind that is never noticed until it is -- in which a
+    // frame belongs to neither the file nor the stream.
+    let (mut rx, catch) = live.follow(last);
+
+    stream.write_all(SSE_HEADERS.as_bytes()).await?;
+    match catch {
+        Catch::Reset => {
+            // What it missed is gone, so it re-reads the session instead. The file is the
+            // truth and `GET /session` is already the route for it; keeping a durable log
+            // of the stream would be derived state, which is the one thing this repository
+            // does not keep.
+            stream.write_all(SSE_RESET.as_bytes()).await?;
+        }
+        Catch::Missed(frames) => {
+            for frame in frames {
+                stream.write_all(frame.render().as_bytes()).await?;
+            }
+        }
+    }
+
+    // Then the state, which is not in the ring and would not be found by a cursor: a page
+    // opened in the middle of a turn has missed every status frame there has been. Sent
+    // after the catch-up rather than before, because the catch-up is older than it is and
+    // would overwrite it. An empty status is not sent -- a page with nothing to show is
+    // already showing nothing.
+    let status = live.current_status();
+    if !status.is_empty() {
+        stream
+            .write_all(format!("{SSE_STATUS_SNAPSHOT}data: {status}\n\n").as_bytes())
+            .await?;
+    }
+
+    let mut heartbeat = tokio::time::interval(HEARTBEAT);
+    // The first tick of an interval is immediate; a heartbeat now would be noise on a
+    // connection that has this second been handed a response.
+    heartbeat.tick().await;
+
+    loop {
+        tokio::select! {
+            received = rx.recv() => match received {
+                Ok(frame) => stream.write_all(frame.render().as_bytes()).await?,
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    // The client could not keep up and frames were dropped. Saying so is the
+                    // only honest option -- the alternative is a transcript with a hole in
+                    // it and nothing to indicate one -- and re-subscribing from *now* is
+                    // what stops the frames still buffered from arriving twice.
+                    stream.write_all(SSE_RESET.as_bytes()).await?;
+                    rx = live.subscribe();
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
+            _ = heartbeat.tick() => {
+                stream.write_all(b": ping\n\n").await?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -457,13 +822,14 @@ mod tests {
             token: "0123456789abcdef0123456789abcdef".to_string(),
             port: 7777,
             session: None,
+            live: None,
         }
     }
 
     /// Ask the pure router a question, as bytes a client would have sent.
     fn ask(head: &str, state: &State) -> Response {
         let request = Request::parse(head).unwrap_or_else(|| panic!("fixture must parse: {head:?}"));
-        respond(&request, state)
+        respond(&request, state).once()
     }
 
     /// A request from our own page, with the token in the header.
@@ -665,7 +1031,11 @@ mod tests {
     fn an_unknown_route_is_a_404_and_the_method_is_checked() {
         let state = state();
         assert_eq!(ask(&ours("/../../etc/passwd"), &state).status, 404);
-        assert_eq!(ask(&ours("/events"), &state).status, 404, "not built yet");
+        assert_eq!(ask(&ours("/nope"), &state).status, 404);
+        // `/events` is a route now, and the one that answers with a stream instead of a
+        // single response -- which is why `Answer` has two shapes.
+        let parsed = Request::parse(&ours("/events")).expect("fixture parses");
+        assert!(matches!(respond(&parsed, &state), Answer::Events { .. }));
         assert_eq!(
             ask(
                 &format!("POST / HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nX-Flint-Token: {}\r\n\r\n", state.token),
@@ -735,7 +1105,7 @@ mod socket_tests {
     /// The URL is the contract: whatever it says must be what the listener accepts.
     #[tokio::test]
     async fn the_url_that_is_printed_is_the_one_that_opens_the_window() {
-        let window = Window::open(0, None).await.expect("bind");
+        let window = Window::open(0, None, None).await.expect("bind");
         let url = window.url();
 
         // Taken apart rather than rebuilt, so the test fails if the URL stops naming the
@@ -761,7 +1131,7 @@ mod socket_tests {
 
     #[tokio::test]
     async fn a_connection_without_the_token_gets_nothing_over_the_wire() {
-        let window = Window::open(0, None).await.expect("bind");
+        let window = Window::open(0, None, None).await.expect("bind");
         let host = format!("127.0.0.1:{}", window.port());
         let response = get(window.port(), "/", Some(&host), None).await;
         assert!(response.starts_with("HTTP/1.1 403"), "{response}");
@@ -772,8 +1142,8 @@ mod socket_tests {
     /// anything: a token that repeated between runs would be a password written down.
     #[tokio::test]
     async fn every_run_gets_its_own_port_and_its_own_token() {
-        let first = Window::open(0, None).await.expect("bind");
-        let second = Window::open(0, None).await.expect("bind");
+        let first = Window::open(0, None, None).await.expect("bind");
+        let second = Window::open(0, None, None).await.expect("bind");
         assert_ne!(first.port(), second.port(), "two listeners cannot share a port");
         assert_ne!(first.token, second.token, "two runs must not share a token");
         assert_eq!(first.token.len(), 32, "128 bits, as hex");
@@ -782,5 +1152,366 @@ mod socket_tests {
         let host = format!("127.0.0.1:{}", second.port());
         let response = get(second.port(), "/", Some(&host), Some(&first.token)).await;
         assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+    }
+}
+
+/// The live feed, driven directly: no socket, no timing.
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    #[test]
+    fn a_client_that_has_just_loaded_is_told_nothing_it_missed() {
+        let live = Live::new();
+        live.event(&Event::Text("hello".to_string()));
+        // `None` means "I have read /session and I am current", which is what the page
+        // sends on its first connection.
+        let (_, catch) = live.follow(None);
+        match catch {
+            Catch::Missed(frames) => assert!(frames.is_empty(), "a fresh client is current"),
+            Catch::Reset => panic!("a fresh client must not be reset"),
+        }
+    }
+
+    #[test]
+    fn a_reconnecting_client_gets_exactly_what_it_missed() {
+        let live = Live::new();
+        live.event(&Event::Text("one".to_string()));
+        live.event(&Event::Text("two".to_string()));
+        let (_, catch) = live.follow(Some(1));
+        match catch {
+            Catch::Missed(frames) => {
+                assert_eq!(frames.len(), 1, "only the frame after the one it saw");
+                assert!(frames[0].line.contains("two"), "{}", frames[0].line);
+            }
+            Catch::Reset => panic!("frame 2 is still in the ring"),
+        }
+    }
+
+    /// Frames older than the buffer are not silently skipped.
+    ///
+    /// This is the whole reason `Catch` has two shapes. A client that is quietly sent the
+    /// frames we happen to still have would render a transcript with a hole in it and no
+    /// sign that anything was missing.
+    #[test]
+    fn a_client_that_fell_too_far_behind_is_told_to_reload() {
+        let live = Live::new();
+        for n in 0..(RECENT_FRAMES + 10) {
+            live.event(&Event::Text(format!("line {n}")));
+        }
+        match live.follow(Some(1)).1 {
+            Catch::Reset => {}
+            Catch::Missed(frames) => panic!("frame 1 is long gone, but {} were replayed", frames.len()),
+        }
+        // And the id just before the oldest kept one still works: the boundary is off by
+        // one in the direction that loses nothing.
+        let oldest = live.recent.lock().unwrap().front().map(|f| f.seq).expect("frames");
+        match live.follow(Some(oldest)).1 {
+            Catch::Missed(frames) => assert_eq!(frames.len(), RECENT_FRAMES - 1),
+            Catch::Reset => panic!("the oldest kept frame is still replayable"),
+        }
+    }
+
+    /// An id from a previous process -- or a made-up one -- is not trusted.
+    #[test]
+    fn an_id_ahead_of_anything_we_sent_is_told_to_reload() {
+        let live = Live::new();
+        live.event(&Event::Text("one".to_string()));
+        assert!(matches!(live.follow(Some(9999)).1, Catch::Reset));
+    }
+
+    /// Every frame carries the sequence number the client sends back.
+    #[test]
+    fn frames_are_numbered_from_one_and_render_as_sse() {
+        let live = Live::new();
+        live.event(&Event::Text("hello".to_string()));
+        live.event(&Event::Text("again".to_string()));
+        let recent = live.recent.lock().unwrap();
+        let rendered: Vec<String> = recent.iter().map(|f| f.render()).collect();
+        assert!(rendered[0].starts_with("id: 1\ndata: "), "{}", rendered[0]);
+        assert!(rendered[0].ends_with("\n\n"), "a frame ends with a blank line");
+        assert!(rendered[1].starts_with("id: 2\ndata: "), "{}", rendered[1]);
+        assert!(rendered[0].contains("\"message.delta\""));
+    }
+
+    /// The browser's stream is the `--json` stream, not a description of it.
+    #[test]
+    fn the_line_on_the_wire_is_what_json_would_have_printed() {
+        let live = Live::new();
+        live.event(&Event::Status {
+            text: "waiting for the model".to_string(),
+            restarted: true,
+        });
+        let recent = live.recent.lock().unwrap();
+        let line = recent.front().expect("a frame").line.clone();
+        let parsed: serde_json::Value = serde_json::from_str(&line).expect("one JSON object");
+        assert_eq!(parsed["type"], "status");
+        assert_eq!(parsed["text"], "waiting for the model");
+        assert_eq!(parsed["restarted"], true);
+    }
+
+    /// A live feed with no listeners is the normal case, not an error.
+    #[test]
+    fn pushing_with_nobody_listening_is_fine() {
+        let live = Live::new();
+        for n in 0..10 {
+            live.event(&Event::Text(format!("{n}")));
+        }
+        assert_eq!(live.recent.lock().unwrap().len(), 10);
+    }
+}
+
+/// The event stream, over a real socket.
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+
+    /// Open `/events`, read whatever arrives, and return the raw bytes.
+    ///
+    /// Bounded by a timeout because the point of this route is that it *does not end*: a
+    /// test that waited for the socket to close would hang until the client gave up, which
+    /// is exactly what the browser does not do.
+    async fn read_stream(window: &Window, query: &str) -> String {
+        let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, window.port()))
+            .await
+            .expect("connect");
+        let request = format!(
+            "GET /events{query} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nX-Flint-Token: {}\r\n\r\n",
+            window.port(),
+            window.token
+        );
+        stream.write_all(request.as_bytes()).await.expect("write");
+
+        let mut seen = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(300);
+        loop {
+            match tokio::time::timeout_at(deadline, stream.read(&mut chunk)).await {
+                Ok(Ok(0)) | Err(_) => break,
+                Ok(Ok(n)) => seen.extend_from_slice(&chunk[..n]),
+                Ok(Err(_)) => break,
+            }
+        }
+        String::from_utf8_lossy(&seen).to_string()
+    }
+
+    #[tokio::test]
+    async fn the_stream_carries_the_run_as_ndjson_frames() {
+        let live = Live::new();
+        let window = Window::open(0, None, Some(Arc::clone(&live)))
+            .await
+            .expect("bind");
+
+        // Pushed *while* the client is connected, because that is what this route is for.
+        // A client with no cursor is current by definition -- it has just read `/session` --
+        // so frames from before it connected are deliberately not sent, and a test that
+        // pushed first would be asserting the replay path by accident.
+        let pusher = {
+            let live = Arc::clone(&live);
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                live.event(&Event::ToolStart {
+                    id: "call_1".to_string(),
+                    name: "bash".to_string(),
+                });
+                live.event(&Event::ToolResult {
+                    id: "call_1".to_string(),
+                    output: "1.2.3".to_string(),
+                    ok: true,
+                });
+            })
+        };
+
+        let raw = read_stream(&window, "").await;
+        pusher.await.expect("pusher");
+        assert!(raw.starts_with("HTTP/1.1 200 OK\r\n"), "{raw}");
+        assert!(
+            raw.contains("Content-Type: text/event-stream\r\n"),
+            "the browser needs the stream type: {raw}"
+        );
+        assert!(
+            !raw.contains("Content-Length"),
+            "an endless response cannot carry a length: {raw}"
+        );
+
+        // Every `data:` line parses as one NDJSON object -- the same assertion
+        // `tests/json_output.rs` makes about `--json`, because it is the same vocabulary.
+        let frames: Vec<&str> = raw
+            .lines()
+            .filter_map(|l| l.strip_prefix("data: "))
+            .filter(|l| *l != "{}")
+            .collect();
+        assert_eq!(frames.len(), 2, "expected two frames in {raw}");
+        for frame in &frames {
+            let parsed: serde_json::Value =
+                serde_json::from_str(frame).unwrap_or_else(|e| panic!("{frame:?} is not JSON: {e}"));
+            assert!(parsed["type"].is_string(), "{frame}");
+        }
+        assert!(frames[0].contains("tool.started"), "{}", frames[0]);
+        assert!(frames[1].contains("1.2.3"), "{}", frames[1]);
+
+        // And the ids are the cursor a reconnect sends back.
+        assert!(raw.contains("id: 1\ndata: "), "{raw}");
+        assert!(raw.contains("id: 2\ndata: "), "{raw}");
+    }
+
+    #[tokio::test]
+    async fn a_reconnect_continues_from_the_id_it_sends() {
+        let live = Live::new();
+        let window = Window::open(0, None, Some(Arc::clone(&live)))
+            .await
+            .expect("bind");
+        // In the ring, but *before* this connection: the replay path this test is about.
+        live.event(&Event::Text("first".to_string()));
+        live.event(&Event::Text("second".to_string()));
+
+        // The cursor, as the reconnecting client sends it.
+        let raw = read_stream(&window, "?last=1").await;
+        assert!(!raw.contains("first"), "it already had frame 1: {raw}");
+        assert!(raw.contains("second"), "it is missing frame 2: {raw}");
+        assert!(!raw.contains("event: reset"), "nothing was lost, so nothing to reload: {raw}");
+    }
+
+    /// A cursor we can no longer honour means "re-read the session", not "here is what is
+    /// left" -- the difference between a transcript with a hole in it and one without.
+    #[tokio::test]
+    async fn an_unhonourable_cursor_asks_the_page_to_reload() {
+        let live = Live::new();
+        let window = Window::open(0, None, Some(Arc::clone(&live)))
+            .await
+            .expect("bind");
+        for n in 0..(RECENT_FRAMES + 5) {
+            live.event(&Event::Text(format!("line {n}")));
+        }
+
+        let raw = read_stream(&window, "?last=1").await;
+        assert!(raw.contains("event: reset\ndata: {}\n\n"), "{raw}");
+        // A named SSE event and not a line in the vocabulary: "your document is stale" is a
+        // fact about the transport, and the vocabulary is deliberately closed.
+        assert!(
+            !raw.contains("\"type\":\"reset\""),
+            "the reset must not enter the run's vocabulary: {raw}"
+        );
+    }
+
+    /// The stream needs the same token as everything else, and the query string is not a
+    /// second way in.
+    #[tokio::test]
+    async fn the_stream_is_behind_the_same_token() {
+        let live = Live::new();
+        let window = Window::open(0, None, Some(Arc::clone(&live)))
+            .await
+            .expect("bind");
+
+        // No token at all.
+        let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, window.port()))
+            .await
+            .expect("connect");
+        let request = format!(
+            "GET /events HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n",
+            window.port()
+        );
+        stream.write_all(request.as_bytes()).await.expect("write");
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.expect("read");
+        let response = String::from_utf8_lossy(&response);
+        assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+
+        // The token in the query string, which is accepted on `/` and nowhere else.
+        let raw = read_stream_token_in_query(&window).await;
+        assert!(raw.starts_with("HTTP/1.1 403"), "{raw}");
+    }
+
+    async fn read_stream_token_in_query(window: &Window) -> String {
+        let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, window.port()))
+            .await
+            .expect("connect");
+        let request = format!(
+            "GET /events?token={} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n",
+            window.token,
+            window.port()
+        );
+        stream.write_all(request.as_bytes()).await.expect("write");
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.expect("read");
+        String::from_utf8_lossy(&response).to_string()
+    }
+}
+
+/// The status a client is told when it arrives in the middle of a turn.
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_page_opened_mid_turn_is_told_what_is_being_waited_for() {
+        let live = Live::new();
+        let window = Window::open(0, None, Some(Arc::clone(&live)))
+            .await
+            .expect("bind");
+
+        // A turn is already running: the status went out before this page existed, and no
+        // cursor can bring it back, because there is no cursor for "now".
+        live.event(&Event::Status {
+            text: "no response yet — the network or the endpoint may be stuck".to_string(),
+            restarted: false,
+        });
+
+        let raw = read_stream_of(&window).await;
+        assert!(
+            raw.contains("event: status\ndata: no response yet"),
+            "a page opened mid-turn must be told what is happening: {raw}"
+        );
+        // The snapshot is outside the numbering: it is state, not a change in the sequence.
+        assert!(
+            !raw.contains("id: 1\nevent: status"),
+            "the snapshot is not a numbered frame: {raw}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_page_opened_between_turns_is_not_given_a_stale_status() {
+        let live = Live::new();
+        let window = Window::open(0, None, Some(Arc::clone(&live)))
+            .await
+            .expect("bind");
+
+        live.event(&Event::Status {
+            text: "waiting for the model".to_string(),
+            restarted: true,
+        });
+        live.event(&Event::Status {
+            text: String::new(),
+            restarted: false,
+        });
+
+        let raw = read_stream_of(&window).await;
+        assert!(
+            !raw.contains("event: status"),
+            "the turn is over, so there is nothing to report: {raw}"
+        );
+    }
+
+    async fn read_stream_of(window: &Window) -> String {
+        let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, window.port()))
+            .await
+            .expect("connect");
+        let request = format!(
+            "GET /events HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nX-Flint-Token: {}\r\n\r\n",
+            window.port(),
+            window.token
+        );
+        stream.write_all(request.as_bytes()).await.expect("write");
+        let mut seen = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(250);
+        loop {
+            match tokio::time::timeout_at(deadline, stream.read(&mut chunk)).await {
+                Ok(Ok(0)) | Err(_) => break,
+                Ok(Ok(n)) => seen.extend_from_slice(&chunk[..n]),
+                Ok(Err(_)) => break,
+            }
+        }
+        String::from_utf8_lossy(&seen).to_string()
     }
 }

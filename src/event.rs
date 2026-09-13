@@ -151,6 +151,19 @@ pub enum Event {
     },
     /// Token usage reported by the provider.
     Usage(Usage),
+    /// What the turn is waiting for has changed.
+    ///
+    /// The terminal's status row and the browser's are the same fact, and this is the only
+    /// place it is decided: `run_turn` emits it at the four moments the phase changes, and
+    /// every renderer displays it. Without it a browser shows nothing at all between
+    /// `turn.started` and the first delta -- which with a local model is minutes, and reads
+    /// as a program that has hung.
+    ///
+    /// `restarted` is whether this begins a **new** wait, as opposed to renaming the one
+    /// already running. A renderer with an elapsed-time clock starts it over only then:
+    /// `waiting for the model` becoming `writing the answer` thirty seconds in is the same
+    /// wait, and resetting the clock would show `0s` where the terminal shows `30s`.
+    Status { text: String, restarted: bool },
     /// One agent turn finished (no more tool calls pending).
     Done,
     /// A non-fatal problem worth surfacing to the user.

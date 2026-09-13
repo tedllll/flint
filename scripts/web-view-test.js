@@ -246,6 +246,55 @@ check("a page from disk is the dropped-file level, and a served one is not", () 
   ok(!viewer.servedByFlint(null), "no location at all");
 });
 
+console.log("the event stream, as it arrives");
+
+check("a frame that arrives in pieces is not lost", () => {
+  // The chunk boundary is the whole risk: a network read ends wherever it ends.
+  const whole = "id: 7\ndata: {\"type\":\"message.delta\",\"text\":\"hi\"}\n\n";
+  let seen = [];
+  let buffer = "";
+  for (const piece of [whole.slice(0, 9), whole.slice(9, 30), whole.slice(30)]) {
+    buffer += piece;
+    const cut = viewer.sseFrames(buffer);
+    buffer = cut.rest;
+    seen = seen.concat(cut.frames);
+  }
+  eq(seen.length, 1, "one frame in three pieces");
+  eq(seen[0].id, "7", "the cursor");
+  eq(JSON.parse(seen[0].data).text, "hi", "the line");
+  eq(buffer, "", "nothing left over");
+});
+
+check("several frames in one chunk all arrive, in order", () => {
+  const cut = viewer.sseFrames(
+    "id: 1\ndata: a\n\nid: 2\ndata: b\n\nid: 3\ndata: c\n\npart"
+  );
+  eq(cut.frames.map((f) => f.id), ["1", "2", "3"], "ids");
+  eq(cut.frames.map((f) => f.data), ["a", "b", "c"], "data");
+  eq(cut.rest, "part", "the incomplete tail is held back");
+});
+
+check("a heartbeat comment is not a frame, and does not end one", () => {
+  const cut = viewer.sseFrames(": ping\n\nid: 1\ndata: real\n\n");
+  eq(cut.frames.length, 1, "only the real frame");
+  eq(cut.frames[0].data, "real", "data");
+});
+
+check("a named event is told apart from a run event", () => {
+  // `reset` is the transport saying "your document is stale"; every unnamed frame is a
+  // fact about the run. The page does different things with the two.
+  const cut = viewer.sseFrames("event: reset\ndata: {}\n\nid: 2\ndata: {\"type\":\"status\"}\n\n");
+  eq(cut.frames[0].event, "reset", "named");
+  eq(cut.frames[1].event, "message", "unnamed is a message");
+  eq(cut.frames[1].id, "2", "and still carries its cursor");
+});
+
+check("a value with no space after the colon is read the same way", () => {
+  const cut = viewer.sseFrames("id:9\ndata:x\n\n");
+  eq(cut.frames[0].id, "9", "id");
+  eq(cut.frames[0].data, "x", "data");
+});
+
 if (failures) {
   console.log(`\n${failures} failed`);
   process.exit(1);

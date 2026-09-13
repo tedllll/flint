@@ -13,7 +13,7 @@
 //! * **Every line says what it is.** Every object has a `type` field from a small, closed
 //!   vocabulary: `session.started`, `turn.started`, `message.delta`, `reasoning.delta`,
 //!   `message.completed`, `tool.started`, `tool.args`, `tool.completed`, `usage`,
-//!   `warning`, `turn.completed`, `error`.
+//!   `warning`, `status`, `turn.completed`, `error`.
 //! * **The same event always writes the same bytes.** Keys come out in a stable order, so
 //!   two runs of the same conversation can be compared with `diff` instead of read.
 //! * **A stream is a view, not the record.** The session file is still written exactly as
@@ -80,6 +80,7 @@ impl Sink {
                 }),
             ),
             Event::Warning(message) => frame("warning", json!({ "message": message })),
+            Event::Status { text, restarted } => status(text, *restarted),
             // The answer is taken, not cloned: a second `Done` in one turn would otherwise
             // repeat the whole message as if it had just been said.
             Event::Done => frame(
@@ -126,6 +127,16 @@ pub fn error(message: &str) -> String {
 
 pub fn warning(message: &str) -> String {
     frame("warning", json!({ "message": message }))
+}
+
+/// What a turn is waiting for, for a reader that cannot see a terminal.
+///
+/// `restarted` is what makes this usable rather than merely present: a renderer showing
+/// elapsed time has to start its clock over when a *new* wait begins and keep it running
+/// when the same wait is renamed. The value comes from `Term`, which owns the clock and is
+/// the only thing that knows the difference.
+pub fn status(text: &str, restarted: bool) -> String {
+    frame("status", json!({ "text": text, "restarted": restarted }))
 }
 
 /// One line: the fields with `type` added.

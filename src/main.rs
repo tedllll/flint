@@ -508,8 +508,16 @@ async fn real_main() -> Result<i32> {
     // warning: `--web` was the whole point of the run, and a run that quietly served
     // nothing while looking like it worked is the failure this project keeps designing
     // against.
+    // Created whether or not `--web` is on, so the turn's plumbing does not change shape
+    // between the two: a `None` feed is one branch in `run_turn` and nothing else.
+    let live = if args.web { Some(web::Live::new()) } else { None };
     if args.web {
-        let window = web::Window::open(args.port.unwrap_or(0), agent.session_path()).await?;
+        let window = web::Window::open(
+            args.port.unwrap_or(0),
+            agent.session_path(),
+            live.clone(),
+        )
+        .await?;
         printer.term().line(format_args!(
             "{} {}",
             printer.dim("web:"),
@@ -536,7 +544,16 @@ async fn real_main() -> Result<i32> {
 
     // ---- one-shot ----
     if let Some(prompt) = args.prompt {
-        run_turn(&mut agent, &provider_cfg, &prompt, &printer, &mut input_rx, false).await?;
+        run_turn(
+            &mut agent,
+            &provider_cfg,
+            &prompt,
+            &printer,
+            &mut input_rx,
+            false,
+            live.as_deref(),
+        )
+        .await?;
         println!();
         return Ok(0);
     }
@@ -550,6 +567,7 @@ async fn real_main() -> Result<i32> {
         key_missing,
         &reader,
         &mut input_rx,
+        live.as_deref(),
     )
     .await;
     term.stop();
@@ -703,6 +721,11 @@ async fn next_line(rx: &mut tokio::sync::mpsc::UnboundedReceiver<InputMsg>) -> O
 }
 
 /// The REPL.
+// Eight arguments, and the lint is not wrong -- they are the REPL's collaborators and a
+// struct holding them would exist only to satisfy it. They are all `&mut` borrows of state
+// that lives in `real_main` for the life of the process, so the struct would be a second
+// place that knows how they fit together, for no reader's benefit.
+#[allow(clippy::too_many_arguments)]
 async fn interactive(
     cfg: &mut config::Config,
     agent: &mut agent::Agent,
@@ -711,6 +734,7 @@ async fn interactive(
     key_missing: bool,
     reader: &InputReader,
     input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<InputMsg>,
+    live: Option<&web::Live>,
 ) -> Result<()> {
 
     // Colour codes as this terminal should show them: the names below shadow the
@@ -791,7 +815,7 @@ async fn interactive(
             printer.style(BOLD, &input)
         ));
 
-        match run_turn(agent, provider_cfg, &input, printer, input_rx, true).await {
+        match run_turn(agent, provider_cfg, &input, printer, input_rx, true, live).await {
             Ok(()) => {}
             Err(e) => {
                 printer.term().blank();
@@ -1805,6 +1829,50 @@ async fn run_json_turn(
     }
 }
 
+/// What the turn is waiting for, said once so that both renderers say the same thing.
+///
+/// The terminal has a status row and the browser has a status line, and they are the same
+/// fact. `run_turn` decides it here and nowhere else. `Term` owns the clock and is the only
+/// thing that knows whether a call *started* a wait or merely renamed one -- a repeated tool
+/// name keeps its original start time on purpose -- so the answer is taken from it rather
+/// than guessed by the caller. A browser that guessed would reset its clock thirty seconds
+/// into a wait and show `0s` where the terminal shows `30s`.
+fn status_waiting(printer: &Printer<'_>, live: Option<&web::Live>, text: &str) {
+    let restarted = printer.term().activity_started(text);
+    announce_status(printer, live, restarted);
+}
+
+/// The same wait, named differently. The clock keeps counting.
+fn status_named(printer: &Printer<'_>, live: Option<&web::Live>, text: &str) {
+    // Nothing running: naming it would invent an activity with no start time, and the
+    // browser must not be told about a phase the terminal is not showing.
+    if !printer.term().activity_named(text) {
+        return;
+    }
+    announce_status(printer, live, false);
+}
+
+/// Nothing is being waited for any more.
+fn status_done(printer: &Printer<'_>, live: Option<&web::Live>) {
+    printer.term().activity_done();
+    announce_status(printer, live, false);
+}
+
+/// What the status row now says, to whoever else is rendering this run.
+///
+/// The words come from `Term::activity_label` and not from the caller's argument. They are
+/// not the same thing: an unnamed wait is shown as `waiting for the model`, and a stream
+/// carrying the raw empty name would blank the browser's status line at the exact moment
+/// the wait began -- which is the whole thing this event exists to prevent.
+fn announce_status(printer: &Printer<'_>, live: Option<&web::Live>, restarted: bool) {
+    if let Some(live) = live {
+        live.event(&Event::Status {
+            text: printer.term().activity_label(),
+            restarted,
+        });
+    }
+}
+
 async fn run_turn(
     agent: &mut agent::Agent,
     provider_cfg: &config::ProviderConfig,
@@ -1816,6 +1884,9 @@ async fn run_turn(
     // as steering, and the answer would be cancelled before it started -- which is
     // exactly what `flint -p ... | cat` used to do.
     can_steer: bool,
+    // The browser's feed, when `--web` is running. Everything the turn produces is copied
+    // here as well as drawn on the terminal, so the two cannot describe different runs.
+    live: Option<&web::Live>,
 ) -> Result<()> {
     #[allow(unused_variables)]
     let Palette { dim, bold, red, green, cyan, yellow, reset } = printer.pal;
@@ -1835,7 +1906,7 @@ async fn run_turn(
     // Every model call starts here, including the ones after a tool round. The status
     // line carries the phase from here on; the escalation in the wait loop turns the
     // nameless wait into an explicit "no response yet".
-    printer.term().activity_started("");
+    status_waiting(printer, live, "");
 
     loop {
         let mut tool_names: HashMap<String, (String, String)> = HashMap::new();
@@ -1855,21 +1926,37 @@ async fn run_turn(
         // A tool round is another wait: the step starts by asking the model again, and
         // the clock has to be running for it or the pause after every tool call looks
         // like the turn is over.
-        printer.term().activity_started("");
+        status_waiting(printer, live, "");
 
         // The turn and its output closure are confined to this scope: the future
         // holds a mutable borrow of `buffer`, and that borrow has to end before
         // the code below can read `buffer` to decide what to flush.
         let (result, steering) = {
-            let mut turn = Box::pin(agent.run(&current, |event| match event {
-                Event::Text(t) => {
-                    // The wait is over and the answer is being written. The clock keeps
-                    // running and the label changes, because these are different things
-                    // to be waiting for: a silent model, and a model emitting an answer
-                    // that is being rendered a row at a time.
-                    if !streamed_text {
-                        printer.term().activity_named(WRITING_LABEL);
+            let mut turn = Box::pin(agent.run(&current, |event| {
+                // A phase change is announced *before* the thing that caused it, so a reader
+                // of the stream sees the two in the order the terminal does: `writing the
+                // answer`, then the text. Emitting the event first and the status from
+                // inside its arm put them the wrong way round, which the first live capture
+                // showed immediately. `activity_named` is idempotent, so repeating this for
+                // every fragment of one answer costs nothing.
+                match &event {
+                    Event::Text(_) if !streamed_text => status_named(printer, live, WRITING_LABEL),
+                    // The same two guards the arm below used to carry, kept together with
+                    // the announcement they belong to: a fragment arriving after the answer
+                    // has started, or a blank one, is not a phase.
+                    Event::Reasoning(t) if !streamed_text && !t.trim().is_empty() => {
+                        status_named(printer, live, THINKING_LABEL)
                     }
+                    _ => {}
+                }
+                // Every event the turn produces, on the browser's stream as well. This
+                // closure is the one place they all pass, which is what makes the browser a
+                // renderer of the same run rather than a reconstruction of it.
+                if let Some(live) = live {
+                    live.event(&event);
+                }
+                match event {
+                Event::Text(t) => {
                     if printer.term().interactive() {
                         // The answer is redrawn in full, so the terminal always
                         // shows a complete line even when a fragment stops
@@ -1883,7 +1970,7 @@ async fn run_turn(
                     }
                     streamed_text = true;
                 }
-                Event::Reasoning(t) => {
+                Event::Reasoning(_) => {
                     // The model thinking out loud.
                     //
                     // Not put in the transcript: the provider emits one event per SSE
@@ -1897,10 +1984,8 @@ async fn run_turn(
                     // turn has taken. A separate `… thinking` marker in the transcript
                     // said the same thing a second time, one row above, and left the
                     // status line claiming the model was still being waited for while it
-                    // was in fact already talking.
-                    if !streamed_text && !t.trim().is_empty() {
-                        printer.term().activity_named(THINKING_LABEL);
-                    }
+                    // was in fact already talking. The label is put up by the match above,
+                    // before this event reaches the stream.
                 }
                 Event::ToolStart { id, name } => {
                     // Start the clock as soon as the tool is known, not when its
@@ -1912,7 +1997,7 @@ async fn run_turn(
                     // announcement claimed the *last* call was the one being waited for,
                     // and reset the elapsed time of a tool that had not started yet.
                     if round_calls.is_empty() {
-                        printer.term().activity_started(&name);
+                        status_waiting(printer, live, &name);
                     }
                     round_calls.push(id.clone());
                     tool_names.insert(id, (name, String::new()));
@@ -1951,7 +2036,7 @@ async fn run_turn(
                         .and_then(|next| tool_names.get(next))
                         .map(|(name, _)| name.clone())
                         .unwrap_or_default();
-                    printer.term().activity_started(&next);
+                    status_waiting(printer, live, &next);
                 }
                 Event::Usage(_) => {}
                 Event::Warning(w) => {
@@ -1959,6 +2044,11 @@ async fn run_turn(
                     printer.term().line(format_args!("{} {w}", printer.style(RED, "warning:")));
                 }
                 Event::Done => {}
+                // The terminal never receives one of these: the status *is* the terminal's
+                // own row, and `status_waiting` reads from it rather than feeding it. A
+                // caller that could send one would be a second place deciding the phase.
+                Event::Status { .. } => {}
+                }
             }));
 
             // Whichever happens first: the model finishes this turn, or the user
@@ -2011,7 +2101,7 @@ async fn run_turn(
                         if printer.term().activity_is_unnamed_wait()
                             && printer.term().activity_elapsed() >= NO_RESPONSE_AFTER
                         {
-                            printer.term().activity_named(NO_RESPONSE_LABEL);
+                            status_named(printer, live, NO_RESPONSE_LABEL);
                         }
                         printer.term().tick();
                     }
@@ -2027,7 +2117,7 @@ async fn run_turn(
 
         // Whatever happened, nothing is running now: leaving a stale clock on the strip
         // would be worse than showing none.
-        printer.term().activity_done();
+        status_done(printer, live);
 
         match steering {
             None => {
@@ -2287,6 +2377,15 @@ fn parse_args(argv: Vec<String>) -> Result<Args> {
     if args.port.is_some() && !args.web {
         return Err(anyhow!(
             "--port needs --web: it chooses the port the browser view listens on"
+        ));
+    }
+    // `--json` writes one turn to stdout and exits, so a window opened beside it would close
+    // before anything could be read from it. Saying so beats starting a listener that is gone
+    // by the time the browser connects.
+    if args.json && args.web {
+        return Err(anyhow!(
+            "--web and --json cannot both own the run: --json exits after one turn, taking \
+             the window with it. Use --web alone, or --json alone."
         ));
     }
     Ok(args)
