@@ -114,7 +114,7 @@ because the strip is a text offset rather than a model. Deliberately after the W
 stream: it is a rewrite of the rendering core, it touches the byte-exact terminal tests, and
 it wants a session with room to hold the whole layout in mind.
 
-### 7. Web mode: a window onto the running process — **settled, not implemented**
+### 7. Web mode: a window onto the running process — **levels 1 and 2 built**
 
 [`docs/web-mode.md`](docs/web-mode.md) is the design, and the decision at its centre is that
 `--web` is **a window, not a mode**: flint starts exactly as it does now and additionally
@@ -124,11 +124,22 @@ fourth renderer over the event funnel that already has three, the SSE payload is
 that `--json` already produces, and a typed message goes into the `InputMsg` channel the
 terminal already steers with.
 
-It is **independent of 5 and 6**, and its first three steps need no decision: the static
-viewer is one HTML file with no build step that you drop a `.jsonl` on, useful the day it
-lands and reusable as the renderer for everything after it. The one open question — a
-hand-rolled HTTP server or `hyper`, which is already in the tree via `reqwest` — is §7 of that
-document and is the only thing blocking step 4.
+It is **independent of 5 and 6**. The one open question — a hand-rolled HTTP server or
+`hyper`, which is already in the tree via `reqwest` — was §7 of that document and is settled in
+[`decisions.md`](docs/decisions.md#dependencies): hand-rolled. The port defaults to ephemeral
+rather than a fixed one, because a fixed port collides with whatever else is on loopback and
+the URL has to be printed anyway.
+
+**Done:** the static viewer (level 1), and level 2 — `--web [--port]`, `GET /`, `GET /session`,
+`GET /events` as SSE with a cursor and replay, and the `status` event that keeps a browser from
+looking frozen during a slow turn. **Not done:** `POST /message` (level 3, typing into the
+browser) and the measurement pass of step 7.
+
+**What level 2 cannot do yet, and it is the next thing worth doing.** A browser shows the run's
+*phase* live and its *text* late, because streamed output is buffered per attempt so that a
+retry can discard it. `docs/web-mode.md` §11 has the measurement. Flushing deltas as they
+arrive is now the highest-value item for anything with a user interface, and it is also what
+would make `--json` a stream a program can actually follow instead of a burst at the end.
 
 ## Small, agreed, unscheduled
 
