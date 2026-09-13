@@ -123,6 +123,11 @@ node scripts/vtscreen.js raw.bin 24 100 --prefill OLD   # ...onto a dirty screen
 `FLINT_TERM_CAPTURE=1` and `FLINT_TERM_SIZE=100x24` (debug builds only) force the
 interactive branch with a pinned size, and a test can now drive the REPL's own commands
 by piping stdin. That is how `/name`, `/delete` and `/skills` are covered end to end.
+`FLINT_TERM_CAPTURE_FILE=<path>` sends the bytes to that file instead of stdout, and a
+test must use it rather than redirecting stdout: a redirected fd 1 also collects the test
+harness's own progress lines, and one of those landing on the bottom row scrolls the
+transcript out of the recorded screen — a blank-screen failure with nothing wrong behind
+it, at about one full-suite run in four before the file variable existed.
 
 `examples/live_turn.rs` drives a real turn against the configured provider. It has its
 own copy of the event handling and does **not** go through `run_turn`, so it must be kept

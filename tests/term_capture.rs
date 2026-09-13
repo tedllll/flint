@@ -2,62 +2,36 @@
 //
 // `Term`'s interactive branches are normally unreachable from a test: they need a
 // terminal, and crossterm talks to the console rather than to stdin. A debug build
-// honours `FLINT_TERM_CAPTURE`, so this test points stdout at a file, drives `Term`
-// the way `run_turn` does, and then hands the bytes to the replay checker in
-// scripts/term-layout-test.js.
+// honours `FLINT_TERM_CAPTURE`, and `FLINT_TERM_CAPTURE_FILE` says which file to write
+// the byte stream to, so a test can drive `Term` the way `run_turn` does and then hand
+// the bytes to the replay checker in scripts/term-layout-test.js.
 //
 // That closes the gap between the hand-written model in scripts/ and the Rust code
 // it is supposed to mirror: if the two ever disagree, this test fails.
 #![cfg(debug_assertions)]
 
 use flint::term::Term;
-use std::io::Write;
 
-/// Redirect the process's stdout to `path` and return a guard that puts it back.
+/// Point this run's capture at `path` and return a guard that forgets it.
 ///
-/// `libc::dup`/`dup2` are the portable way to do this; flushing first matters
-/// because Rust buffers stdout and would otherwise swallow anything pending.
-#[cfg(unix)]
-fn redirect_stdout(path: &std::path::Path) -> Box<dyn FnOnce()> {
-    use std::os::unix::io::AsRawFd;
-    let file = std::fs::File::create(path).unwrap();
-    let saved = unsafe { libc::dup(1) };
-    std::io::stdout().flush().unwrap();
-    assert!(saved >= 0);
-    assert!(unsafe { libc::dup2(file.as_raw_fd(), 1) } >= 0);
-    Box::new(move || {
-        std::io::stdout().flush().unwrap();
-        unsafe { libc::dup2(saved, 1) };
-        unsafe { libc::close(saved) };
-    })
+/// This used to redirect file descriptor 1 with `dup2`, which is process-wide: the test
+/// harness's own progress lines went into the capture with it. One of those lands on the
+/// bottom row while a test owns stdout, its newline scrolls the screen, and the transcript
+/// the test is about to assert on has left the recorded screen -- a blank screen with
+/// nothing wrong in the layout code to find, roughly one full-suite run in four. A run
+/// that is simply *told* where to write cannot be disturbed that way, and it needs no
+/// `libc` at all.
+fn capture_into(path: &std::path::Path) -> Box<dyn FnOnce()> {
+    std::env::set_var("FLINT_TERM_CAPTURE_FILE", path);
+    Box::new(|| std::env::remove_var("FLINT_TERM_CAPTURE_FILE"))
 }
 
-#[cfg(windows)]
-fn redirect_stdout(path: &std::path::Path) -> Box<dyn FnOnce()> {
-    use std::os::windows::io::AsRawHandle;
-    let file = std::fs::File::create(path).unwrap();
-    std::io::stdout().flush().unwrap();
-    let saved = unsafe { libc::dup(1) };
-    assert!(saved >= 0, "dup failed");
-    // The CRT's file descriptor has to be backed by a HANDLE, so the Rust File is
-    // opened onto a fresh handle for fd 1 rather than reusing the one it already
-    // has; `forget` keeps it from closing a handle fd 1 now owns.
-    let fd = unsafe { libc::open_osfhandle(file.as_raw_handle() as isize, 0) };
-    assert!(fd >= 0, "open_osfhandle failed");
-    std::mem::forget(file);
-    assert!(unsafe { libc::dup2(fd, 1) } >= 0, "dup2 failed");
-    Box::new(move || {
-        std::io::stdout().flush().unwrap();
-        unsafe { libc::dup2(saved, 1) };
-        unsafe { libc::close(saved) };
-    })
-}
-
-/// Serialises the tests that move stdout.
+/// Serialises the tests that move process-wide state.
 ///
-/// `dup2` on file descriptor 1 is process-wide, so two of these running at once
-/// point it at each other's files and every assertion reads someone else's output.
-/// The lock is what makes `redirect_stdout` usable from more than one test.
+/// `FLINT_TERM_CAPTURE`, `FLINT_TERM_CAPTURE_FILE` and `FLINT_TERM_SIZE` belong to the
+/// process, not to the thread that set them, so two of these tests running at once point
+/// each other at the wrong file or the wrong window size and every assertion then reads
+/// someone else's run. The lock is what makes the capture usable from more than one test.
 fn stdout_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
@@ -79,7 +53,7 @@ fn interactive_layout_matches_the_replay_model() {
     let _guard = stdout_lock().lock().unwrap_or_else(|e| e.into_inner());
     let path = capture_path();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let restore = redirect_stdout(&path);
+    let restore = capture_into(&path);
 
     // Must be set before `Term::start`, and only has an effect in a debug build.
     std::env::set_var("FLINT_TERM_CAPTURE", "1");
@@ -130,7 +104,7 @@ fn a_notice_mid_answer_does_not_tear_the_layout() {
         .join("target")
         .join("term-notice.bin");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let restore = redirect_stdout(&path);
+    let restore = capture_into(&path);
 
     std::env::set_var("FLINT_TERM_CAPTURE", "1");
     std::env::set_var("FLINT_TERM_SIZE", "70x24");
@@ -207,7 +181,7 @@ fn a_new_streamed_segment_replaces_the_previous_one() {
         .join("target")
         .join("term-segments.bin");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let restore = redirect_stdout(&path);
+    let restore = capture_into(&path);
 
     std::env::set_var("FLINT_TERM_CAPTURE", "1");
     // Pin the size, because the replay below has to use the same one. A capture made
@@ -309,7 +283,7 @@ fn a_segment_that_repeats_committed_text_does_not_draw_it_twice() {
         .join("target")
         .join("term-repeated-prefix.bin");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let restore = redirect_stdout(&path);
+    let restore = capture_into(&path);
 
     std::env::set_var("FLINT_TERM_CAPTURE", "1");
     std::env::set_var("FLINT_TERM_SIZE", "70x24");
@@ -446,7 +420,7 @@ fn the_running_clock_does_not_land_on_the_answers_last_row() {
         .join("target")
         .join("term-activity.bin");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let restore = redirect_stdout(&path);
+    let restore = capture_into(&path);
 
     std::env::set_var("FLINT_TERM_CAPTURE", "1");
     std::env::set_var("FLINT_TERM_SIZE", "70x24");
@@ -523,7 +497,7 @@ fn a_committed_line_does_not_paint_a_clock_that_has_not_waited() {
         .join("target")
         .join("term-clock-delay.bin");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let restore = redirect_stdout(&path);
+    let restore = capture_into(&path);
 
     std::env::set_var("FLINT_TERM_CAPTURE", "1");
     std::env::set_var("FLINT_TERM_SIZE", "70x24");
@@ -633,7 +607,7 @@ fn the_status_line_waits_and_then_appears() {
         .join("target")
         .join("term-waiting.bin");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let restore = redirect_stdout(&path);
+    let restore = capture_into(&path);
 
     std::env::set_var("FLINT_TERM_CAPTURE", "1");
     std::env::set_var("FLINT_TERM_SIZE", "70x24");
@@ -694,7 +668,7 @@ fn the_status_line_names_the_phase_it_is_in() {
         .join("target")
         .join("term-phase.bin");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let restore = redirect_stdout(&path);
+    let restore = capture_into(&path);
 
     std::env::set_var("FLINT_TERM_CAPTURE", "1");
     std::env::set_var("FLINT_TERM_SIZE", "70x24");
@@ -748,7 +722,7 @@ fn the_transcript_starts_at_the_top_of_the_screen() {
         .join("target")
         .join("term-top.bin");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let restore = redirect_stdout(&path);
+    let restore = capture_into(&path);
 
     std::env::set_var("FLINT_TERM_CAPTURE", "1");
     std::env::set_var("FLINT_TERM_SIZE", "70x24");
@@ -789,7 +763,7 @@ fn a_full_transcript_scrolls_instead_of_overwriting() {
         .join("target")
         .join("term-scroll.bin");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let restore = redirect_stdout(&path);
+    let restore = capture_into(&path);
 
     std::env::set_var("FLINT_TERM_CAPTURE", "1");
     std::env::set_var("FLINT_TERM_SIZE", "70x24");
@@ -836,7 +810,7 @@ fn a_path_inside_the_session_directory_is_shown_relative() {
         .join("target")
         .join("term-paths.bin");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let restore = redirect_stdout(&path);
+    let restore = capture_into(&path);
 
     std::env::set_var("FLINT_TERM_CAPTURE", "1");
     let term = Term::start().expect("term");
@@ -880,7 +854,7 @@ fn starting_up_leaves_no_remnant_of_the_previous_screen() {
         .join("target")
         .join("term-cleanstart.bin");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let restore = redirect_stdout(&path);
+    let restore = capture_into(&path);
 
     std::env::set_var("FLINT_TERM_CAPTURE", "1");
     std::env::set_var("FLINT_TERM_SIZE", "70x24");
@@ -928,7 +902,7 @@ fn starting_up_asks_the_terminal_to_repaint() {
         .join("target")
         .join("term-repaint.bin");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let restore = redirect_stdout(&path);
+    let restore = capture_into(&path);
 
     std::env::set_var("FLINT_TERM_CAPTURE", "1");
     std::env::set_var("FLINT_TERM_SIZE", "70x24");
@@ -968,7 +942,7 @@ fn resizing_the_window_keeps_the_transcript() {
         .join("target")
         .join("term-resize.bin");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let restore = redirect_stdout(&path);
+    let restore = capture_into(&path);
 
     std::env::set_var("FLINT_TERM_CAPTURE", "1");
     std::env::set_var("FLINT_TERM_SIZE", "70x24");
@@ -1022,7 +996,7 @@ fn the_status_line_knows_which_phase_it_is_in() {
         .join("target")
         .join("term-phases.bin");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let restore = redirect_stdout(&path);
+    let restore = capture_into(&path);
 
     std::env::set_var("FLINT_TERM_CAPTURE", "1");
     std::env::set_var("FLINT_TERM_SIZE", "70x24");
@@ -1091,7 +1065,7 @@ fn narration_is_not_recommitted_each_tool_round() {
         .join("target")
         .join("term-rounds.bin");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let restore = redirect_stdout(&path);
+    let restore = capture_into(&path);
 
     std::env::set_var("FLINT_TERM_CAPTURE", "1");
     std::env::set_var("FLINT_TERM_SIZE", "70x24");
@@ -1165,7 +1139,7 @@ fn a_later_turn_does_not_recommit_the_earlier_turns_narration() {
         .join("target")
         .join("term-turns.bin");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let restore = redirect_stdout(&path);
+    let restore = capture_into(&path);
 
     std::env::set_var("FLINT_TERM_CAPTURE", "1");
     std::env::set_var("FLINT_TERM_SIZE", "70x24");

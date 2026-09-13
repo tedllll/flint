@@ -386,9 +386,20 @@ node scripts/layout-trace.js          # frame-by-frame trace, for diagnosing
 node scripts/vtscreen.js raw.bin 24 70  # one raw dump, as a screen
 ```
 
-`tests/term_capture.rs` points stdout at `target/term-capture.bin`, drives `Term`
-the way the REPL does, and the layout test replays that file. A debug build
-honours `FLINT_TERM_CAPTURE` for this, which is the only way to reach theinteractive branches from a test; release builds do not compile it.
+`tests/term_capture.rs` drives `Term` the way the REPL does and writes the byte stream
+to a file of its own, and the layout test replays that file. A debug build honours
+`FLINT_TERM_CAPTURE` for this — the only way to reach the interactive branches from a
+test — and `FLINT_TERM_CAPTURE_FILE=<path>` says where the bytes go; without it they go
+to stdout, which is what `examples/live_turn.rs` below wants. Release builds do not
+compile either variable.
+
+The file is named rather than reached by pointing the process's stdout at it, which is
+what this used to do. Redirecting file descriptor 1 also captures whatever else writes
+there, and in a test binary that is the harness's own progress lines: one of them lands
+on the bottom row mid-capture, its newline scrolls the screen, and the transcript a test
+is about to assert on has left the recorded screen. That produced a blank screen and a
+failure with nothing wrong in the layout code — roughly one full-suite run in four,
+against zero in ten after the change.
 
 The replay model counts CJK characters as two columns and expands tabs, because it
 is used to judge output that contains both. A tool that disagrees with a real

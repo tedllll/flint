@@ -217,6 +217,48 @@ pub fn capture_requested() -> bool {
     }
 }
 
+/// The file a captured run should write its bytes to, when it was given one.
+///
+/// `FLINT_TERM_CAPTURE` says "behave as if there were a terminal"; this says where the
+/// bytes go. It exists because the alternative -- pointing the process's stdout at the
+/// capture file -- also captures whatever else writes to stdout, which in a test binary
+/// is the harness's own progress lines. One of those lands mid-capture, on the bottom
+/// row, and its newline scrolls the transcript out of the recorded screen: a test that
+/// fails with a blank screen and nothing wrong in the layout code to find. Writing to a
+/// file of the run's own choosing removes the whole class.
+pub fn capture_file() -> Option<std::path::PathBuf> {
+    #[cfg(debug_assertions)]
+    {
+        std::env::var_os("FLINT_TERM_CAPTURE_FILE").map(std::path::PathBuf::from)
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        None
+    }
+}
+
+/// Where a run's bytes go, so the drawing code never asks which case it is in.
+enum Sink<'a> {
+    Stdout(std::io::Stdout),
+    File(&'a std::fs::File),
+}
+
+impl std::io::Write for Sink<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Sink::Stdout(out) => out.write(buf),
+            Sink::File(file) => file.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Sink::Stdout(out) => out.flush(),
+            Sink::File(file) => file.flush(),
+        }
+    }
+}
+
 /// What is running right now.
 struct Activity {
     /// The tool name, or empty while the model is thinking rather than running one.
@@ -333,6 +375,14 @@ pub struct Term {
     activity_painted: AtomicBool,
     /// When the last bare Ctrl-C arrived, so two in a row can mean quit.
     last_ctrl_c: Mutex<Option<std::time::Instant>>,
+    /// Where a captured run writes, when it was given a file of its own.
+    ///
+    /// `None` is the ordinary case: the terminal, or -- for a captured run with no file
+    /// named -- whatever the process's stdout points at. A shared reference is enough to
+    /// write through (`impl Write for &File`), and taking no lock is deliberate: some
+    /// drawing paths call other drawing paths, and a lock held across one of those is a
+    /// deadlock. Interleaving is no worse than it already is on stdout.
+    capture: Option<std::fs::File>,
 }
 
 impl Term {
@@ -362,6 +412,7 @@ impl Term {
             activity_shown: AtomicU16::new(0),
             activity_painted: AtomicBool::new(false),
             last_ctrl_c: Mutex::new(None),
+            capture: None,
         }
     }
 
@@ -409,9 +460,19 @@ impl Term {
         // run. Raw mode and the window-size query still need a real terminal, so
         // those stay keyed on `tty` below.
         let interactive = tty || capture_requested();
+        // Opened before anything is drawn, so the first frame is in the file too. A file
+        // that cannot be opened is not worth failing a run over: the bytes then go to
+        // stdout, exactly as they would have without the variable.
+        let capture = capture_file().and_then(|path| {
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            std::fs::File::create(&path).ok()
+        });
 
         let term = Term {
             interactive,
+            capture,
             screen_rows: AtomicU16::new(24),
             screen_cols: AtomicU16::new(80),
             viewport_top: AtomicU16::new(20),
@@ -444,6 +505,9 @@ impl Term {
             let default_hook = std::panic::take_hook();
             std::panic::set_hook(Box::new(move |info| {
                 let _ = disable_raw_mode();
+                // Deliberately not the term's own sink: this runs from the panic hook,
+                // which outlives the `Term` it was installed by, and a panic path must
+                // not be the thing that fails.
                 let mut out = std::io::stdout();
                 let _ = write!(out, "\x1b[r\x1b[?25h\r\n");
                 let _ = out.flush();
@@ -578,6 +642,17 @@ impl Term {
         }
     }
 
+    /// Where the bytes of this run go: the terminal, or the capture file.
+    ///
+    /// Every drawing path goes through here, so a captured run does not depend on the
+    /// process's stdout pointing anywhere in particular -- see `capture_file`.
+    fn sink(&self) -> Sink<'_> {
+        match &self.capture {
+            Some(file) => Sink::File(file),
+            None => Sink::Stdout(std::io::stdout()),
+        }
+    }
+
     /// How long the current activity has been running; zero when none is.
     ///
     /// Lets the caller tell a slow model from one that is not answering. The clock itself
@@ -656,7 +731,7 @@ impl Term {
                 )
             })
         };
-        let mut out = std::io::stdout();
+        let mut out = self.sink();
         // The whole row is cleared either way, so a finished tool leaves no stale clock
         // behind on a row that is also part of the answer strip.
         let _ = write!(out, "\x1b[{};1H\x1b[2K", row);
@@ -714,7 +789,7 @@ impl Term {
         if !self.interactive {
             return;
         }
-        let mut out = std::io::stdout();
+        let mut out = self.sink();
         let rows = self.screen_rows.load(Ordering::Relaxed);
         // Take the screen, rather than inheriting wherever the shell left the cursor.
         //
@@ -909,7 +984,7 @@ impl Term {
             return;
         }
         let bottom = self.history_bottom();
-        let mut out = std::io::stdout();
+        let mut out = self.sink();
         for text in &wrapped {
             // Where this line goes, then advance. At the bottom the newline scrolls the
             // region instead, so the row stays put and the *screen* moves -- which is
@@ -1088,7 +1163,7 @@ impl Term {
         let first = (height.saturating_sub(capacity) as usize).max(committed_now);
         let visible = &rows[first.min(rows.len())..];
         let start = top + capacity.saturating_sub(visible.len() as u16);
-        let mut out = std::io::stdout();
+        let mut out = self.sink();
         let previous = std::mem::take(&mut *self.stream_rows.lock().unwrap());
         let previous_first = self.stream_first.swap(first as u16, Ordering::Relaxed) as usize;
 
@@ -1256,7 +1331,7 @@ impl Term {
         self.clear_viewport();
         // Scroll the now-blank slice up, so the strip is empty and the transcript
         // above is untouched.
-        let mut out = std::io::stdout();
+        let mut out = self.sink();
         let _ = write!(out, "\x1b[{};{}r\x1b[{};1H", top, last, top);
         for _ in 0..shown {
             let _ = write!(out, "\r\n");
@@ -1280,7 +1355,7 @@ impl Term {
         let top = self.viewport_top.load(Ordering::Relaxed);
         // The status row is `input_row - 1`, so the strip ends one row above it.
         let last = self.input_row.load(Ordering::Relaxed).saturating_sub(1);
-        let mut out = std::io::stdout();
+        let mut out = self.sink();
         for row in top..last {
             let _ = write!(out, "\x1b[{};1H\x1b[2K", row);
         }
@@ -1297,7 +1372,7 @@ impl Term {
         let after: String = input.buf[input.pos..].iter().collect();
         drop(input);
         let prefix = self.prefix.lock().unwrap();
-        let mut out = std::io::stdout();
+        let mut out = self.sink();
         let _ = write!(
             out,
             "\x1b[{};1H\x1b[2K\x1b[1m{}\x1b[0m{before}",
@@ -1425,7 +1500,7 @@ impl Term {
         if !self.interactive {
             return;
         }
-        let mut out = std::io::stdout();
+        let mut out = self.sink();
         // Drop the scroll region, show the cursor, park below the input row so the
         // shell's next prompt starts on a fresh line.
         let _ = write!(out, "\x1b[r\x1b[?25h");

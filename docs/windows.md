@@ -242,7 +242,10 @@ Treat Windows as the environment where this will happen again. Concretely:
    That prints what the terminal was told to draw, character by character, without
    anyone having to describe a screenshot. Note this only works in a debug build, and
    that `FLINT_TERM_CAPTURE` forces the interactive path while not being a real
-   terminal -- which is exactly why the layout code can be exercised here at all.
+   terminal -- which is exactly why the layout code can be exercised here at all. (Since
+   `flint` itself is the only writer here, sending it to stdout is fine; a *test* uses
+   `FLINT_TERM_CAPTURE_FILE=<path>` instead, because a redirected stdout would collect
+   the test harness's own output too.)
 
    On macOS the equivalent (`osascript` reading Terminal's `history`) is what settled
    the last three layout bugs, after guessing had failed several times.
