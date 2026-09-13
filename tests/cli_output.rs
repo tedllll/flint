@@ -321,6 +321,331 @@ fn exec_works_without_a_config_and_creates_none() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// A `FLINT_HOME` of this test's own: a config, and an empty sessions directory.
+fn test_home(tag: &str, base_url: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("flint-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("sessions")).expect("temp home");
+    std::fs::write(
+        dir.join("config.toml"),
+        format!(
+            "default_provider = \"stub\"\n\n\
+             [[providers]]\n\
+             name = \"stub\"\n\
+             base_url = \"{base_url}\"\n\
+             model = \"stub-model\"\n\
+             api_key = \"not-a-real-key\"\n"
+        ),
+    )
+    .expect("failed to write the test config");
+    dir
+}
+
+/// Write a session file, ordering it by modification time.
+///
+/// The order matters because the list is newest-first and the numbers are what
+/// `--archive N` takes, so a test that shrugged at it would be asserting against
+/// whatever order the filesystem happened to produce.
+fn write_session(
+    dir: &std::path::Path,
+    file: &str,
+    lines: &[&str],
+    age_secs: u64,
+) -> std::path::PathBuf {
+    let path = dir.join(file);
+    std::fs::write(&path, format!("{}\n", lines.join("\n"))).expect("write session");
+    let when = std::time::SystemTime::now() - std::time::Duration::from_secs(age_secs);
+    let handle = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .expect("open session");
+    handle.set_modified(when).expect("set mtime");
+    path
+}
+
+fn meta_line(id: &str) -> String {
+    format!(
+        r#"{{"type":"meta","v":2,"id":"{id}","created":"epoch:1","cwd":"/tmp","provider":"stub","model":"stub-model"}}"#
+    )
+}
+
+/// Tidying sessions is a file operation, and it must not need a model.
+///
+/// `--list-sessions`, `--archive` and `--delete` all run before the provider is even
+/// resolved, because the moment you want to tidy the list is often the moment the
+/// network is what is broken. This drives the real binary with no server at all.
+#[test]
+fn sessions_can_be_listed_named_archived_and_deleted_without_a_model() {
+    let home = test_home("sessions", "http://127.0.0.1:1/v1");
+    let sessions = home.join("sessions");
+
+    // Newest first, and each one exercises a different part of the format: a name
+    // appended after the conversation, an event this build has never heard of, and one
+    // already filed away.
+    write_session(
+        &sessions,
+        "111-1.jsonl",
+        &[
+            &meta_line("111-1"),
+            r#"{"type":"chat","message":{"role":"user","content":"the codex config is broken"}}"#,
+            r#"{"type":"title","name":"codex config"}"#,
+        ],
+        10,
+    );
+    write_session(
+        &sessions,
+        "222-2.jsonl",
+        &[
+            &meta_line("222-2"),
+            r#"{"type":"chat","message":{"role":"user","content":"update dsh please"}}"#,
+            r#"{"type":"future-event","payload":{"unknown":true}}"#,
+        ],
+        20,
+    );
+    std::fs::create_dir_all(sessions.join("archive")).expect("archive dir");
+    write_session(
+        &sessions.join("archive"),
+        "333-3.jsonl",
+        &[
+            &meta_line("333-3"),
+            r#"{"type":"chat","message":{"role":"user","content":"long forgotten"}}"#,
+        ],
+        30,
+    );
+
+    let out = binary()
+        .arg("--list-sessions")
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .output()
+        .expect("failed to run flint");
+    let listed = String::from_utf8_lossy(&out.stdout).to_string();
+    let warned = String::from_utf8_lossy(&out.stderr).to_string();
+
+    assert!(out.status.success(), "listing failed: {warned}");
+    assert!(
+        listed.contains("codex config"),
+        "the name given to a session is not shown: {listed:?}"
+    );
+    assert!(
+        listed.contains("update dsh please"),
+        "an unnamed session lost its first message: {listed:?}"
+    );
+    assert!(
+        !listed.contains("long forgotten"),
+        "an archived session is still being listed: {listed:?}"
+    );
+    // The unknown event must be ignored in silence. A future version's session is not
+    // corruption, and saying so on every list would make it look like it.
+    assert!(
+        warned.is_empty(),
+        "an unknown event was reported as damage: {warned:?}"
+    );
+
+    // `--archive 1` is the newest, which the title above identifies.
+    let out = binary()
+        .args(["--archive", "1"])
+        .env("FLINT_HOME", &home)
+        .output()
+        .expect("failed to run flint");
+    assert!(
+        out.status.success(),
+        "archiving failed: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        sessions.join("archive").join("111-1.jsonl").exists(),
+        "the archived session is not in the archive directory"
+    );
+    assert!(!sessions.join("111-1.jsonl").exists());
+
+    // By id prefix, so a session can be removed without knowing its number.
+    let out = binary()
+        .args(["--delete", "222-2"])
+        .env("FLINT_HOME", &home)
+        .output()
+        .expect("failed to run flint");
+    assert!(
+        out.status.success(),
+        "deleting failed: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!sessions.join("222-2.jsonl").exists());
+
+    // Archived sessions are out of the list but not out of reach: resolving by id has to
+    // keep working, or `mv` by hand would make a conversation unreachable.
+    let out = binary()
+        .args(["--archive", "333-3"])
+        .env("FLINT_HOME", &home)
+        .output()
+        .expect("failed to run flint");
+    assert!(
+        out.status.success(),
+        "an archived session could not be resolved by id: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        sessions.join("archive").join("333-3.jsonl").exists(),
+        "archiving an already-archived session moved it somewhere else"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Naming appends, so it works on a conversation that already happened.
+///
+/// The shape of this is the point: `--name` on a resumed session must not rewrite
+/// anything, and the *last* name in the file is the one that counts.
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn a_session_can_be_named_after_the_fact_and_the_last_name_wins() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(&[
+                    r#"data: {"choices":[{"delta":{"content":"ok"}}]}"#,
+                    r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+                    "data: [DONE]",
+                ])),
+        )
+        .mount(&server)
+        .await;
+
+    let home = test_home("naming", &server.uri());
+
+    let first = binary()
+        .args(["-p", "say something", "--name", "first name"])
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("failed to run flint");
+    assert!(
+        first.status.success(),
+        "the named run failed: {:?}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    // The same conversation, continued and renamed.
+    let resume_args = std::fs::read_dir(home.join("sessions"))
+        .expect("sessions dir")
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+        .expect("the run did not write a session");
+    assert!(
+        std::fs::read_to_string(&resume_args)
+            .expect("read session")
+            .contains(r#""type":"title","name":"first name""#),
+        "the name was not appended to the session file"
+    );
+
+    let second = binary()
+        .args(["-p", "and again", "--continue", "--name", "second name"])
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("failed to run flint");
+    assert!(
+        second.status.success(),
+        "resuming with a new name failed: {:?}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+
+    let listed = binary()
+        .arg("--list-sessions")
+        .env("FLINT_HOME", &home)
+        .output()
+        .expect("failed to run flint");
+    let listed = String::from_utf8_lossy(&listed.stdout).to_string();
+    assert!(
+        listed.contains("second name"),
+        "the newest name is not the one shown: {listed:?}"
+    );
+    assert!(
+        !listed.contains("first name"),
+        "an older name is still in force: {listed:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// The REPL's own session commands, driven through a real session.
+///
+/// `/name` writes to the conversation that is open, and `/archive` and `/delete` refuse
+/// it -- a rule worth a test, because the failure it prevents is silent: deleting the
+/// file this process appends to would have it recreated by the next event, and the
+/// conversation would come back as a nameless fragment.
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn the_repl_names_the_open_session_and_refuses_to_delete_it() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(&[
+                    r#"data: {"choices":[{"delta":{"content":"ok"}}]}"#,
+                    r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+                    "data: [DONE]",
+                ])),
+        )
+        .mount(&server)
+        .await;
+
+    let home = test_home("repl-name", &server.uri());
+    let mut child = binary()
+        .env("FLINT_HOME", &home)
+        .env("FLINT_TERM_CAPTURE", "1")
+        .env("FLINT_TERM_SIZE", "80x24")
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to run flint");
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().expect("no stdin handle");
+        stdin
+            .write_all(b"/name a named conversation\n/sessions\n/delete 1\n/exit\n")
+            .expect("failed to write stdin");
+    }
+    let out = child.wait_with_output().expect("flint did not finish");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+
+    let session = std::fs::read_dir(home.join("sessions"))
+        .expect("sessions dir")
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+        .expect("no session file was written");
+    let body = std::fs::read_to_string(&session).expect("read session");
+
+    assert!(
+        body.contains(r#""type":"title","name":"a named conversation""#),
+        "the name never reached the session file: {body:?}"
+    );
+    assert!(
+        text.contains("a named conversation"),
+        "the listing does not show the name: {text:?}"
+    );
+    assert!(
+        text.contains("that is the conversation you are in"),
+        "deleting the open session was not refused: {text:?}"
+    );
+    assert!(
+        session.exists(),
+        "the open session was deleted anyway: {}",
+        session.display()
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 /// The clock has to be running for the wait *after* a tool round, and not for the tools.
 /// Two things were wrong with it. A tool fast enough that the hold-back never expired
 /// still painted `── 0s <tool> ──`, because committing a transcript line repainted the

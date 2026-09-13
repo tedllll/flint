@@ -32,6 +32,15 @@ struct Args {
     /// session worth returning to is three conversations back -- and going back is the
     /// normal case when the last thing you did was break something.
     resume: Option<String>,
+    /// A name for the conversation this run writes to.
+    ///
+    /// Applied after the session exists, as an appended `title` line: a run that resumes
+    /// can be renamed as easily as a new one, and neither requires rewriting the file.
+    name: Option<String>,
+    /// Move a session into the archive and exit. A list number, an id prefix, or a path.
+    archive: Option<String>,
+    /// Delete a session and exit.
+    delete: Option<String>,
     provider: Option<String>,
     model: Option<String>,
     readonly: bool,
@@ -102,20 +111,34 @@ fn resolve_session(target: &str) -> Result<PathBuf> {
     }
 
     let prefix = target.trim_end_matches(".jsonl");
-    let matches: Vec<String> = session::list(&dir)?
+    // The archive is searched by id as well as the live directory: a conversation that
+    // was filed away is still something you may want to read, and `mv` by hand must not
+    // make it unreachable. It is not offered by number, because the numbers are the ones
+    // `/sessions` prints and that list does not include the archive.
+    let mut candidates: Vec<(String, PathBuf)> = session::list(&dir)?
         .into_iter()
-        .map(|(id, _)| id)
-        .filter(|id| id.starts_with(prefix))
+        .map(|(id, _)| (id.clone(), dir.join(format!("{id}.jsonl"))))
+        .collect();
+    let archived = session::archive_dir(&dir);
+    candidates.extend(
+        session::list(&archived)?
+            .into_iter()
+            .map(|(id, _)| (id.clone(), archived.join(format!("{id}.jsonl")))),
+    );
+    let matches: Vec<(String, PathBuf)> = candidates
+        .into_iter()
+        .filter(|(id, _)| id.starts_with(prefix))
         .collect();
     match matches.len() {
-        1 => return Ok(dir.join(format!("{}.jsonl", matches[0]))),
+        1 => return Ok(matches[0].1.clone()),
         0 => {}
         _ => {
+            let names: Vec<&str> = matches.iter().map(|(id, _)| id.as_str()).collect();
             return Err(anyhow!(
                 "'{target}' matches {} sessions: {}. Use a longer prefix.",
                 matches.len(),
-                matches.join(", ")
-            ))
+                names.join(", ")
+            ));
         }
     }
 
@@ -145,7 +168,7 @@ fn print_transcript(history: &[event::Message], printer: &Printer<'_>) {
     printer.term().line(format_args!(
         "{}",
         printer.dim(&format!(
-            "鈹€鈹€ {}{} 鈹€鈹€",
+            "\u{2500}\u{2500} {}{} \u{2500}\u{2500}",
             if start > 0 {
                 format!("— {start} earlier messages, ")
             } else {
@@ -246,6 +269,31 @@ async fn real_main() -> Result<i32> {
     }
     let readonly = cfg.readonly || args.readonly;
 
+    // ---- archive or delete one session, then stop ----
+    //
+    // Before the provider is resolved on purpose: filing a conversation away and
+    // throwing one out are file operations, and neither may depend on a key, a
+    // reachable endpoint, or a parseable provider block. Keeping the list usable is
+    // exactly the job you want to be able to do when the network is what is broken.
+    match (args.archive.as_deref(), args.delete.as_deref()) {
+        (Some(_), Some(_)) => {
+            return Err(anyhow!("use either --archive or --delete, not both"));
+        }
+        (Some(target), None) => {
+            let path = resolve_session(target)?;
+            let moved = session::archive(&path)?;
+            println!("archived {}", moved.display());
+            return Ok(0);
+        }
+        (None, Some(target)) => {
+            let path = resolve_session(target)?;
+            session::delete(&path)?;
+            println!("deleted {}", path.display());
+            return Ok(0);
+        }
+        (None, None) => {}
+    }
+
     // ---- resolve provider ----
     let provider_cfg = cfg.active_provider(args.provider.as_deref())?.clone();
     let mut provider_cfg = provider_cfg;
@@ -285,11 +333,15 @@ async fn real_main() -> Result<i32> {
                     provider_cfg.model = loaded.model.clone();
                 }
                 eprintln!(
-                    "flint: resumed {} ({} messages)",
+                    "flint: resumed {} ({} messages){}",
                     path.file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_default(),
-                    history.len()
+                    history.len(),
+                    match loaded.title.as_deref() {
+                        Some(name) => format!(" — {name}"),
+                        None => String::new(),
+                    }
                 );
                 resumed = Some(path);
                 resumed_history = Some(loaded);
@@ -323,6 +375,14 @@ async fn real_main() -> Result<i32> {
             &provider_cfg.model,
         )?),
     };
+    // Naming is an appended event, so it works the same whether this run started the
+    // conversation or continued it. Done here, before the writer is handed to the agent,
+    // so the name is on disk before the first turn is asked for.
+    if let Some(name) = args.name.as_deref() {
+        if let Some(writer) = &writer {
+            writer.title(name)?;
+        }
+    }
 
     let mut agent = agent::Agent::new(&cfg, provider, readonly, cwd.clone(), writer);
     if !history.is_empty() {
@@ -970,6 +1030,9 @@ async fn handle_command(
   /tools                list available tools
   /sessions             list past sessions, numbered
   /resume <n|id>        switch to one of them
+  /name [text]          name this conversation
+  /archive <n|id>       file one away, out of the list
+  /delete <n|id>        delete one
   /new                  start a fresh conversation
   /reload               re-read the config file (after editing it yourself)
   !<command>            run a shell command without the model
@@ -1445,6 +1508,59 @@ async fn handle_command(
             return Ok(Flow::NewAgent(new_agent, target));
         }
 
+        "/name" => {
+            // A name is one appended line, so this behaves the same on a conversation
+            // that was just started and one that was resumed -- neither needs a rewrite,
+            // and the newest name is the one in force.
+            let Some(path) = agent.session_path() else {
+                printer
+                    .term()
+                    .line(format_args!("{dim}this conversation is not being saved{reset}"));
+                return Ok(Flow::Continue);
+            };
+            if arg.is_empty() {
+                let title = session::scan(&path)?.title;
+                printer.term().line(format_args!(
+                    "{dim}name:{reset} {}",
+                    title.unwrap_or_else(|| "(unnamed)".to_string())
+                ));
+                return Ok(Flow::Continue);
+            }
+            agent.name_session(arg)?;
+            printer.term().line(format_args!("{green}named:{reset} {arg}"));
+        }
+
+        "/archive" | "/delete" => {
+            // Both take an explicit session and both refuse the one that is open.
+            //
+            // Refusing is not a limitation, it is the only honest answer: this process is
+            // appending to that file, so deleting it would leave the writer pointing at a
+            // path that no longer exists (and the next event would recreate the file),
+            // while moving it would hide the conversation being written. `/new` first,
+            // then file the old one away by its number.
+            if arg.is_empty() {
+                printer
+                    .term()
+                    .line(format_args!("usage: {cmd} <number|id>  (/sessions to list)"));
+                return Ok(Flow::Continue);
+            }
+            let path = resolve_session(arg)?;
+            if agent.session_path().as_deref() == Some(path.as_path()) {
+                printer.term().line(format_args!(
+                    "{dim}that is the conversation you are in. /new starts a fresh one; \
+                     then this one can be filed away by its number.{reset}"
+                ));
+                return Ok(Flow::Continue);
+            }
+            if cmd == "/archive" {
+                let moved = session::archive(&path)?;
+                printer.term().line(format_args!("archived {}", moved.display()));
+            } else {
+                session::delete(&path)?;
+                printer.term().line(format_args!("deleted {}", path.display()));
+            }
+        }
+
         "/new" => {
             let provider = provider::Provider::new(provider_cfg.clone())?;
             let writer = Some(session::SessionWriter::create(
@@ -1855,6 +1971,24 @@ fn parse_args(argv: Vec<String>) -> Result<Args> {
             "--readonly" | "--no-edit" => args.readonly = true,
             "--no-color" => args.no_color = true,
             "--list-sessions" => args.list_sessions = true,
+            "--name" => {
+                args.name = Some(
+                    iter.next()
+                        .ok_or_else(|| anyhow!("--name requires a value"))?,
+                )
+            }
+            "--archive" => {
+                args.archive = Some(
+                    iter.next()
+                        .ok_or_else(|| anyhow!("--archive requires a session"))?,
+                )
+            }
+            "--delete" => {
+                args.delete = Some(
+                    iter.next()
+                        .ok_or_else(|| anyhow!("--delete requires a session"))?,
+                )
+            }
             "--cwd" => {
                 args.cwd = Some(
                     iter.next()
@@ -1900,6 +2034,9 @@ fn print_help(color: bool, term: &Term) {
   flint --resume <n|id>            resume a particular session
   flint exec <command>             run a command directly (no model, no network)
   flint --list-sessions            list saved sessions, numbered for --resume
+  flint --name <text>              name this conversation (also: /name)
+  flint --archive <n|id>           file a session away, out of the list
+  flint --delete <n|id>            delete a session file
 
 {b}OPTIONS{r}
   --provider <name>   use a specific provider          (config: default_provider)

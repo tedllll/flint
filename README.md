@@ -100,7 +100,16 @@ flint --resume 3                 # resume a particular one (see the list)
 flint --resume 1789116592        # ...by id prefix, or by path to the .jsonl
 flint exec "npm i -g @deepseek-ai/dsh"   # no model involved
 flint --list-sessions            # numbered, so --resume N works
+flint --name "codex config"      # name the conversation you are in
+flint --archive 3                # file it away, out of the list
+flint --delete 4                 # remove the session file
 ```
+
+A session can be named, archived and deleted, and none of the three needs a model or a
+key: they are file operations, and the moment you want to tidy the list is often the
+moment the network is what is broken. Archiving moves the file into
+`~/.flint/sessions/archive/`, so `mv` is the whole operation and undoing it by hand is
+the same operation backwards.
 
 Resuming prints the tail of the transcript, so "did it load?" is answerable at a
 glance. Loading also happens when there is no network: an unreachable provider is
@@ -122,6 +131,9 @@ Inside the REPL:
 | `/tools` | list tools |
 | `/sessions` | list past sessions, numbered |
 | `/resume <n\|id>` | switch to one of them, without restarting |
+| `/name [text]` | show or set a name for this conversation |
+| `/archive <n\|id>` | move a session into `sessions/archive/` |
+| `/delete <n\|id>` | delete a session file |
 | `/new` | start a fresh conversation |
 | `/config [edit]` | show or change shell, steps, proxy |
 | `/reload` | re-read the config file after editing it yourself |
@@ -132,7 +144,7 @@ input. Ctrl-C clears a half-typed line, and quits when the line is already
 empty. Ctrl-D quits.
 
 Flags: `--provider`, `--model`, `--readonly`, `--cwd`, `--no-color` (or
-`NO_COLOR`), `--continue`.
+`NO_COLOR`), `--continue`, `--name`, `--archive`, `--delete`.
 
 ## Permissions
 
@@ -216,6 +228,22 @@ Sessions are append-only JSONL at `~/.flint/sessions/<id>.jsonl`, one event per
 line. A damaged line is skipped and reported rather than taking the session
 down. A resumed session is appended to, not rewritten, so nothing said after
 `--continue` is lost.
+
+Nothing is ever rewritten, which is what makes the format repairable by hand:
+
+- `Meta` records the format revision (`"v": 2`). A file that names no revision is
+  v1, and a file that names a *newer* one is read as far as it can be.
+- An event whose `type` this build does not know is skipped **without comment**.
+  That is what lets a later version add one: a newer flint's session must not
+  look like corruption to an older one. A line that names a type this build knows
+  and still cannot be read *is* reported, because that means the transcript has a
+  hole in it.
+- Naming appends a `"type":"title"` line, so the name is the last one in the
+  file; archiving *moves* the file to `sessions/archive/` rather than marking it.
+
+Listing reads the two ends of each file and nothing else -- the head for `Meta`
+and the first thing you said, the tail for a name appended later. A conversation
+that grew to hundreds of kilobytes costs the same to list as a short one.
 
 ### Proxies
 

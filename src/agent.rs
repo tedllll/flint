@@ -158,6 +158,23 @@ impl Agent {
         self.tools.names()
     }
 
+    /// The file this conversation is being appended to, when it is being saved at all.
+    ///
+    /// The commands that manage sessions need it to know which conversation they are
+    /// looking at: `/name` writes to it, and `/archive` and `/delete` have to be able to
+    /// refuse the one that is open.
+    pub fn session_path(&self) -> Option<PathBuf> {
+        self.writer.as_ref().map(|w| w.path().to_path_buf())
+    }
+
+    /// Name this conversation, by appending a `title` event.
+    pub fn name_session(&mut self, name: &str) -> Result<()> {
+        match &self.writer {
+            Some(writer) => writer.title(name),
+            None => anyhow::bail!("this conversation is not being saved"),
+        }
+    }
+
     /// Run one user turn to completion, reporting progress through `sink`.
     pub async fn run(&mut self, user_input: &str, mut sink: impl FnMut(Event)) -> Result<()> {
         // Before anything can be sent: if the previous turn was interrupted while it
