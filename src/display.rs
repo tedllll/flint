@@ -332,6 +332,25 @@ pub fn summarise_args_in(
         "bash" => str_at("command"),
         "read" | "write" | "edit" | "list" => str_at("path"),
         "glob" => str_at("pattern"),
+        // A patch is its file list. The text itself is dozens of lines, and the one thing
+        // worth a line in the transcript is what the call is about to touch -- the
+        // fallback would print `*** Begin Patch`, which says nothing at all.
+        "apply_patch" => str_at("patch").map(|text| match crate::patch::parse(&text) {
+            Ok(changes) => changes
+                .iter()
+                .map(|change| {
+                    let path = match shorten {
+                        Some(shorten) => shorten(change.path()),
+                        None => change.path().to_string(),
+                    };
+                    format!("{} {path}", change.verb())
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+            // A patch that does not parse is about to fail with the reason; showing its
+            // first line here is more use than showing nothing.
+            Err(_) => util::preview(&text, 60),
+        }),
         // Both halves matter for a search: what was looked for, and where.
         "grep" => str_at("pattern").map(|needle| match str_at("glob") {
             Some(filter) => format!("{needle}  in {filter}"),
@@ -393,6 +412,29 @@ mod tests {
                 "{tool} should show the path"
             );
         }
+    }
+
+    /// A patch shows the files it touches, with what it does to each.
+    ///
+    /// The fallback would print the patch's first line, `*** Begin Patch`, which is a line
+    /// about nothing: the patch text is dozens of lines and the only part worth showing is
+    /// what it is about to change.
+    #[test]
+    fn a_patch_shows_the_files_it_touches() {
+        let args = r#"{"patch":"*** Begin Patch\n*** Add File: new.txt\n+hello\n*** Update File: old.txt\n-before\n+after\n*** Delete File: dead.txt\n*** End Patch\n"}"#;
+        assert_eq!(
+            summarise_args("apply_patch", args, 100),
+            "add new.txt, update old.txt, delete dead.txt"
+        );
+    }
+
+    /// A patch that does not parse still says something readable, because the call is
+    /// about to fail and the transcript should not read as if it had been empty.
+    #[test]
+    fn a_malformed_patch_still_shows_something() {
+        let out = summarise_args("apply_patch", r#"{"patch":"not a patch at all"}"#, 100);
+        assert!(!out.is_empty(), "a malformed patch showed nothing");
+        assert!(out.contains("not a patch"), "{out}");
     }
 
     #[test]

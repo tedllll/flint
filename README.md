@@ -169,6 +169,7 @@ shell command. Use it when you want flint to look but not touch.
 | `read` | read a file with line numbers, pageable via `offset`/`limit` |
 | `write` | create or overwrite a file |
 | `edit` | exact string replacement, unique-match enforced |
+| `apply_patch` | several files in one all-or-nothing patch |
 | `list` | list a directory |
 | `glob` | find files by name pattern (`*.rs`, `**/test_*.py`), recursively |
 | `grep` | search file contents for a literal string, recursively, with line numbers |
@@ -198,6 +199,33 @@ Creating a file is not gated, since nothing is being destroyed, and a file the r
 itself counts as known — the tool produced those exact bytes. `bash` is deliberately not
 gated: a shell command can write anything it likes, and a guarantee that held only for
 `write` and `edit` would be worse than no guarantee at all.
+
+`apply_patch` takes Codex's format — `*** Begin Patch`, then `*** Add File:`,
+`*** Update File:` or `*** Delete File:` sections, then `*** End Patch`:
+
+```text
+*** Begin Patch
+*** Add File: src/new.rs
++pub fn hello() {}
+*** Update File: src/main.rs
+@@ fn main() @@
+ mod new;
+-use std::io;
++use std::io::{self, Write};
+*** Delete File: src/old.rs
+*** End Patch
+```
+
+Three things about it are decisions rather than syntax. A hunk is located by its own
+lines, so there is no line-number arithmetic to get wrong and no way to land a change in
+the wrong place because the file grew since it was read — if the context and the removed
+lines are not there exactly once, the patch does not apply, and the error names the file
+and the hunk. **Nothing is written until everything matches**: several files in one patch
+are one edit, so a hunk that fails in the third file leaves the first two as they were
+instead of leaving the tree half-changed. And a patch cannot touch the same file twice in
+one call, since both sections would be planned from the same contents on disk and the
+second would undo the first. Updates and deletions go through the same read-first gate as
+`edit`. Not supported, on purpose: `*** Move to:` renames and any kind of fuzzy matching.
 
 A tool argument of the wrong type is refused and named — `argument 'path' must be a
 string, but it is a number` — rather than reported as missing or quietly read as absent.

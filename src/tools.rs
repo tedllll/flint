@@ -4,7 +4,7 @@
 //! — exposed globally and per call, because in a rescue situation you want
 //! "let it work" and "do not touch anything" and very little in between.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::context;
+use crate::patch;
 use crate::util;
 
 #[async_trait::async_trait]
@@ -57,6 +58,11 @@ impl ToolBox {
                 reads: reads.clone(),
             }),
             Box::new(EditTool {
+                readonly,
+                cwd: cwd.clone(),
+                reads: reads.clone(),
+            }),
+            Box::new(PatchTool {
                 readonly,
                 cwd: cwd.clone(),
                 reads: reads.clone(),
@@ -1373,6 +1379,122 @@ impl Tool for EditTool {
 }
 
 // ---------------------------------------------------------------------------
+// apply_patch
+// ---------------------------------------------------------------------------
+
+pub struct PatchTool {
+    readonly: bool,
+    cwd: PathBuf,
+    reads: std::sync::Arc<Reads>,
+}
+
+#[async_trait::async_trait]
+impl Tool for PatchTool {
+    fn name(&self) -> &str {
+        "apply_patch"
+    }
+
+    fn description(&self) -> &str {
+        "Apply a patch to one or more text files, all or nothing. Use this instead of \
+         several `edit` calls when one change spans files. Format: `*** Begin Patch`, then \
+         one section per file -- `*** Add File: <path>`, `*** Update File: <path>` or \
+         `*** Delete File: <path>` -- ending with `*** End Patch`. In an update, a line \
+         starting with `+` is added, `-` is removed, and a space is context; `@@ ... @@` \
+         starts another hunk. Each hunk is found by its own lines, so a file that has \
+         changed since you read it makes the whole patch fail instead of landing in the \
+         wrong place. Files must have been read before being updated or deleted."
+    }
+
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "patch": {
+                    "type": "string",
+                    "description": "The patch text, from `*** Begin Patch` to `*** End Patch`."
+                }
+            },
+            "required": ["patch"]
+        })
+    }
+
+    async fn call(&self, args: &Value) -> Result<String> {
+        if self.readonly {
+            return Err(anyhow!(
+                "readonly mode is ON: refusing to apply a patch. Turn it off with /readonly."
+            ));
+        }
+        let changes = patch::parse(require_str(args, "patch")?)?;
+
+        // Everything is worked out before anything is written. A patch is one edit: a
+        // hunk that does not match in the third file must leave the first two as they
+        // were, or the tree is left half-changed and the model has to work out which half.
+        let mut planned: Vec<(PathBuf, Option<String>, &patch::Change)> = Vec::new();
+        let mut touched: Vec<PathBuf> = Vec::new();
+        for change in &changes {
+            let path = resolve_path(&self.cwd, change.path());
+            // Two sections for one file would both be planned from the contents on disk,
+            // so the second would undo the first rather than build on it.
+            if touched.contains(&path) {
+                bail!(
+                    "{} appears twice in one patch; put all of its changes in one section",
+                    path.display()
+                );
+            }
+            touched.push(path.clone());
+
+            let current = match tokio::fs::read_to_string(&path).await {
+                Ok(text) => Some(text),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => {
+                    return Err(anyhow!(e))
+                        .with_context(|| format!("cannot read {}", path.display()))
+                }
+            };
+            // The same gate as `write` and `edit`: updating or deleting a file this run
+            // has not read is refused, and so is one that changed since it was read.
+            if !matches!(change, patch::Change::Add { .. }) {
+                self.reads.check(&path)?;
+            }
+            let next = patch::apply_to(change, &path, current.as_deref())?;
+            planned.push((path, next, change));
+        }
+
+        let mut summary = format!(
+            "applied {} file change{}:\n",
+            planned.len(),
+            if planned.len() == 1 { "" } else { "s" }
+        );
+        for (path, next, change) in planned {
+            match next {
+                Some(content) => {
+                    if let Some(parent) = path.parent() {
+                        if !parent.as_os_str().is_empty() {
+                            tokio::fs::create_dir_all(parent)
+                                .await
+                                .with_context(|| format!("cannot create {}", parent.display()))?;
+                        }
+                    }
+                    tokio::fs::write(&path, content)
+                        .await
+                        .with_context(|| format!("cannot write {}", path.display()))?;
+                    // This run produced these exact contents, so a following edit does not
+                    // need a read first -- as with `write` and `edit`.
+                    self.reads.note(&path);
+                }
+                None => {
+                    tokio::fs::remove_file(&path)
+                        .await
+                        .with_context(|| format!("cannot delete {}", path.display()))?;
+                }
+            }
+            summary.push_str(&format!("  {} {}\n", change.verb(), path.display()));
+        }
+        Ok(summary.trim_end().to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // list
 // ---------------------------------------------------------------------------
 
@@ -2509,5 +2631,205 @@ mod arg_tests {
             .await
             .expect("list");
         assert!(listed.contains("f.txt"), "{listed}");
+    }
+}
+
+#[cfg(test)]
+mod patch_tool_tests {
+    use super::test_support::TempDir;
+    use super::*;
+    use crate::config::Config;
+    use serde_json::json;
+
+    fn tools(dir: &Path) -> ToolBox {
+        ToolBox::new(&Config::default(), false, dir.to_path_buf())
+    }
+
+    /// One patch: a file created, a file changed, a file deleted.
+    #[tokio::test]
+    async fn one_patch_can_add_update_and_delete() {
+        let dir = TempDir::new("patch-mixed");
+        let keep = dir.path().join("keep.txt");
+        let dead = dir.path().join("dead.txt");
+        let new = dir.path().join("new.txt");
+        std::fs::write(&keep, "before\n").unwrap();
+        std::fs::write(&dead, "gone soon\n").unwrap();
+        let tools = tools(dir.path());
+
+        // Read what is about to change, which is what the gate asks of `edit` too.
+        for path in [&keep, &dead] {
+            tools
+                .invoke("read", &json!({ "path": path.to_str().unwrap() }))
+                .await
+                .expect("read");
+        }
+
+        let text = format!(
+            "*** Begin Patch\n\
+             *** Add File: {new}\n\
+             +hello\n\
+             *** Update File: {keep}\n\
+             -before\n\
+             +after\n\
+             *** Delete File: {dead}\n\
+             *** End Patch\n",
+            new = new.display(),
+            keep = keep.display(),
+            dead = dead.display(),
+        );
+        let out = tools
+            .invoke("apply_patch", &json!({ "patch": text }))
+            .await
+            .expect("apply");
+
+        assert_eq!(std::fs::read_to_string(&new).unwrap(), "hello\n");
+        assert_eq!(std::fs::read_to_string(&keep).unwrap(), "after\n");
+        assert!(!dead.exists(), "the deleted file is still there");
+        for verb in ["add", "update", "delete"] {
+            assert!(out.contains(verb), "the summary omits {verb}: {out}");
+        }
+    }
+
+    /// A patch that cannot be applied in full is not applied at all.
+    ///
+    /// This is the promise the tool exists for: several files in one patch are one edit.
+    /// Half-applying leaves the tree in a state nobody asked for and the model working out
+    /// which half landed.
+    #[tokio::test]
+    async fn a_bad_hunk_leaves_the_earlier_files_alone() {
+        let dir = TempDir::new("patch-atomic");
+        let first = dir.path().join("first.txt");
+        let second = dir.path().join("second.txt");
+        let fresh = dir.path().join("fresh.txt");
+        std::fs::write(&first, "one\n").unwrap();
+        std::fs::write(&second, "two\n").unwrap();
+        let tools = tools(dir.path());
+        for path in [&first, &second] {
+            tools
+                .invoke("read", &json!({ "path": path.to_str().unwrap() }))
+                .await
+                .expect("read");
+        }
+
+        // The first section is fine, the second asks for text that is not in the file, and
+        // a third would create a file.
+        let text = format!(
+            "*** Begin Patch\n\
+             *** Update File: {first}\n\
+             -one\n\
+             +ONE\n\
+             *** Update File: {second}\n\
+             -not in this file\n\
+             +whatever\n\
+             *** Add File: {fresh}\n\
+             +never written\n\
+             *** End Patch\n",
+            first = first.display(),
+            second = second.display(),
+            fresh = fresh.display(),
+        );
+        let err = tools
+            .invoke("apply_patch", &json!({ "patch": text }))
+            .await
+            .expect_err("a patch that does not fit must fail");
+        assert!(format!("{err:#}").contains("not in the file"), "{err:#}");
+
+        assert_eq!(
+            std::fs::read_to_string(&first).unwrap(),
+            "one\n",
+            "the first file was changed even though the patch failed"
+        );
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "two\n");
+        assert!(!fresh.exists(), "a file was created by a patch that failed");
+    }
+
+    /// Updating or deleting a file this run has not read is refused, exactly as `edit` is.
+    #[tokio::test]
+    async fn an_update_to_an_unread_file_is_refused() {
+        let dir = TempDir::new("patch-gate");
+        let file = dir.path().join("notes.txt");
+        std::fs::write(&file, "keep me\n").unwrap();
+
+        let text = format!(
+            "*** Begin Patch\n\
+             *** Update File: {}\n\
+             -keep me\n\
+             +lose me\n\
+             *** End Patch\n",
+            file.display()
+        );
+        let err = tools(dir.path())
+            .invoke("apply_patch", &json!({ "patch": text }))
+            .await
+            .expect_err("an unread file must not be patched");
+        assert!(format!("{err:#}").contains("has not been read"), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "keep me\n");
+    }
+
+    /// Adding over a file that is already there is refused rather than quietly replacing it.
+    #[tokio::test]
+    async fn adding_over_an_existing_file_is_refused() {
+        let dir = TempDir::new("patch-add-exists");
+        let file = dir.path().join("there.txt");
+        std::fs::write(&file, "original\n").unwrap();
+
+        let text = format!(
+            "*** Begin Patch\n\
+             *** Add File: {}\n\
+             +replacement\n\
+             *** End Patch\n",
+            file.display()
+        );
+        let err = tools(dir.path())
+            .invoke("apply_patch", &json!({ "patch": text }))
+            .await
+            .expect_err("adding an existing file must be refused");
+        assert!(format!("{err:#}").contains("already exists"), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "original\n");
+    }
+
+    /// Two sections for the same file are refused: both would be planned from the contents
+    /// on disk, so the second would undo the first instead of building on it.
+    #[tokio::test]
+    async fn two_sections_for_one_file_are_refused() {
+        let dir = TempDir::new("patch-twice");
+        let file = dir.path().join("twice.txt");
+        std::fs::write(&file, "a\nb\n").unwrap();
+        let tools = tools(dir.path());
+        tools
+            .invoke("read", &json!({ "path": file.to_str().unwrap() }))
+            .await
+            .expect("read");
+
+        let text = format!(
+            "*** Begin Patch\n\
+             *** Update File: {path}\n\
+             -a\n\
+             +A\n\
+             *** Update File: {path}\n\
+             -b\n\
+             +B\n\
+             *** End Patch\n",
+            path = file.display()
+        );
+        let err = tools
+            .invoke("apply_patch", &json!({ "patch": text }))
+            .await
+            .expect_err("one file, two sections");
+        assert!(format!("{err:#}").contains("appears twice"), "{err:#}");
+    }
+
+    /// Read-only mode refuses the tool before it looks at the patch at all.
+    #[tokio::test]
+    async fn readonly_refuses_a_patch() {
+        let dir = TempDir::new("patch-readonly");
+        let tools = ToolBox::new(&Config::default(), true, dir.path().to_path_buf());
+        let text = "*** Begin Patch\n*** Add File: x\n+nope\n*** End Patch\n";
+        let err = tools
+            .invoke("apply_patch", &json!({ "patch": text }))
+            .await
+            .expect_err("read-only must refuse");
+        assert!(format!("{err:#}").contains("readonly mode is ON"), "{err:#}");
+        assert!(!dir.path().join("x").exists());
     }
 }
