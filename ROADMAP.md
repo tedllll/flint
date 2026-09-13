@@ -54,6 +54,22 @@ staleness. Honest truncation that keeps both ends and spills the whole answer to
 reporting it as missing or quietly ignoring it. A non-blocking note at the 3rd, 5th and 8th
 identical call in one turn.
 
+### 3b. Web search — **done**
+
+`search`, backed by DeepSeek's server-side search on its Anthropic-compatible endpoint. The
+point of it is that search is a *tool* and not a capability of the driving model, so a
+configuration running only a local model can search, with nothing deployed on any machine that
+has a DeepSeek key. The credential is inherited from a DeepSeek provider when there is one and
+named explicitly in `[search]` when there is not; the tool is offered only when it can work.
+Measured record, including cost: [`docs/deepseek-search.md`](docs/deepseek-search.md).
+
+**What it deliberately leaves undone:** `fetch`. Search returns sources, and reading one is
+the next step a model wants — today the only way is `bash` and `curl`, which loses the page to
+the truncation budget and shows the model raw HTML. `fetch` is the bigger and riskier half of
+this pair: it is the first tool that brings outside content into a context belonging to a
+program that can run commands, and it needs the SSRF defence `docs/deepseek-search.md` §4
+describes before it is worth having.
+
 ### 4. Machine-readable runs — **done**
 
 `flint -p "..." --json` writes the run as one JSON object per line on stdout, and nothing

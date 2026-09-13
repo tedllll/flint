@@ -66,6 +66,10 @@ in a scratch directory for the same reason.
 | `<project>/AGENTS.md` | instructions for that project |
 | `<project>/.flint/skills/<name>/SKILL.md` | skills for that project |
 
+Nothing else. A web search keeps no state on this machine at all: the request goes out, the
+answer comes back as a tool result, and the sources land in the session file like any other
+tool output.
+
 ### `config.toml`, key by key
 
 One table per endpoint, then the settings that apply to the run as a whole. A key that is
@@ -95,6 +99,23 @@ tool_detail = false             # print the output behind a tool result
 instructions = "hint"           # AGENTS.md: "hint" (name them), "paste", "off"
 skill_dirs = []                 # extra skill directories, after the standard two
 ```
+
+```toml
+[search]                        # optional, and normally absent
+enabled = true                  # false turns the `search` tool off
+provider = ""                   # borrow this provider's key and proxy
+base_url = ""                   # default: DeepSeek's Anthropic endpoint
+model = ""                      # which model *DeepSeek* searches on; default deepseek-flash
+max_uses = 1                    # how many searches one call may trigger
+api_key = ""                    # used when `provider` names nothing
+api_key_env = ""
+```
+
+With no `[search]` block at all, the credential is inherited from any provider whose
+`base_url` is DeepSeek's, resolved the way that provider resolves it. The endpoint is **not**
+inherited: a provider's address is a chat-completions one and that surface ignores
+`web_search` without saying so. `docs/deepseek-search.md` is the measured record, including
+what a search costs — it is billed as input tokens, not per search.
 
 The distinction between the two `proxy` keys is worth keeping straight: the one inside a
 provider table is how flint reaches the *model*, and the top-level one is handed to the
