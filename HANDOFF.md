@@ -7,9 +7,9 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 298 passing (220 lib, 28
-`agent_loop`, 19 `cli_output`, 4 `json_output`, 18 `term_capture`, 5 `web_view`, 4
-`search_tool`), `cargo clippy --all-targets` is silent, and both `node
+As of the commit that carries this file, `cargo test` is 299 passing (221 lib, 28
+`agent_loop`, 19 `cli_output`, 4 `json_output`, 4 `search_tool`, 18 `term_capture`, 5
+`web_view`), `cargo clippy --all-targets` is silent, and both `node
 scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
 
 **This round was on macOS** (Darwin arm64, rustc 1.98.1). That is worth knowing before
@@ -27,6 +27,36 @@ The binary is held open by any running `flint`, so close those before replacing 
 `docs/windows.md` is the field notes for the Windows terminal.
 
 ## What was just done
+
+**A pasted block is one message again, and keeps its line breaks.** Reported from a real
+session as "it treats it as one sentence", and the report was accurate. Two faults were
+stacked, and each one on its own would have produced the complaint:
+
+**Bracketed paste was never enabled.** A terminal only wraps a paste in `\x1b[200~ … \x1b[201~`
+when the program asks, and nothing ever asked — so the paste arrived as one keystroke per
+character and every newline in it was an Enter. A three-line prompt became three messages, and
+the second and third arrived while the first turn was still running, which is the *steering*
+path: they interrupted it. The model was given the first line and interrupted twice.
+
+**And the handler for it deleted the line breaks.** `Event::Paste` had been in `term.rs` all
+along, with a test asserting that newlines are removed "or the line breaks the input row" — a
+test of a branch that could not be reached. Had the enable been there, a pasted list or stack
+trace would have reached the model as one run-on line: the same complaint by another route.
+
+So the enable is there now, and a paste containing a line break is submitted as **one message
+with its breaks intact**. A paste with no line break still joins the line being typed, which is
+what a pasted path or snippet is for. The input row is one row, so a block is submitted rather
+than parked in it: showing a paragraph there would be showing something other than what Enter
+sends. The REPL echoes one transcript line per line of the message, because a single write
+carrying a newline would move the cursor down through the rows the layout reserved.
+
+**Verified in a real pty, because nothing else can.** `from_stdin` reads lines and never
+touches the event reader, so bracketed paste is a terminal-only path: no pipe reaches it and
+`cargo test` cannot cover it. What was checked by hand, under a pty with a scratch
+`FLINT_HOME`: the enable sequence goes out, and a paste of three lines comes back as three
+echoed lines under one prompt rather than as three messages. The unit tests cover the two
+shapes the handler must produce — a block with breaks, a fragment that joins the line — but the
+*enable* itself is only checked there.
 
 **Text now arrives while it is being written.** Deltas used to be collected per attempt and
 handed over only when that attempt completed, so that a retry could discard them — which meant

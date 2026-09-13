@@ -10,10 +10,19 @@ second mode.** flint starts exactly as it does now and additionally serves a vie
 process on loopback. The terminal keeps working. The browser is a client of the process, not
 of a file, and closing the tab loses nothing.
 
-**Steps 2 and 3 of §9 are implemented** — the static viewer and the `--web` listener with
-`GET /` — and §7 is now decided. Steps 4 to 6 (`/session`, `/events`, `/message`) are not,
-and §11 records what has been measured in a browser versus what has not. The order at the end
-is the plan.
+**Steps 2 to 5 of §9 are implemented** — the static viewer, the `--web` listener with `GET /`,
+and the two data routes `GET /session` and `GET /events` — and §7 is now decided. Step 6
+(`POST /message`) is not: **the page is a viewer and has no input box**, so something typed into
+a browser has nowhere to go and the terminal is still the only way in. §11 records what has been
+measured in a browser versus what has not. The order at the end is the plan.
+
+The token goes in two different places, and the difference is deliberate: `?token=` is accepted
+on `/` alone, because that is the URL `--web` prints and the only one a person pastes into an
+address bar; every other route wants `x-flint-token` in the header, so a token cannot leak
+through a `Referer`, a log or a shared screenshot (`Request::offered_token`, `src/web.rs`). A
+hand-written `curl` at `/session` with the token in the query string gets `403` — correct, and
+not a missing route. Without the header, `/`, `/session`, `/events` and a path that does not
+exist are deliberately indistinguishable.
 
 ## How to read the labels
 
