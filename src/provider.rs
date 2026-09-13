@@ -535,8 +535,18 @@ impl StreamParser {
                     events.push(Event::Text(text.to_string()));
                 }
             }
-            // DeepSeek-style reasoning channel.
-            if let Some(reasoning) = delta.get("reasoning_content").and_then(Value::as_str) {
+            // The reasoning channel, under either of the two names that exist for it.
+            //
+            // `reasoning_content` is DeepSeek's and the one this started with.
+            // `reasoning` is what mlx_lm.server sends -- measured against a local model,
+            // where flint showed no reasoning at all because it only knew the first name.
+            // Both are read rather than one being chosen: a local model and a hosted one
+            // are the same conversation to whoever is reading the status line.
+            let reasoning = delta
+                .get("reasoning_content")
+                .or_else(|| delta.get("reasoning"))
+                .and_then(Value::as_str);
+            if let Some(reasoning) = reasoning {
                 if !reasoning.is_empty() {
                     events.push(Event::Reasoning(reasoning.to_string()));
                 }
@@ -820,6 +830,28 @@ mod tests {
                 ("b".to_string(), r#"{"path":"."}"#.to_string()),
             ]
         );
+    }
+
+    /// The reasoning channel has two names in the wild, and a local model uses the other one.
+    ///
+    /// Found by running flint against `mlx_lm.server`: the reasoning arrived, the parser did
+    /// not know the field, and the status line stayed silent for a model that was visibly
+    /// thinking.
+    #[test]
+    fn reasoning_is_read_under_either_name() {
+        for field in ["reasoning_content", "reasoning"] {
+            let mut p = StreamParser::default();
+            let line = format!(r#"data: {{"choices":[{{"delta":{{"{field}":"thinking..."}}}}]}}"#);
+            let events = p.feed_line(&line);
+            let seen: Vec<&str> = events
+                .iter()
+                .filter_map(|e| match e {
+                    Event::Reasoning(t) => Some(t.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(seen, vec!["thinking..."], "the {field} field must be read");
+        }
     }
 
     #[test]
