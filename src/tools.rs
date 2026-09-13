@@ -37,18 +37,30 @@ impl ToolBox {
         // Skills are looked up in the same directories the prompt's catalog was built
         // from, so the tool can never offer something the catalog did not name.
         let skill_dirs = context::Workspace::discover(&cwd, &config.skill_dirs);
+        // One record for the whole tool set: it is the run's memory of what it has looked
+        // at, so every tool that reads has to write into the same one that the writers
+        // consult.
+        let reads = std::sync::Arc::new(Reads::default());
         let mut tools: Vec<Box<dyn Tool>> = vec![
             Box::new(BashTool {
                 config: config.clone(),
                 readonly,
                 cwd: cwd.clone(),
             }),
-            Box::new(ReadTool { cwd: cwd.clone() }),
+            Box::new(ReadTool {
+                cwd: cwd.clone(),
+                reads: reads.clone(),
+            }),
             Box::new(WriteTool {
                 readonly,
                 cwd: cwd.clone(),
+                reads: reads.clone(),
             }),
-            Box::new(EditTool { readonly, cwd: cwd.clone() }),
+            Box::new(EditTool {
+                readonly,
+                cwd: cwd.clone(),
+                reads: reads.clone(),
+            }),
             Box::new(ListTool),
             Box::new(GlobTool { cwd: cwd.clone() }),
             Box::new(GrepTool { cwd: cwd.clone() }),
@@ -159,6 +171,75 @@ fn require_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("missing required string argument '{key}'"))
+}
+
+/// What this run has read, so a write can tell whether it is overwriting something the
+/// model has actually looked at.
+///
+/// In memory and never persisted. It is a fact about this run's attention, not about the
+/// file: a copy on disk would be derived state that goes quietly wrong after a restart, and
+/// the failure it causes -- a write allowed because *some earlier process* read the file --
+/// is exactly the failure the gate exists to prevent.
+///
+/// The value is what the file looked like when it was read, not merely that it was, so a
+/// file changed by something else in the meantime is caught too. That is the case a
+/// read-tracking gate is usually built for and usually misses: the model read the file
+/// three turns ago, a build regenerated it, and the edit that follows is aimed at text
+/// that is no longer there.
+#[derive(Default)]
+pub struct Reads {
+    seen: std::sync::Mutex<std::collections::HashMap<PathBuf, Fingerprint>>,
+}
+
+/// Enough of a file's identity to notice that it is no longer the file that was read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Fingerprint {
+    modified: Option<std::time::SystemTime>,
+    len: u64,
+}
+
+impl Fingerprint {
+    fn of(meta: &std::fs::Metadata) -> Self {
+        Fingerprint {
+            modified: meta.modified().ok(),
+            len: meta.len(),
+        }
+    }
+}
+
+impl Reads {
+    /// Record that `path` has been read, as it is now.
+    fn note(&self, path: &Path) {
+        let Ok(meta) = std::fs::metadata(path) else {
+            return;
+        };
+        let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+        seen.insert(path.to_path_buf(), Fingerprint::of(&meta));
+    }
+
+    /// Refuse to modify `path` unless this run has read it and it has not changed since.
+    ///
+    /// A file that is not there is always allowed: creating it destroys nothing, and
+    /// demanding a read of a file that does not exist would make `write` unable to create
+    /// anything at all.
+    fn check(&self, path: &Path) -> Result<()> {
+        let Ok(meta) = std::fs::metadata(path) else {
+            return Ok(());
+        };
+        let now = Fingerprint::of(&meta);
+        let seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+        match seen.get(path) {
+            None => Err(anyhow!(
+                "cannot modify \"{}\": file has not been read — read the file, then retry",
+                path.display()
+            )),
+            Some(then) if *then != now => Err(anyhow!(
+                "cannot modify \"{}\": file has changed on disk since it was read — read it again, then retry",
+                path.display()
+            )),
+            Some(_) => Ok(()),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1002,6 +1083,8 @@ fn git_is_read_only(subcommand: Option<&str>) -> bool {
 
 pub struct ReadTool {
     cwd: PathBuf,
+    /// Shared with the writers, which refuse to modify a file this run has not read.
+    reads: std::sync::Arc<Reads>,
 }
 
 #[async_trait::async_trait]
@@ -1064,6 +1147,9 @@ impl Tool for ReadTool {
                 offset + limit
             ));
         }
+        // Noted before the cap: what the gate needs is that the model has seen this file,
+        // and a read shortened for the request still means it looked.
+        self.reads.note(&path);
         Ok(util::truncate(&out, 60_000))
     }
 }
@@ -1075,6 +1161,7 @@ impl Tool for ReadTool {
 pub struct WriteTool {
     readonly: bool,
     cwd: PathBuf,
+    reads: std::sync::Arc<Reads>,
 }
 
 #[async_trait::async_trait]
@@ -1085,7 +1172,8 @@ impl Tool for WriteTool {
 
     fn description(&self) -> &str {
         "Create or completely overwrite a text file. Parent directories are \
-         created automatically. For small changes prefer `edit`."
+         created automatically. An existing file must have been read first, and is \
+         refused if it has changed on disk since. For small changes prefer `edit`."
     }
 
     fn schema(&self) -> Value {
@@ -1107,6 +1195,10 @@ impl Tool for WriteTool {
         }
         let path = resolve_path(&self.cwd, require_str(args, "path")?);
         let content = require_str(args, "content")?;
+        // A write replaces the whole file, so whatever was there is gone. Refusing until
+        // it has been read is the difference between "the model meant to replace this" and
+        // "the model had a wrong idea of what this was".
+        self.reads.check(&path)?;
 
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -1118,6 +1210,9 @@ impl Tool for WriteTool {
         tokio::fs::write(&path, content)
             .await
             .with_context(|| format!("cannot write {}", path.display()))?;
+        // The tool just wrote the exact contents, so it knows what is there; requiring a
+        // read back would be a round trip to learn what this call already decided.
+        self.reads.note(&path);
         Ok(format!(
             "wrote {} ({} bytes)",
             path.display(),
@@ -1133,6 +1228,7 @@ impl Tool for WriteTool {
 pub struct EditTool {
     readonly: bool,
     cwd: PathBuf,
+    reads: std::sync::Arc<Reads>,
 }
 
 #[async_trait::async_trait]
@@ -1143,7 +1239,8 @@ impl Tool for EditTool {
 
     fn description(&self) -> &str {
         "Replace an exact string in a file. `old_string` must match byte for byte \
-         and, unless `replace_all` is true, must appear exactly once."
+         and, unless `replace_all` is true, must appear exactly once. The file must \
+         have been read first."
     }
 
     fn schema(&self) -> Value {
@@ -1176,6 +1273,11 @@ impl Tool for EditTool {
         if old.is_empty() {
             return Err(anyhow!("old_string must not be empty"));
         }
+        // The same gate as `write`. An edit is narrower, and its `old_string` would fail on
+        // its own if the text had changed -- but "the text I meant to change is not here"
+        // and "you never looked at this file" are different mistakes, and the second one
+        // is worth naming before the model starts editing by trial and error.
+        self.reads.check(&path)?;
 
         let text = tokio::fs::read_to_string(&path)
             .await
@@ -1205,6 +1307,9 @@ impl Tool for EditTool {
         tokio::fs::write(&path, updated)
             .await
             .with_context(|| format!("cannot write {}", path.display()))?;
+        // As with `write`: the tool produced these exact contents, so the next edit does
+        // not need a read to be allowed.
+        self.reads.note(&path);
         Ok(format!(
             "edited {} ({count} replacement{})",
             path.display(),
@@ -1968,15 +2073,14 @@ mod progress_parse_tests {
 }
 
 #[cfg(test)]
-mod spill_tests {
-    use super::*;
-    use crate::config::Config;
+mod test_support {
+    use std::path::{Path, PathBuf};
 
     /// A directory of this test's own, removed when the test ends.
-    struct TempDir(PathBuf);
+    pub(super) struct TempDir(PathBuf);
 
     impl TempDir {
-        fn new(tag: &str) -> Self {
+        pub(super) fn new(tag: &str) -> Self {
             let dir = std::env::temp_dir().join(format!(
                 "flint-tools-{tag}-{}-{:?}",
                 std::process::id(),
@@ -1987,7 +2091,7 @@ mod spill_tests {
             TempDir(dir)
         }
 
-        fn path(&self) -> &Path {
+        pub(super) fn path(&self) -> &Path {
             &self.0
         }
     }
@@ -1997,6 +2101,13 @@ mod spill_tests {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
+}
+
+#[cfg(test)]
+mod spill_tests {
+    use super::test_support::TempDir;
+    use super::*;
+    use crate::config::Config;
 
     /// An answer over the budget keeps both ends, and the whole of it is on disk.
     ///
@@ -2071,5 +2182,174 @@ mod spill_tests {
             !dir.path().join("spill").exists(),
             "a spill directory was made for output that fit"
         );
+    }
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::test_support::TempDir;
+    use super::*;
+    use crate::config::Config;
+    use serde_json::json;
+
+    fn tools(dir: &Path) -> ToolBox {
+        let config = Config::default();
+        ToolBox::new(&config, false, dir.to_path_buf()).with_spill_dir(dir.join("spill"))
+    }
+
+    /// Overwriting a file nobody has read is refused, and the refusal says what to do.
+    ///
+    /// Without this the model can act on a guess: it has an idea of what a file contains,
+    /// writes that idea over the real thing, and the real thing is gone. The check is that
+    /// the file is untouched afterwards, not merely that an error came back.
+    #[tokio::test]
+    async fn a_write_to_an_unread_file_is_refused() {
+        let dir = TempDir::new("gate-unread");
+        let file = dir.path().join("notes.txt");
+        std::fs::write(&file, "what was here\n").unwrap();
+
+        let err = tools(dir.path())
+            .invoke(
+                "write",
+                &json!({ "path": file.to_str().unwrap(), "content": "something else\n" }),
+            )
+            .await
+            .expect_err("an unread file must not be overwritten");
+
+        let msg = format!("{err:#}");
+        assert!(msg.contains("has not been read"), "{msg}");
+        assert!(msg.contains("notes.txt"), "the refusal must name the file: {msg}");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "what was here\n",
+            "the file was overwritten anyway"
+        );
+    }
+
+    /// Reading it first is what unblocks the write: the same call, one `read` earlier.
+    #[tokio::test]
+    async fn reading_first_allows_the_write() {
+        let dir = TempDir::new("gate-read-first");
+        let file = dir.path().join("notes.txt");
+        std::fs::write(&file, "what was here\n").unwrap();
+        let tools = tools(dir.path());
+
+        tools
+            .invoke("read", &json!({ "path": file.to_str().unwrap() }))
+            .await
+            .expect("read");
+        tools
+            .invoke(
+                "write",
+                &json!({ "path": file.to_str().unwrap(), "content": "something else\n" }),
+            )
+            .await
+            .expect("a file that has been read may be written");
+
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "something else\n");
+    }
+
+    /// A file that changed after it was read is refused too.
+    ///
+    /// This is the case a read-tracking gate usually misses: the model did read the file,
+    /// three turns ago, and something else has written it since -- a build, a formatter, a
+    /// generator. What it is about to overwrite is no longer what it saw.
+    #[tokio::test]
+    async fn a_file_changed_since_it_was_read_is_refused() {
+        let dir = TempDir::new("gate-changed");
+        let file = dir.path().join("generated.txt");
+        std::fs::write(&file, "from the generator\n").unwrap();
+        let tools = tools(dir.path());
+
+        tools
+            .invoke("read", &json!({ "path": file.to_str().unwrap() }))
+            .await
+            .expect("read");
+        // Something else writes it, and to a different length, so no clock resolution is
+        // being relied on to notice.
+        std::fs::write(&file, "the generator ran again and wrote this instead\n").unwrap();
+
+        let err = tools
+            .invoke(
+                "write",
+                &json!({ "path": file.to_str().unwrap(), "content": "mine\n" }),
+            )
+            .await
+            .expect_err("a file that changed under us must not be overwritten");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("changed on disk"), "{msg}");
+        assert!(msg.contains("generated.txt"), "{msg}");
+    }
+
+    /// Creating a file that is not there needs no read: nothing is being destroyed, and a
+    /// gate that demanded one would make `write` unable to create anything.
+    #[tokio::test]
+    async fn a_new_file_can_be_written_without_reading() {
+        let dir = TempDir::new("gate-new");
+        let file = dir.path().join("nested").join("fresh.txt");
+
+        tools(dir.path())
+            .invoke(
+                "write",
+                &json!({ "path": file.to_str().unwrap(), "content": "hello\n" }),
+            )
+            .await
+            .expect("a new file needs no read");
+
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello\n");
+    }
+
+    /// `edit` is behind the same gate, and says the same thing.
+    #[tokio::test]
+    async fn an_edit_to_an_unread_file_is_refused() {
+        let dir = TempDir::new("gate-edit");
+        let file = dir.path().join("notes.txt");
+        std::fs::write(&file, "keep this\n").unwrap();
+
+        let err = tools(dir.path())
+            .invoke(
+                "edit",
+                &json!({
+                    "path": file.to_str().unwrap(),
+                    "old_string": "keep",
+                    "new_string": "lose"
+                }),
+            )
+            .await
+            .expect_err("an unread file must not be edited");
+        assert!(format!("{err:#}").contains("has not been read"), "{err:#}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "keep this\n");
+    }
+
+    /// A file this run wrote counts as known, so an edit straight after a write is allowed.
+    ///
+    /// The tool produced those exact bytes; making the model read them back would be a
+    /// round trip to learn what the previous call already decided.
+    #[tokio::test]
+    async fn a_file_this_run_wrote_can_be_edited_without_reading_it() {
+        let dir = TempDir::new("gate-wrote");
+        let file = dir.path().join("notes.txt");
+        let tools = tools(dir.path());
+
+        tools
+            .invoke(
+                "write",
+                &json!({ "path": file.to_str().unwrap(), "content": "one\n" }),
+            )
+            .await
+            .expect("write");
+        tools
+            .invoke(
+                "edit",
+                &json!({
+                    "path": file.to_str().unwrap(),
+                    "old_string": "one",
+                    "new_string": "two"
+                }),
+            )
+            .await
+            .expect("an edit after our own write");
+
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "two\n");
     }
 }

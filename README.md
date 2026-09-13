@@ -189,6 +189,16 @@ how long the output was and which file holds the rest. Cutting the tail instead,
 what a plain `[truncated]` marker does, throws away the end of a build log: the part that
 says what failed and the part that gets looked for.
 
+`write` and `edit` refuse to touch a file this run has not read, and refuse again if the
+file was read and then changed on disk by something else — a build, a formatter, a
+generator. The first refusal exists because the alternative is a model overwriting a file
+with its *idea* of what the file said; the second because the case a read-tracking gate
+usually misses is the file that was read several turns ago and is no longer that file.
+Creating a file is not gated, since nothing is being destroyed, and a file the run wrote
+itself counts as known — the tool produced those exact bytes. `bash` is deliberately not
+gated: a shell command can write anything it likes, and a guarantee that held only for
+`write` and `edit` would be worse than no guarantee at all.
+
 The same call with the same arguments three times in one turn gets a one-line note saying
 so -- and again at five and eight. Nothing is refused, because a repeat is sometimes right
 (a file another process is writing, a command whose answer really has changed); what is
