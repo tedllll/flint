@@ -1041,6 +1041,15 @@ async function follow() {
             schedulePaint();
             continue;
           }
+          // The list of conversations changed -- `/archive` or `/delete` in the terminal. Only
+          // the sidebar is re-read: the transcript has not changed, and rebuilding it would
+          // throw away the reader's place for nothing. The list itself is not cosmetic, though:
+          // the numbers in it are what `/resume` takes, and they are positions in a list, so a
+          // stale one resumes the wrong conversation.
+          if (frame.event === "sessions") {
+            await readSessions();
+            continue;
+          }
           // The third named event, and the other half of what a cursor cannot express: what the
           // turn in flight has written so far. State, applied without a cursor -- and the only
           // way a page that loaded, reconnected or was reset mid-turn can learn the part of the

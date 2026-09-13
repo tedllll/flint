@@ -182,11 +182,22 @@ most of a turn is text nobody could see. The retry rule is now explicit: the lad
 the first drawn character, because nothing in the chain can take text back. `docs/web-mode.md`
 §11 has the measurement; `src/provider.rs` has the rule.
 
-### 8. Web mode, from using it — **found, not fixed**
+### 8. Web mode, from using it — **one fixed, three parked**
 
-Three things turned up in the first real session with the browser page, after level 3 was
-finished. They are listed here rather than in the small-ideas list because one of them needs a
+Four things turned up in the first real sessions with the browser page, after level 3 was
+finished. The fourth is fixed (below); the other three are parked, because the middle one needs a
+decision rather than a patch. They are listed here rather than in the small-ideas list because one of them needs a
 decision about *where a command's output lives*, which is a design question and not a patch.
+
+**A conversation archived or deleted in the terminal stayed in the sidebar — fixed.** Reported as
+"the page did not refresh", and it is worse than that. The numbers in the sidebar are the ones
+`/resume` takes, and they are *positions in a list*: delete one conversation and every number below
+it shifts up, so a stale row sends `/resume 4` for what is now conversation five and the person
+carries on talking in the wrong one. Not parked, for that reason — `/archive` and `/delete` now
+push a frame named `sessions`, and only the sidebar is re-read (the transcript has not changed, so
+`reset` would throw away the reader's place for nothing). Measured: deleting a middle conversation
+moved the page's rows from `1=gamma 2=beta 3=alpha` to `1=gamma 2=alpha 3=(empty)`, which is
+exactly the terminal's own numbering.
 
 **A conversation that has not happened yet is in the sidebar.** Start flint and type `/web`: the
 list already shows one conversation, labelled `(empty)`. That is the file `SessionWriter::create`

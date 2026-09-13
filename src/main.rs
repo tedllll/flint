@@ -2109,6 +2109,14 @@ async fn handle_command(
                 session::delete(&path)?;
                 printer.term().line(format_args!("deleted {}", path.display()));
             }
+            // The list changed under the browser. The numbering in the sidebar *is* the
+            // numbering `/resume` takes, so a list left showing the old ones points every row
+            // below the one that went at the wrong conversation -- and clicking one would carry
+            // on talking in it. Reported from a real session: history tidied in the terminal,
+            // and the page still offering the deleted conversation.
+            if let Some(viewer) = viewer.as_mut() {
+                viewer.list_changed();
+            }
         }
 
         "/new" => {

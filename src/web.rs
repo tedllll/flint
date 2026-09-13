@@ -241,6 +241,25 @@ impl Live {
         let _ = self.subscribers.send(frame);
     }
 
+    /// Tell every reader the list of conversations has changed, as a frame named `sessions`.
+    ///
+    /// A named frame because the sidebar's data is a *route* (`GET /sessions`) and this says that
+    /// route is stale. It is not a fact about the run and it is not the transcript, which is why
+    /// it is not `reset`: `reset` makes the page re-read the session file and rebuild the
+    /// transcript, and the transcript has not changed.
+    ///
+    /// Nothing is cleared here either -- the ring, the status and the in-flight answer all belong
+    /// to the conversation being *shown*, and `/archive` and `/delete` refuse to touch the open
+    /// one for exactly that reason.
+    ///
+    /// What it exists to prevent is not cosmetic. The numbers in the sidebar are the ones
+    /// `/resume` takes, and they are positions in a list: delete one conversation and every number
+    /// below it shifts up. A sidebar left showing the old ones sends `/resume 4` for what is now
+    /// conversation five, and the person carries on talking in the wrong one.
+    pub fn sessions_changed(&self) {
+        self.push_named("sessions", String::new());
+    }
+
     /// Tell every reader that the conversation it is showing is not this one any more.
     ///
     /// Called when the run moves to a different session file -- `/new`, `/resume`. The frames
@@ -946,6 +965,14 @@ impl Viewer {
         Ok(url)
     }
 
+    /// Tell the sidebar its list is out of date.
+    ///
+    /// Called after `/archive` and `/delete`. Cheap and safe to call when no window is open, and
+    /// when none of the clients are looking -- a frame nobody reads is a frame nobody reads.
+    pub fn list_changed(&self) {
+        self.live.sessions_changed();
+    }
+
     /// Point the view at a different conversation.
     ///
     /// Called after `/new` and `/resume`. The session file changes first and the readers are
@@ -1114,6 +1141,7 @@ const SSE_STATUS_SNAPSHOT: &str = "event: status\n";
 /// The data is a JSON *string* rather than the raw text, unlike `status`: an answer has newlines
 /// in it and a `data:` line does not.
 const SSE_ANSWER_SNAPSHOT: &str = "event: answer\n";
+
 
 /// Tell a client its document is stale, so it re-reads the session.
 ///
@@ -2348,6 +2376,66 @@ mod snapshot_tests {
         assert!(
             !raw.contains("event: status"),
             "the turn is over, so there is nothing to report: {raw}"
+        );
+    }
+
+    /// Tidying the history in the terminal has to reach the sidebar.
+    ///
+    /// Reported from a real session: conversations deleted in the terminal, and the page still
+    /// offering them. The reason it matters is not that the list looks wrong -- it is that the
+    /// numbers *are* the ones `/resume` takes, and they are positions. A stale sidebar resumes the
+    /// wrong conversation, and the person carries on talking in it.
+    #[tokio::test]
+    async fn a_client_is_told_when_the_list_of_conversations_changes() {
+        let live = Live::new();
+        let window = Window::open(0, None, Some(Arc::clone(&live)))
+            .await
+            .expect("bind");
+
+        // Connected first, so this is the frame a page already watching receives rather than a
+        // snapshot for one that arrives later.
+        let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, window.port()))
+            .await
+            .expect("connect");
+        let request = format!(
+            "GET /events HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nX-Flint-Token: {}\r\n\r\n",
+            window.port(),
+            window.token
+        );
+        stream.write_all(request.as_bytes()).await.expect("write");
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        live.sessions_changed();
+
+        let mut seen = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(400);
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(left, stream.read(&mut chunk)).await {
+                Ok(Ok(0)) | Err(_) => break,
+                Ok(Ok(read)) => {
+                    seen.extend_from_slice(&chunk[..read]);
+                    if String::from_utf8_lossy(&seen).contains("event: sessions") {
+                        break;
+                    }
+                }
+                Ok(Err(_)) => break,
+            }
+        }
+        let raw = String::from_utf8_lossy(&seen);
+        assert!(
+            raw.contains("event: sessions"),
+            "the sidebar was never told its list had changed: {raw}"
+        );
+        // And it is *not* a reset: the transcript has not changed, so the reader's place in it
+        // must not be thrown away.
+        assert!(
+            !raw.contains("event: reset"),
+            "a changed list must not rebuild the transcript: {raw}"
         );
     }
 

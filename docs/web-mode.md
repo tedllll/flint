@@ -217,6 +217,7 @@ Four routes. No cookies, no HTTP/2, no TLS, no keep-alive, no streaming request 
 | `GET /events` | SSE: replays from `Last-Event-ID`, then live events |
 | `POST /message` | one message from the browser, into the steering channel |
 | `GET /sessions` | the conversations `/resume` can reach, numbered the way `/resume` numbers them |
+| *`event: sessions`* | not a route but its counterpart: the list has changed, re-read it |
 
 **All five are implemented.** `/session` and `/events` read the session path and the event feed
 through a shared handle, which is what lets `/new` and `/resume` move an open window to the
@@ -441,6 +442,7 @@ textarea, dispatch the events a person's typing produces, and then look at what 
 | Claim | How | Result |
 |---|---|---|
 | The sidebar lists the conversations | `GET /sessions`, eight real sessions | numbered newest-first, the open one marked, labels ellipsised to one row each |
+| Tidying the history in the terminal reaches the sidebar | `/delete 2` in the terminal, a middle conversation | **a defect.** The page kept offering it — and the numbers in the list are *positions*, so each stale row below it pointed at a different conversation. Fixed: a frame named `sessions` re-reads the sidebar and nothing else. The rows went `1=gamma 2=beta 3=alpha` → `1=gamma 2=alpha 3=(empty)`, which is what `/resume` now takes |
 | The sidebar can start one | `+ new`, three times over | one click, one `POST /message`, one new conversation each time — the count was watched on disk as well as on the page, after an earlier run suggested a click could make several |
 | Enter sends | `keydown` Enter in the textarea | the message reached the transcript; the box cleared |
 | Clicking a row switches conversation | click on row 2 | `/resume 2` ran in the terminal, `/session` changed id, `current` moved to row 2 — **for free**, because the sidebar sends text and the REPL decides what text means |

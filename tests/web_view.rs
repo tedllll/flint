@@ -205,3 +205,33 @@ fn the_sidebar_can_start_a_conversation() {
         "the composer must say that commands work here"
     );
 }
+
+/// A conversation archived or deleted in the terminal has to leave the sidebar.
+///
+/// Reported from a real session: history tidied in the terminal and the page still offering it.
+/// The list being wrong is the small half. The numbers in it are what `/resume` takes, and they
+/// are *positions in a list* — delete one conversation and every number below it shifts up — so a
+/// stale sidebar resumes the wrong conversation and the person carries on talking in it.
+#[test]
+fn the_page_re_reads_the_list_when_the_process_says_it_changed() {
+    let html = view();
+    let branch = html
+        .split("frame.event === \"sessions\"")
+        .nth(1)
+        .expect("the page must handle the list-changed event");
+    let branch = &branch[..branch.len().min(300)];
+    assert!(
+        branch.contains("readSessions()"),
+        "the sidebar has to be re-read: {branch:?}"
+    );
+    // And *only* the sidebar. The transcript has not changed, so rebuilding it would throw away
+    // the reader's place for nothing -- which is the difference between this event and `reset`.
+    assert!(
+        !branch.contains("readSession()") || branch.contains("readSessions()"),
+        "the list changing must not rebuild the transcript: {branch:?}"
+    );
+    assert!(
+        !branch.contains("await readSession();"),
+        "the transcript is not stale when only the list changed: {branch:?}"
+    );
+}
