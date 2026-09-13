@@ -429,6 +429,34 @@ pub fn spill_dir() -> PathBuf {
     config_dir().join("spill")
 }
 
+/// What every generated `config.toml` says before its settings.
+///
+/// A constant rather than a literal inside [`Config::save`] so that a test can assert it
+/// still explains the fields whose names do not explain themselves. This is where a person —
+/// or an agent asked to configure flint — actually looks, and knowledge that lives only in
+/// `engine.rs` is knowledge nobody configuring flint has.
+pub const CONFIG_HEADER: &str = "\
+# flint configuration.
+# `base_url` must be OpenAI-compatible: POST {base_url}/chat/completions
+# Add as many providers as you like and switch with --provider <name> or /provider.
+#
+# A local model server is started and stopped for you as you switch between providers:
+#
+#   start = \"...\"    run when flint needs this provider and nothing answers at base_url
+#   stop  = \"...\"    run when a switch leaves this provider behind
+#   start = \"\"       this one is not flint's to manage -- leave it alone
+#
+# Leaving `start` out asks flint to use what it knows, and it knows three engines by name: a
+# provider called `ollama`, `mlx` or `llamacpp` has its start command derived from the name.
+# That only happens when it can work -- the endpoint is on this machine, the program is on
+# PATH, and for `mlx` and `llamacpp` the `model` field names what to load. When it cannot,
+# flint says what is missing rather than running a command that would fail. Setting `start`
+# yourself always wins.
+#
+# Engine output, and the reason a start failed, is in <FLINT_HOME>/engines/<provider>.log.
+
+";
+
 impl Config {
     /// Add a provider, or overwrite the one with the same name.
     ///
@@ -552,12 +580,8 @@ impl Config {
     pub fn save(&self) -> Result<()> {
         std::fs::create_dir_all(config_dir()).context("cannot create config directory")?;
         let body = toml::to_string_pretty(self).context("cannot serialize config")?;
-        let header = "\
-# flint configuration.
-# `base_url` must be OpenAI-compatible: POST {base_url}/chat/completions
-# Add as many providers as you like and switch with --provider <name> or /provider.
+        let header = CONFIG_HEADER;
 
-";
         let path = config_path();
         std::fs::write(&path, format!("{header}{body}"))
             .with_context(|| format!("cannot write config {}", path.display()))?;
@@ -568,6 +592,37 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The generated file has to explain the engine fields, because it is where a person —
+    /// or an agent asked to configure flint — actually looks. Knowledge that lives only in
+    /// `engine.rs` is knowledge nobody configuring flint has.
+    #[test]
+    fn the_generated_config_explains_the_engine_fields() {
+        for needed in [
+            "start", "stop", "ollama", "mlx", "llamacpp", "PATH", "engines/",
+        ] {
+            assert!(
+                CONFIG_HEADER.contains(needed),
+                "the generated config never mentions {needed:?}, so a reader will not find it"
+            );
+        }
+        // This is *why* the header has to carry it. `start` and `stop` are
+        // `Option<String>`, and TOML cannot write a null — so an unset one is not in the
+        // file at all, and what a generated config shows is `start_timeout_secs = 0` with no
+        // `start` to go with it. That dangling key is the hook; the header is the
+        // explanation. `/provider` is the third, and the one at the point of use: it says
+        // what flint would run for each engine (`engine::describe`).
+        let body = toml::to_string_pretty(&Config::default()).expect("serialize");
+        assert!(
+            body.contains("start_timeout_secs"),
+            "the one engine key that is written is the hook a reader notices: {body}"
+        );
+        assert!(
+            !body.contains("\nstart = "),
+            "if `start` ever starts serialising, the header stops being the only place it \
+             is explained, and this test should be rewritten rather than deleted: {body}"
+        );
+    }
 
     /// A file written before instruction files existed must keep working, and must get the
     /// default mode rather than an empty string that means nothing.

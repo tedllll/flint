@@ -64,6 +64,7 @@ in a scratch directory for the same reason.
 | `<FLINT_HOME>/sessions/<stamp>-<n>.jsonl` | one conversation per file, append-only |
 | `<FLINT_HOME>/sessions/archive/` | conversations filed away with `/archive` |
 | `<FLINT_HOME>/spill/<session>/<n>.txt` | tool output too long for one request, in full |
+| `<FLINT_HOME>/engines/<provider>.log` | a local engine's output, and the only place a failed start says why |
 | `<FLINT_HOME>/AGENTS.md` | instructions that apply to every project |
 | `<FLINT_HOME>/skills/<name>/SKILL.md` | skills available everywhere |
 | `<project>/AGENTS.md` | instructions for that project |
@@ -102,6 +103,27 @@ tool_detail = false             # print the output behind a tool result
 instructions = "hint"           # AGENTS.md: "hint" (name them), "paste", "off"
 skill_dirs = []                 # extra skill directories, after the standard two
 ```
+
+```toml
+[[providers]]                   # ...and the two fields that run a local engine
+start = ""                      # run when flint needs this provider and nothing answers
+stop = ""                       # run when a switch leaves this provider behind
+start_timeout_secs = 0          # how long to wait for the endpoint; 0 means 180
+```
+
+A **local** model server is started and stopped as providers are switched, so that
+`/provider llamacpp` brings up the server it needs and switching away frees the memory it
+held. `start` has three meanings and the difference is the interface: **absent** asks flint to
+use what it knows about the engine, **a command** is used as written, and **empty** means this
+one is not flint's to manage — which is how a provider that is somebody else's process (an
+ollama also serving a GUI, say) says so.
+
+Left absent, flint derives the command from the provider's **name**, for three engines it
+knows: `ollama`, `mlx` (or `mlx-lm`, `mlxlm`) and `llamacpp` (or `llama-server`). It only does
+so when that can work — the endpoint is on this machine, the program is on `PATH`, and for
+`mlx` and `llamacpp` the `model` field names what to load — and when it cannot, it says which
+of those is missing instead of running a command that would fail. A name-derived command that
+fails looks like flint being broken, which is why the check exists rather than the guess.
 
 ```toml
 [search]                        # optional, and normally absent

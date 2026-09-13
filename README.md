@@ -265,6 +265,48 @@ cheap will spend real money.
 is labelled as untrusted: in the first live run the model used it, found it disagreed with the
 local toolchain, checked another source, and reported that the summary was stale.
 
+### Local engines
+
+A local model server is a program that has to be running before its endpoint answers, that
+holds gigabytes while it is, and that nothing else on the machine will start. So a provider
+may name the commands that do it, and flint runs them as you switch:
+
+```toml
+[[providers]]
+name = "llamacpp"
+base_url = "http://127.0.0.1:8080/v1"
+model = "gemma-4-12b-it-Q5_K_M"
+start = "bash ~/gemma4-12b/server.sh"      # when flint needs it and nothing answers
+stop  = "pkill -f 'llama-b10839/llama-server'"   # when a switch leaves it behind
+start_timeout_secs = 180                   # a 12B model takes a while to load
+```
+
+`/provider llamacpp` then starts what it needs, waits for the endpoint — saying so, because a
+minute of nothing on screen is indistinguishable from a hang — and switching to another
+provider stops the one being left. On a machine that cannot hold two models at once, that is
+the difference between switching and running out of memory.
+
+**`start` has three meanings**, and the difference is the whole interface:
+
+| | |
+|---|---|
+| absent | use what flint knows about this engine |
+| a command | use it, and stop guessing |
+| empty | not flint's to manage — leave it alone |
+
+Left absent, flint derives the command from the provider's **name**, for `ollama`, `mlx` and
+`llamacpp`. It only does so when that can actually work: the endpoint is local, the program is
+on `PATH`, and the model is named. When it cannot, it says which of those is missing rather
+than running something that would fail — a name-derived command that fails looks like flint
+being broken, which is worse than having no default at all.
+
+`stop` is run in the open, because for a recognised engine it is a `pkill -f` and the pattern
+decides what dies. And with no `stop`, an engine is left running on purpose: an ollama that is
+also serving a GUI must not be shut down because a conversation moved on.
+
+Engine output goes to `<FLINT_HOME>/engines/<provider>.log`, and when a start times out that
+path is in the error — it is where the reason is.
+
 ## Permissions
 
 **Full by default.** There is no approval prompt; flint runs what it decides to

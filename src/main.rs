@@ -1217,8 +1217,17 @@ async fn handle_command(
                         } else {
                             String::new()
                         };
+                        // What flint would do about this provider's engine, when it would
+                        // do anything: a command derived from the name is invisible in the
+                        // config, and this is where a person finds out it exists.
+                        let engine = engine::describe(p);
+                        let engine = if engine.is_empty() {
+                            String::new()
+                        } else {
+                            format!("  {dim}{engine}{reset}")
+                        };
                         printer.term().line(format_args!(
-                            "  {mark} {:<12} {:<34} {}{key_state}",
+                            "  {mark} {:<12} {:<34} {}{key_state}{engine}",
                             p.name, p.base_url, p.model
                         ));
                     }
@@ -2493,6 +2502,16 @@ fn print_help(color: bool, term: &Term) {
   --cwd <dir>         working directory for tools
   --no-color          disable ANSI colour (also honours NO_COLOR)
   -h, --help          this message
+
+{b}LOCAL ENGINES{r}
+  A local model server is started and stopped as you switch providers.
+    start = \"...\"     run when flint needs this provider and nothing answers at its URL
+    stop  = \"...\"     run when a switch leaves it behind
+    start = \"\"        not flint's to manage — leave it alone
+  Leaving `start` out uses what flint knows: a provider named `ollama`, `mlx` or `llamacpp`
+  gets its command from the name, when the endpoint is local, the program is on PATH and the
+  model is named. Anything else is said plainly rather than attempted.
+  Engine output: <FLINT_HOME>/engines/<provider>.log
 
 {b}CONFIG{r}
   {}

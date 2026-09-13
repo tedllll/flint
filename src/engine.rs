@@ -185,6 +185,23 @@ fn shell_word(text: &str) -> String {
     }
 }
 
+/// A short description of what flint would do about a provider's engine, for `/provider`.
+///
+/// The point of showing it is that everything else about this is invisible: a
+/// name-derived command never appears in the config, and behaviour nobody can see is the
+/// thing this repository keeps arguing against. A person who cannot see that flint is about
+/// to run `ollama serve` finds out only when it is wrong.
+///
+/// Empty when there is nothing to say, which is most providers.
+pub fn describe(provider: &ProviderConfig) -> &'static str {
+    match plan(provider) {
+        Plan::Configured { .. } => "engine: configured",
+        Plan::Recognised { .. } => "engine: from its name",
+        Plan::CannotStart { .. } => "engine: from its name, but it cannot run here",
+        Plan::Nothing => "",
+    }
+}
+
 /// What flint did about an engine.
 #[derive(Debug, PartialEq)]
 pub enum Woke {
