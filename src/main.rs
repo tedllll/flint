@@ -1708,8 +1708,6 @@ async fn run_json_turn(
     provider_error: Option<&str>,
     prompt: &str,
 ) -> Result<i32> {
-    ensure_usable(provider_cfg)?;
-
     let mut out = std::io::stdout();
     // Flushed per line: a consumer may be reading the stream as it arrives, and a
     // block-buffered pipe would deliver the whole run at the end, which is the one thing a
@@ -1730,6 +1728,16 @@ async fn run_json_turn(
         emit(ndjson::warning(error));
     }
     emit(ndjson::turn_started(prompt));
+
+    // The checks come after those three lines, not before, so that a run which cannot even
+    // start is still described on stdout. Failing out to `main`'s error path would put the
+    // reason on stderr and leave the stream empty, which is indistinguishable from a run
+    // that is still thinking -- and a caller reading the stream would wait for a
+    // `turn.completed` that is never coming.
+    if let Err(e) = ensure_usable(provider_cfg) {
+        emit(ndjson::error(&format!("{e:#}")));
+        return Ok(1);
+    }
 
     let mut sink = ndjson::Sink::new();
     let result = agent

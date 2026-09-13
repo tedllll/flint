@@ -7,8 +7,8 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to
-`origin/main` (tip `6e961ab`). `cargo test` is 189 passing (134 lib, 22 `agent_loop`,
-12 `cli_output`, 3 `json_output`, 18 `term_capture`), `cargo clippy --all-targets` is
+`origin/main` (tip `d31c32d`). `cargo test` is 190 passing (134 lib, 22 `agent_loop`,
+12 `cli_output`, 4 `json_output`, 18 `term_capture`), `cargo clippy --all-targets` is
 silent, and `node scripts/term-layout-test.js` passes every layout assertion.
 
 Build with:

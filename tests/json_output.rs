@@ -270,6 +270,51 @@ async fn a_tool_round_names_the_tool_it_ran() {
     assert_eq!(line_of(&lines, "message.completed")["text"], "hello world");
 }
 
+/// A run that cannot even start is still described on the stream.
+///
+/// The failure this guards against is the quiet one: the reason goes to stderr, stdout is
+/// empty, and a caller reading the stream sees an empty run and waits for a
+/// `turn.completed` that is never coming. The stream has to say how the run ended even when
+/// it ended before the first request.
+#[tokio::test]
+async fn a_run_that_cannot_start_ends_the_stream_with_an_error() {
+    let server = MockServer::start().await;
+    let cwd = cwd_for("no-key");
+    let home = home_for("no-key", &server.uri(), &cwd);
+    // A provider that is not local and has no key: the one thing that stops a run before it
+    // starts, and the case a fresh machine actually hits.
+    std::fs::write(
+        home.join("config.toml"),
+        "default_provider = \"stub\"\n\
+         \n\
+         [[providers]]\n\
+         name = \"stub\"\n\
+         base_url = \"https://api.example.invalid/v1\"\n\
+         model = \"stub-model\"\n",
+    )
+    .expect("config file");
+
+    let (code, lines, stderr) = run_json(&home, &cwd, &["-p", "say hello", "--json"]);
+
+    assert_eq!(code, 1, "a run with no key must fail");
+    assert_eq!(
+        kinds(&lines),
+        vec!["session.started", "turn.started", "error"],
+        "the stream does not describe how the run ended"
+    );
+    assert!(
+        line_of(&lines, "error")["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no API key"),
+        "the error line does not say what was wrong: {lines:?}"
+    );
+    assert_eq!(
+        stderr, "",
+        "the reason was written to stderr instead of the stream"
+    );
+}
+
 /// Without a prompt there is no run to describe, and saying so must not write half a
 /// stream first: a caller reads stdout and would see an empty run as a successful one.
 #[tokio::test]
