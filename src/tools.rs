@@ -25,6 +25,11 @@ pub trait Tool: Send + Sync {
 pub struct ToolBox {
     tools: Vec<Box<dyn Tool>>,
     by_name: Vec<(String, usize)>,
+    /// The budget for one tool answer, after which the rest goes to a file.
+    max_output: usize,
+    /// Where that file goes, and how many have been written this session.
+    spill_dir: PathBuf,
+    spilled: std::sync::atomic::AtomicUsize,
 }
 
 impl ToolBox {
@@ -60,7 +65,19 @@ impl ToolBox {
             .enumerate()
             .map(|(i, t)| (t.name().to_string(), i))
             .collect();
-        ToolBox { tools, by_name }
+        ToolBox {
+            tools,
+            by_name,
+            max_output: config.max_tool_output,
+            spill_dir: crate::config::spill_dir().join("unattached"),
+            spilled: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// File this session's spill files under a name of their own.
+    pub fn with_spill_dir(mut self, dir: PathBuf) -> Self {
+        self.spill_dir = dir;
+        self
     }
 
     /// (name, description, JSON schema) for every tool, for the request body.
@@ -84,7 +101,40 @@ impl ToolBox {
             .find(|(n, _)| n == name)
             .map(|(_, i)| *i)
             .ok_or_else(|| anyhow!("unknown tool '{name}'"))?;
-        self.tools[index].call(args).await
+        let output = self.tools[index].call(args).await?;
+        Ok(self.cap(output))
+    }
+
+    /// Keep one tool answer inside the request budget, without pretending the rest does
+    /// not exist.
+    ///
+    /// Cutting it off and saying "truncated" is where the information actually goes: the
+    /// end of a build log is the part that says what failed. So the whole answer is
+    /// written to a plain file first, and the reply keeps both ends and names that file.
+    fn cap(&self, output: String) -> String {
+        if output.chars().count() <= self.max_output {
+            return output;
+        }
+        let note = match self.spill(&output) {
+            Ok(path) => format!("full output: {}", path.display()),
+            Err(e) => format!(
+                "the whole output could not be saved in {}: {e:#}",
+                self.spill_dir.display()
+            ),
+        };
+        util::head_and_tail(&output, self.max_output, &note)
+    }
+
+    /// Write `text` to the next numbered file in this session's spill directory.
+    fn spill(&self, text: &str) -> Result<PathBuf> {
+        std::fs::create_dir_all(&self.spill_dir)
+            .with_context(|| format!("cannot create {}", self.spill_dir.display()))?;
+        // Numbered in the order they happened, starting at 1, so the newest file in a
+        // listing is also the most recent thing that was too long to show.
+        let n = self.spilled.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let path = self.spill_dir.join(format!("{n}.txt"));
+        std::fs::write(&path, text).with_context(|| format!("cannot write {}", path.display()))?;
+        Ok(path)
     }
 
     pub fn names(&self) -> Vec<String> {
@@ -1914,5 +1964,112 @@ mod progress_parse_tests {
         // The tail of the output usually arrives without one, and it is where the error
         // message lives.
         assert_eq!(split_progress_lines(b"last words"), vec!["last words"]);
+    }
+}
+
+#[cfg(test)]
+mod spill_tests {
+    use super::*;
+    use crate::config::Config;
+
+    /// A directory of this test's own, removed when the test ends.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "flint-tools-{tag}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            TempDir(dir)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// An answer over the budget keeps both ends, and the whole of it is on disk.
+    ///
+    /// The point is not that something was cut -- cutting is the old behaviour too -- but
+    /// that the part which was cut can still be read, and that the reply says where. A
+    /// build log whose last line is gone is a log whose error message is gone.
+    #[tokio::test]
+    async fn a_long_answer_is_spilled_and_named_in_the_reply() {
+        let dir = TempDir::new("spill");
+        let file = dir.path().join("log.txt");
+        let whole: String = (0..300).map(|n| format!("line {n:03} of the log\n")).collect();
+        std::fs::write(&file, &whole).unwrap();
+
+        let config = Config {
+            max_tool_output: 1000,
+            ..Config::default()
+        };
+        let tools = ToolBox::new(&config, false, dir.path().to_path_buf())
+            .with_spill_dir(dir.path().join("spill"));
+        let out = tools
+            .invoke("read", &json!({ "path": file.to_str().unwrap() }))
+            .await
+            .expect("read");
+
+        assert!(out.contains("line 000 of the log"), "the head is gone: {out}");
+        assert!(out.contains("line 299 of the log"), "the tail is gone: {out}");
+        assert!(out.contains("full output:"), "the reply does not say where: {out}");
+
+        // The spill holds what the tool actually returned, in full -- `read` numbers its
+        // lines, so it is that text and not the raw file.
+        let spilled = std::fs::read_to_string(dir.path().join("spill").join("1.txt"))
+            .expect("the spill file must exist, since the reply points at it");
+        assert!(spilled.contains("line 000 of the log"), "the spill is missing the start");
+        assert!(spilled.contains("line 299 of the log"), "the spill is missing the end");
+        assert!(
+            spilled.chars().count() > out.chars().count(),
+            "the spill is no longer than the reply, so the cut part is nowhere"
+        );
+
+        // The next one is numbered, not overwritten: two long answers in one session are
+        // two files, so the first is still there when the second arrives.
+        let out = tools
+            .invoke("read", &json!({ "path": file.to_str().unwrap() }))
+            .await
+            .expect("read again");
+        assert!(out.contains("2.txt"), "the second spill reused a name: {out}");
+        assert!(dir.path().join("spill").join("2.txt").exists());
+        assert!(dir.path().join("spill").join("1.txt").exists());
+    }
+
+    /// A tool answer inside the budget is returned untouched, with no note about a file.
+    #[tokio::test]
+    async fn a_short_answer_is_not_spilled() {
+        let dir = TempDir::new("short");
+        let file = dir.path().join("small.txt");
+        std::fs::write(&file, "one line\n").unwrap();
+
+        let config = Config {
+            max_tool_output: 1000,
+            ..Config::default()
+        };
+        let tools = ToolBox::new(&config, false, dir.path().to_path_buf())
+            .with_spill_dir(dir.path().join("spill"));
+        let out = tools
+            .invoke("read", &json!({ "path": file.to_str().unwrap() }))
+            .await
+            .expect("read");
+
+        assert!(out.contains("one line"));
+        assert!(!out.contains("full output:"), "a note on nothing: {out}");
+        assert!(
+            !dir.path().join("spill").exists(),
+            "a spill directory was made for output that fit"
+        );
     }
 }

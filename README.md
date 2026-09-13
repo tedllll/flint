@@ -182,8 +182,17 @@ file" and "where is this symbol" would have no working answer. They are also wha
 makes getting your bearings in an unfamiliar tree a single step instead of a dozen
 `list` calls.
 
-Tool output is capped at `max_tool_output` characters before going back to the
-model, with a `[truncated]` marker.
+Tool output is capped at `max_tool_output` characters before going back to the model. When
+it goes over, the whole of it is written to `~/.flint/spill/<session>/<n>.txt` and the
+reply keeps both ends -- the first 4096 characters and the last 1024 -- with a line saying
+how long the output was and which file holds the rest. Cutting the tail instead, which is
+what a plain `[truncated]` marker does, throws away the end of a build log: the part that
+says what failed and the part that gets looked for.
+
+The same call with the same arguments three times in one turn gets a one-line note saying
+so -- and again at five and eight. Nothing is refused, because a repeat is sometimes right
+(a file another process is writing, a command whose answer really has changed); what is
+worth avoiding is repeating it silently while the budget goes into the same output twice.
 
 ### Downloads
 

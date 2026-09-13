@@ -119,6 +119,11 @@ pub struct Agent {
     cwd: PathBuf,
     writer: Option<SessionWriter>,
     last_usage: Option<Usage>,
+    /// How often each tool call has been made this turn, by name and arguments.
+    ///
+    /// Per turn rather than per session: an identical call in a later turn follows a new
+    /// question, and a file the last turn read may legitimately have changed since.
+    repeats: std::collections::HashMap<String, usize>,
 }
 
 impl Agent {
@@ -138,7 +143,15 @@ impl Agent {
         cwd: PathBuf,
         writer: Option<SessionWriter>,
     ) -> Self {
-        let tools = ToolBox::new(config, readonly, cwd.clone());
+        // Spill files belong to one conversation, so that a person reading them later
+        // knows which run produced them. One-shot mode has no session to belong to.
+        let tag = writer
+            .as_ref()
+            .and_then(|w| w.path().file_stem())
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unattached".to_string());
+        let tools = ToolBox::new(config, readonly, cwd.clone())
+            .with_spill_dir(crate::config::spill_dir().join(tag));
         Agent {
             provider,
             tools,
@@ -148,6 +161,7 @@ impl Agent {
             cwd,
             writer,
             last_usage: None,
+            repeats: std::collections::HashMap::new(),
         }
     }
 
@@ -196,6 +210,7 @@ impl Agent {
         // be followed by tool messages responding to each 'tool_call_id'". That made
         // the session permanently unusable, not just the one turn.
         self.close_dangling_tool_calls();
+        self.repeats.clear();
 
         self.history.push(Message::user(user_input));
         self.record(SessionEvent::Chat {
@@ -257,6 +272,10 @@ impl Agent {
                 match result {
                     Ok(output) => {
                         let ok = !output.contains("[exit code:");
+                        let output = match self.note_repeat(&call.name, &args) {
+                            Some(note) => format!("{output}\n{note}"),
+                            None => output,
+                        };
                         sink(Event::ToolResult {
                             id: call.id.clone(),
                             output: output.clone(),
@@ -286,6 +305,42 @@ impl Agent {
 
         sink(Event::Done);
         Ok(())
+    }
+
+    /// Record this call and, at a few counts, say so in the result.
+    ///
+    /// A repeat is sometimes right -- a file another process is writing, a command whose
+    /// answer really has changed -- so nothing is blocked and nothing is refused. What is
+    /// wrong is repeating it *silently*, turn after turn, while the token budget goes into
+    /// the same output and the same reasoning. The note names the count and what it means
+    /// and leaves the decision where it belongs.
+    ///
+    /// Counted by name and arguments together, so reading a different file is not a
+    /// repeat. `serde_json`'s objects keep their keys sorted, so two spellings of the
+    /// same arguments compare equal.
+    fn note_repeat(&mut self, name: &str, args: &serde_json::Value) -> Option<String> {
+        let key = format!("{name}\u{1}{args}");
+        let count = {
+            let seen = self.repeats.entry(key).or_insert(0);
+            *seen += 1;
+            *seen
+        };
+        let note = match count {
+            3 => format!(
+                "[note: this is the 3rd identical call to {name} with the same arguments. \
+                 It will return what it returned the first time.]"
+            ),
+            5 => format!(
+                "[note: this is the 5th identical call to {name} with the same arguments. \
+                 If the first one did not answer the question, this one will not either.]"
+            ),
+            8 => format!(
+                "[note: this is the 8th identical call to {name} with the same arguments. \
+                 That is a loop: say what is blocking you, or try something else.]"
+            ),
+            _ => return None,
+        };
+        Some(note)
     }
 
     /// Record a tool result in history and persist it.

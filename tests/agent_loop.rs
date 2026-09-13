@@ -95,6 +95,17 @@ fn tool_then_answer() -> String {
     ])
 }
 
+/// Frame sequence for a model that asks for the same call three times in one round.
+fn same_call_three_times() -> String {
+    sse(&[
+        r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","function":{"name":"list","arguments":"{\"path\":\".\"}"}}]}}]}"#,
+        r#"data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_b","function":{"name":"list","arguments":"{\"path\":\".\"}"}}]}}]}"#,
+        r#"data: {"choices":[{"delta":{"tool_calls":[{"index":2,"id":"call_c","function":{"name":"list","arguments":"{\"path\":\".\"}"}}]}}]}"#,
+        r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+        "data: [DONE]",
+    ])
+}
+
 /// Frame sequence for a model that just answers.
 fn answer_only() -> String {
     sse(&[
@@ -303,6 +314,7 @@ fn fixtures_are_well_formed() {
     for (label, body) in [
         ("tool_then_answer", tool_then_answer()),
         ("answer_only", answer_only()),
+        ("same_call_three_times", same_call_three_times()),
     ] {
         let mut saw_data_frame = false;
         for line in body.lines() {
@@ -447,6 +459,59 @@ async fn the_skill_tool_is_absent_when_there_are_no_skills() {
     );
 
     let _ = std::fs::remove_dir_all(&empty);
+}
+
+/// The third identical call says so, and says it to the model.
+///
+/// Asserted on the request that follows, not only on the events: a note that reaches the
+/// transcript and not the model is a note to the user, and the model is the one that has
+/// to stop. Nothing is blocked -- a repeat is sometimes right -- so the check is that the
+/// call still ran and the note arrived with it.
+#[tokio::test]
+async fn a_repeated_call_is_pointed_out_to_the_model() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(SseFixture {
+            body: same_call_three_times(),
+        })
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(SseFixture {
+            body: answer_only(),
+        })
+        .mount(&server)
+        .await;
+
+    let mut agent = agent_for(&server, std::env::temp_dir()).await;
+    let mut outputs: Vec<String> = Vec::new();
+    agent
+        .run("list the directory three times", |ev| {
+            if let Event::ToolResult { output, .. } = ev {
+                outputs.push(output);
+            }
+        })
+        .await
+        .expect("run");
+
+    assert_eq!(outputs.len(), 3, "all three calls must still run");
+    assert!(
+        !outputs[0].contains("identical call") && !outputs[1].contains("identical call"),
+        "a note on a first or second call: {outputs:?}"
+    );
+    assert!(
+        outputs[2].contains("3rd identical call"),
+        "the third identical call went unremarked: {}",
+        outputs[2]
+    );
+
+    let requests = server.received_requests().await.expect("requests");
+    let follow_up = String::from_utf8_lossy(&requests[1].body).to_string();
+    assert!(
+        follow_up.contains("3rd identical call"),
+        "the note never reached the model: {follow_up}"
+    );
 }
 
 #[tokio::test]

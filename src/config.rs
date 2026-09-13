@@ -295,6 +295,16 @@ pub fn sessions_dir() -> PathBuf {
     config_dir().join("sessions")
 }
 
+/// Where tool output too long for one request is kept, in full, as plain text.
+///
+/// Under the session rather than in a single pile, because the only question anyone asks
+/// of these files is "what did that command actually print", and the answer belongs to one
+/// conversation. Nothing reads them back automatically: they are there for a person, or
+/// for the model, to `read` deliberately.
+pub fn spill_dir() -> PathBuf {
+    config_dir().join("spill")
+}
+
 impl Config {
     /// Add a provider, or overwrite the one with the same name.
     ///
