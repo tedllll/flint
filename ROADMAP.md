@@ -182,6 +182,42 @@ most of a turn is text nobody could see. The retry rule is now explicit: the lad
 the first drawn character, because nothing in the chain can take text back. `docs/web-mode.md`
 §11 has the measurement; `src/provider.rs` has the rule.
 
+### 8. Web mode, from using it — **found, not fixed**
+
+Three things turned up in the first real session with the browser page, after level 3 was
+finished. They are listed here rather than in the small-ideas list because one of them needs a
+decision about *where a command's output lives*, which is a design question and not a patch.
+
+**A conversation that has not happened yet is in the sidebar.** Start flint and type `/web`: the
+list already shows one conversation, labelled `(empty)`. That is the file `SessionWriter::create`
+opens at startup, and it is honest — the file *is* the session from the first moment, which is what
+makes `/new` and `--continue` and a crash all behave — but it reads as a conversation when nothing
+has been said. Three ways out, and they are not equivalent: do not create the file until the first
+message (then "the session is the record from the start" stops being true, and a crash before the
+first message leaves nothing); keep the file and hide empty sessions from the *list* (the sidebar
+and `/sessions` already share one listing, so it is one change in one place); or show it and mark
+it — dim, or "new conversation", or leave it out until it has a first message. The second is
+probably right, and the thing to decide first is whether `/resume` should also stop offering it.
+
+**A command typed into the composer prints nothing.** `/provider`, `/config`, `/usage`, `/tools`,
+`/sessions`, `/skills`, `/model`, `/name`, `/readonly`, `/verbose`, `/detail`, `/reload`, `/help` —
+all of them answer on the terminal, and the page shows none of it, so the composer is a prompt for
+messages and not for commands. The cause is structural: command output goes to `printer.term()`,
+which draws in the terminal and exists nowhere else. It is neither a session event (commands do
+not write to the session file) nor a live frame (the feed carries the *turn's* events), and the page
+renders exactly those two. So this is the same class of gap as the one `turn.started` closed for
+user messages, and it needs the same kind of answer: either command output becomes something the
+feed carries, or the page gets a second source for it. Worth deciding before building, because
+"every line the terminal prints" is a large surface — the notice sink, the status line and the
+usage summary all take that path.
+
+**Renaming a conversation from the sidebar.** Not tried by the person who asked, and the mechanism
+is already there: `/name <text>` appends a `title` line, the page already *renders* titles (its
+header shows one), and typing `/name x` in the composer works today. What is missing is an
+affordance and any feedback — and the feedback is the previous item. So this one is small once that
+is decided, and it is not worth doing first.
+
+
 ## Small, agreed, unscheduled
 
 - `read`/`write`/`edit` taking `file_path`, with `path` kept as an alias so nothing breaks.
@@ -195,8 +231,8 @@ the first drawn character, because nothing in the chain can take text back. `doc
 
 Five known defects are not repeated here, so that the list cannot drift apart from the
 state of the tree: Windows newline and code-page behaviour, CI that checks nothing on push,
-three `eprintln!` sites that can land inside the answer strip, a transcript that is not
-and a transcript that is not trimmed by construction.
+three `eprintln!` sites that can land inside the answer strip, and a transcript that is not
+trimmed by construction.
 [`HANDOFF.md`](HANDOFF.md#known-unfinished) has each in detail, labelled by what was
 measured and what was not.
 

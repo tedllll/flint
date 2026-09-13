@@ -306,6 +306,12 @@ Six commits, all pushed. The reasoning is in each commit message; this is the in
 
 ## Known unfinished
 
+**Three things the first real session with the browser page turned up** are written down in
+[`ROADMAP.md`](ROADMAP.md) §8 rather than here, because the middle one is a design question and
+not a defect: a conversation that has not happened yet shows in the sidebar as `(empty)`, a command
+typed into the composer prints nothing (its output goes to the terminal and nowhere the page can
+read), and renaming a conversation from the sidebar has no affordance. None is started.
+
 **A terminal that goes away takes a core with it.** When flint's pty is closed without a
 `SIGHUP` -- a terminal emulator that crashes, a `close(master)` from the other end -- the process
 spins at 100% of a core forever and never exits. The spin is inside `crossterm`, not here:
