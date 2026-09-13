@@ -94,7 +94,7 @@ impl SessionWriter {
         let meta = SessionEvent::Meta {
             v: FORMAT_VERSION,
             id: id.clone(),
-            created: now_iso8601(),
+            created: now_stamp(),
             cwd: cwd.display().to_string(),
             provider: provider.to_string(),
             model: model.to_string(),
@@ -440,8 +440,13 @@ fn new_id() -> String {
     format!("{}-{}", now.as_secs(), now.subsec_millis())
 }
 
-/// UTC timestamp without pulling in a date crate.
-fn now_iso8601() -> String {
+/// When the session started, as `epoch:<seconds>`.
+///
+/// Not a date format, whatever this used to be called: Unix seconds with a prefix that says
+/// so. That is enough to order sessions and to show a person roughly when one was written,
+/// and it needs no date library to produce or to parse -- which, for one field, is the whole
+/// argument.
+fn now_stamp() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())

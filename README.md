@@ -112,7 +112,9 @@ A session can be named, archived and deleted, and none of the three needs a mode
 key: they are file operations, and the moment you want to tidy the list is often the
 moment the network is what is broken. Archiving moves the file into
 `~/.flint/sessions/archive/`, so `mv` is the whole operation and undoing it by hand is
-the same operation backwards.
+the same operation backwards. The file itself — every event, the rules a reader keeps, and
+what can safely be edited by hand — is documented in
+[`docs/session-format.md`](docs/session-format.md).
 
 Resuming prints the tail of the transcript, so "did it load?" is answerable at a
 glance. Loading also happens when there is no network: an unreachable provider is

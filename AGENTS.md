@@ -41,6 +41,7 @@ whoever is changing the code — a person or a model driving it.
 | `tests/` | `agent_loop` (stub provider), `cli_output` (real binary, raw bytes), `term_capture` (byte-exact terminal) |
 | `scripts/` | Node replay tools: `vtscreen.js`, `term-layout-test.js`, `layout-trace.js` |
 | `docs/windows.md` | field notes on Windows terminal behaviour; read before touching layout |
+| `docs/session-format.md` | the session file format, for readers and for hand-editing |
 | `HANDOFF.md` | state of the project at the end of the last working session |
 
 ## Where flint keeps its own state
@@ -104,7 +105,8 @@ file, including `AGENTS.md` and the skill catalog, after something has changed i
 the two ends of each file), `/name`, `/archive` and `/delete` manage the open one, and
 `flint --list-sessions` does the listing without a model. A session file is one JSON object
 per line; an unknown event type is skipped in silence, and a line that names a *known* type
-but cannot be parsed is reported as damage rather than ignored.
+but cannot be parsed is reported as damage rather than ignored. `docs/session-format.md` is
+the reference for the format itself, including what can be edited by hand.
 
 ## There is no permission layer
 
@@ -145,17 +147,19 @@ So, when working in this repository:
 ## Verifying a change
 
 ```bash
-cargo test                      # 178 tests: the lib, the loop, raw CLI bytes, the terminal
+cargo test                      # the lib, the loop, raw CLI bytes, the terminal
 cargo clippy --all-targets      # expected to be silent, and worth keeping that way
 node scripts/term-layout-test.js
 ```
 
-Write the test that fails first, watch it fail for the right reason, then fix the code. A
-regression test that has never been red has not been shown to test anything. Assertions on
-the terminal must be on real bytes: `FLINT_TERM_CAPTURE=1` plus `FLINT_TERM_CAPTURE_FILE=<path>`
-and `FLINT_TERM_SIZE=100x24` (debug builds only) force the interactive path into a file,
-which `scripts/vtscreen.js` then replays as a screen. `FLINT_TERM_CAPTURE=1` alone writes
-to stdout, which is what `examples/live_turn.rs` wants.
+`HANDOFF.md` has the current counts and the state of the tree as the last session left it;
+the count in this file would only be a date. Keep the tests honest instead: write the test
+that fails first, watch it fail for the right reason, then fix the code. A regression test
+that has never been red has not been shown to test anything. Assertions on the terminal must
+be on real bytes: `FLINT_TERM_CAPTURE=1` plus `FLINT_TERM_CAPTURE_FILE=<path>` and
+`FLINT_TERM_SIZE=100x24` (debug builds only) force the interactive path into a file, which
+`scripts/vtscreen.js` then replays as a screen. `FLINT_TERM_CAPTURE=1` alone writes to
+stdout, which is what `examples/live_turn.rs` wants.
 
 Two traps worth knowing on Windows:
 
