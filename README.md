@@ -214,6 +214,24 @@ It is built by the same function the client posts, and there is a test that runs
 against a stub provider and asserts the preview equals the bytes the server received — so
 the command cannot quietly start describing something that is not sent.
 
+### Reading the web
+
+`fetch` reads a URL and returns its text: markup stripped, length bounded, and a line saying
+where the page came from and what was left out. It replaces `bash` and `curl` for reading a
+page, which hands you raw bytes that are mostly markup — measured at 94,879 bytes for one
+search result page against a 30,000-character budget, so the part worth reading is exactly
+what gets cut.
+
+**It reaches the public internet and nothing else.** The host is resolved once and every
+answer is checked: loopback, the private ranges, link-local (where cloud metadata lives) and
+the rest are refused, an IPv6 address that is really an IPv4 one is judged as the IPv4
+address it is, and the connection is pinned to an address that was checked so a second
+resolution cannot move it. Redirects are followed by hand, five at most, re-checked each hop.
+
+This is a boundary around *this tool*, not around flint: `bash` reaches whatever the machine
+can, and nothing here pretends otherwise. What it buys is that the safe path is also the easy
+one.
+
 ### Search
 
 `search` asks DeepSeek to look something up and returns a summary with its sources — so a
@@ -274,6 +292,7 @@ program and its verb rather than by re-reading a command line it never had. Use 
 | `grep` | search file contents for a literal string, recursively, with line numbers |
 | `skill` | load the full instructions of a skill named in the catalog (only offered when skills exist) |
 | `search` | look something up on the web and get a summary with its sources (only offered when a search credential is configured) |
+| `fetch` | read a URL and get its text, with the markup stripped and the length bounded |
 
 `glob` and `grep` are built in rather than shelled out on purpose. Every other
 platform difference flint can paper over, but this one it cannot: `grep` does not

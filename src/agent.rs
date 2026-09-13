@@ -36,6 +36,10 @@ Rules:
   equivalents. `glob` finds files by name and `grep` searches file contents, both \
   recursively; they behave identically on every platform, which the shell does not. \
   Reach for them instead of `find`, `dir /s`, `findstr` or `grep -r`.
+- Prefer `fetch` over `curl` for reading a web page. It strips the markup, bounds how much
+  comes back, and says where the page came from; `curl` hands you the raw bytes, which for a
+  page is mostly markup and is what gets cut off when it is long. Use `curl` when you want
+  the raw bytes on purpose -- an API, a download, a file.
 - Prefer `exec` over `bash` for running a program. `exec` takes the program and one \
   array of arguments, so nothing between you and the program re-reads what you wrote: \
   quotes, spaces, backslashes and non-ASCII text inside an argument arrive intact. Use \
@@ -749,6 +753,28 @@ mod tests {
 
     /// The prompt must carry the shell dialect for the platform it was built
     /// for, and must not hedge by describing both.
+    /// Every built-in tool that has a shell equivalent has to be named as preferred.
+    ///
+    /// Found by a real run: a local model asked to read a URL reached for `bash` and `curl`,
+    /// because the paragraph that tells it to prefer the built-in tools listed the file tools
+    /// and not `fetch`. A schema says what a tool does; only the prompt says to reach for it,
+    /// and a tool nobody is told to prefer is a tool that goes unused.
+    #[test]
+    fn the_prompt_names_the_tools_it_wants_preferred_over_the_shell() {
+        let p = build_system_prompt(&cfg_for_prompt(), std::path::Path::new("/tmp"));
+        for tool in ["read", "write", "edit", "list", "glob", "grep", "exec", "fetch"] {
+            assert!(
+                p.contains(&format!("`{tool}`")),
+                "the prompt never names `{tool}` as a tool to prefer: {p}"
+            );
+        }
+        // And the shell equivalents it should be replacing are named too, so the sentence is
+        // an instruction rather than a list.
+        for equivalent in ["curl", "find"] {
+            assert!(p.contains(equivalent), "the prompt does not mention {equivalent}: {p}");
+        }
+    }
+
     #[test]
     fn system_prompt_states_the_platform_shell() {
         let cwd = std::path::Path::new("/tmp/example");
