@@ -8,7 +8,8 @@ the queue. The reasoning for each design lives next to the design itself:
 | [`HANDOFF.md`](HANDOFF.md) | what state the tree is in, and what the last session learned |
 | [`docs/decisions.md`](docs/decisions.md) | why flint is built the way it is, decision by decision |
 | [`docs/windows-tooling.md`](docs/windows-tooling.md) | the settled, unimplemented plan for the Windows command line |
-| [`docs/web-mode.md`](docs/web-mode.md) | the settled, unimplemented plan for the browser view (`--web`) |
+| [`docs/web-mode.md`](docs/web-mode.md) | the plan for the browser view (`--web`); levels 1 and 2 are built |
+| [`docs/deepseek-search.md`](docs/deepseek-search.md) | what a DeepSeek-keyed web search measured, and what it costs |
 | [`docs/session-format.md`](docs/session-format.md) | the session file, for readers and for hand-editing |
 | [`docs/windows.md`](docs/windows.md) | field notes on the Windows terminal, labelled by what was measured |
 | [`AGENTS.md`](AGENTS.md) | the ground rules, and where flint keeps its own state |

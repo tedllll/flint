@@ -267,7 +267,14 @@ In order, each one its own commit. Everything before step 4 is useful on its own
    first commit that needs §7 decided.
 5. **Live** — `GET /events`: the same `ndjson::Sink` output, framed as SSE, with `id:` and
    `Last-Event-ID`. The test asserts the frames parse as NDJSON and that the terminal still
-   sees the same turn.
+   sees the same turn. — **done**, with four things that were not in the plan and are worth
+   knowing: `/session` had to report a **cursor** (`X-Flint-Event-Seq`) because the file and
+   the stream would otherwise double-count or lose a frame depending on timing; the stream is
+   opened *before* the file is read and the server subscribes before it sends headers, so
+   nothing slips between them; a reconnect is served from the last 512 frames and gets
+   `event: reset` when that is not enough; and the current status is sent once on connect as
+   a named event, because a page opened in the middle of a turn has missed every status frame
+   and there is no cursor for "now".
 
    **This step and the `status` event are one commit, and the reason is worth knowing before
    starting.** The browser needs to be told what the turn is waiting for — without it, a
