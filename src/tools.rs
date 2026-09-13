@@ -439,7 +439,7 @@ fn default_args_for(program: &str) -> Vec<String> {
 
 /// Is `program` runnable? Bare names are searched on `PATH`; anything with a
 /// path separator is checked directly.
-fn command_exists(program: &str) -> bool {
+pub(crate) fn command_exists(program: &str) -> bool {
     let path = std::path::Path::new(program);
     if path.components().count() > 1 {
         return path.is_file();

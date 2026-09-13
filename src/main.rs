@@ -10,7 +10,10 @@
 //! The `exec` mode is the last line of defence: when every provider is
 //! unreachable, flint still runs commands.
 
-use flint::{agent, config, context, display, event, ndjson, provider, search, session, term, tools, web};
+use flint::{
+    agent, config, context, display, engine, event, ndjson, provider, search, session, term, tools,
+    web,
+};
 
 use anyhow::{anyhow, Context, Result};
 use display::{Printer, BOLD, CHATTY, DIM, GREEN, NORMAL, QUIET, RED, RESET, YELLOW};
@@ -500,6 +503,20 @@ async fn real_main() -> Result<i32> {
         }));
     }
 
+    // ---- the engine, if this provider needs one running ----
+    //
+    // Here rather than at the first request, because the wait is the honest part: a local
+    // model takes tens of seconds to load, and a flint that accepted a prompt and then sat
+    // there would look broken. A failure is a warning and not a stop, for the same reason a
+    // missing API key is not one: the run may be about to fix the thing that is wrong.
+    if let Err(e) = engine::ensure_up(&provider_cfg, &cfg, |line| {
+        printer.term().line(format_args!("{}", printer.dim(&line)))
+    })
+    .await
+    {
+        printer.term().line(format_args!("{} {e:#}", printer.style(YELLOW, "warning:")));
+    }
+
     // ---- the browser window, if it was asked for ----
     //
     // Started after the terminal exists, so the URL lands in the transcript where a person
@@ -901,6 +918,10 @@ async fn confirm(reader: &InputReader, label: &str, default: bool) -> Result<boo
 async fn provider_wizard(
     cfg: &mut config::Config,
     agent: &agent::Agent,
+    // Which provider is in force, so that switching to the one just configured also leaves
+    // the one it replaces. Carried in rather than read off the agent, which knows its model
+    // and not which entry it came from.
+    from: Option<&str>,
     editing: Option<&str>,
     printer: &Printer<'_>,
     reader: &InputReader,
@@ -1003,6 +1024,13 @@ async fn provider_wizard(
         } else {
             Some(env_name)
         },
+        // The engine commands are not something the wizard asks about — it is a form for
+        // reaching an endpoint, and these are about running a program. Carrier over from the
+        // provider being edited, so correcting a URL does not quietly stop flint from
+        // starting the engine that URL depends on.
+        start: existing.as_ref().and_then(|e| e.start.clone()),
+        stop: existing.as_ref().and_then(|e| e.stop.clone()),
+        start_timeout_secs: existing.as_ref().map(|e| e.start_timeout_secs).unwrap_or(0),
         // Inherited from the config's shell proxy, which is what a user setting up a
         // provider behind one has already told us.
         proxy: cfg.proxy.clone(),
@@ -1030,7 +1058,7 @@ async fn provider_wizard(
     if confirm(reader, &format!("switch to '{name}' now?"), true).await? {
         cfg.default_provider = name.clone();
         cfg.save()?;
-        return switch_provider(cfg, &name, agent.cwd(), agent.readonly(), printer.term(), printer.pal);
+        return switch_provider(cfg, from, &name, agent.cwd(), agent.readonly(), printer.term(), printer.pal).await;
     }
     Ok(Flow::Continue)
 }
@@ -1040,8 +1068,13 @@ async fn provider_wizard(
 /// `cwd` and `readonly` are carried over from the running agent rather than
 /// re-derived, so switching provider does not silently change where commands
 /// run or drop the read-only guard.
-fn switch_provider(
+///
+/// This is also where engines are dealt with, because a switch is the only moment either
+/// half of that makes sense: arriving somewhere is a chance to start what is not running,
+/// and leaving is a chance to free what is. See [`engine`].
+async fn switch_provider(
     cfg: &config::Config,
+    from: Option<&str>,
     name: &str,
     cwd: &std::path::Path,
     readonly: bool,
@@ -1057,6 +1090,35 @@ fn switch_provider(
         .provider(name)
         .ok_or_else(|| anyhow!("unknown provider '{name}'"))?
         .clone();
+
+    // The order is the point: the engine being moved *to* comes up before the one being
+    // moved *from* goes down. The other way round is tidier about memory and much worse
+    // about failure -- a start that times out would leave the user with neither engine
+    // running and the old provider already stopped, which is a state they cannot get out of
+    // without reading this source file.
+    let says = |line: String| term.line(format_args!("{dim}{line}{reset}"));
+    if let Err(e) = engine::ensure_up(&target, cfg, says).await {
+        // Reported and not fatal: the provider the user asked for is still the provider they
+        // get, and they may well have started the engine themselves a moment ago. What must
+        // not happen is a switch that silently did nothing.
+        term.line(format_args!(
+            "{yellow}warning:{reset} {e:#}
+{dim}  switching anyway — the first message will \
+             be the thing that fails if the engine is not up.{reset}"
+        ));
+    }
+    if let Some(previous) = from.filter(|previous| *previous != name) {
+        if let Some(previous) = cfg.provider(previous) {
+            if let Err(e) = engine::shut_down(previous, cfg, |line| {
+                term.line(format_args!("{dim}{line}{reset}"))
+            })
+            .await
+            {
+                term.line(format_args!("{yellow}warning:{reset} {e:#}"));
+            }
+        }
+    }
+
     let provider = provider::Provider::new(target.clone())?;
     let writer = Some(session::SessionWriter::create(
         &config::sessions_dir(),
@@ -1169,7 +1231,10 @@ async fn handle_command(
                     ));
                 }
 
-                "add" => return provider_wizard(cfg, agent, None, printer, reader).await,
+                "add" => {
+                    return provider_wizard(cfg, agent, Some(&provider_cfg.name), None, printer, reader)
+                        .await
+                }
 
                 "edit" => {
                     if rest.is_empty() {
@@ -1178,7 +1243,7 @@ async fn handle_command(
                     if cfg.provider(rest).is_none() {
                         return Err(anyhow!("unknown provider '{rest}'"));
                     }
-                    return provider_wizard(cfg, agent, Some(rest), printer, reader).await;
+                    return provider_wizard(cfg, agent, Some(&provider_cfg.name), Some(rest), printer, reader).await;
                 }
 
                 "rm" | "remove" | "delete" => {
@@ -1207,7 +1272,7 @@ async fn handle_command(
                         printer.style(GREEN, "ok")
                     ));
                     if provider_cfg.name == rest {
-                        return switch_provider(cfg, &fallback, agent.cwd(), agent.readonly(), printer.term(), printer.pal);
+                        return switch_provider(cfg, Some(&provider_cfg.name), &fallback, agent.cwd(), agent.readonly(), printer.term(), printer.pal).await;
                     }
                 }
 
@@ -1228,7 +1293,7 @@ async fn handle_command(
                         target.name,
                         config::config_path().display()
                     ));
-                    return switch_provider(cfg, &target.name, agent.cwd(), agent.readonly(), printer.term(), printer.pal);
+                    return switch_provider(cfg, Some(&provider_cfg.name), &target.name, agent.cwd(), agent.readonly(), printer.term(), printer.pal).await;
                 }
 
                 _ => {
@@ -1238,27 +1303,25 @@ async fn handle_command(
                             anyhow!("unknown provider '{first}' (try /provider add or /provider)")
                         })?
                         .clone();
-                    let provider = provider::Provider::new(target.clone())?;
-                    let writer = Some(session::SessionWriter::create(
-                        &config::sessions_dir(),
-                        agent.cwd(),
-                        &target.name,
-                        &target.model,
-                    )?);
-                    let new_agent = agent::Agent::new(
-                        cfg,
-                        provider,
-                        agent.readonly(),
-                        agent.cwd().clone(),
-                        writer,
-                    );
+                    // Switching here makes it the default for the next run, which is what a
+                    // person means by typing it.
                     cfg.default_provider = target.name.clone();
                     cfg.save()?;
-                    printer.term().line(format_args!(
-                        "switched to {bold}{}{reset} ({})",
-                        target.name, target.model
-                    ));
-                    return Ok(Flow::NewAgent(new_agent, target));
+                    // And then the switch itself is `switch_provider`'s job — the engines
+                    // included. This branch used to build the agent inline, with its own
+                    // copy of four lines that had to stay in step with that function; the
+                    // copy is why `/provider <name>` was the one path that did not start or
+                    // stop an engine, which is the path everybody uses.
+                    return switch_provider(
+                        cfg,
+                        Some(&provider_cfg.name),
+                        &target.name,
+                        agent.cwd(),
+                        agent.readonly(),
+                        printer.term(),
+                        printer.pal,
+                    )
+                    .await;
                 }
             }
         }

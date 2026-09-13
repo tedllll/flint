@@ -1115,3 +1115,75 @@ fn a_port_without_web_is_refused() {
         "the error must say what is missing: {text}"
     );
 }
+
+/// Switching provider must actually run the engine's start command.
+///
+/// This is the test for a bug that shipped and was found by hand: `/provider <name>` built
+/// its agent inline instead of going through `switch_provider`, so the engine handling —
+/// which lives there — was skipped on the one path everybody uses. `/provider key` and
+/// `/provider rm` did start engines, which is exactly the kind of inconsistency a second
+/// copy of four lines produces.
+///
+/// The start command leaves a file, and the endpoint is a port nothing is listening on, so
+/// the wait ends in a second rather than in a model load.
+#[cfg(debug_assertions)]
+#[test]
+fn switching_provider_runs_the_engines_start_command() {
+    let home = test_home("engine-switch", "http://127.0.0.1:1/v1");
+    let marker = home.join("the-engine-was-started");
+    std::fs::write(
+        home.join("config.toml"),
+        format!(
+            "default_provider = \"stub\"\n\
+             shell = \"sh\"\n\
+             shell_args = [\"-c\"]\n\
+             \n\
+             [[providers]]\n\
+             name = \"stub\"\n\
+             base_url = \"http://127.0.0.1:1/v1\"\n\
+             api_key = \"x\"\n\
+             model = \"stub\"\n\
+             \n\
+             [[providers]]\n\
+             name = \"engine\"\n\
+             base_url = \"http://127.0.0.1:9/v1\"\n\
+             api_key = \"x\"\n\
+             model = \"something\"\n\
+             start = \"touch {marker}\"\n\
+             start_timeout_secs = 1\n",
+            marker = marker.display()
+        ),
+    )
+    .expect("config");
+
+    let mut child = binary()
+        .env("FLINT_HOME", &home)
+        .env("FLINT_TERM_CAPTURE", "1")
+        .env("FLINT_TERM_SIZE", "120x24")
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to run flint");
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().expect("no stdin handle");
+        stdin
+            .write_all(b"/provider engine\n/exit\n")
+            .expect("failed to write stdin");
+    }
+    let out = child.wait_with_output().expect("flint did not finish");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+
+    assert!(
+        text.contains("switched to engine"),
+        "the switch itself did not happen, so this proves nothing: {text:?}"
+    );
+    assert!(
+        marker.exists(),
+        "the start command never ran on `/provider <name>`: {text:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}

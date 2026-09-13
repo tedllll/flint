@@ -9,6 +9,7 @@ pub mod context;
 pub mod ndjson;
 pub mod patch;
 pub mod display;
+pub mod engine;
 pub mod event;
 pub mod fetch;
 pub mod provider;

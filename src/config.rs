@@ -30,6 +30,29 @@ pub struct ProviderConfig {
     /// Read the key from this environment variable instead of `api_key`.
     #[serde(default)]
     pub api_key_env: Option<String>,
+    /// A command that starts this provider's engine, run when flint needs the provider and
+    /// nothing is answering at `base_url`.
+    ///
+    /// For a local model server and nothing else. An endpoint on the internet is either
+    /// reachable or not, and starting it is not this machine's business; a local one is a
+    /// program that has to be running before the endpoint exists at all. See
+    /// [`crate::engine`] for why flint runs a command instead of owning a process.
+    #[serde(default)]
+    pub start: Option<String>,
+
+    /// A command that stops it, run when a switch leaves this provider behind.
+    ///
+    /// Absent means the engine is left running: a model somebody else is also using — an
+    /// ollama serving a GUI, say — must not be shut down because a conversation moved on.
+    #[serde(default)]
+    pub stop: Option<String>,
+
+    /// How long to wait for the endpoint after `start`. Zero means the default.
+    ///
+    /// Worth raising for a large model on a cold disk, where the honest answer is minutes.
+    #[serde(default)]
+    pub start_timeout_secs: u64,
+
     /// Proxy for reaching *this provider*, e.g. `socks5h://127.0.0.1:10808` or
     /// `http://127.0.0.1:10808`.
     ///
@@ -329,6 +352,9 @@ impl Default for Config {
                     model: "deepseek-chat".to_string(),
                     models: vec!["deepseek-chat".to_string(), "deepseek-reasoner".to_string()],
                     api_key_env: Some("DEEPSEEK_API_KEY".to_string()),
+                    start: None,
+                    stop: None,
+                    start_timeout_secs: 0,
                     proxy: None,
                 },
                 // A local fallback costs nothing to configure and still works
@@ -339,6 +365,9 @@ impl Default for Config {
                     api_key: "ollama".to_string(),
                     model: "qwen2.5-coder:7b".to_string(),
                     models: Vec::new(),
+                    start: None,
+                    stop: None,
+                    start_timeout_secs: 0,
                     api_key_env: None,
                     proxy: None,
                 },

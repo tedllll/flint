@@ -213,6 +213,9 @@ impl Provider {
             model: String::new(),
             models: Vec::new(),
             api_key_env: None,
+            start: None,
+            stop: None,
+            start_timeout_secs: 0,
             proxy: None,
         }
     }

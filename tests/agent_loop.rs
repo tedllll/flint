@@ -63,6 +63,9 @@ fn test_config(base_url: &str) -> Config {
         search: None,
         providers: vec![ProviderConfig {
             name: "stub".to_string(),
+            start: None,
+            stop: None,
+            start_timeout_secs: 0,
             base_url: base_url.to_string(),
             api_key: "test".to_string(),
             model: "stub-model".to_string(),

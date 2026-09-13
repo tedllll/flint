@@ -469,6 +469,9 @@ mod tests {
             model: "some-model".to_string(),
             models: Vec::new(),
             api_key_env: env.map(str::to_string),
+            start: None,
+            stop: None,
+            start_timeout_secs: 0,
             proxy: None,
         }
     }
