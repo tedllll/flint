@@ -530,7 +530,11 @@ async fn real_main() -> Result<i32> {
     // holds it and can bind it part-way through, and a run started without `--web` differs
     // only in that nobody has asked yet.
     let mut viewer = if args.web {
-        Some(web::Viewer::asked(args.port.unwrap_or(0), agent.session_path()))
+        Some(web::Viewer::asked(
+            args.port.unwrap_or(0),
+            agent.session_path(),
+            browser_input(&reader, args.prompt.is_none()),
+        ))
     } else {
         None
     };
@@ -606,6 +610,28 @@ async fn real_main() -> Result<i32> {
 struct InputReader {
     /// Present only when there is a terminal to answer questions on.
     req_tx: Option<tokio::sync::mpsc::UnboundedSender<InputReq>>,
+    /// The same sender the reader thread writes to.
+    ///
+    /// Kept so that the browser can be a **second producer** on the prompt rather than a
+    /// parallel path into the agent: a line typed into the page arrives here and becomes
+    /// `InputMsg::Line`, which is the event a keystroke produces. That is what makes every
+    /// slash command work from the browser without the browser knowing what one is, and what
+    /// makes a message sent while the model is running steer the turn the way typing does.
+    line_tx: tokio::sync::mpsc::UnboundedSender<InputMsg>,
+    /// Whether the source of input has finished -- Ctrl-D, or a pipe closing.
+    ///
+    /// Recorded rather than inferred, and the reason is a bug this caused. `run_turn`
+    /// deliberately **consumes and drops** a `Quit` that arrives while a turn is running, since
+    /// a pipe closing is not a person asking to stop. So the end of input is a fact that can be
+    /// observed exactly once and then lost.
+    ///
+    /// That was invisible while the sender lived and died with the reader thread: the channel
+    /// closed on its own and the REPL left on `Disconnected`. The browser put a second producer
+    /// on this channel, which keeps it open for the life of the process -- and then a dropped
+    /// `Quit` meant a turn that failed with a closed pipe behind it left flint waiting forever
+    /// for input that could not come. Measured with `printf 'a\n/exit\n' | flint` against a dead
+    /// endpoint: the error printed and the process never exited.
+    ended: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Debug)]
@@ -630,6 +656,11 @@ impl InputReader {
         term: std::sync::Arc<term::Term>,
     ) -> (Self, tokio::sync::mpsc::UnboundedReceiver<InputMsg>) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<InputMsg>();
+        // Cloned before the thread takes `tx`: this is the handle the browser writes through,
+        // and both producers have to be the same channel for a browser line to *be* a keystroke.
+        let line_tx = tx.clone();
+        let ended = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ended_in_thread = std::sync::Arc::clone(&ended);
         let (req_tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel::<InputReq>();
         std::thread::Builder::new()
             .name("flint-keys".to_string())
@@ -649,6 +680,10 @@ impl InputReader {
 
                     let Ok(ev) = crossterm::event::read() else {
                         let _ = tx.send(InputMsg::Quit);
+                        // After the message, never before: the REPL treats "empty and ended"
+                        // as the end of input, and a flag set first could let it reach that
+                        // conclusion while this `Quit` was still in flight.
+                        ended_in_thread.store(true, std::sync::atomic::Ordering::SeqCst);
                         return;
                     };
                     match term.on_event(ev) {
@@ -668,6 +703,7 @@ impl InputReader {
                                 let _ = reply.send(String::new());
                             }
                             let _ = tx.send(InputMsg::Quit);
+                            ended_in_thread.store(true, std::sync::atomic::Ordering::SeqCst);
                             return;
                         }
                         term::Key::Interrupt => {
@@ -688,6 +724,8 @@ impl InputReader {
         (
             InputReader {
                 req_tx: Some(req_tx),
+                line_tx,
+                ended,
             },
             rx,
         )
@@ -706,6 +744,9 @@ impl InputReader {
     /// No terminal: read lines directly.
     fn from_stdin() -> (Self, tokio::sync::mpsc::UnboundedReceiver<InputMsg>) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<InputMsg>();
+        let line_tx = tx.clone();
+        let ended = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ended_in_thread = std::sync::Arc::clone(&ended);
         std::thread::Builder::new()
             .name("flint-stdin".to_string())
             .spawn(move || {
@@ -718,9 +759,17 @@ impl InputReader {
                     }
                 }
                 let _ = tx.send(InputMsg::Quit);
+                ended_in_thread.store(true, std::sync::atomic::Ordering::SeqCst);
             })
             .ok();
-        (InputReader { req_tx: None }, rx)
+        (
+            InputReader {
+                req_tx: None,
+                line_tx,
+                ended,
+            },
+            rx,
+        )
     }
 }
 
@@ -729,12 +778,27 @@ impl InputReader {
 /// Polling rather than `recv().await` because callers hold `&InputReader` (to ask
 /// wizard questions) while reading lines. A 2 ms tick is far below perception and
 /// costs nothing next to a network round trip.
-async fn next_line(rx: &mut tokio::sync::mpsc::UnboundedReceiver<InputMsg>) -> Option<InputMsg> {
+///
+/// Empty is not the same as over, and that distinction is the whole of this function. It used
+/// to be the same by accident: the sender belonged to the reader thread, so when the input ran
+/// out the channel closed and `Disconnected` said so. The browser is now a second producer on
+/// this channel, which keeps it open for the life of the process, so "there will never be
+/// another line" has to be asked separately -- see `InputReader::ended`.
+async fn next_line(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<InputMsg>,
+    reader: &InputReader,
+) -> Option<InputMsg> {
     loop {
         match rx.try_recv() {
             Ok(msg) => return Some(msg),
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return None,
             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                // Only when the channel is *empty*, so a `Quit` still queued behind a finished
+                // reader is drained before this gives up. Losing it would be harmless -- the
+                // answer is the same -- but draining keeps the two paths identical.
+                if reader.ended.load(std::sync::atomic::Ordering::SeqCst) {
+                    return None;
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(2)).await;
             }
         }
@@ -791,21 +855,33 @@ async fn interactive(
     }
     printer.term().blank();
 
+    // A line a turn handed back rather than answering. See `for_the_repl`.
+    let mut hand_back: Option<String> = None;
+
     loop {
         // The prompt lives on the terminal's reserved row, so there is nothing to
         // print here: the key thread redraws it after every keystroke.
         printer.term().prompt();
 
-        let Some(msg) = next_line(input_rx).await else {
-            // The reader thread ends at EOF (Ctrl-D, or piped input done).
-            break;
-        };
-        let input = match msg {
-            InputMsg::Quit => break,
-            // Nothing is running once the prompt is back, so there is nothing to stop
-            // and no reason to take the process with it.
-            InputMsg::Interrupt => continue,
-            InputMsg::Line(line) => line.trim().to_string(),
+        // A line the turn could not use -- a command typed or clicked while the model was
+        // working. It is handled here, next time round the loop, as if it had just been typed:
+        // `run_turn` cannot run a command, and this is the only place that knows what a typed
+        // line means.
+        let input = match hand_back.take() {
+            Some(line) => line.trim().to_string(),
+            None => {
+                let Some(msg) = next_line(input_rx, reader).await else {
+                    // The reader thread ends at EOF (Ctrl-D, or piped input done).
+                    break;
+                };
+                match msg {
+                    InputMsg::Quit => break,
+                    // Nothing is running once the prompt is back, so there is nothing to stop
+                    // and no reason to take the process with it.
+                    InputMsg::Interrupt => continue,
+                    InputMsg::Line(line) => line.trim().to_string(),
+                }
+            }
         };
         if input.is_empty() {
             continue;
@@ -874,7 +950,9 @@ async fn interactive(
             viewer.as_ref().map(web::Viewer::live),
         )
         .await {
-            Ok(()) => {}
+            // A command that arrived mid-turn: run it, rather than asking the model about it.
+            Ok(Some(line)) => hand_back = Some(line),
+            Ok(None) => {}
             Err(e) => {
                 printer.term().blank();
                 printer.term().line(format_args!("{} {e:#}", printer.style(RED, "error:")));
@@ -1015,6 +1093,53 @@ fn flag_at_the_prompt(input: &str) -> Option<(String, String)> {
         _ => return None,
     };
     Some((command, why.to_string()))
+}
+
+/// Whether a line typed while the model is working is meant for the model at all.
+///
+/// `run_turn` is where a line arriving mid-turn is picked up, and it has no way to run anything:
+/// it takes the line and makes it the next prompt. So `/resume`, typed or clicked in the
+/// browser's sidebar, became a *message* to the model while a turn was running -- and the moment
+/// you want to look at another conversation is while one is churning. Measured against a slow
+/// stub: `/resume 1` went out as a prompt and `/session` never changed.
+///
+/// The three forms are the three the REPL itself treats as more than text, and they are listed
+/// here rather than inferred because this function and the REPL have to agree: a line this says
+/// is for the REPL must be one the REPL will actually act on, or it would be swallowed.
+fn for_the_repl(line: &str) -> bool {
+    line.starts_with('/') || line.starts_with('!') || flag_at_the_prompt(line).is_some()
+}
+
+/// The channel a browser message arrives on, adapted into the one the keyboard feeds.
+///
+/// **This is the whole of what makes the page a composer.** A line typed into the browser
+/// becomes `InputMsg::Line`, which is the event a keystroke produces, so it arrives at the
+/// prompt, it steers a turn that is already running, and every slash command works from the
+/// page without the page knowing that slash commands exist. `/resume 3` from the sidebar is
+/// that and nothing more: the sidebar sends text, the REPL decides what text starting with `/`
+/// means, and the browser is not a second place that decides.
+///
+/// `Some` only when there is a prompt to type into. A one-shot `-p` run has an input channel it
+/// never reads -- `can_steer` is false -- so a message posted to it would be accepted and then
+/// silently dropped, which is the failure this project keeps designing against. `None` makes
+/// `POST /message` answer `409` instead.
+fn browser_input(
+    reader: &InputReader,
+    has_prompt: bool,
+) -> Option<tokio::sync::mpsc::UnboundedSender<String>> {
+    if !has_prompt {
+        return None;
+    }
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let line_tx = reader.line_tx.clone();
+    tokio::spawn(async move {
+        while let Some(text) = rx.recv().await {
+            if line_tx.send(InputMsg::Line(text)).is_err() {
+                break;
+            }
+        }
+    });
+    Some(tx)
 }
 
 /// Ask a question and wait for a line.///
@@ -1364,9 +1489,9 @@ async fn handle_command(
                     }
                 },
             };
-            let asked = viewer.get_or_insert_with(|| {
-                web::Viewer::asked(0, agent.session_path())
-            });
+            let browser = browser_input(reader, true);
+            let asked = viewer
+                .get_or_insert_with(|| web::Viewer::asked(0, agent.session_path(), browser));
             match asked.open(port).await {
                 Ok(url) => announce_view(printer, &url),
                 // Not fatal, unlike `--web`: there the view was the whole point of the run,
@@ -2164,12 +2289,25 @@ async fn run_turn(
     // The browser's feed, when `--web` is running. Everything the turn produces is copied
     // here as well as drawn on the terminal, so the two cannot describe different runs.
     live: Option<&web::Live>,
-) -> Result<()> {
+) -> Result<Option<String>> {
     #[allow(unused_variables)]
     let Palette { dim, bold, red, green, cyan, yellow, reset } = printer.pal;
     ensure_usable(provider_cfg)?;
 
     let mut current = input.to_string();
+
+    // Tell the browser what was asked, before the answer starts arriving.
+    //
+    // `turn.started` is the line `--json` already writes for exactly this, and the page already
+    // renders it as the user's turn. Until this existed the page learned about a message only by
+    // re-reading the session file, so a question typed into the *terminal* was invisible to a
+    // browser watching the same conversation -- and a question typed into the browser would have
+    // been invisible to the page that sent it, which is the shape of bug a composer must not
+    // have. Pushed here rather than at each call site because every turn passes through here,
+    // including the one a steering line starts.
+    if let Some(live) = live {
+        live.line(ndjson::turn_started(&current));
+    }
 
     // Say something before the request goes out, not only after a tool starts.
     //
@@ -2208,7 +2346,7 @@ async fn run_turn(
         // The turn and its output closure are confined to this scope: the future
         // holds a mutable borrow of `buffer`, and that borrow has to end before
         // the code below can read `buffer` to decide what to flush.
-        let (result, steering) = {
+        let (result, steering, hand_back) = {
             let mut turn = Box::pin(agent.run(&current, |event| {
                 // A phase change is announced *before* the thing that caused it, so a reader
                 // of the stream sees the two in the order the terminal does: `writing the
@@ -2336,6 +2474,9 @@ async fn run_turn(
             // next_line: the stream is woken by the network, the input by the tick.
             let mut result = None;
             let mut steering = None;
+            // A line the REPL has to deal with. Kept apart from `steering`, which is a line the
+            // model is about to be asked: one of them becomes a prompt and the other must not.
+            let mut hand_back = None;
             let mut interrupted = false;
             loop {
                 // Only a submitted line interrupts. `Quit` here means stdin ended
@@ -2348,7 +2489,11 @@ async fn run_turn(
                     Err(tokio::sync::mpsc::error::TryRecvError::Empty)
                 } {
                     Ok(InputMsg::Line(line)) => {
-                        steering = Some(line);
+                        if for_the_repl(&line) {
+                            hand_back = Some(line);
+                        } else {
+                            steering = Some(line);
+                        }
                         break;
                     }
                     // A bare Ctrl-C stops the turn but keeps the process: the session is
@@ -2389,8 +2534,16 @@ async fn run_turn(
                     .term()
                     .notice("stopped -- the model is not running any more");
             }
-            (result, steering)
+            (result, steering, hand_back)
         };
+
+        // The line was not for the model, so the turn stops here rather than answering it. The
+        // request in flight is dropped, which is what `Interrupt` does too -- a command is not a
+        // reason to keep paying for an answer nobody is waiting for any more.
+        if let Some(line) = hand_back {
+            status_done(printer, live);
+            return Ok(Some(line));
+        }
 
         // Whatever happened, nothing is running now: leaving a stale clock on the strip
         // would be worse than showing none.
@@ -2419,6 +2572,9 @@ async fn run_turn(
                 }
                 printer.interrupted();
                 printer.term().line(format_args!("{bold}> {reset}{}", printer.dim(&text)));
+                if let Some(live) = live {
+                    live.line(ndjson::turn_started(&text));
+                }
                 current = text;
             }
         }
@@ -2438,7 +2594,8 @@ async fn run_turn(
             )
         ));
     }
-    Ok(())
+    // `None`: everything the turn was given, it used.
+    Ok(None)
 }
 
 /// `!cmd` escape inside the REPL and the `exec` subcommand.

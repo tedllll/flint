@@ -121,3 +121,62 @@ fn the_view_understands_both_vocabularies() {
         );
     }
 }
+
+/// The composer posts the token in a header, never in a query string.
+///
+/// §4.2 again, and it matters more here than anywhere: `/message` is the route that can make
+/// flint do something. A token in a query string ends up in history, in a log and in any link
+/// that gets shared, and `?token=` is accepted on `/` *alone* precisely so that pasting the URL
+/// works without every other request carrying a credential in its address.
+#[test]
+fn the_composer_keeps_the_token_out_of_the_url() {
+    let html = view();
+    assert!(
+        html.contains("\"/message\""),
+        "the page must post messages to the route that exists"
+    );
+    assert!(
+        html.contains("\"/sessions\""),
+        "the sidebar must read the list from the route that exists"
+    );
+    // Both go through the one helper that builds the header, and neither appends a query.
+    for route in ["/message?", "/sessions?", "/events?token", "/session?token"] {
+        assert!(
+            !html.contains(route),
+            "{route} would put the token in an address bar, a log and a Referer"
+        );
+    }
+}
+
+/// A message that was refused must not be shown as if it had been sent, and a message typed
+/// while an earlier one is in flight must not be erased by it.
+///
+/// One line, two ways to get it wrong, and both were found by driving a real browser rather
+/// than by reading this file. The page cannot append what it typed and call that the
+/// transcript: the transcript is what flint was *told*, and the only thing that can say whether
+/// it was told is the reply. Nor can it clear the box on a timer of its own -- two submits can
+/// overlap, because typing again during the round trip is ordinary, and the earlier clear then
+/// wipes the later text. Measured: send, type again within 150 ms, send; the second message was
+/// written and then erased before it could be read.
+#[test]
+fn the_composer_is_honest_about_what_it_sent() {
+    let html = view();
+    assert!(
+        html.contains("not sent:"),
+        "a refused message must be reported, not silently dropped"
+    );
+    let handler = html
+        .split("addEventListener(\"submit\"")
+        .nth(1)
+        .expect("the form must have a submit handler");
+    let cleared = handler
+        .find("message.value = \"\"")
+        .expect("the input must be cleared somewhere");
+    let checked = handler
+        .find("await sendText(text) && message.value === text")
+        .expect("the clear must be conditional on acceptance *and* on the box still holding it");
+    assert!(
+        checked < cleared,
+        "the input is cleared without checking what came back"
+    );
+}

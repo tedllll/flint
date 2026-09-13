@@ -7,8 +7,8 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 311 passing (226 lib, 28
-`agent_loop`, 26 `cli_output`, 4 `json_output`, 4 `search_tool`, 18 `term_capture`, 5
+As of the commit that carries this file, `cargo test` is 326 passing (237 lib, 28
+`agent_loop`, 28 `cli_output`, 4 `json_output`, 4 `search_tool`, 18 `term_capture`, 7
 `web_view`), `cargo clippy --all-targets` is silent, and both `node
 scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
 
@@ -27,6 +27,41 @@ The binary is held open by any running `flint`, so close those before replacing 
 `docs/windows.md` is the field notes for the Windows terminal.
 
 ## What was just done
+
+**L3: the browser page is a composer, with a sidebar of conversations.** This is the last of
+`docs/web-mode.md` §9, and it was built against a real browser rather than reasoned about —
+which is what turned up three defects that no amount of reading the source would have shown.
+All three are recorded in that document's §11; the two that mattered:
+
+- **A sidebar click during a turn did nothing.** `/resume 3` went up the message route, joined
+  the channel the keyboard feeds, and `run_turn` — which picks a mid-turn line up to make it the
+  next *prompt* and has no way to run anything — handed it to the model. The conversation did
+  not switch. The moment you want another conversation is while one is churning, so this was the
+  ordinary path, not a corner. A line that is a command is now handed back to the REPL
+  (`for_the_repl`, and `run_turn` returns `Option<String>`), because the REPL is the only place
+  that knows what a typed line means.
+- **The status bar sat on top of the composer.** `position: fixed` put it over the input and the
+  hint, so the bottom two lines of the page were unreadable exactly while a turn was running —
+  which is when the status line is showing. It is the second grid row now.
+
+**The shape of it.** `POST /message` carries *text* and does not interpret it: the page has no
+idea what `/resume` is, so a slash command from the sidebar works without the browser being a
+second place that decides what a typed line means. `GET /sessions` goes through `session::list`,
+the same function `resolve_session` uses, so the numbers in the sidebar *are* the numbers
+`/resume` accepts. One `Live::line` push of `turn.started` at the top of `run_turn` is what makes
+a question visible to a watching browser wherever it was typed — before that, a message typed in
+the *terminal* never appeared in the page until a reload.
+
+**And the end of input had to become a fact rather than an inference.** `run_turn` deliberately
+*consumes and drops* a `Quit` that arrives mid-turn, because a pipe closing is not a person
+asking to stop. That was invisible while the sender lived and died with the reader thread — the
+channel closed by itself and the REPL left on `Disconnected`. The browser is a second producer on
+that channel, which keeps it open for the life of the process, and a dropped `Quit` then meant
+`printf 'a\n/exit\n' | flint` against a dead endpoint printed its error and **waited forever**.
+`InputReader::ended` records the fact; `next_line` consults it, and only when the channel is
+empty. Regression test: `the_end_of_input_ends_the_repl_even_when_a_turn_consumed_the_quit`,
+which fails on a 30-second deadline when the check is removed.
+
 
 **`--web` now opens the page — that was the actual complaint.** The report was "I sent `--web`
 and no page opened", and the first attempt at it answered a different question: it made the flag
@@ -241,6 +276,17 @@ Six commits, all pushed. The reasoning is in each commit message; this is the in
   being told something untrue about the tool.
 
 ## Known unfinished
+
+**A terminal that goes away takes a core with it.** When flint's pty is closed without a
+`SIGHUP` -- a terminal emulator that crashes, a `close(master)` from the other end -- the process
+spins at 100% of a core forever and never exits. The spin is inside `crossterm`, not here:
+`crossterm::event::read()` is `try_read(None)`, whose loop condition
+(`timeout.leftover().map_or(true, |t| !t.is_zero())`) is always true, and the fd reports `POLLHUP`
+without `POLLIN`, which none of its three branches handles -- so `poll` returns immediately,
+nothing is consumed, and it polls again. `src/event/source/unix/tty.rs` in crossterm 0.29 is the
+place to read. Measured on both this build and the one before it (100.3% and 100.7%), so it
+predates the browser work. A fix means driving the loop from `event::poll(timeout)` and checking
+whether the terminal is still there, which is a change to the key thread rather than to a flag.
 
 **The Windows half of the tooling plan is still unwritten** — `pwsh` (step 3), the
 process-tree kill and the child output encoding (step 4), and the PowerShell facts in the

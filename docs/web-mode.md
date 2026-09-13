@@ -10,11 +10,11 @@ second mode.** flint starts exactly as it does now and additionally serves a vie
 process on loopback. The terminal keeps working. The browser is a client of the process, not
 of a file, and closing the tab loses nothing.
 
-**Steps 2 to 5 of §9 are implemented** — the static viewer, the `--web` listener with `GET /`,
-and the two data routes `GET /session` and `GET /events` — and §7 is now decided. Step 6
-(`POST /message`) is not: **the page is a viewer and has no input box**, so something typed into
-a browser has nowhere to go and the terminal is still the only way in. §11 records what has been
-measured in a browser versus what has not. The order at the end is the plan.
+**All of §9 is implemented.** The static viewer, the `--web` listener with `GET /`, the two
+data routes `GET /session` and `GET /events`, and step 6 — `GET /sessions` and `POST /message`,
+which is what makes the page a **composer** and gives it a sidebar. §11 records what has been
+measured in a browser versus what has not. What is left is not a level but a polish list: §8's
+"not doing" is still not being done.
 
 The token goes in two different places, and the difference is deliberate: `?token=` is accepted
 on `/` alone, because that is the URL `--web` prints and the only one a person pastes into an
@@ -91,7 +91,7 @@ Four things in the current tree are most of the feature. None of them was writte
 | **L0** | `flint -p "..." --json \| jq` | nothing — **done** | No, but it is already scriptable |
 | **L1** | one static HTML file, a `.jsonl` dropped onto it | a text file in the repo — **done** | **No.** It can compose a command for you to paste |
 | **L2** | `--web` or `/web`, live view | the listener of §6 — **done** | No — read-only |
-| **L3** | `POST /message` into the steering channel | one more route | Yes |
+| **L3** | `POST /message` into the steering channel | two more routes — **done** | Yes |
 
 **L2 has two ways in, and the second one is the one people use.** `--web` has to be decided
 before the run starts, and the moment you want a real renderer is thirty seconds into an answer
@@ -215,11 +215,27 @@ Four routes. No cookies, no HTTP/2, no TLS, no keep-alive, no streaming request 
 | `GET /` | the embedded HTML. Requires the token. |
 | `GET /session` | the session so far, as the session file's own lines (`NDJSON`) |
 | `GET /events` | SSE: replays from `Last-Event-ID`, then live events |
-| `POST /message` | one message from the browser, into the steering channel **(not built)** |
+| `POST /message` | one message from the browser, into the steering channel |
+| `GET /sessions` | the conversations `/resume` can reach, numbered the way `/resume` numbers them |
 
-The first three are implemented; the fourth is L3 and is the only route missing. `/session` and
-`/events` read the session path and the event feed through a shared handle, which is what lets
-`/new` and `/resume` move an open window to the conversation the terminal moved to.
+**All five are implemented.** `/session` and `/events` read the session path and the event feed
+through a shared handle, which is what lets `/new` and `/resume` move an open window to the
+conversation the terminal moved to. `/sessions` is the sidebar's source and goes through
+`session::list` — the same function `resolve_session` uses — so the numbers in the page *are*
+the numbers `/resume` accepts; a second listing that sorted differently would make every row
+point at the wrong conversation.
+
+**`POST /message` carries text and does not interpret it.** A line beginning `/` is a slash
+command because the REPL says so, `!` is a shell escape because the REPL says so, and neither
+fact is known to `web.rs`. So `/resume 3` from the sidebar works without the page knowing that
+slash commands exist, and there is exactly one place that decides what a typed line means.
+
+It is also the only route that can make something *happen*, and that is worth stating plainly:
+reachable at that port with that token, a caller can run the agent. What keeps it acceptable is
+unchanged from §4 — loopback only, the `Host` and `Origin` checks, and a token another origin's
+page cannot set, since a cross-origin form post cannot add a header and a `fetch` that could is
+refused by `Origin` before it arrives. The body is length-delimited, capped at a megabyte, and
+refused rather than half-read when it stops early.
 
 - **SSE framing is the existing format.** Each event goes out as `data: <one ndjson line>`
   followed by a blank line, and each carries `id: <session line number>`. A reconnect sends
@@ -335,7 +351,14 @@ In order, each one its own commit. Everything before step 4 is useful on its own
    - a `status` event carrying `restarted`, because a *rename* — `waiting for the model` to
      `writing the answer` thirty seconds in — must not reset the browser's clock to zero.
 6. **Input** — `POST /message` into `InputMsg::Line`, through the steering path, with its own
-   test: a message typed into the browser steers a turn that is already running.
+   test: a message typed into the browser steers a turn that is already running. — **done**,
+   and the interesting part was not the route. A line from the browser joins the channel the
+   keyboard feeds, so a message sent while the model is working steers the turn exactly as
+   typing does — and that turned out to be wrong for a *command*: `run_turn` picks a mid-turn
+   line up to make it the next prompt, and cannot run anything, so `/resume` from the sidebar
+   became a message to the model and the conversation did not change. A line that is a command
+   is now handed back to the REPL instead (`for_the_repl`), which is the only place that knows
+   what a typed line means.
 7. **Measure, and write it down here** — what a long turn does to the browser (backpressure,
    scroll position, a stream that grows to a megabyte), whether a reconnect after a sleep
    replays exactly once, and how the page behaves at 80 columns next to the terminal.
@@ -380,6 +403,26 @@ assertions. What follows is the part no test in this repository reaches.
 | The status line during a slow model call | **measured** | the browser shows `no response yet — the network or the endpoint may be stuck`, the terminal's own words |
 | A turn on a browser that then reloads mid-turn | **not measured** | |
 | What 80 columns looks like next to a terminal | **not measured** | |
+
+### L3 in a real browser — measured, and it found three defects
+
+Driven over the Chrome DevTools protocol against the real page and the real binary: fill the
+textarea, dispatch the events a person's typing produces, and then look at what flint received.
+
+| Claim | How | Result |
+|---|---|---|
+| The sidebar lists the conversations | `GET /sessions`, eight real sessions | numbered newest-first, the open one marked, labels ellipsised to one row each |
+| Enter sends | `keydown` Enter in the textarea | the message reached the transcript; the box cleared |
+| Clicking a row switches conversation | click on row 2 | `/resume 2` ran in the terminal, `/session` changed id, `current` moved to row 2 — **for free**, because the sidebar sends text and the REPL decides what text means |
+| A message typed into the page appears in the *terminal* | pty, side by side | `> hello from the browser`, then the answer |
+| What was asked arrives live on `/events` | a listener attached across a turn | `turn.started` with the prompt, then `message.delta` frames |
+| The input is not cleared when the send failed | `fetch` stubbed to 503 | the text stayed and the hint read `not sent: HTTP 503 down` |
+| A sidebar click while the model is working | a five-second stub | **a defect.** `/resume` was taken by `run_turn` as the next prompt: the conversation did not switch and the model was asked about it. Fixed — see §9 step 6 |
+| Two sends 150 ms apart | send, type again, send | **a defect.** The first one's clear-on-success wiped the second one's text. Fixed by clearing only when the box still holds what was sent |
+| The layout | screenshots at 1400×900 and 900×700 | **a defect.** `#status` was `position: fixed` and sat *on top of* the composer and the hint — the bottom two lines were unreadable exactly while a turn was running, which is when the status line shows. It is the second grid row now |
+
+The three defects are the reason this section exists. None of them is visible in the source: the
+first two need a turn to be in flight, and the third needs a window with a status line in it.
 
 ### `/web` from a real session — measured in a pty, on the release binary
 

@@ -57,7 +57,73 @@
   h1 { font-size: 15px; margin: 0 0 4px; font-weight: 600; }
   .meta { color: var(--dim); font-size: 12.5px; word-break: break-all; }
   .meta span { margin-right: 14px; white-space: nowrap; }
-  main { padding: 14px 18px 45vh; max-width: 110ch; }
+  /* Two columns: the conversations on the left, this one on the right. A grid rather than
+     floats or flex, because the sidebar has to be a fixed width and the transcript has to be
+     the rest -- and `minmax(0, 1fr)` is what stops a long unbroken line in the transcript from
+     widening the column and pushing the sidebar off screen. */
+  /* Rows as well as columns, and the status line is the second row rather than a fixed bar.
+     Measured: with `position: fixed` it sat *on top of* the composer and the hint under it, so
+     the last two lines of the page were unreadable exactly while a turn was running -- which is
+     when the status line is showing. A grid row cannot overlap anything. */
+  .app {
+    display: grid;
+    grid-template-columns: 250px minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+    height: 100vh;
+  }
+  .app.plain { grid-template-columns: minmax(0, 1fr); }
+  aside {
+    background: var(--panel); border-right: 1px solid var(--line);
+    overflow-y: auto; min-height: 0; padding: 12px 0 14px;
+  }
+  .side-head {
+    color: var(--dim); font-size: 11.5px; letter-spacing: .1em; text-transform: uppercase;
+    padding: 0 14px 8px;
+  }
+  #sessions { list-style: none; margin: 0; padding: 0; }
+  /* One row per conversation, and the label ellipsised rather than wrapped: a list of
+     conversations is for telling apart at a glance, and a row that wraps to two lines makes
+     the list half as long for no more information. The flex row with `min-width: 0` on the
+     label is what lets the ellipsis happen at all -- a flex item refuses to shrink below its
+     content otherwise, which is how the first version pushed the label onto its own line. */
+  #sessions li {
+    display: flex; align-items: baseline; gap: 7px;
+    padding: 6px 14px; cursor: pointer; border-left: 2px solid transparent;
+    font-size: 13.5px; line-height: 1.4;
+  }
+  #sessions li:hover { background: var(--bg); }
+  #sessions li.current { border-left-color: var(--user); background: var(--bg); }
+  #sessions li .n {
+    flex: 0 0 auto; min-width: 13px; text-align: right;
+    color: var(--dim); font-size: 12px;
+  }
+  #sessions li .label {
+    flex: 1 1 auto; min-width: 0; color: var(--fg);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #sessions li.current .label { color: var(--user); }
+  #sessions .none, #sessions .waiting { color: var(--dim); cursor: default; padding: 7px 14px; }
+  .pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  main { padding: 14px 18px 40px; max-width: 110ch; flex: 1; overflow-y: auto; }
+  /* The composer is a row rather than a fixed element: it sits under the transcript, so a
+     scrollbar belongs to the transcript and not to the whole window. */
+  #composer {
+    border-top: 1px solid var(--line); background: var(--bg);
+    display: flex; gap: 8px; align-items: flex-end; padding: 10px 18px;
+  }
+  #message {
+    flex: 1; resize: none; font: inherit; color: var(--fg); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px;
+    max-height: 30vh; min-height: 34px; overflow-y: auto;
+  }
+  #message:focus { outline: none; border-color: var(--user); }
+  #send {
+    font: inherit; color: var(--bg); background: var(--user); border: 0;
+    border-radius: 6px; padding: 7px 14px; cursor: pointer;
+  }
+  #send:disabled { background: var(--line); color: var(--dim); cursor: default; }
+  .hint { color: var(--dim); font-size: 12px; padding: 0 18px 8px; }
+  .hint.bad { color: var(--bad); }
   .drop {
     border: 1px dashed var(--line); border-radius: 8px;
     padding: 28px 18px; margin: 14px 18px; color: var(--dim); text-align: center;
@@ -93,19 +159,29 @@
   .notice.error { color: var(--bad); }
   .notice.damage { color: var(--bad); border-left: 2px solid var(--bad); padding-left: 8px; }
   #status {
-    position: fixed; left: 0; right: 0; bottom: 0; z-index: 2;
+    grid-column: 1 / -1;
     background: var(--panel); border-top: 1px solid var(--line);
     color: var(--dim); font-size: 13px; padding: 6px 18px;
   }
+  #status[hidden] { display: none; }
   #status b { color: var(--fg); font-weight: 600; }
   .empty { color: var(--dim); }
 </style>
 </head>
 <body>
-<header>
-  <h1 id="title">flint</h1>
-  <div class="meta" id="meta"></div>
-</header>
+<!-- The sidebar is hidden unless a running flint served this page: a dropped file has no list
+     of conversations to switch between, and showing an empty one would be a promise the page
+     cannot keep. -->
+<div class="app plain" id="app">
+  <aside id="sidebar" hidden>
+    <div class="side-head">conversations</div>
+    <ul id="sessions"><li class="waiting">reading the list…</li></ul>
+  </aside>
+  <div class="pane">
+    <header>
+      <h1 id="title">flint</h1>
+      <div class="meta" id="meta"></div>
+    </header>
 
 <div class="drop" id="drop">
   Drop a session <code>.jsonl</code> here — or
@@ -113,8 +189,20 @@
   <input type="file" id="file" accept=".jsonl,.json,application/jsonl,text/plain" hidden>
 </div>
 
-<main id="transcript"><p class="empty">Nothing loaded yet.</p></main>
-<div id="status" hidden></div>
+    <main id="transcript"><p class="empty">Nothing loaded yet.</p></main>
+    <!-- Typing goes through the same channel the keyboard does, so a slash command works from
+         here too -- `/resume 3` below is that and nothing more. Enter sends, Shift+Enter is a
+         newline, because a pasted block is a message the same way it is in the terminal. -->
+    <form id="composer" hidden>
+      <textarea id="message" rows="1" placeholder="say something to flint"></textarea>
+      <button id="send" type="submit">send</button>
+    </form>
+    <div class="hint" id="hint" hidden></div>
+  </div>
+  <!-- The second grid row: the terminal's status strip, in the same place the terminal puts it,
+       and out of the composer's way. -->
+  <div id="status" hidden></div>
+</div>
 
 <script>
 "use strict";
@@ -379,6 +467,47 @@ function tokenFromSearch(search) {
   return match ? match[1] : "";
 }
 
+/// The sidebar's items, out of what `GET /sessions` returned.
+///
+/// Pure and tested in Node, because the two things that can go wrong here are both silent: a
+/// number that is not the one `/resume` accepts, and a list that is rendered as if it were
+/// empty. Anything unexpected becomes an empty list rather than a throw -- the sidebar is not
+/// worth taking the page down for, and the transcript beside it is still readable.
+function sessionsFrom(text) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e) {
+    return [];
+  }
+  const list = parsed && parsed.sessions;
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter((s) => s && typeof s.n === "number" && typeof s.id === "string")
+    .map((s) => ({
+      n: s.n,
+      id: s.id,
+      label: typeof s.label === "string" && s.label ? s.label : "(empty)",
+      current: s.current === true,
+    }));
+}
+
+/// The body `POST /message` wants.
+///
+/// One place, so the request shape is stated once: a JSON object with the text under `text`,
+/// which is what the route reads and all it reads.
+function messageBody(text) {
+  return JSON.stringify({ text: text });
+}
+
+/// What the sidebar should send to open a conversation.
+///
+/// By *number*, which is the vocabulary `/sessions` prints and `/resume` accepts -- so the page
+/// does not have to know an id, a path, or anything about where sessions live.
+function resumeLine(n) {
+  return "/resume " + n;
+}
+
 /// Split an SSE buffer into the frames that are complete, and the tail still arriving.
 ///
 /// Pure, and tested in Node, because this is where a stream is most easily lost: a network
@@ -553,10 +682,122 @@ function paint(doc) {
 }
 
 // ---------------------------------------------------------------------------
-// Wiring. L1 only: a dropped file. `--web` feeds the same model from `/session`.
+// Wiring. L1: a dropped file. L2 and L3: `--web` feeds the same model from `/session` and
+// takes what is typed here back through `/message`.
 // ---------------------------------------------------------------------------
 
 const doc = newDoc();
+
+/// The conversations `/resume` can reach, as the process last described them.
+let sessions = [];
+
+/// Whether anything typed here can actually be sent. False for a page opened from disk, which
+/// has no listener to post to -- so the composer is simply not there rather than present and
+/// failing.
+let canSend = false;
+
+// ---------------------------------------------------------------------------
+// the sidebar
+// ---------------------------------------------------------------------------
+
+/// Repaint the left column.
+///
+/// A full render rather than a diff, for the same reason the transcript is: the list is tens of
+/// rows, and a renderer that is always a function of the state cannot drift from it.
+function paintSessions() {
+  const list = document.getElementById("sessions");
+  if (!list) return;
+  list.textContent = "";
+  if (!sessions.length) {
+    list.appendChild(el("li", "none", "no conversations yet"));
+    return;
+  }
+  for (const session of sessions) {
+    const item = el("li", session.current ? "current" : "");
+    item.appendChild(el("span", "n", String(session.n)));
+    item.appendChild(el("span", "label", session.label));
+    // The id is what the row *is*, for anything that wants to check itself against the file.
+    item.title = session.id;
+    item.addEventListener("click", () => openConversation(session));
+    list.appendChild(item);
+  }
+}
+
+/// Ask the process to switch conversations.
+///
+/// By sending `/resume <n>` up the message route, which means the page never touches a session
+/// file, never builds a path, and has no opinion about what "switching" is: it types what the
+/// user would have typed. Everything that follows -- the file, the terminal, the transcript,
+/// this sidebar -- is the process's own behaviour, and the page's only job is to draw the
+/// result when the `reset` frame says the document is stale.
+async function openConversation(session) {
+  if (session.current) return;
+  await sendText(resumeLine(session.n));
+}
+
+async function readSessions() {
+  if (!canSend) return;
+  try {
+    const response = await fetch("/sessions", { headers: authHeader() });
+    if (!response.ok) throw new Error("HTTP " + response.status);
+    sessions = sessionsFrom(await response.text());
+  } catch (e) {
+    // Keep whatever was last drawn. A sidebar that emptied itself because one request failed
+    // would look like the conversations had been deleted.
+    sessions = sessions.map((s) => s);
+    return;
+  }
+  paintSessions();
+}
+
+// ---------------------------------------------------------------------------
+// typing
+// ---------------------------------------------------------------------------
+
+/// Send one line to the prompt. Returns whether it was accepted.
+async function sendText(text) {
+  if (!canSend || !text.trim()) return false;
+  try {
+    const response = await fetch("/message", {
+      method: "POST",
+      headers: Object.assign({ "Content-Type": "application/json" }, authHeader()),
+      body: messageBody(text),
+    });
+    if (!response.ok) throw new Error("HTTP " + response.status + " " + (await response.text()).trim());
+    setHint("");
+    return true;
+  } catch (e) {
+    // Shown rather than thrown: a message that did not arrive must not look like one that did,
+    // and the alternative -- appending it to the transcript anyway -- is the one way this page
+    // could lie about what flint was told.
+    setHint("not sent: " + e.message, true);
+    return false;
+  }
+}
+
+function setHint(text, bad) {
+  const hint = document.getElementById("hint");
+  if (!hint) return;
+  hint.textContent = text || "";
+  hint.className = bad ? "hint bad" : "hint";
+  hint.hidden = !text;
+}
+
+/// What the composer says when there is nothing wrong.
+///
+/// The wording about interrupting is the terminal's own rule, said here because the page gives
+/// no other sign of it: a line sent while the model is working does not queue, it steers.
+function idleHint() {
+  return "Enter sends · Shift+Enter is a newline" + (doc.status ? " · sending now interrupts the turn" : "");
+}
+
+function sizeComposer() {
+  const box = document.getElementById("message");
+  if (!box) return;
+  box.style.height = "auto";
+  box.style.height = Math.min(box.scrollHeight, Math.round(window.innerHeight * 0.3)) + "px";
+}
+
 
 function load(whole) {
   const fresh = newDoc();
@@ -621,7 +862,11 @@ async function follow() {
           // A named event, not a line of the run's vocabulary: it means this page's
           // document is stale, so it re-reads rather than trying to catch up.
           if (frame.event === "reset") {
+            // `/new`, `/resume` and `/reload` all land here, from the terminal as much as from
+            // this page. The sidebar is re-read too, because which conversation is *current* has
+            // just changed and only the process knows to which.
             await readSession();
+            await readSessions();
             continue;
           }
           // The other named event, and the pair of them are the two things a cursor cannot
@@ -630,6 +875,7 @@ async function follow() {
           // without a cursor, because it is not a change -- it is where things are.
           if (frame.event === "status") {
             doc.status = frame.data;
+            setHint(doc.status ? "" : idleHint());
             schedulePaint();
             continue;
           }
@@ -682,7 +928,42 @@ if (typeof document !== "undefined" && document.getElementById) {
     // process's. A failure is rendered rather than thrown, because a blank page and a
     // page whose request was refused look identical and only one of them is a bug.
     drop.hidden = true;
+    canSend = true;
+    document.getElementById("app").className = "app";
+    document.getElementById("sidebar").hidden = false;
+    document.getElementById("composer").hidden = false;
+    setHint(idleHint());
+
+    const message = document.getElementById("message");
+    message.addEventListener("input", sizeComposer);
+    message.addEventListener("keydown", (e) => {
+      // Enter sends, Shift+Enter is a newline. The other way round is what a chat box does and
+      // is wrong here: a prompt is a paragraph far more often than it is a line, and a pasted
+      // block has to be able to arrive as one message.
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        document.getElementById("composer").requestSubmit();
+      }
+    });
+    document.getElementById("composer").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const text = message.value;
+      if (!text.trim()) return;
+      // Cleared only once it is accepted, so a refusal leaves the text where it was rather
+      // than losing what somebody typed -- and only when the box still holds what was sent.
+      // Two submits can overlap -- the round trip is short but it is not instant, and typing
+      // again during it is ordinary -- and the earlier one's clear would otherwise wipe the
+      // text of the later one. Measured in a real browser: send, type again within 150 ms,
+      // send, and the second message was written and then erased before it could be read.
+      if (await sendText(text) && message.value === text) {
+        message.value = "";
+        sizeComposer();
+      }
+    });
+
     paint(doc);
+    paintSessions();
+    readSessions();
     follow().catch((e) => {
       doc.blocks = [
         { kind: "damage", text: "cannot follow this flint: " + e.message },
@@ -696,7 +977,10 @@ if (typeof document !== "undefined" && document.getElementById) {
 
 // For the Node test in scripts/web-view-test.js, and for the page's own console.
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { newDoc, applyLine, applyText, applyEvent, tokenFromSearch, servedByFlint, sseFrames };
+  module.exports = {
+    newDoc, applyLine, applyText, applyEvent, tokenFromSearch, servedByFlint, sseFrames,
+    sessionsFrom, messageBody, resumeLine,
+  };
 }
 </script>
 </body>

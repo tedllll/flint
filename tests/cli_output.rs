@@ -941,8 +941,12 @@ async fn resume_and_capture(
         let stdin = child.stdin.as_mut().expect("no stdin handle");
         // By id, not by list number: the REPL creates its own session on startup, and that
         // one is the newest, so `1` would resume the empty file this run just opened.
+        // No `/exit`: with piped stdin it would arrive while `hello` is still being
+        // answered, and it is now run as the command it is -- which cancels the turn
+        // before any request goes out. Closing the pipe ends the REPL instead, after
+        // the turn has finished, which is what this test needs to observe.
         stdin
-            .write_all(b"/resume 111-1\nhello\n/exit\n")
+            .write_all(b"/resume 111-1\nhello\n")
             .expect("failed to write stdin");
     }
     let out = child.wait_with_output().expect("flint did not finish");
@@ -1072,7 +1076,9 @@ fn the_web_flag_prints_the_url_it_is_serving() {
     {
         use std::io::Write;
         let stdin = child.stdin.as_mut().expect("no stdin handle");
-        stdin.write_all(b"/exit\n").expect("failed to write stdin");
+        stdin
+            .write_all(b"hello\n")
+            .expect("failed to write stdin");
     }
     let out = child.wait_with_output().expect("flint did not finish");
     let text = String::from_utf8_lossy(&out.stdout).to_string();
@@ -1367,8 +1373,8 @@ async fn a_sentence_about_a_flag_is_still_a_message() {
     // the second arrives while the first turn is running and is delivered as *steering* --
     // which interrupts it. That is what typing during a turn is supposed to do, and it is why
     // these are two processes rather than one script.
-    let sentence = repl(&home, &["why does --web need a token?", "/exit"]);
-    let bullet = repl(&home, &["- a pasted bullet", "/exit"]);
+    let sentence = repl(&home, &["why does --web need a token?"]);
+    let bullet = repl(&home, &["- a pasted bullet"]);
     let _ = std::fs::remove_dir_all(&home);
 
     for (what, text) in [("a sentence about a flag", sentence), ("a bullet", bullet)] {
@@ -1398,7 +1404,7 @@ async fn the_web_command_survives_a_port_it_cannot_have() {
     let held = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind a decoy");
     let port = held.local_addr().expect("addr").port();
 
-    let text = repl(&home, &[&format!("/web {port}"), "hello", "/exit"]);
+    let text = repl(&home, &[&format!("/web {port}"), "hello"]);
     let _ = std::fs::remove_dir_all(&home);
 
     assert!(
@@ -1408,5 +1414,116 @@ async fn the_web_command_survives_a_port_it_cannot_have() {
     assert!(
         text.contains("THE MODEL WAS REACHED"),
         "the conversation did not survive a refused port: {text:?}"
+    );
+}
+
+/// Run the REPL with these lines on stdin, and give up rather than blocking forever.
+///
+/// Same as `repl`, except that a process which never exits is a *failure* instead of a hang.
+/// Output goes to a file rather than a pipe for the same reason: a child blocked writing into a
+/// full pipe that nobody is draining looks exactly like a child that is stuck.
+fn repl_within(home: &std::path::Path, lines: &[&str], secs: u64) -> (String, bool) {
+    use std::io::Write;
+    let out_path = home.join("stdout.txt");
+    let file = std::fs::File::create(&out_path).expect("create the output file");
+    let mut child = binary()
+        .env("FLINT_HOME", home)
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::from(file))
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to run flint");
+    {
+        let stdin = child.stdin.as_mut().expect("no stdin handle");
+        stdin
+            .write_all(format!("{}\n", lines.join("\n")).as_bytes())
+            .expect("failed to write stdin");
+    }
+    // Dropping the handle closes the pipe, which is what ends the input.
+    drop(child.stdin.take());
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    let exited = loop {
+        match child.try_wait().expect("try_wait") {
+            Some(_) => break true,
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                break false;
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    };
+    let _ = child.wait();
+    let text = std::fs::read_to_string(&out_path).unwrap_or_default();
+    (text, exited)
+}
+
+/// The end of input has to end the REPL, even when a turn ate the message that said so.
+///
+/// This is a regression test for a defect the browser introduced, and the shape of it is worth
+/// keeping: piping two lines gives `[Line, Line, Quit]` on the input channel. The first starts a
+/// turn; the second arrives while it is running and is delivered as *steering*, which is what
+/// typing during a turn is for. The third -- the `Quit` the reader sends when the pipe closes --
+/// is then consumed by the turn the steering line started, and `run_turn` deliberately drops it,
+/// because a pipe closing is not a person asking to stop.
+///
+/// That was harmless while the channel closed by itself when the reader thread ended: the REPL
+/// left on `Disconnected`. Putting a second producer on the channel -- the page -- keeps it open
+/// for the life of the process, so a dropped `Quit` became a process that waited forever for
+/// input that could not come. Observed against a dead endpoint as `error: no network ...` and
+/// then nothing, for as long as anyone was willing to watch.
+#[tokio::test]
+async fn the_end_of_input_ends_the_repl_even_when_a_turn_consumed_the_quit() {
+    let server = marker_provider("THE MODEL WAS REACHED").await;
+    let home = test_home("eof-steering", &server.uri());
+
+    let (text, exited) = repl_within(&home, &["first question", "second question"], 30);
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(
+        exited,
+        "flint never exited after its input ended: {text:?}"
+    );
+    // Both halves of the setup, so the test cannot pass by never reaching the case: the second
+    // line has to have arrived as steering, and the turn it started has to have finished.
+    assert!(
+        text.contains("second question"),
+        "the second line never became the next prompt, so no turn was running to eat the \
+         `Quit`: {text:?}"
+    );
+    assert!(
+        text.contains("THE MODEL WAS REACHED"),
+        "the turn after the steering line did not finish: {text:?}"
+    );
+}
+
+/// A line meant for flint must not be handed to the model just because a turn was running.
+///
+/// `run_turn` is where a line arriving mid-turn is picked up, and it has no way to run a
+/// command: it takes the line and makes it the next prompt. So `/resume` typed -- or clicked in
+/// the sidebar of the browser view -- while the model was working became a *message*, and the
+/// conversation did not switch. Measured against a slow stub provider: `/resume 1` arrived, the
+/// terminal drew `> /resume 1` as a prompt, and `/session` never changed.
+///
+/// That is the ordinary case, not a corner: the moment you want to look at another conversation
+/// is while one is churning.
+#[tokio::test]
+async fn a_command_typed_during_a_turn_is_run_and_not_sent_to_the_model() {
+    let server = marker_provider("THE MODEL WAS REACHED").await;
+    let home = test_home("steer-command", &server.uri());
+
+    // The second line arrives while the first turn is running, and is a command.
+    let (text, exited) = repl_within(&home, &["a question", "/name from mid-turn"], 30);
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit: {text:?}");
+    assert!(
+        text.contains("named: from mid-turn"),
+        "the command was not run as a command: {text:?}"
+    );
+    assert!(
+        !text.contains("> /name from mid-turn"),
+        "the command was echoed as a prompt to the model: {text:?}"
     );
 }

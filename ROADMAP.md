@@ -146,11 +146,14 @@ It is **independent of 5 and 6**. The one open question — a hand-rolled HTTP s
 rather than a fixed one, because a fixed port collides with whatever else is on loopback and
 the URL has to be printed anyway.
 
-**Done:** the static viewer (level 1), and level 2 — `--web [--port]`, `GET /`, `GET /session`,
-`GET /events` as SSE with a cursor and replay, and the `status` event that keeps a browser from
-looking frozen during a slow turn. **Not done:** `POST /message` (level 3, typing into the
-browser) and the measurement pass of step 7 — though `/web` itself is now measured end to end
-in a pty (§11), which is most of what that pass was for.
+**Done: all three levels.** The static viewer, level 2 — `--web [--port]` and `/web`, `GET /`,
+`GET /session`, `GET /events` as SSE with a cursor and replay, the `status` event that keeps a
+browser from looking frozen during a slow turn — and level 3, `POST /message` and `GET
+/sessions`: the page is a composer with a sidebar of conversations. Step 7's measurement pass is
+done too, in a pty and in a real browser over the DevTools protocol, and it is what found the
+three defects §11 of that document records — a sidebar click during a turn doing nothing, the
+status bar sitting on the composer, and two sends 150 ms apart wiping each other's text.
+
 
 **And `/web` is now how level 2 is actually reached — and it opens the page.** `--web` has to be
 decided before the run starts, and the moment you want a real renderer is mid-answer. Measured

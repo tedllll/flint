@@ -45,7 +45,7 @@ whoever is changing the code — a person or a model driving it.
 | `docs/windows.md` | field notes on Windows terminal behaviour; read before touching layout |
 | `docs/windows-tooling.md` | the plan for command-line escaping on Windows, half built (`exec` and the shared runner are in; the PowerShell half needs a Windows session); read before touching `probe_shell` or adding a tool |
 | `docs/session-format.md` | the session file format, for readers and for hand-editing |
-| `docs/web-mode.md` | the browser view over a running flint; levels 1 and 2 are built and §11 records what was measured in a browser |
+| `docs/web-mode.md` | the browser view over a running flint: all three levels are built (read-only view, live feed, composer with a sidebar) and §11 records what was measured in a browser |
 | `docs/deepseek-search.md` | web search: what was measured about DeepSeek's search, and what it costs |
 | `docs/decisions.md` | why flint is built this way, decision by decision |
 | `ROADMAP.md` | the plan of record: the ordered queue, and what is deliberately not done |

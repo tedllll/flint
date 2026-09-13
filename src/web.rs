@@ -37,6 +37,14 @@ use crate::event::Event;
 /// thing the ceiling can be for is a client that never sends the blank line.
 const MAX_HEAD: usize = 8 * 1024;
 
+/// The most of a request *body* this server will read.
+///
+/// One route has a body -- `POST /message` -- and a message is a thing a person types or
+/// pastes, so a megabyte is far more than anyone will send and far less than a client that
+/// never stops. The terminal has no such limit, which is deliberate: this one exists because
+/// the reader here is a socket that a page can open in a loop.
+const MAX_BODY: usize = 1024 * 1024;
+
 /// What the listener knows about the run it belongs to.
 ///
 /// `token` is the credential (§4.2) and `port` is what the `Host` and `Origin` checks
@@ -63,6 +71,19 @@ pub struct State {
     /// for those `/events` says so rather than pretending to be a stream that will never
     /// say anything.
     live: Option<Arc<Live>>,
+    /// Where a line typed into the browser goes: the prompt, by way of the caller.
+    ///
+    /// A `String` and not the REPL's own input enum, and that is the layering rather than an
+    /// accident. Everything below this line is a reader of the run and a writer of *text*; the
+    /// meaning of a typed line -- that `/` starts a command, that `!` runs a shell command, that
+    /// a line arriving mid-turn steers it -- belongs to the REPL, and this file is not a second
+    /// place that decides it. `main.rs` adapts this channel into the one the keyboard feeds, so
+    /// a message from the page is *the same event* as a message from the keyboard and every
+    /// slash command works from the browser because nothing here knows what one is.
+    ///
+    /// `None` for a run with no prompt to type into -- a one-shot `-p` run -- and for those
+    /// `POST /message` says so rather than accepting a message nobody will ever read.
+    input: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 /// How many recent frames are kept for a client that reconnects.
@@ -167,6 +188,16 @@ impl Live {
         if let Some(line) = line {
             self.push(line);
         }
+    }
+
+    /// One already-rendered line of the run's vocabulary, to every reader of the stream.
+    ///
+    /// For a frame that no `Event` produces. `turn.started` is the one, and it is the same line
+    /// `--json` writes for the same moment -- taking a rendered line rather than an enum variant
+    /// keeps the two writers on the same function, because a second spelling of the vocabulary
+    /// here would be a second thing to keep in step.
+    pub fn line(&self, line: String) {
+        self.push(line);
     }
 
     /// The sequence number of the last frame, `0` when there has not been one.
@@ -459,6 +490,18 @@ impl Response {
         self
     }
 
+    /// A response a program reads rather than a person: `POST /message` and `GET /sessions`
+    /// are the two routes with a machine on the other end.
+    fn json(status: u16, reason: &'static str, body: String) -> Response {
+        Response {
+            status,
+            reason,
+            content_type: "application/json; charset=utf-8",
+            body,
+            extra: Vec::new(),
+        }
+    }
+
     /// One of the four refusals. The reason is short and honest: it is a person debugging
     /// their own URL that reads it, and the listener is on loopback, so there is nothing to
     /// learn from it that a local process could not read anyway.
@@ -527,7 +570,7 @@ impl Answer {
 /// deliberate: `Host` before anything else, because it is the check that decides whether the
 /// browser's same-origin protection applies at all, and a request that fails it is not from
 /// a page of ours however good its token looks.
-pub fn respond(request: &Request, state: &State) -> Answer {
+pub fn respond(request: &Request, body: &str, state: &State) -> Answer {
     if !host_is_ours(request.header("host"), state.port) {
         return Answer::Once(Response::refused(
             "this listener answers only to 127.0.0.1 (check the Host header)",
@@ -558,18 +601,120 @@ pub fn respond(request: &Request, state: &State) -> Answer {
         // second format: the page is a reader of the same file the terminal is writing, and
         // the moment this route rendered something of its own the two could disagree.
         ("GET", "/session") => serve_session(state),
+        // The sidebar. The numbering here *is* the numbering `/resume` accepts, because both
+        // go through `session::list` -- a second listing that sorted differently would make
+        // every number in the page point at the wrong conversation.
+        ("GET", "/sessions") => serve_sessions(state),
         // Everything since, and then everything as it happens.
         ("GET", "/events") => return Answer::Events {
             last: last_event_id(request),
         },
-        ("GET", _) | ("HEAD", _) => Response::text(404, "Not Found", "no such route\n"),
+        // A line typed into the browser, into the same channel the keyboard feeds.
+        ("POST", "/message") => accept_message(body, state),
+        // Before the catch-alls, or `POST /` would be reported as a missing route rather
+        // than as a route that exists and takes no body.
         (_, "/") => Response::text(
             405,
             "Method Not Allowed",
             "the view is served, not written to\n",
         ),
+        ("GET", _) | ("HEAD", _) | ("POST", _) => {
+            Response::text(404, "Not Found", "no such route\n")
+        }
         _ => Response::text(404, "Not Found", "no such route\n"),
     })
+}
+
+/// The conversations `/resume` can reach, numbered the way `/resume` numbers them.
+///
+/// Read fresh on every request, like `/session`: the list changes as conversations are made,
+/// named and filed away, and a cached copy would be wrong exactly while somebody is looking at
+/// it. `session::list` reads only the two ends of each file, so listing is cheap whatever the
+/// conversations weigh.
+fn serve_sessions(state: &State) -> Response {
+    serve_sessions_in(&crate::config::sessions_dir(), state)
+}
+
+/// The same, with the directory given.
+///
+/// Split out so a test can point it at a directory of its own. The alternative -- setting
+/// `FLINT_HOME` for the duration -- would change the environment under every other test running
+/// in the same process, which is a race that shows up as a mystery failure elsewhere.
+fn serve_sessions_in(dir: &std::path::Path, state: &State) -> Response {
+    let open = state
+        .session
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|path| path.file_stem())
+        .map(|stem| stem.to_string_lossy().to_string());
+    let listed = match crate::session::list(dir) {
+        Ok(listed) => listed,
+        Err(e) => {
+            return Response::text(500, "Internal Server Error", format!("{e:#}\n"));
+        }
+    };
+    let sessions: Vec<serde_json::Value> = listed
+        .iter()
+        .enumerate()
+        .map(|(index, (id, label))| {
+            serde_json::json!({
+                "n": index + 1,
+                "id": id,
+                // The label `session::list` chose: the newest name given to the conversation,
+                // else the first thing that was said, else "(empty)". Chosen in one place so
+                // the sidebar and `/sessions` cannot describe the same file differently.
+                "label": label,
+                "current": Some(id.as_str()) == open.as_deref(),
+            })
+        })
+        .collect();
+    Response::json(
+        200,
+        "OK",
+        serde_json::json!({ "sessions": sessions }).to_string(),
+    )
+}
+
+/// One message from the page, into the prompt.
+///
+/// This is the route that makes the page a composer, and it is the only route in this file that
+/// can cause something to *happen* -- the others read. What keeps that acceptable is unchanged
+/// from §4: loopback only, the `Host` and `Origin` checks, and a token that the page has and
+/// another origin's page does not. A cross-origin form post cannot set `X-Flint-Token`, and a
+/// `fetch` that could would be refused by the `Origin` check before it got here.
+///
+/// Note what it does *not* do: it does not interpret the text. A line beginning `/` is a slash
+/// command because the REPL says so, a line beginning `!` is a shell escape because the REPL
+/// says so, and neither fact is known in this file. That is the point -- there is one place
+/// that decides what a typed line means, and the browser is not a second one.
+fn accept_message(body: &str, state: &State) -> Response {
+    let Some(input) = &state.input else {
+        return Response::text(
+            409,
+            "Conflict",
+            "this run has no prompt to type into (a one-shot run reads no input)\n",
+        );
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(body) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            return Response::text(400, "Bad Request", format!("expected a JSON body: {e}\n"));
+        }
+    };
+    let Some(text) = parsed.get("text").and_then(|t| t.as_str()) else {
+        return Response::text(400, "Bad Request", "expected {\"text\": \"...\"}\n");
+    };
+    if text.trim().is_empty() {
+        return Response::text(400, "Bad Request", "an empty message is not one\n");
+    }
+    match input.send(text.to_string()) {
+        Ok(()) => Response::json(202, "Accepted", "{\"queued\":true}".to_string()),
+        // The receiver is gone, so the run is ending. Saying so is better than a 202 for a
+        // message that will never be read: a page that shows what it sent would otherwise
+        // show a message the terminal never saw.
+        Err(_) => Response::text(409, "Conflict", "this flint is shutting down\n"),
+    }
 }
 
 /// Which frame the client last saw, from the header SSE defines for it.
@@ -672,7 +817,7 @@ impl Window {
         session: Option<std::path::PathBuf>,
         live: Option<Arc<Live>>,
     ) -> Result<Window> {
-        Window::open_following(port, Arc::new(Mutex::new(session)), live).await
+        Window::open_following(port, Arc::new(Mutex::new(session)), live, None).await
     }
 
     /// The same, for a caller whose session can change under it.
@@ -684,6 +829,7 @@ impl Window {
         port: u16,
         session: Arc<Mutex<Option<std::path::PathBuf>>>,
         live: Option<Arc<Live>>,
+        input: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     ) -> Result<Window> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
             .await
@@ -698,6 +844,7 @@ impl Window {
             port,
             session,
             live,
+            input,
         });
         tokio::spawn(accept_loop(listener, state));
         Ok(Window { port, token })
@@ -737,16 +884,25 @@ pub struct Viewer {
     session: Arc<Mutex<Option<std::path::PathBuf>>>,
     /// The port `--port` asked for, kept so `/web` with no argument means what the flag meant.
     port: u16,
+    /// The prompt the page types into. Absent for a run with no prompt, which is what makes
+    /// `POST /message` answer `409` rather than swallowing a message nobody will read. See
+    /// `State::input` for why this is text and not the REPL's own input event.
+    input: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 impl Viewer {
     /// Ask for a view of `session`. Nothing is bound and nothing is listening yet.
-    pub fn asked(port: u16, session: Option<std::path::PathBuf>) -> Viewer {
+    pub fn asked(
+        port: u16,
+        session: Option<std::path::PathBuf>,
+        input: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    ) -> Viewer {
         Viewer {
             live: Live::new(),
             window: None,
             session: Arc::new(Mutex::new(session)),
             port,
+            input,
         }
     }
 
@@ -765,9 +921,13 @@ impl Viewer {
             return Ok(window.url());
         }
         let port = if port == 0 { self.port } else { port };
-        let window =
-            Window::open_following(port, Arc::clone(&self.session), Some(Arc::clone(&self.live)))
-                .await?;
+        let window = Window::open_following(
+            port,
+            Arc::clone(&self.session),
+            Some(Arc::clone(&self.live)),
+            self.input.clone(),
+        )
+        .await?;
         let url = window.url();
         self.window = Some(window);
         Ok(url)
@@ -808,15 +968,16 @@ async fn accept_loop(listener: TcpListener, state: Arc<State>) {
 async fn serve(mut stream: TcpStream, state: &State) -> Result<()> {
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 1024];
-    loop {
+    let head_end = loop {
         let read = stream.read(&mut chunk).await?;
         if read == 0 {
-            break;
+            break None;
         }
         buf.extend_from_slice(&chunk[..read]);
-        // The end of the head is the whole of the request for every route so far.
-        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-            break;
+        // The end of the head is the whole of the request for every route but one, and the
+        // bytes after it are the body of that one.
+        if let Some(at) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break Some(at + 4);
         }
         if buf.len() > MAX_HEAD {
             let response = Response::text(431, "Request Header Fields Too Large", "too long\n");
@@ -824,15 +985,32 @@ async fn serve(mut stream: TcpStream, state: &State) -> Result<()> {
             let _ = stream.shutdown().await;
             return Ok(());
         }
-    }
-
-    let head = String::from_utf8_lossy(&buf);
-    let answer = match Request::parse(&head) {
-        Some(request) => respond(&request, state),
-        None => Answer::Once(Response::text(400, "Bad Request", "not an HTTP/1.1 request\n")),
     };
 
-    match answer {
+    // Only the head goes to the parser. A body that arrived in the same read would otherwise be
+    // read as a header line, and a body is arbitrary text: `{"text":"a: b"}` is a JSON object
+    // and also a plausible header.
+    let (head, rest) = match head_end {
+        Some(at) => (&buf[..at], buf[at..].to_vec()),
+        None => (&buf[..], Vec::new()),
+    };
+    let Some(request) = Request::parse(&String::from_utf8_lossy(head)) else {
+        let response = Response::text(400, "Bad Request", "not an HTTP/1.1 request\n");
+        stream.write_all(&response.render()).await?;
+        let _ = stream.shutdown().await;
+        return Ok(());
+    };
+
+    let body = match read_body(&mut stream, &request, rest).await {
+        Ok(body) => body,
+        Err(response) => {
+            stream.write_all(&response.render()).await?;
+            let _ = stream.shutdown().await;
+            return Ok(());
+        }
+    };
+
+    match respond(&request, &body, state) {
         Answer::Once(response) => {
             stream.write_all(&response.render()).await?;
         }
@@ -845,6 +1023,49 @@ async fn serve(mut stream: TcpStream, state: &State) -> Result<()> {
     // that is what removes keep-alive, pipelining and request framing from this file (§6).
     let _ = stream.shutdown().await;
     Ok(())
+}
+
+/// The body, when the request says it has one.
+///
+/// Length-delimited and nothing else. No `Transfer-Encoding`, no chunked bodies, no
+/// `Expect: 100-continue` -- §6's surface is small on purpose, and a page that sends a JSON
+/// message can always say how long it is. A request that lies about the length, or stops early,
+/// is refused rather than half-read: a truncated body is a truncated message.
+async fn read_body(
+    stream: &mut TcpStream,
+    request: &Request,
+    mut have: Vec<u8>,
+) -> std::result::Result<String, Response> {
+    let Some(length) = request.header("content-length") else {
+        return Ok(String::new());
+    };
+    let length: usize = length.trim().parse().map_err(|_| {
+        Response::text(400, "Bad Request", "Content-Length is not a number\n")
+    })?;
+    if length > MAX_BODY {
+        return Err(Response::text(
+            413,
+            "Content Too Large",
+            format!("a message may be at most {MAX_BODY} bytes\n"),
+        ));
+    }
+    let mut chunk = [0u8; 8192];
+    while have.len() < length {
+        let read = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|_| Response::text(400, "Bad Request", "the body did not arrive\n"))?;
+        if read == 0 {
+            return Err(Response::text(
+                400,
+                "Bad Request",
+                "the body stopped before Content-Length did\n",
+            ));
+        }
+        have.extend_from_slice(&chunk[..read]);
+    }
+    have.truncate(length);
+    Ok(String::from_utf8_lossy(&have).to_string())
 }
 
 /// The headers of an event stream: everything a small response has, except a length.
@@ -957,13 +1178,14 @@ mod tests {
             port: 7777,
             session: Arc::new(Mutex::new(None)),
             live: None,
+            input: None,
         }
     }
 
     /// Ask the pure router a question, as bytes a client would have sent.
     fn ask(head: &str, state: &State) -> Response {
         let request = Request::parse(head).unwrap_or_else(|| panic!("fixture must parse: {head:?}"));
-        respond(&request, state).once()
+        respond(&request, "", state).once()
     }
 
     /// A request from our own page, with the token in the header.
@@ -1101,6 +1323,192 @@ mod tests {
         State { session: Arc::new(Mutex::new(Some(path))), ..state() }
     }
 
+    /// A state with the prompt attached, and the receiving end of it.
+    fn with_input() -> (State, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        (State { input: Some(tx), ..state() }, rx)
+    }
+
+    /// A `POST` from our own page, with a body.
+    fn post(target: &str, json: &str) -> String {
+        format!(
+            "POST {target} HTTP/1.1\r\nHost: 127.0.0.1:7777\r\n\
+             X-Flint-Token: {}\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\n\r\n{json}",
+            state().token,
+            json.len()
+        )
+    }
+
+    /// `POST /message` is the only route that can make something *happen*, so the checks §4
+    /// asks for are asserted against it directly rather than only against the reads.
+    #[test]
+    fn a_message_is_queued_into_the_prompt() {
+        let (state, mut rx) = with_input();
+        let json = r#"{"text":"hello from the page"}"#;
+        let request = Request::parse(&post("/message", json)).expect("fixture parses");
+        let response = respond(&request, json, &state).once();
+        assert_eq!(response.status, 202, "{}", body(&response));
+        assert_eq!(
+            rx.try_recv().expect("the message must reach the prompt"),
+            "hello from the page"
+        );
+    }
+
+    /// The text is carried untouched, because meaning is decided in exactly one place.
+    ///
+    /// A slash command from the sidebar is the case that matters: the page has no idea what
+    /// `/resume 3` does, and must not. If this route ever began interpreting what it carries,
+    /// there would be two places that decide what a typed line means, and they would drift.
+    #[test]
+    fn a_message_is_not_interpreted_here() {
+        let (state, mut rx) = with_input();
+        for text in ["/resume 3", "!ls -la", "--web", "  spaced  "] {
+            let json = serde_json::json!({ "text": text }).to_string();
+            let request = Request::parse(&post("/message", &json)).expect("fixture parses");
+            let response = respond(&request, &json, &state).once();
+            assert_eq!(response.status, 202, "{text}: {}", body(&response));
+            assert_eq!(rx.try_recv().expect("queued"), text);
+        }
+    }
+
+    #[test]
+    fn a_message_without_the_token_is_refused_and_never_queued() {
+        let (state, mut rx) = with_input();
+        let head = "POST /message HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nContent-Length: 20\r\n\r\n";
+        let request = Request::parse(head).expect("fixture parses");
+        let json = r#"{"text":"let me in"}"#;
+        assert_eq!(respond(&request, json, &state).once().status, 403);
+        assert!(
+            rx.try_recv().is_err(),
+            "a refused request must not have queued anything"
+        );
+    }
+
+    /// A page the user did not write cannot ask flint to do something.
+    #[test]
+    fn a_message_from_another_origin_is_refused() {
+        let (state, mut rx) = with_input();
+        let json = r#"{"text":"do as I say"}"#;
+        let head = post("/message", json).replace(
+            "Host: 127.0.0.1:7777",
+            "Host: 127.0.0.1:7777\r\nOrigin: http://evil.example",
+        );
+        let request = Request::parse(&head).expect("fixture parses");
+        assert_eq!(respond(&request, json, &state).once().status, 403);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_message_that_is_not_a_message_is_refused() {
+        let (state, mut rx) = with_input();
+        for (json, why) in [
+            ("not json at all", "not JSON"),
+            (r#"{"text":42}"#, "text is not a string"),
+            (r#"{}"#, "no text"),
+            (r#"{"text":"   "}"#, "only whitespace"),
+        ] {
+            let request = Request::parse(&post("/message", json)).expect("fixture parses");
+            let response = respond(&request, json, &state).once();
+            assert_eq!(response.status, 400, "{why}: {}", body(&response));
+        }
+        assert!(rx.try_recv().is_err(), "a refused message must not be queued");
+    }
+
+    /// A run with no prompt says so, rather than accepting a message nobody will read.
+    ///
+    /// This is the `-p` case: `--web` with a one-shot prompt serves a view, and a page that
+    /// typed into it would otherwise get a cheerful `202` for a message that goes nowhere.
+    #[test]
+    fn a_run_with_no_prompt_refuses_a_message() {
+        let json = r#"{"text":"hello"}"#;
+        let request = Request::parse(&post("/message", json)).expect("parses");
+        let response = respond(&request, json, &state()).once();
+        assert_eq!(response.status, 409);
+        assert!(body(&response).contains("no prompt"), "{}", body(&response));
+    }
+
+    /// The sidebar's numbers have to be the numbers `/resume` accepts.
+    ///
+    /// Asserted against `session::list` rather than against a fixture, because a fixture would
+    /// be a second opinion about the ordering and the whole guarantee is that there is one.
+    #[test]
+    fn the_session_list_is_the_one_resume_numbers() {
+        let dir = std::env::temp_dir().join(format!("flint-web-sessions-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let older = dir.join("100-1.jsonl");
+        let newer = dir.join("200-2.jsonl");
+        for (path, id, asked) in [
+            (&older, "100-1", "the older question"),
+            (&newer, "200-2", "the newer question"),
+        ] {
+            std::fs::write(
+                path,
+                format!(
+                    "{{\"type\":\"meta\",\"v\":2,\"id\":\"{id}\",\"cwd\":\"/tmp\",\
+                     \"provider\":\"p\",\"model\":\"m\"}}\n\
+                     {{\"type\":\"chat\",\"message\":{{\"role\":\"user\",\
+                     \"content\":\"{asked}\"}}}}\n"
+                ),
+            )
+            .expect("write");
+        }
+        // Newest first is decided by mtime, so the order has to be forced rather than assumed.
+        let now = std::time::SystemTime::now();
+        set_modified(&older, now - std::time::Duration::from_secs(60));
+        set_modified(&newer, now);
+
+        let expected = crate::session::list(&dir).expect("list");
+        assert_eq!(expected.len(), 2, "the fixture did not produce two sessions");
+        assert_eq!(expected[0].0, "200-2", "newest first");
+
+        let response = serve_sessions_in(&dir, &state());
+        assert_eq!(response.status, 200, "{}", body(&response));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body(&response)).expect("the list is JSON");
+        let items = parsed["sessions"].as_array().expect("an array");
+        assert_eq!(items.len(), 2);
+        for (index, (id, label)) in expected.iter().enumerate() {
+            assert_eq!(items[index]["n"], index + 1, "1-based, and in the same order");
+            assert_eq!(items[index]["id"], id.as_str());
+            assert_eq!(items[index]["label"], label.as_str());
+            assert_eq!(items[index]["current"], false, "nothing is open in a bare state");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_open_conversation_is_marked_in_the_list() {
+        let dir = std::env::temp_dir().join(format!("flint-web-current-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("300-3.jsonl");
+        std::fs::write(
+            &path,
+            "{\"type\":\"meta\",\"v\":2,\"id\":\"300-3\",\"cwd\":\"/tmp\",\
+             \"provider\":\"p\",\"model\":\"m\"}\n",
+        )
+        .expect("write");
+
+        let response = serve_sessions_in(&dir, &with_session(path));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body(&response)).expect("the list is JSON");
+        assert_eq!(parsed["sessions"][0]["current"], true);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn set_modified(path: &std::path::Path, when: std::time::SystemTime) {
+        let handle = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open to set mtime");
+        handle.set_modified(when).expect("set mtime");
+    }
+
+
     /// `/session` is the file, byte for byte -- not a summary and not a second format.
     #[test]
     fn the_session_route_serves_the_file_itself() {
@@ -1169,7 +1577,7 @@ mod tests {
         // `/events` is a route now, and the one that answers with a stream instead of a
         // single response -- which is why `Answer` has two shapes.
         let parsed = Request::parse(&ours("/events")).expect("fixture parses");
-        assert!(matches!(respond(&parsed, &state), Answer::Events { .. }));
+        assert!(matches!(respond(&parsed, "", &state), Answer::Events { .. }));
         assert_eq!(
             ask(
                 &format!("POST / HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nX-Flint-Token: {}\r\n\r\n", state.token),
@@ -1234,6 +1642,127 @@ mod socket_tests {
         let mut response = Vec::new();
         stream.read_to_end(&mut response).await.expect("read");
         String::from_utf8_lossy(&response).to_string()
+    }
+
+    /// Send raw bytes and read whatever comes back.
+    ///
+    /// Raw, because these two cases are about the *framing* of a request rather than about what
+    /// it asks for: a body the reader has to assemble across reads, and a body that never
+    /// finishes arriving. A helper that built a well-formed request could not express either.
+    async fn send(port: u16, request: &[u8]) -> String {
+        let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .await
+            .expect("connect");
+        stream.write_all(request).await.expect("write");
+        // The write half is closed before reading, and that is not tidiness: a request whose
+        // `Content-Length` promises more than it sends is exactly one of the cases below, and
+        // without this the server waits for a body that is never coming while the test waits
+        // for a response that cannot be sent.
+        stream.shutdown().await.expect("close the write half");
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.expect("read");
+        String::from_utf8_lossy(&response).to_string()
+    }
+
+    /// A body split across reads is still one message.
+    ///
+    /// The reader loop exists because a TCP read ends where it ends, not where the message
+    /// does. A short body with a longer `Content-Length` also arrives here -- the loop keeps
+    /// reading -- and the message must not be truncated to the first chunk.
+    #[tokio::test]
+    async fn a_message_body_is_assembled_across_reads() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let window = Window::open_following(
+            0,
+            Arc::new(Mutex::new(None)),
+            None,
+            Some(tx),
+        )
+        .await
+        .expect("bind");
+
+        // A space at the end of every chunk, so a reader that stopped early would produce
+        // something visibly unfinished rather than something plausible.
+        let text = "x".repeat(9000);
+        let json = serde_json::json!({ "text": text }).to_string();
+        let head = format!(
+            "POST /message HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nX-Flint-Token: {}\r\n\
+             Content-Length: {}\r\n\r\n",
+            window.port(),
+            window.token,
+            json.len()
+        );
+
+        let port = window.port();
+        let expected = text.clone();
+        let writer = tokio::spawn(async move {
+            let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+                .await
+                .expect("connect");
+            stream.write_all(head.as_bytes()).await.expect("head");
+            for piece in json.as_bytes().chunks(97) {
+                stream.write_all(piece).await.expect("piece");
+                tokio::task::yield_now().await;
+            }
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).await.expect("read");
+            String::from_utf8_lossy(&response).to_string()
+        });
+
+        let response = writer.await.expect("the writer task");
+        assert!(response.starts_with("HTTP/1.1 202"), "{response}");
+        assert_eq!(
+            rx.recv().await.expect("a message must arrive"),
+            expected,
+            "the body was not assembled whole"
+        );
+    }
+
+    /// A body that stops early is refused rather than half-read.
+    ///
+    /// The alternative -- take what arrived -- turns a truncated message into a message, and
+    /// there is no way for anything downstream to tell the difference.
+    #[tokio::test]
+    async fn a_message_that_stops_arriving_is_refused() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let window = Window::open_following(0, Arc::new(Mutex::new(None)), None, Some(tx))
+            .await
+            .expect("bind");
+
+        let head = format!(
+            "POST /message HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nX-Flint-Token: {}\r\n\
+             Content-Length: 500\r\n\r\n",
+            window.port(),
+            window.token
+        );
+        // The connection is closed after eleven bytes of a promised five hundred.
+        let mut request = head.into_bytes();
+        request.extend_from_slice(br#"{"text":"hi"#);
+        let response = send(window.port(), &request).await;
+
+        assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+        assert!(rx.try_recv().is_err(), "a truncated body must not be queued");
+    }
+
+    /// A body over the ceiling is refused without being read.
+    #[tokio::test]
+    async fn a_message_over_the_ceiling_is_refused() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let window = Window::open_following(0, Arc::new(Mutex::new(None)), None, Some(tx))
+            .await
+            .expect("bind");
+
+        let head = format!(
+            "POST /message HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nX-Flint-Token: {}\r\n\
+             Content-Length: {}\r\n\r\n",
+            window.port(),
+            window.token,
+            MAX_BODY + 1
+        );
+        let response = send(window.port(), head.as_bytes()).await;
+
+        assert!(response.starts_with("HTTP/1.1 413"), "{response}");
+        assert!(rx.try_recv().is_err());
     }
 
     /// The URL is the contract: whatever it says must be what the listener accepts.
@@ -1301,7 +1830,7 @@ mod socket_tests {
         std::fs::write(&first, "{\"type\":\"meta\",\"id\":\"first\"}\n").expect("write");
         std::fs::write(&second, "{\"type\":\"meta\",\"id\":\"second\"}\n").expect("write");
 
-        let mut viewer = Viewer::asked(0, Some(first.clone()));
+        let mut viewer = Viewer::asked(0, Some(first.clone()), None);
         let url = viewer.open(0).await.expect("bind");
         let port: u16 = url
             .trim_start_matches("http://127.0.0.1:")
@@ -1417,7 +1946,7 @@ mod live_tests {
     /// disagree about which run they are watching.
     #[tokio::test]
     async fn asking_for_the_view_twice_opens_one_listener() {
-        let mut viewer = Viewer::asked(0, None);
+        let mut viewer = Viewer::asked(0, None, None);
         let first = viewer.open(0).await.expect("bind");
         let second = viewer.open(0).await.expect("bind again");
         assert_eq!(first, second, "the second ask must report where it already is");
@@ -1426,7 +1955,7 @@ mod live_tests {
     /// And a viewer that was only *asked* for is not broken -- it is unbound.
     #[test]
     fn a_viewer_that_has_not_been_opened_has_no_window() {
-        let viewer = Viewer::asked(0, None);
+        let viewer = Viewer::asked(0, None, None);
         assert!(viewer.window.is_none());
         // The feed exists anyway, which is the point of the split: a turn that starts while
         // the socket is still being bound does not lose its frames.

@@ -295,6 +295,61 @@ check("a value with no space after the colon is read the same way", () => {
   eq(cut.frames[0].data, "x", "data");
 });
 
+// ---------------------------------------------------------------------------
+// the sidebar, and what the composer says
+// ---------------------------------------------------------------------------
+
+console.log("\nthe conversation list, and what a click sends");
+
+check("the list is read out of the route's own shape", () => {
+  const got = viewer.sessionsFrom(JSON.stringify({
+    sessions: [
+      { n: 1, id: "200-2", label: "the newer question", current: true },
+      { n: 2, id: "100-1", label: "the older one", current: false },
+    ],
+  }));
+  eq(got.length, 2, "two rows");
+  eq(got[0].n, 1, "the number /resume takes");
+  eq(got[0].current, true, "the open one");
+  eq(got[1].label, "the older one", "the label");
+});
+
+check("a list that is not a list is empty rather than fatal", () => {
+  // The sidebar is not worth taking the page down for: the transcript beside it still reads.
+  // Every one of these is a shape a bad day could produce.
+  for (const text of ["", "not json", "{}", '{"sessions":null}', '{"sessions":"nope"}', "[]"]) {
+    eq(viewer.sessionsFrom(text), [], `for ${JSON.stringify(text)}`);
+  }
+});
+
+check("a row without a usable number or id is dropped, not rendered broken", () => {
+  const got = viewer.sessionsFrom(JSON.stringify({
+    sessions: [
+      { n: 1, id: "good", label: "kept" },
+      { id: "no number", label: "dropped" },
+      { n: 2, label: "no id" },
+      { n: 3, id: "label missing" },
+      null,
+    ],
+  }));
+  eq(got.map((s) => s.id), ["good", "label missing"], "only the usable rows");
+  eq(got[1].label, "(empty)", "a missing label gets the same word the terminal uses");
+});
+
+check("opening a conversation sends the number, not a path", () => {
+  // The page must not know where sessions live. `/resume <n>` is the vocabulary `/sessions`
+  // prints, and the process is what turns it into a file -- so a change to where sessions are
+  // kept cannot break this, and the page cannot open something the terminal could not.
+  eq(viewer.resumeLine(3), "/resume 3", "the line");
+});
+
+check("a message is the shape the route reads", () => {
+  eq(JSON.parse(viewer.messageBody("hello")), { text: "hello" }, "an object with the text");
+  // Including the ones that look like commands: the route must carry them, not interpret them.
+  eq(JSON.parse(viewer.messageBody("/resume 3")).text, "/resume 3", "a slash command");
+  eq(JSON.parse(viewer.messageBody('line one\nline two')).text, "line one\nline two", "a block");
+});
+
 if (failures) {
   console.log(`\n${failures} failed`);
   process.exit(1);

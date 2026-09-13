@@ -227,13 +227,26 @@ Three things about the view are deliberate, and each one was a decision rather t
   that is the URL you paste; every other route wants it in an `X-Flint-Token` header, so it
   cannot leak through a `Referer`, a log or a screenshot. The page carries
   `Referrer-Policy: no-referrer` for the same reason.
-- **The page is a viewer, not a composer.** There is no input box yet — `POST /message` is the
-  one route still missing (`docs/web-mode.md` §9 step 6). Typing stays in the terminal.
+- **The page is a window and a composer.** There is a sidebar of conversations and an input box
+  at the bottom. What you type goes into the *same channel the keyboard feeds*, which is the
+  whole of the design: a message sent while the model is working steers the turn exactly as
+  typing does, and a slash command typed into the page is a slash command — so `/resume` from
+  the sidebar works without the page knowing that slash commands exist, let alone what one does.
+  Enter sends; Shift+Enter is a newline, because a prompt is a paragraph more often than a line.
+
+  The sidebar lists them the way `/resume` numbers them — it reads the same listing — and
+  clicking one is exactly `flint`'s own `/sessions` followed by `/resume <n>`.
 
 What it shows is the conversation the process is in, read from the session file on disk, plus
 the live event stream — the same events `--json` writes, produced by the same code. So a tool
 call, a streamed answer, a reasoning delta and the status line all appear, and `/new`,
 `/resume` and `/reload` move the page to the conversation the terminal moved to.
+
+**What that costs, stated plainly:** a caller who has the port and the token can run the agent,
+because that is what an input box is. What keeps it acceptable is §4 of `docs/web-mode.md` —
+loopback only, the `Host` and `Origin` checks, and a token another origin's page cannot set. Any
+line the page sends is treated as typed, including `!command`, which means the page is exactly as
+powerful as the terminal it is watching.
 
 `flint debug prompt-input` is what to use when the question is what the *model* was given;
 this is for reading what happened.
