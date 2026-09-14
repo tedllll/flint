@@ -410,6 +410,50 @@ fn a_command_answer_is_a_block_with_the_line_that_asked_for_it() {
     );
 }
 
+/// The command panel is drawn from the frame, and the page carries none of the list itself.
+///
+/// §8's read channel, second half over the page's own bytes. Two things are checked, and the second
+/// is the one that matters: the panel is built from `state.commands`, and the page contains no
+/// command name of its own. A page that knew `/provider key <key>` would be a second copy of the
+/// terminal's grammar — it would go on offering a command that was renamed, in a panel whose whole
+/// job is to say what there is.
+#[test]
+fn the_command_panel_is_drawn_from_the_frame() {
+    // Somewhere to put it, in the header a state frame reveals. The window runs past the controls
+    // div: the panel is a sibling of it rather than a child, because `.controls` is a flex row and
+    // a panel belongs on its own line.
+    let controls = from("<div class=\"controls\" id=\"controls\" hidden>", 20);
+    assert!(
+        controls.contains("id=\"commands\"") && controls.contains("id=\"command-list\""),
+        "the header has nowhere to draw the command panel: {controls}"
+    );
+
+    // Built from the frame: every field of a row comes from the frame's own entry.
+    let built = from("function showCommands(doc)", 40);
+    for (needed, why) in [
+        ("state.commands", "the list of commands"),
+        ("command.label", "what the row says to type"),
+        ("command.help", "what the row says it does"),
+        ("command.class", "which group the row belongs to"),
+    ] {
+        assert!(
+            built.contains(needed),
+            "the panel is not drawn from the frame's `{needed}` ({why}): {built}"
+        );
+    }
+
+    // And the page holds no copy of the command list. These are the strings that would be in it if
+    // it did; the panel's *group* names are the page's own, and are checked above instead.
+    let html = view();
+    for leaked in ["/provider key", "/delete <n|id>", "/reload", "inspect the config"] {
+        assert!(
+            !html.contains(leaked),
+            "the page carries `{leaked}` itself, so it can offer a command the terminal does not \
+             have"
+        );
+    }
+}
+
 /// A conversation archived or deleted in the terminal has to leave the sidebar.
 ///
 /// Reported from a real session: history tidied in the terminal and the page still offering it.

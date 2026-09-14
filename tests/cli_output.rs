@@ -2709,3 +2709,204 @@ async fn the_page_is_told_what_a_command_answered() {
     );
 }
 
+/// The command list out of a state frame: `(label, send, help, class)` per row.
+///
+/// Parsed rather than pattern-matched, because the second test below feeds what this returns
+/// straight back to the process: what the page may send has to be exactly what the frame said, or
+/// the test would be checking a string this file made up.
+fn commands_in(frame: &str) -> Vec<(String, String, String, String)> {
+    let field = |row: &serde_json::Value, name: &str| {
+        row.get(name)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    for line in frame.lines() {
+        let Some(json) = line.strip_prefix("data: ") else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+            continue;
+        };
+        if value.get("type").and_then(|t| t.as_str()) != Some("state") {
+            continue;
+        }
+        let Some(rows) = value.get("commands").and_then(|c| c.as_array()) else {
+            continue;
+        };
+        return rows
+            .iter()
+            .map(|row| {
+                (
+                    field(row, "label"),
+                    field(row, "send"),
+                    field(row, "help"),
+                    field(row, "class"),
+                )
+            })
+            .collect();
+    }
+    Vec::new()
+}
+
+/// The page is handed the command list, and it is the same list `/help` prints.
+///
+/// §8's read channel, second half: a picker needs the values a setting takes, and a menu needs the
+/// commands there are. The frame carries each one as what `/help` prints (`label`), what the page
+/// would put on the wire (`send`), what it does (`help`) and which of §8's classes it belongs to
+/// (`class`) — `send` separate from `label` because the split is not uniform: `add` is part of
+/// `/provider add` and `<key>` is not, and a page that had to tell those apart would be
+/// re-deriving the terminal's own grammar.
+///
+/// The cross-check at the end is the point of the test: the terminal's `/help` and the page's menu
+/// are one table, and a second copy of it is how a page comes to offer a command that has been
+/// renamed. Both halves are read here — the frame off the live stream, `/help` off the run's own
+/// stdout — so this fails if either rendering drifts.
+#[tokio::test]
+async fn the_page_is_told_which_commands_it_may_offer() {
+    let home = test_home("command-list", "http://127.0.0.1:9/v1");
+    let log = home.join("transcript.txt");
+    let mut child = binary()
+        .arg("--web")
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::fs::File::create(&log).expect("transcript file"))
+        .stderr(std::fs::File::create(home.join("stderr.txt")).expect("stderr file"))
+        .spawn()
+        .expect("failed to run flint");
+
+    let (port, token) = port_and_token(&wait_for_url(&log));
+    let mut watching = http_stream(port, "/events", &token);
+    // Read to the *end* of the frame, and not to a key inside it: serde writes the keys in order,
+    // so stopping at any field would leave a truncated object that will not parse.
+    let opening = read_until(&mut watching, "\"type\":\"state\"}\n\n", 20);
+    post_message(port, &token, "/help");
+    read_until(&mut watching, "\"input\":\"/help\"", 20);
+
+    drop(watching);
+    drop(child.stdin.take());
+    let exited = wait_for_exit(&mut child, 20);
+    let transcript = std::fs::read_to_string(&log).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit");
+    let commands = commands_in(&opening);
+    assert!(
+        !commands.is_empty(),
+        "the state frame carries no command list, so the page has nothing to offer: {opening:?}"
+    );
+    assert!(
+        commands.iter().any(|(label, send, _, class)| label == "/provider key <key>"
+            && send == "/provider key"
+            && class == "form"),
+        "a command that is a form is not carried as one, so a page could only guess at the \
+         argument it needs: {commands:?}"
+    );
+    assert!(
+        commands.iter().any(|(_, _, _, class)| class == "danger"),
+        "no command is marked destructive, so a control would have nothing to confirm: \
+         {commands:?}"
+    );
+    assert!(
+        commands.iter().any(|(label, send, _, class)| label == "/reload"
+            && send == "/reload"
+            && class == "button"),
+        "a no-argument action is not carried, which is the class §8 builds first: {commands:?}"
+    );
+    // The classes the page cannot draw from *this* frame are not in it. `/exit` is the one §8 calls
+    // out (a window onto a process, and a misclick must not end a session); the three toggles are
+    // already on the page from the `toggles` field, and repeating them here would be one fact in
+    // two places; `/web` has nothing to offer (the page *is* the web view) and `!` is a shell
+    // escape that the composer can type anyway.
+    for absent in [
+        "\"label\":\"/exit\"",
+        "\"label\":\"/verbose",
+        "\"label\":\"/detail",
+        "\"label\":\"/readonly",
+        "\"label\":\"/web",
+        "\"label\":\"!<command>\"",
+    ] {
+        assert!(
+            !opening.contains(absent),
+            "the frame offers {absent}, which the page either must not offer or already has: \
+             {opening:?}"
+        );
+    }
+    // And the terminal's own help is the same table: every row the page was handed is a row
+    // `/help` prints, with the same one-line description.
+    for (label, _, help, _) in &commands {
+        assert!(
+            transcript.contains(label.as_str()),
+            "the page is offered `{label}` and `/help` does not print it, so the two lists have \
+             drifted apart: {transcript:?}"
+        );
+        assert!(
+            transcript.contains(help.as_str()),
+            "`{label}` is described one way to the page and another in `/help`: {transcript:?}"
+        );
+    }
+}
+
+/// Every command the page may offer is one the terminal accepts.
+///
+/// The drift this catches is the whole reason the list is a table: a page that offers a button for
+/// a command that has been renamed sends a line the REPL answers with `unknown command`, and
+/// nothing in either renderer would notice, because the frame is built from the same table that
+/// would be wrong. So the frame's own `send` strings are posted back through the route the page
+/// uses and the answer is read: a page's menu is only as good as the terminal's dispatch.
+///
+/// Only the classes that are safe to run with no argument. A form would sit waiting for input and a
+/// destructive one would delete something — which is what the class is *for*, and why the frame
+/// carries it rather than letting the page guess from the name.
+#[tokio::test]
+async fn every_command_the_page_may_offer_is_one_the_terminal_takes() {
+    let home = test_home("command-list-drift", "http://127.0.0.1:9/v1");
+    let log = home.join("transcript.txt");
+    let mut child = binary()
+        .arg("--web")
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::fs::File::create(&log).expect("transcript file"))
+        .stderr(std::fs::File::create(home.join("stderr.txt")).expect("stderr file"))
+        .spawn()
+        .expect("failed to run flint");
+
+    let (port, token) = port_and_token(&wait_for_url(&log));
+    let mut watching = http_stream(port, "/events", &token);
+    let opening = read_until(&mut watching, "\"type\":\"state\"}\n\n", 20);
+
+    let mut checked = 0;
+    for (label, send, _, class) in commands_in(&opening) {
+        if class != "panel" && class != "button" {
+            continue;
+        }
+        let posted = post_message(port, &token, &send);
+        assert!(
+            posted.starts_with("HTTP/1.1 202"),
+            "`{label}` was refused at the route: {posted:?}"
+        );
+        let told = read_until(&mut watching, &format!("\"input\":\"{send}\""), 20);
+        assert!(
+            !told.contains("unknown command"),
+            "the page is offered `{label}` as a {class} and the terminal does not have it, so a \
+             button drawn from this frame would answer with a complaint: {told:?}"
+        );
+        checked += 1;
+    }
+
+    drop(watching);
+    drop(child.stdin.take());
+    let exited = wait_for_exit(&mut child, 20);
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit");
+    assert!(
+        checked >= 8,
+        "only {checked} commands were checked, so the frame is missing the reports and actions \
+         this class is made of"
+    );
+}
+
+

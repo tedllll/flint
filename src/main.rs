@@ -1524,6 +1524,210 @@ async fn switch_provider(
     Ok(Flow::NewAgent(new_agent, target))
 }
 
+/// Which block of `/help` a row belongs to.
+#[derive(Clone, Copy, PartialEq)]
+enum HelpSection {
+    /// The commands themselves.
+    Commands,
+    /// The one line that is not a command: what typing during a turn does, which `/stop` is the
+    /// short spelling of.
+    Working,
+}
+
+/// What the page may draw for a command, if anything.
+///
+/// §8's classes, and the reason every row carries one. The frame hands the page a menu, and a
+/// control drawn for a command the terminal refuses is the failure the toggle round was built to
+/// prevent; the class is also what keeps this program's grammar out of the page -- a form needs an
+/// input, a destructive command needs confirming, a report needs nothing -- and it is what
+/// `tests/cli_output.rs` filters on, because running `/delete` to find out whether it exists is not
+/// a check anybody wants.
+#[derive(Clone, Copy, PartialEq)]
+enum OnPage {
+    /// A report. §8's first class: the page shows the listing rather than sending the command,
+    /// since the terminal is where somebody asked for it and the page's reader did not.
+    Panel,
+    /// One action, no argument.
+    Button,
+    /// A setting whose value is already somewhere else -- `/model`'s and `/provider`'s in the
+    /// `providers` field of this same frame, `/resume`'s in the sidebar's rows.
+    Selector,
+    /// Free-form input.
+    Form,
+    /// Destroys something. A button, behind the page's own confirmation: nothing in flint is
+    /// recoverable, and a misclick in a browser is a misclick.
+    Danger,
+    /// Already on the page from another field of the frame. Sending these in the command list as
+    /// well would be one fact in two places, which is how the two come to disagree about it.
+    Toggles,
+    /// The terminal's own, and not offered on the page at all: `/exit` because the page is a window
+    /// onto a process and a misclick must not end a session, `/web` because the page *is* the web
+    /// view, `!` because it is a shell escape the composer can type anyway, `/stop` because the
+    /// composer already has the button.
+    Terminal,
+}
+
+/// One row of `/help`, and one row of what the page is offered.
+///
+/// There are three readers of this fact -- the terminal's help, the REPL's dispatch, and the page's
+/// menu -- and the point of the table is that there is one copy of it. A second copy is how a page
+/// comes to offer a command that has been renamed while `/help` goes on describing the old one, and
+/// how a button for a command that takes an argument ends up sending a line with none in it.
+struct CommandHelp {
+    /// What `/help` prints in the left column: the word, and what it takes.
+    label: &'static str,
+    /// The line the page sends for it, with no argument: `/provider add`, `/name`.
+    ///
+    /// Kept beside the label instead of split out of it, because the split is not uniform -- `add`
+    /// is part of the command and `<key>` is not -- and a page that had to tell those apart would
+    /// be re-deriving this program's own grammar.
+    send: &'static str,
+    /// One line about what it does. The printer wraps it; the page gets it as written.
+    help: &'static str,
+    section: HelpSection,
+    on_page: OnPage,
+}
+
+impl CommandHelp {
+    /// A row of the table, in one line, with the columns in the order the struct declares them.
+    const fn row(
+        label: &'static str,
+        send: &'static str,
+        help: &'static str,
+        section: HelpSection,
+        on_page: OnPage,
+    ) -> Self {
+        Self {
+            label,
+            send,
+            help,
+            section,
+            on_page,
+        }
+    }
+}
+
+/// Every command the REPL takes, in the order `/help` has always printed them.
+///
+/// Aliases are not rows: `/q` and `/quit` are dispatched, but three spellings of one command is
+/// three lines of help for one thing, and the page has no use for them.
+const COMMANDS: &[CommandHelp] = &[
+    CommandHelp::row("/help", "/help", "this message", HelpSection::Commands, OnPage::Panel),
+    CommandHelp::row("/exit", "/exit", "quit", HelpSection::Commands, OnPage::Terminal),
+    CommandHelp::row("/provider", "/provider", "list providers", HelpSection::Commands, OnPage::Panel),
+    CommandHelp::row("/provider <name>", "/provider", "switch to one", HelpSection::Commands, OnPage::Selector),
+    CommandHelp::row("/provider add", "/provider add", "set up a new provider (interactive)", HelpSection::Commands, OnPage::Form),
+    CommandHelp::row("/provider edit <name>", "/provider edit", "change one (interactive)", HelpSection::Commands, OnPage::Form),
+    CommandHelp::row("/provider key <key>", "/provider key", "set the API key for the active provider", HelpSection::Commands, OnPage::Form),
+    CommandHelp::row("/provider rm <name>", "/provider rm", "delete one", HelpSection::Commands, OnPage::Danger),
+    CommandHelp::row("/config", "/config", "show shell, steps, proxy", HelpSection::Commands, OnPage::Panel),
+    CommandHelp::row("/config edit", "/config edit", "change shell, steps, proxy", HelpSection::Commands, OnPage::Form),
+    CommandHelp::row("/model [name]", "/model", "show or change the model", HelpSection::Commands, OnPage::Panel),
+    CommandHelp::row("/usage", "/usage", "context and token accounting", HelpSection::Commands, OnPage::Panel),
+    CommandHelp::row("/verbose [on|off|full]", "/verbose", "how much of the agent's activity to narrate", HelpSection::Commands, OnPage::Toggles),
+    CommandHelp::row("/detail [on|off]", "/detail", "print tool output (off: one line per result)", HelpSection::Commands, OnPage::Toggles),
+    CommandHelp::row("/readonly [on|off]", "/readonly", "toggle the write guard", HelpSection::Commands, OnPage::Toggles),
+    CommandHelp::row("/tools", "/tools", "list available tools", HelpSection::Commands, OnPage::Panel),
+    CommandHelp::row("/skills [name]", "/skills", "list skills, or print one as the model would see it", HelpSection::Commands, OnPage::Selector),
+    CommandHelp::row("/sessions", "/sessions", "list past sessions, numbered", HelpSection::Commands, OnPage::Panel),
+    CommandHelp::row("/resume <n|id>", "/resume", "switch to one of them", HelpSection::Commands, OnPage::Selector),
+    CommandHelp::row("/name [text]", "/name", "name this conversation", HelpSection::Commands, OnPage::Form),
+    CommandHelp::row("/archive <n|id>", "/archive", "file one away, out of the list", HelpSection::Commands, OnPage::Danger),
+    CommandHelp::row("/delete <n|id>", "/delete", "delete one", HelpSection::Commands, OnPage::Danger),
+    CommandHelp::row("/new", "/new", "start a fresh conversation", HelpSection::Commands, OnPage::Button),
+    CommandHelp::row("/web [port]", "/web", "open the browser view of this conversation", HelpSection::Commands, OnPage::Terminal),
+    CommandHelp::row("/reload", "/reload", "re-read the config file (after editing it yourself)", HelpSection::Commands, OnPage::Button),
+    CommandHelp::row("!<command>", "!", "run a shell command without the model", HelpSection::Commands, OnPage::Terminal),
+    CommandHelp::row("/stop", "/stop", "the same thing as one short word, for when a key is not available -- ssh, a pipe, or the browser's composer.", HelpSection::Working, OnPage::Terminal),
+];
+
+/// Where a description starts: two columns of indent, the label column, and the space after it.
+///
+/// Written down rather than measured from the table, because this is the column `/help` has always
+/// used: the table arrives to fill it, not to re-flow it. A label wider than the column spills one
+/// space past its own description's column, which the widest row has always done.
+const HELP_COLUMN: usize = 24;
+/// The width a label is padded to, which is the column less the space that separates it.
+const HELP_LABEL: usize = HELP_COLUMN - 3;
+/// How much room a description gets before it wraps: 80 columns less its own column.
+///
+/// The width the hand-written help was wrapped to, kept so that moving the rows into a table does
+/// not silently re-flow every one of them.
+const HELP_ROOM: usize = 80 - HELP_COLUMN;
+
+/// `/help`: the table, printed in the two blocks it has always been printed in.
+///
+/// The rows come from `COMMANDS` and the prose does not, which is the split that keeps the help and
+/// the page's menu together: a command that exists is a row, and everything else here explains a
+/// *block* of rows rather than a command.
+fn print_help_table(printer: &Printer<'_>) {
+    let Palette { dim, reset, .. } = printer.pal;
+    let line = |text: std::fmt::Arguments<'_>| printer.term().line(text);
+
+    line(format_args!("{dim}commands{reset}"));
+    help_rows(printer, HelpSection::Commands);
+    line(format_args!("{dim}while the model is working{reset}"));
+    line(format_args!(
+        "  Type and press Enter to interrupt it. Your line becomes the next input."
+    ));
+    help_rows(printer, HelpSection::Working);
+    line(format_args!("{dim}notes{reset}"));
+    line(format_args!(
+        "  Permission model is full by default. /readonly is the only guard."
+    ));
+    line(format_args!(
+        "  Everything above is configurable from inside flint; the file is only there"
+    ));
+    line(format_args!(
+        "  so that it stays hand-editable when that is easier."
+    ));
+    line(format_args!(
+        "  Config file: {reset}{}",
+        config::config_path().display()
+    ));
+}
+
+/// One block of the table: every row in this section, each wrapped under its own column.
+fn help_rows(printer: &Printer<'_>, section: HelpSection) {
+    for row in COMMANDS.iter().filter(|row| row.section == section) {
+        let mut wrapped = wrap(row.help, HELP_ROOM).into_iter();
+        let first = wrapped.next().unwrap_or_default();
+        printer
+            .term()
+            .line(format_args!("  {:<HELP_LABEL$} {}", row.label, first));
+        for rest in wrapped {
+            printer
+                .term()
+                .line(format_args!("{:HELP_COLUMN$}{rest}", ""));
+        }
+    }
+}
+
+/// Greedy word wrap: break before the word that would pass `room`.
+///
+/// The breaks the help has always had, done by hand until now, including the continuation of its
+/// widest row -- so keeping the rule keeps the breaks.
+fn wrap(text: &str, room: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut line = String::new();
+    for word in text.split(' ') {
+        let grown = if line.is_empty() {
+            word.chars().count()
+        } else {
+            line.chars().count() + 1 + word.chars().count()
+        };
+        if grown > room && !line.is_empty() {
+            out.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    out.push(line);
+    out
+}
+
 async fn handle_command(
     input: &str,
     cfg: &mut config::Config,
@@ -1547,45 +1751,11 @@ async fn handle_command(
         "/exit" | "/quit" | "/q" => return Ok(Flow::Exit),
 
         "/help" | "/?" => {
-            printer.term().line(format_args!(
-                "\
-{dim}commands{reset}
-  /help                 this message
-  /exit                 quit
-  /provider             list providers
-  /provider <name>      switch to one
-  /provider add         set up a new provider (interactive)
-  /provider edit <name> change one (interactive)
-  /provider key <key>   set the API key for the active provider
-  /provider rm <name>   delete one
-  /config [edit]        show or change shell, steps, proxy
-  /model [name]         show or change the model
-  /usage                context and token accounting
-  /verbose [on|off|full] how much of the agent's activity to narrate
-  /detail [on|off]      print tool output (off: one line per result)
-  /readonly [on|off]    toggle the write guard
-  /tools                list available tools
-  /skills [name]        list skills, or print one as the model would see it
-  /sessions             list past sessions, numbered
-  /resume <n|id>        switch to one of them
-  /name [text]          name this conversation
-  /archive <n|id>       file one away, out of the list
-  /delete <n|id>        delete one
-  /new                  start a fresh conversation
-  /web [port]           open the browser view of this conversation
-  /reload               re-read the config file (after editing it yourself)
-  !<command>            run a shell command without the model
-{dim}while the model is working{reset}
-  Type and press Enter to interrupt it. Your line becomes the next input.
-  /stop                 the same thing as one short word, for when a key is not
-                        available -- ssh, a pipe, or the browser's composer.
-{dim}notes{reset}
-  Permission model is full by default. /readonly is the only guard.
-  Everything above is configurable from inside flint; the file is only there
-  so that it stays hand-editable when that is easier.
-  Config file: {reset}{}",
-                config::config_path().display()
-            ));
+            // The list is the table every other reader of it uses -- see `COMMANDS`. Aliases are
+            // dispatched a few lines down (`/quit`, `/q`, and `/provider`'s sub-words), and are
+            // deliberately not rows: three spellings of one command is three lines of help for one
+            // thing.
+            print_help_table(printer);
         }
 
         // The browser view, opened from inside a conversation.
@@ -2427,8 +2597,50 @@ fn state_frame(
         "model": provider.model,
         "toggles": toggles(agent, printer),
         "providers": providers,
+        "commands": page_commands(),
     })
     .to_string()
+}
+
+/// The page's menu: the commands it may offer, in the shape a control is drawn from.
+///
+/// `label` is what `/help` prints, so the page can show the command's own words; `send` is what
+/// goes on the wire, so the page never assembles a command line out of parts; `class` is §8's
+/// class, which is what a control is chosen by -- and what the drift test in `tests/cli_output.rs`
+/// filters on to run only the commands that are safe to run with no argument.
+///
+/// Two kinds of row are left out rather than marked: the toggles, which the `toggles` field carries
+/// in the shape a switch needs, and the terminal's own commands, which have no business on a page
+/// (`/exit` above all: a misclick must not end a session).
+fn page_commands() -> serde_json::Value {
+    let rows: Vec<serde_json::Value> = COMMANDS
+        .iter()
+        .filter_map(|row| {
+            row.on_page.class().map(|class| {
+                serde_json::json!({
+                    "label": row.label,
+                    "send": row.send,
+                    "help": row.help,
+                    "class": class,
+                })
+            })
+        })
+        .collect();
+    serde_json::Value::Array(rows)
+}
+
+impl OnPage {
+    /// The word this class is carried as, or `None` for the two the frame does not offer.
+    fn class(self) -> Option<&'static str> {
+        match self {
+            OnPage::Panel => Some("panel"),
+            OnPage::Button => Some("button"),
+            OnPage::Selector => Some("selector"),
+            OnPage::Form => Some("form"),
+            OnPage::Danger => Some("danger"),
+            OnPage::Toggles | OnPage::Terminal => None,
+        }
+    }
 }
 
 /// The settings a page can switch, each with the values it takes and the value it is on.

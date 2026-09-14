@@ -368,7 +368,7 @@ most of a turn is text nobody could see. The retry rule is now explicit: the lad
 the first drawn character, because nothing in the chain can take text back. `docs/web-mode.md`
 §11 has the measurement; `src/provider.rs` has the rule.
 
-### 8. Web mode, from using it — **the read channel is in; the controls are being built**
+### 8. Web mode, from using it — **the read channel is in, and the page has its menu; the controls are next**
 
 Four things turned up in the first real sessions with the browser page, after level 3 was
 finished. Two are settled (below): the sidebar bug is fixed, and the commands gap now has a
@@ -522,11 +522,12 @@ something actually changed. The header stops printing the model and provider its
 is present, since the pickers say it and offer the alternatives; a dropped file still gets them
 from the session's `meta`.
 
-**The command list is deliberately not in the frame yet.** It belongs with the buttons and panels
-that read it — and a field nothing renders is a field that drifts. The frame grew its consumers one
-at a time, which is also how it stays small: the toggles are in it because a picker needs their
-values, and nothing else is. What this round built instead is the *output* half of the same design,
-because every class below needs it:
+**The command list waited for a reader.** A field nothing renders is a field that drifts, so the
+frame grew its consumers one at a time: the toggles arrived because a picker needs their values, and
+the command list arrived with the panel that draws it — which is also where the question "what
+should the page offer" got its answer, since a list with no classes in it is a list nobody can build
+a control from. What came first instead was the *output* half of the same design, because every class
+below needs it:
 
 **What a command answers is on the feed now — built, 2026-09-14.** The design above splits output by
 class, and the missing half was the action's: a command answers through `printer.term()`, which draws
@@ -568,30 +569,74 @@ were mutation-checked rather than watched red, because the code came first: neut
 push fails the e2e on "the page was never told what the command answered", and neutering the
 colour-stripping fails the unit test on the escape it should have removed.
 
-**Next: the command list, and the first panels — not started, and here is what is already decided.**
+**The page knows what commands there are — built, 2026-09-15.** The trap named below was the third
+copy, and the answer was to have no second one: `COMMANDS` in `src/main.rs` is now the list, and
+`/help` prints it. The check that this is real rather than asserted is behavioural, in
+`tests/cli_output.rs`: the frame's own `send` strings are posted back through the route the composer
+uses and the answers are read, so a command that has been renamed fails the test the moment the
+table is edited — `every_command_the_page_may_offer_is_one_the_terminal_takes`, and the same test
+carries a floor on how many rows it checked, because a frame with nothing in it would otherwise pass
+the loop in silence. The other half of the pair reads *both* renderings — the frame off the live
+stream, `/help` off the run's own stdout — and asserts every row the page was handed is a row the
+terminal prints, with the same description: the two are one table, and this is the test that would
+notice if somebody made them two again.
+
+An entry is `{label, send, help, class}`, and the two string fields are the interesting decision.
+`label` is what `/help` prints (`/provider key <key>`); `send` is what goes on the wire
+(`/provider key`). Splitting a label into a name and an argument list would have been the obvious
+shape and is wrong, because the split is not uniform: `add` is part of `/provider add` and `<key>` is
+not, and a page that had to tell those apart would be re-deriving the terminal's own grammar — which
+is exactly what a control drawn from this frame must not do. `class` is §8's own four
+(`panel`/`button`/`selector`/`form`/`danger`, `OnPage` in the source) and it is what a control will be
+chosen by, so it is carried now: the drift test above uses it to run only the commands that are safe
+to run with no argument, since running `/delete` to see whether it exists is not a check anybody
+wants. Two kinds of row are left out rather than marked: the three toggles, which the `toggles`
+field already carries in the shape a switch needs, and the terminal's own — `/exit` above all, since
+a misclick in a browser must not end a session, `/web` because the page *is* the web view, `!`
+because it is a shell escape the composer can type anyway, and `/stop` because the composer already
+has the button.
+
+`/help` was rewritten to print the table, and the gate for it was the cheapest possible: the output
+was captured before the change and diffed after. It comes out byte-identical, including the hand-made
+wrap of `/stop`'s row — the wrap is now a greedy function at the width the column leaves, which
+reproduces the breaks that used to be typed in by hand — with exactly one deliberate difference:
+`/config [edit]` became `/config` and `/config edit`, because one row cannot carry two classes and
+the page needs to know that one of them is a report and the other takes an argument.
+
+The page's half is a `<details>` in the header, collapsed, listing the rows in groups the page names
+itself — reports, actions, selectors, forms, destructive — which is a reading order rather than the
+table's order. It is deliberately not a control yet: a report is *shown* rather than sent (§8 below),
+and a button that sends a command this page has not been taught to confirm would be a button that
+destroys a conversation on one click. The policy test asserts the panel is built from the frame *and*
+that the page contains no command name of its own (`/provider key`, `/delete <n|id>`, `/reload`),
+which is the same drift guard one level down: a page that knew a command would go on offering it
+after a rename, in a panel whose whole job is to say what there is.
+
+**Next: the first controls — the buttons, then the selectors — and here is what is already decided.**
 Written down because both halves have a trap that is cheaper to avoid than to find:
 
-- **The frame grows `commands`**, one entry per command the page may offer: `{name, args, help,
-  class}`. `class` is this section's own four — `panel`, `action`, `form`, `danger` — and the frame
-  carries all of them even though the page renders one at a time: a control that offers a command
-  the terminal refuses is the failure the toggle round was built to prevent, and a class the page
-  silently drops is a control nobody can account for. `/exit` is not in it: the page is a window
-  onto a process, and a misclick must not end a session.
-- **The table has to be written once.** `/help` prints a hand-written block today (the
-  `"/help" | "/?"` arm) and dispatch is a `match`; a third copy for the frame would be the drift
-  this repository spends its comments preventing. The table drives `/help` and the frame, and the
-  `match` is checked against it by a test — one that runs each name through the REPL and asserts it
-  is not answered with "unknown command", which is the behavioural check that catches a rename.
 - **A panel's text comes from the process.** What `/config`, `/tools`, `/skills` and `/help` print
   *is* the panel, so the process builds those lines and puts them in the frame; formatting them in
   the page would be a second implementation of the terminal's own report. The trap: those lines are
   styled (dim/bold) for the terminal and the frame must carry plain text, so either they are built
   once as data and rendered twice, or the terminal gives up its styling — and the `term_capture`
-  tests assert exact bytes, so that choice has to be made deliberately. `Term::plain` (built in the
-  round above) is what strips colour on the way to the page.
-- **A button sends `/<name>` through `sendText`**, exactly as a picker or a switch does, and its
-  answer arrives on the `command` line built above. A refused send puts the control back to what is
-  in force.
+  tests assert exact bytes, so that choice has to be made deliberately. `Term::plain` (built two
+  rounds above) is what strips colour on the way to the page, and the `command` line already carries
+  a command's whole answer if the cheaper route is taken and a panel is simply the answer to
+  `/<name>` — which it is, for every panel in the list.
+- **A button sends `send` through `sendText`**, exactly as a picker or a switch does, and its answer
+  arrives on the `command` line built above. A refused send puts the control back to what is in
+  force. The page already has the row it needs for this: `class: "button"`, two rows today
+  (`/new`, `/reload`).
+- **A selector's options come from somewhere the frame already describes** — `/model`'s and
+  `/provider`'s from `providers` (both controls exist), `/resume`'s and `/archive`'s from the
+  sidebar's rows, which is the picked row's number rather than anything the page has to know. The
+  command list says which commands take a value; it does not say where the values come from, and it
+  should not, because that is what the control is for.
+- **A form is the composer's problem.** `/name <text>`, `/provider key <key>`, `/provider add` and
+  `/config edit` are interactive in the terminal, and `add`/`edit`/`edit` are wizards on top of that,
+  so the page gets a field only where the argument is a single value; the wizards stay where they
+  are, which is a decision worth revisiting rather than assuming.
 - **The destructive class gets the page's own confirmation** — a second click, not a `/yes` command
   — because there is no undo anywhere in flint.
 

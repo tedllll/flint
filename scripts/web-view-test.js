@@ -448,6 +448,54 @@ check("a state frame with no toggles in it takes the switches away", () => {
   eq(viewer.__node("toggles").children.length, 0, "none listed, none shown");
 });
 
+console.log("the panel of commands the frame describes");
+
+// §8's read channel, second half: the command list is what a menu — buttons, forms, confirmations —
+// is drawn from, and the page must not carry a copy of it. What is pinned here is the arrangement:
+// one group per class the page was taught, in a fixed order, with each row saying what to type and
+// what it does. The classes are §8's own, so the panel reads as the design does.
+check("the frame's command list becomes a panel, grouped by class", () => {
+  const page = loadViewer();
+  const d = page.newDoc();
+  page.applyState(d, JSON.stringify({
+    type: "state", provider: "stub", model: "m", providers: [{ name: "stub", models: ["m"] }],
+    toggles: [],
+    commands: [
+      { label: "/config", send: "/config", help: "show shell, steps, proxy", class: "panel" },
+      { label: "/reload", send: "/reload", help: "re-read the config file", class: "button" },
+      { label: "/resume <n|id>", send: "/resume", help: "switch to one of them", class: "selector" },
+      { label: "/name [text]", send: "/name", help: "name this conversation", class: "form" },
+      { label: "/delete <n|id>", send: "/delete", help: "delete one", class: "danger" },
+    ],
+  }));
+  eq(page.__node("commands").hidden, false, "a frame that lists commands offers the panel");
+  const groups = page.__node("command-list").children;
+  eq(
+    groups.map((g) => g.children[0].textContent),
+    ["reports", "actions", "selectors", "forms", "destructive"],
+    "one group per class, in the order §8 names them"
+  );
+  eq(
+    groups[0].children.slice(1).map((r) => r.children.map((c) => c.textContent)),
+    [["/config", "show shell, steps, proxy"]],
+    "a row says what to type and what it does"
+  );
+  eq(groups[4].children.length, 2, "the destructive group carries its own rows");
+});
+
+check("a state frame with no commands in it takes the panel away", () => {
+  const page = loadViewer();
+  const d = page.newDoc();
+  page.showState(d);
+  eq(page.__node("commands").hidden, true, "a document with no state offers no menu");
+  page.applyState(d, JSON.stringify({
+    type: "state", provider: "stub", model: "m", providers: [{ name: "stub", models: ["m"] }],
+  }));
+  // A frame from a build that did not carry them, or one whose list is empty: either way the panel
+  // goes rather than staying up with rows nothing is reporting any more.
+  eq(page.__node("commands").hidden, true, "a frame without a command list offers no menu");
+});
+
 console.log("where the lines come from");
 
 check("the token is read out of the URL that --web printed", () => {
