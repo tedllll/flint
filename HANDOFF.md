@@ -472,10 +472,21 @@ section into it, so the two do not drift. The shape of it now:
    only the strip had, the strip is emptied, and the next fragment starts a fresh segment at the
    new width (`a_resize_closes_the_answer_that_was_still_arriving`; re-wrapping instead would
    commit rows against a `committed` count measured in the old wrapping and duplicate text in the
-   scrollback). What step 3 still owes: deleting the interim state (`begin_answer`,
-   `last_segment_text`, `committed`, `fresh_segment`) so the strip becomes a cell grid rather
-   than a text offset — `committed` counting *rows* rather than characters is what forces the
-   segment boundary above, and it goes with that rewrite.
+   scrollback). What step 3 still owes is the **consolidation**, and `ROADMAP.md` §6 now records
+   what it has to keep, because two of the four pieces cannot be deleted: `segment_text` (what
+   actually arrived) is not the concatenation of the handed prefix and the drawn text — the strip
+   drops the leading blank space and may not fire at all — and `committed` has to stay while
+   answers commit *into* the transcript as they stream, which is the feature that makes a long
+   answer readable while it arrives. So the rewrite is one model owning the strip's rows, the
+   answer row the first holds, the arrival, the drawn text, the handed prefix and the committed
+   count — six fields behind three locks whose agreement is kept by hand across four functions —
+   rather than four deletions. The one trap to design around: with a single mutex, no guard may
+   live across the `close_stream` / `clear_viewport` calls that `stream` makes (it takes
+   `last_segment_text` at line ~1122 and `segment_text` at ~1146 today, both dropped before those
+   calls), so the frame has to snapshot under the lock, emit with it released, and relock to
+   store. Also worth knowing: `clear_viewport` now owns clearing the painter's memory of the rows
+   it erases — that came out of `stream_rows` in the last session, and a mutation removing every
+   such clear still passes all twenty terminal tests, so it is a simplification, not a fix.
 3. **Web mode** — `--web` as a window onto the running process rather than a mode. The first
    three steps need no decision, and the one open question (§7 of that document: a hand-rolled
    HTTP server or `hyper`, which is already in the tree via `reqwest`) blocks only step 4.
