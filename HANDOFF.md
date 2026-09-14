@@ -452,13 +452,20 @@ section into it, so the two do not drift. The shape of it now:
    [`docs/windows-tooling.md`](docs/windows-tooling.md) and now **half built**: the runner
    extraction, `exec` and the `glob`/`grep` separator fix are in the tree. What is left is
    the part that needs the machine.
-2. **The transcript as cells** — step 1, the measurement, is done: one 40-line answer streamed
-   in 256 deltas paints **10×** the characters it contains for a screen identical to the one a
-   single delta produces, at about 78 characters of waste per delta. `ROADMAP.md` §6 has the
-   table and the tool (`cargo test --test term_capture -- --ignored --nocapture
-   measured_cost_of_streaming`). What is left is paint only what changed, then re-render for
-   real on resize — which is also what deletes the interim state the clock fix left behind:
-   `begin_answer`, `last_segment_text`, the `committed` count and `fresh_segment`.
+2. **The transcript as cells** — steps 1 and 2 are done. The measurement found one 40-line
+   answer streamed in 256 deltas painting **10×** the characters it contains (about 78
+   characters of waste per delta) for a screen identical to the one a single delta produces;
+   after step 2 the same answer costs **2.2×**, and the second number is now the floor rather
+   than a shortfall: the transcript is painted once (a constant 2,158 characters) and the strip
+   paints the answer once as it streams, because every row really is drawn twice — as the
+   visible tail, then again when it scrolls out into the transcript. `ROADMAP.md` §6 has both
+   tables, and `tests/term_capture.rs::streaming_in_many_deltas_paints_only_what_changed` gates
+   the part that matters (four times the deltas, under 1.25× the paint). The tool is
+   `cargo test --test term_capture -- --ignored --nocapture measured_cost_of_streaming`. What
+   is left is step 3, re-render for real on resize — which is also what deletes the interim
+   state the clock fix left behind: `begin_answer`, `last_segment_text`, the `committed` count
+   and `fresh_segment`. Step 3 has a new reason to exist as well: the strip caches the rows it
+   drew for the width in force at the time, so a resize has to invalidate them.
 3. **Web mode** — `--web` as a window onto the running process rather than a mode. The first
    three steps need no decision, and the one open question (§7 of that document: a hand-rolled
    HTTP server or `hyper`, which is already in the tree via `reqwest`) blocks only step 4.

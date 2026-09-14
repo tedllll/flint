@@ -125,7 +125,7 @@ could only be settled on a Windows machine were settled on one (Windows 10.0.262
 work a command backgrounds (§6.1) and the line-ending sentence for `apply_patch` (§6.4).
 Neither is a Windows item, and both need a test before they need code.
 
-### 6. The transcript as cells — **step 1 measured**
+### 6. The transcript as cells — **step 2 landed**
 
 Three steps: measure the transcript as cells, paint only what changed, then re-render for
 real on resize. This is also what deletes the interim state the clock fix left behind —
@@ -150,10 +150,10 @@ is what it cost to arrive:
 | 64 | 20,210 | 404 | 253 | 7,507 | 3.4× |
 | 256 | 56,813 | 1,124 | 434 | 21,973 | **10.0×** |
 
-A delta is charged for **rows, not for the text it carries**: the marginal cost is about 78
+A delta was charged for **rows, not for the text it carries**: the marginal cost was about 78
 characters painted and about 200 bytes per delta, whether that delta carried two characters or
 nine. Answer text arriving whole costs 1.0× its own length, which says the painter is not
-wasteful about a single frame — the waste is entirely in *repeating* one, and it scales with how
+wasteful about a single frame — the waste was entirely in *repeating* one, and it scaled with how
 finely the answer was chopped rather than with the answer. That is what a text offset does: it
 has no way to know that 77 of the 78 characters it just drew were already on the screen.
 
@@ -161,6 +161,57 @@ It also sets step 2's acceptance rule, which is what the measurement was for: **
 screen — byte-identical under `scripts/vtscreen.js` — at a cost that grows with the text and not
 with the delta count.** The 256-delta row is the one to watch, and the byte-exact tests in
 `tests/term_capture.rs` already pin the screens it must not change.
+
+**Step 2 landed**, 2026-09-14, and the same measurement after it:
+
+| deltas | bytes | row writes | row erases | characters painted | × the answer |
+|---|---|---|---|---|---|
+| 1 | 5,557 | 80 | 75 | 2,224 | 1.0× |
+| 4 | 6,166 | 101 | 90 | 2,403 | 1.1× |
+| 16 | 9,098 | 171 | 129 | 3,338 | 1.5× |
+| 64 | 14,017 | 338 | 176 | 4,554 | 2.1× |
+| 256 | 21,772 | 882 | 357 | 4,928 | **2.2×** |
+
+Bytes per delta at 256 fell from 222 to 85, and painted characters from 10.0× the answer to
+2.2×. Three paints changed:
+
+- **A row that is already right is not rewritten.** The frame compares each strip row against
+  what it held last time, per *screen row* rather than by index into the slice — the slice
+  slides as the answer grows, so an index is not a row.
+- **A row that grew is written from the first difference on**, positioned at the column that
+  difference starts in, instead of the whole row from column 1.
+- **The slide itself is delegated to the terminal.** When the slice's window moves, every row
+  on screen changes content; `CSI S` inside the strip's own scroll region moves those cells
+  instead, and only the rows that are genuinely new are painted. The rows that scroll out at
+  the top are the ones already handed to the transcript a few lines earlier, so nothing is
+  lost by moving them.
+
+**2.2× is the floor, not a shortfall.** The measurement splits the painted characters by
+region: the transcript costs a constant **2,158** characters at 1, 64 and 256 deltas, and the
+strip costs the answer's own **2,191**. Every row is drawn twice because it *is* drawn twice —
+once while it is the visible tail of the streamed answer, and again when it scrolls out into
+the transcript above, which is the same text at two screen positions at two times. The
+single-delta run never streams through the strip and so pays 54 characters there. What matters
+is that the second number does not grow: 2,184 characters at 64 deltas and 2,196 at 256, and
+`streaming_in_many_deltas_paints_only_what_changed` asserts exactly that (four times the
+deltas, under 1.25× the paint; it was 2.9× before this change).
+
+Two things this leaves behind for step 3, both now visible because the painter has a model of
+what is on screen:
+
+- The strip's rows are still an **absolute-address rewrite** driven from `stream_rows`, not a
+  cell grid. `stream_rows`, `stream_first` and `previous_drawn` are the beginnings of that
+  grid; the interim text-offset state (`begin_answer`, `last_segment_text`, `committed`,
+  `fresh_segment`) is untouched so far.
+- A resize still does not re-render: the strip caches rows for the width that was in force
+  when they were drawn, and step 3 has to invalidate them when `screen_cols` changes.
+
+One trap worth remembering, because it cost an afternoon: the `\r\n` that carries the cursor
+from one strip row to the next belongs to the row that was *written*. Emitted after a row that
+was skipped, it moves the cursor from wherever it was parked — the input row — and a line feed
+on the screen's last row scrolls the whole transcript up by one. The visible effect was the
+answer being eaten a row at a time with holes appearing in history, and it was only caught by
+replaying the capture frame by frame.
 
 ### 7. Web mode: a window onto the running process — **levels 1 and 2 built**
 

@@ -1226,13 +1226,7 @@ fn a_later_turn_does_not_recommit_the_earlier_turns_narration() {
 fn measured_cost_of_streaming_an_answer() {
     let _guard = stdout_lock().lock().unwrap_or_else(|e| e.into_inner());
 
-    // Mixed CJK and ASCII, so the measurement is not accidentally about a byte being a
-    // character, and long enough to scroll a 24-row screen several times over.
-    let answer: String = (1..=40)
-        .map(|i| {
-            format!("第 {i} 行：这是用来测量重画成本的一句话，中间夹着 ASCII words and a bit more.\n")
-        })
-        .collect();
+    let answer = measurement_answer();
     let answer_chars = answer.chars().count();
     println!(
         "\nthe answer: {answer_chars} characters, {} rows, {} bytes\n",
@@ -1244,42 +1238,8 @@ fn measured_cost_of_streaming_an_answer() {
         "deltas", "bytes", "row-wr", "erases", "painted", "paint/ans", "b/delta"
     );
 
-    let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
     for deltas in [1usize, 4, 16, 64, 256] {
-        let path = target.join(format!("stream-cost-{deltas}.bin"));
-        let restore = capture_into(&path);
-        std::env::set_var("FLINT_TERM_CAPTURE", "1");
-        std::env::set_var("FLINT_TERM_SIZE", "100x24");
-
-        let bytes;
-        {
-            let term = Term::start().expect("term");
-            term.line(format_args!("> 请总结一下"));
-            // The REPL's own rule: every delta sends the *cumulative* text, because that is
-            // what a model that resends or resumes produces. Feeding only the new fragment
-            // here would measure a path flint does not take.
-            let marks: Vec<usize> = answer
-                .char_indices()
-                .map(|(b, _)| b)
-                .step_by(answer_chars.div_ceil(deltas).max(1))
-                .collect();
-            let mut cumulative = String::new();
-            for k in 0..deltas {
-                let end = marks.get(k + 1).copied().unwrap_or(answer.len());
-                let start = marks.get(k).copied().unwrap_or(answer.len());
-                if start >= answer.len() {
-                    break;
-                }
-                cumulative.push_str(&answer[start..end.min(answer.len())]);
-                term.stream(&cumulative);
-            }
-            term.end_stream();
-            drop(term);
-            bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        }
-        restore();
-
-        let captured = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).to_string();
+        let (captured, bytes) = stream_capture(&answer, deltas, &format!("stream-cost-{deltas}.bin"));
         let cost = paint_cost(&captured);
         println!(
             "{deltas:>7} {bytes:>9} {:>9} {:>8} {:>9} {:>9.1}x {:>8.1}",
@@ -1291,6 +1251,106 @@ fn measured_cost_of_streaming_an_answer() {
         );
     }
     println!();
+}
+
+/// A streamed answer must cost what the answer costs, not what the deltas cost.
+///
+/// ROADMAP §6 step 2, and the invariant the rewrite exists for: the same text arriving in more
+/// pieces must not cost proportionally more. The old painter charged about 78 characters to
+/// every delta -- 10x the answer at 256 deltas (`measured_cost_of_streaming_an_answer`) -- and
+/// nearly all of it was rows re-saying what they already said.
+///
+/// The bound is two costs, because two things have to be painted. Every row is drawn while it
+/// is the visible tail of the answer and drawn *again* when it scrolls out into the
+/// transcript, and that is not waste: it is the same text at two screen positions at two
+/// times, which is what a streamed answer inside a fixed strip is. The measurement shows the
+/// split plainly -- at 64 and at 256 deltas the transcript costs a constant 2158 characters and
+/// the strip costs the answer's own 2191, while the single-delta run never streams through the
+/// strip at all and pays 54 there. So `2x` is the floor, and the assertion is that the cost
+/// stays near it.
+///
+/// Which is why there are two bounds, and the second one is the sharp one: four times the
+/// deltas over the same text must paint barely more than the same amount. That is the claim
+/// that the per-delta cost is gone, and it is the one that fails loudly if a future painter
+/// starts redrawing a row per fragment again. Before the rewrite: 7507 -> 21973 characters,
+/// 2.9x. After: 4554 -> 4928, 1.08x.
+#[test]
+fn streaming_in_many_deltas_paints_only_what_changed() {
+    let _guard = stdout_lock().lock().unwrap_or_else(|e| e.into_inner());
+
+    let answer = measurement_answer();
+    let (once, _) = stream_capture(&answer, 1, "stream-once.bin");
+    let (many, _) = stream_capture(&answer, 64, "stream-many.bin");
+    let (most, _) = stream_capture(&answer, 256, "stream-most.bin");
+    let one_delta = paint_cost(&once).painted;
+    let many_deltas = paint_cost(&many).painted;
+    let most_deltas = paint_cost(&most).painted;
+
+    assert!(
+        many_deltas * 2 < one_delta * 5,
+        "64 deltas painted {many_deltas} characters against {one_delta} for a single delta \
+         ({}x): more than the strip-and-transcript cost of the answer",
+        many_deltas as f64 / one_delta as f64
+    );
+    assert!(
+        most_deltas * 4 < many_deltas * 5,
+        "256 deltas painted {most_deltas} characters against {many_deltas} for 64 \
+         ({}x): a delta is still being charged for text that is already on the screen",
+        most_deltas as f64 / many_deltas as f64
+    );
+}
+
+/// The answer both of the tests above measure: mixed CJK and ASCII, and long enough to scroll a
+/// 24-row screen several times over.
+fn measurement_answer() -> String {
+    (1..=40)
+        .map(|i| {
+            format!("第 {i} 行：这是用来测量重画成本的一句话，中间夹着 ASCII words and a bit more.\n")
+        })
+        .collect()
+}
+
+/// Stream `answer` into a capture file in `deltas` pieces, and return its bytes.
+///
+/// The REPL's own rule: every delta sends the *cumulative* text, because that is what a model
+/// that resends or resumes produces. Feeding only the new fragment here would measure a path
+/// flint does not take.
+fn stream_capture(answer: &str, deltas: usize, file: &str) -> (String, u64) {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join(file);
+    let restore = capture_into(&path);
+    std::env::set_var("FLINT_TERM_CAPTURE", "1");
+    std::env::set_var("FLINT_TERM_SIZE", "100x24");
+
+    let answer_chars = answer.chars().count();
+    let bytes;
+    {
+        let term = Term::start().expect("term");
+        term.line(format_args!("> 请总结一下"));
+        let marks: Vec<usize> = answer
+            .char_indices()
+            .map(|(b, _)| b)
+            .step_by(answer_chars.div_ceil(deltas).max(1))
+            .collect();
+        let mut cumulative = String::new();
+        for k in 0..deltas {
+            let start = marks.get(k).copied().unwrap_or(answer.len());
+            if start >= answer.len() {
+                break;
+            }
+            let end = marks.get(k + 1).copied().unwrap_or(answer.len());
+            cumulative.push_str(&answer[start..end.min(answer.len())]);
+            term.stream(&cumulative);
+        }
+        term.end_stream();
+        drop(term);
+        bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    }
+    restore();
+
+    let captured = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).to_string();
+    (captured, bytes)
 }
 
 /// What a capture asked the terminal to do: cells painted, rows addressed, rows erased.

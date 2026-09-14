@@ -40,6 +40,23 @@ fn display_width(text: &str) -> u16 {
     text.chars().map(char_width).sum()
 }
 
+/// The number of *bytes* of `new` that `old` already starts with, on a character boundary.
+///
+/// A streamed row almost always keeps its head and grows at the end, so this is the part of
+/// the row the terminal already has. It returns a byte count because it is used to slice the
+/// string, and it stops on a character boundary because slicing a wide character in half is
+/// not a thing that can be drawn.
+fn common_prefix_len(old: &str, new: &str) -> usize {
+    let mut bytes = 0;
+    for (a, b) in old.chars().zip(new.chars()) {
+        if a != b {
+            break;
+        }
+        bytes += a.len_utf8();
+    }
+    bytes
+}
+
 fn char_width(c: char) -> u16 {
     let c = c as u32;
     // Combining marks and zero-width characters take no room of their own.
@@ -1230,15 +1247,39 @@ impl Term {
         //
         // Only rows the previous frame actually drew are considered: the rows below it
         // were erased then, and the ones above belong to history.
-        for n in 0..previous_drawn {
-            let strip_row = previous_start_frame + n as u16;
-            if strip_row < top || strip_row > last {
-                continue;
-            }
-            let was_showing = previous_first + n;
-            let still_showing = was_showing >= first && was_showing < first + visible.len();
-            if !still_showing {
-                let _ = write!(out, "\x1b[{};1H\x1b[2K", strip_row);
+        //
+        // **Unless the slice slid**, in which case the terminal is asked to move those cells
+        // instead. The window sliding is the common case for a long answer, and redrawing
+        // every row one position up is what made 64 deltas cost 3.4x the answer (ROADMAP §6).
+        // `CSI S` scrolls the strip's *own* region, so nothing above it moves, and the rows
+        // that scroll out at the top are the ones already handed to history a few lines up.
+        // The scroll is only valid when the rest of the block is what it was: the window must
+        // have moved by the same amount for every row, and one frame's worth of the block --
+        // its last row, the one still being appended to -- is allowed to differ, because that
+        // row is not final in the older frame.
+        let slid = first.saturating_sub(previous_first);
+        let overlap = visible.len().saturating_sub(slid);
+        let can_slide = slid > 0
+            && previous_drawn == visible.len()
+            && start == previous_start_frame
+            && slid <= previous.len()
+            && visible[..overlap.saturating_sub(1)]
+                .iter()
+                .zip(previous[slid..].iter())
+                .all(|(now, before)| now == before);
+        if can_slide {
+            let _ = write!(out, "\x1b[{};{}r\x1b[{}S\x1b[r", top, last, slid);
+        } else {
+            for n in 0..previous_drawn {
+                let strip_row = previous_start_frame + n as u16;
+                if strip_row < top || strip_row > last {
+                    continue;
+                }
+                let was_showing = previous_first + n;
+                let still_showing = was_showing >= first && was_showing < first + visible.len();
+                if !still_showing {
+                    let _ = write!(out, "\x1b[{};1H\x1b[2K", strip_row);
+                }
             }
         }
         // Rewrite each visible row in place, then erase whatever the row held before
@@ -1252,28 +1293,74 @@ impl Term {
         // text first and erasing only the tail never touches a row ahead of the
         // cursor.
         let mut drawn = 0u16;
+        // The `\r\n` that carries the cursor to the next row belongs to the row that was
+        // *written*, and only to it. Emitted after a row that nothing was written for, it
+        // would move the cursor from wherever it was already parked -- the input row, since
+        // that is the last thing drawn before this -- and a line feed on the screen's last
+        // row scrolls the *whole* transcript up by one. That is not a hypothetical: it is
+        // what a `\r\n` after a skipped row did, and the failure looked like the answer
+        // being eaten a row at a time, with history developing holes.
+        let more = visible.len().saturating_sub(1);
         for (n, line) in visible.iter().enumerate() {
             let r = start + n as u16;
             if r > last {
                 break;
             }
-            let _ = write!(out, "\x1b[{};1H{line}", r);
-            let width = display_width(line);
-            if let Some(prev) = previous.get(drawn as usize) {
-                let prev_width = display_width(prev);
-                if prev_width > width {
-                    // `CSI {n}K` erases n cells from the cursor without moving it, so
-                    // it shortens the row and leaves the cursor where the next line's
-                    // positioning needs it to be.
-                    let _ = write!(out, "\x1b[{}K", prev_width - width);
+            // What this *screen row* held last frame, if it held anything. Matched by screen
+            // row rather than by position in the slice: the slice slides as the answer grows,
+            // so the same index can be a different row, and a difference taken against the
+            // wrong row would skip a row that did change -- leaving stale text on screen.
+            // Rows outside the previous frame's range were blank, so nothing to compare to.
+            //
+            // `slid` is the correction for the scroll above: the cells on this row are the
+            // ones that were `slid` rows further down before it, so that is what they have to
+            // be compared against. It is zero whenever no scroll was emitted -- the terminal
+            // does not move anything by itself, and comparing against a row that is not there
+            // would skip a row that did change.
+            let base = if can_slide { slid as u16 } else { 0 };
+            let previous_here = r
+                .checked_sub(previous_start_frame)
+                .map(|index| index.saturating_add(base))
+                .and_then(|index| previous.get(index as usize));
+            match previous_here {
+                // Already on screen exactly as it should be. Writing it again is the whole
+                // cost this rewrite exists to remove: at 64 deltas the old painter drew 3.4x
+                // the answer, and nearly all of it was rows re-saying what they already said
+                // (ROADMAP §6, `measured_cost_of_streaming_an_answer`).
+                //
+                // Nothing else writes inside the strip between frames: `insert_history`
+                // scrolls only the region above it, and `clear_viewport` clears
+                // `stream_rows` along with the rows it erases.
+                Some(previous_row) if previous_row == line => {}
+                Some(previous_row) => {
+                    // The common case by far: the row kept its head and grew at the end.
+                    // Only the part from the first difference on is sent, positioned at the
+                    // column that difference starts in -- the head is already on screen.
+                    let keep = common_prefix_len(previous_row, line);
+                    let at = display_width(&line[..keep]);
+                    let _ = write!(out, "\x1b[{};{}H{}", r, at + 1, &line[keep..]);
+                    let width = display_width(line);
+                    let previous_width = display_width(previous_row);
+                    if previous_width > width {
+                        // `CSI {n}K` erases n cells from the cursor without moving it, so
+                        // it shortens the row and leaves the cursor where the next line's
+                        // positioning needs it to be.
+                        let _ = write!(out, "\x1b[{}K", previous_width - width);
+                    }
+                    if n < more {
+                        // A short line needs the `CR` to return from wherever it ended; a
+                        // full one is already at column 1 of the next row.
+                        let _ = write!(out, "\r\n");
+                    }
+                }
+                None => {
+                    let _ = write!(out, "\x1b[{};1H{line}", r);
+                    if n < more {
+                        let _ = write!(out, "\r\n");
+                    }
                 }
             }
             drawn += 1;
-            if n < visible.len().saturating_sub(1) {
-                // A short line needs the `CR` to return from wherever it ended; a
-                // full one is already at column 1 of the next row.
-                let _ = write!(out, "\r\n");
-            }
         }
         for r in (start + drawn)..=last {
             let _ = write!(out, "\x1b[{};1H\x1b[2K", r);
