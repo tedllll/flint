@@ -99,16 +99,25 @@
     height: 100vh;
   }
   .app.plain { grid-template-columns: minmax(0, 1fr); }
-  .app.plain #grip { display: none; }
   /* The grip has no visible width of its own, only a highlight on hover so that it is
      discoverable at all, and the resize cursor. Every cursor on the page becomes that one
      while a drag is running: the pointer is captured, so the moves keep arriving here while
      the cursor itself travels over the transcript, and without this the page flickers between
      two cursors for the whole drag. */
-  #grip { cursor: col-resize; }
-  #grip:hover, body.dragging #grip { background-color: var(--user); }
+  #grip, #read-grip { cursor: col-resize; }
+  #grip:hover, #read-grip:hover, body.dragging #grip, body.dragging #read-grip {
+    background-color: var(--user);
+  }
   body.dragging { user-select: none; }
   body.dragging * { cursor: col-resize !important; }
+  /* The reading-width hand, which is placed against the text's right edge rather than against a
+     column of the layout, and is clamped inside the pane for the window too narrow to hold the
+     width it is asking for. */
+  #read-grip {
+    position: absolute; top: 0; bottom: 0; width: 5px;
+    left: min(calc(var(--pad-x) + var(--read, 110ch)), calc(100% - 5px));
+  }
+  .app.plain #grip, .app.plain #read-grip { display: none; }
   aside {
     background: var(--panel); border-right: 1px solid var(--line);
     overflow-y: auto; min-height: 0; padding: 12px 0 14px;
@@ -148,13 +157,16 @@
   }
   #sessions li.current .label { color: var(--user); }
   #sessions .none, #sessions .waiting { color: var(--dim); cursor: default; padding: 7px 14px; }
-  .pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  /* `position: relative` and `--pad-x` are for the reading-width hand below: the hand is placed
+     against the pane's own edge, and the padding is a variable because three things need the same
+     number -- the transcript's padding, the hand's position, and the arithmetic in the drag. */
+  .pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; --pad-x: 18px; }
   /* The scroll container is the whole pane, and the *reading* width is capped inside it. The cap
      used to be on this element, which left the transcript's scrollbar sitting in the middle of a
      wide window with a dead strip of background to its right: a scrollbar belongs at the edge of
      what you are scrolling, and what you are scrolling is the window. */
-  main { padding: 14px 18px 40px; flex: 1; overflow-y: auto; }
-  #doc { max-width: 110ch; }
+  main { padding: 14px var(--pad-x) 40px; flex: 1; overflow-y: auto; }
+  #doc { max-width: var(--read, 110ch); }
   /* The composer is a row rather than a fixed element: it sits under the transcript, so a
      scrollbar belongs to the transcript and not to the whole window. */
   #composer {
@@ -253,6 +265,12 @@
 </div>
 
     <main id="transcript"><div id="doc"><p class="empty">Nothing loaded yet.</p></div></main>
+    <!-- The hand for the reading width. Positioned rather than a grid column, because it follows a
+         variable inside the pane instead of a column of the layout, and it spans the pane so it can
+         be grabbed anywhere down the text's right edge. -->
+    <div id="read-grip" role="separator" aria-orientation="vertical" tabindex="0"
+         title="drag to change the reading width" aria-label="reading width"
+         aria-valuemin="320" aria-valuemax="1200"></div>
     <!-- Typing goes through the same channel the keyboard does, so a slash command works from
          here too -- `/resume 3` below is that and nothing more. Enter sends, Shift+Enter is a
          newline, because a pasted block is a message the same way it is in the terminal. -->
@@ -1169,46 +1187,72 @@ if (typeof document !== "undefined" && document.getElementById) {
     document.getElementById("composer").hidden = false;
     setHint(idleHint());
 
-    // The sidebar's width, dragged or nudged with the arrows. One variable on the grid rather
-    // than a recomputed layout: the browser does the arithmetic and the transcript takes what
-    // is left. Nothing is remembered across reloads, which is deliberate -- the page keeps
-    // nothing in storage today, and a width that outlives the run is a preference nobody asked
-    // to have saved; the default is one double-click away.
+    // The two hands, left and right, are one control: grab it, drag, let go, nudge with the
+    // arrows, double-click to put it back. Only the width behind the boundary differs, so `apply`
+    // is handed the boundary's position in the window and turns it into whichever width belongs
+    // to that boundary. Nothing is remembered across reloads -- the page keeps nothing in storage
+    // today, and a width that outlives the run is a preference nobody asked to have saved.
+    const dragBoundary = (hand, apply, reset) => {
+      hand.addEventListener("pointerdown", (e) => {
+        if (e.button !== 0) return;
+        hand.setPointerCapture(e.pointerId);
+        document.body.classList.add("dragging");
+        e.preventDefault(); // a drag is not a text selection
+      });
+      hand.addEventListener("pointermove", (e) => {
+        if (hand.hasPointerCapture(e.pointerId)) apply(e.clientX);
+      });
+      const end = (e) => {
+        if (hand.hasPointerCapture(e.pointerId)) hand.releasePointerCapture(e.pointerId);
+        document.body.classList.remove("dragging");
+      };
+      hand.addEventListener("pointerup", end);
+      hand.addEventListener("pointercancel", end);
+      hand.addEventListener("dblclick", reset);
+      hand.addEventListener("keydown", (e) => {
+        // The boundary follows the arrow, so Right widens whatever is on its left -- one rule for
+        // both hands, and the reason this cannot be written as a width delta per hand.
+        const step = e.shiftKey ? 48 : 16;
+        if (e.key === "ArrowLeft") apply(hand.getBoundingClientRect().left - step);
+        else if (e.key === "ArrowRight") apply(hand.getBoundingClientRect().left + step);
+        else return;
+        e.preventDefault();
+      });
+    };
+
     const app = document.getElementById("app");
+    const pane = document.querySelector(".pane");
+    const padX = () => parseFloat(getComputedStyle(pane).getPropertyValue("--pad-x")) || 18;
+
+    // The conversation list's width.
     const grip = document.getElementById("grip");
-    const sideWidth = () => document.getElementById("sidebar").getBoundingClientRect().width;
-    const setSide = (width) => {
-      // 320px is what the transcript needs to be worth reading; below 160px the labels are
-      // all ellipsis, which is the state the list was in before it could be dragged at all.
+    const setSide = (boundaryX) => {
+      // 320px is what the transcript needs to be worth reading; below 160px the labels are all
+      // ellipsis, which is the state the list was in before it could be dragged at all.
       const widest = Math.max(160, Math.min(900, window.innerWidth - 320));
-      const w = Math.round(Math.min(Math.max(width, 160), widest));
+      const w = Math.round(Math.min(Math.max(boundaryX, 160), widest));
       app.style.setProperty("--side", w + "px");
       grip.setAttribute("aria-valuenow", String(w));
     };
-    grip.addEventListener("pointerdown", (e) => {
-      if (e.button !== 0) return;
-      grip.setPointerCapture(e.pointerId);
-      document.body.classList.add("dragging");
-      e.preventDefault(); // a drag is not a text selection
-    });
-    grip.addEventListener("pointermove", (e) => {
-      if (grip.hasPointerCapture(e.pointerId)) setSide(e.clientX);
-    });
-    const endDrag = (e) => {
-      if (grip.hasPointerCapture(e.pointerId)) grip.releasePointerCapture(e.pointerId);
-      document.body.classList.remove("dragging");
+    dragBoundary(grip, setSide, () => app.style.removeProperty("--side"));
+    setSide(grip.getBoundingClientRect().left);
+
+    // The reading width. The transcript still scrolls at the window's edge whatever this is,
+    // because the cap is on the content inside the scroll container and not on the container.
+    const readHand = document.getElementById("read-grip");
+    const doc = document.getElementById("doc");
+    const setRead = (boundaryX) => {
+      const box = pane.getBoundingClientRect();
+      const pad = padX();
+      // Never wider than the pane can show: past that the hand would be dragged off the edge and
+      // the only way to get it back would be the double-click.
+      const most = Math.max(320, box.width - pad * 2);
+      const w = Math.round(Math.min(Math.max(boundaryX - box.left - pad, 320), most));
+      app.style.setProperty("--read", w + "px");
+      readHand.setAttribute("aria-valuenow", String(w));
     };
-    grip.addEventListener("pointerup", endDrag);
-    grip.addEventListener("pointercancel", endDrag);
-    grip.addEventListener("dblclick", () => app.style.removeProperty("--side"));
-    grip.addEventListener("keydown", (e) => {
-      const step = e.shiftKey ? 48 : 16;
-      if (e.key === "ArrowLeft") setSide(sideWidth() - step);
-      else if (e.key === "ArrowRight") setSide(sideWidth() + step);
-      else return;
-      e.preventDefault();
-    });
-    setSide(sideWidth());
+    dragBoundary(readHand, setRead, () => app.style.removeProperty("--read"));
+    readHand.setAttribute("aria-valuenow", String(Math.round(doc.getBoundingClientRect().width)));
 
     document.getElementById("new-conversation").addEventListener("click", async (e) => {
       // Disabled while it is in flight, because a second click before the process answers would
