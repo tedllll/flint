@@ -112,11 +112,19 @@
   body.dragging * { cursor: col-resize !important; }
   /* The reading-width hand, which is placed against the text's right edge rather than against a
      column of the layout, and is clamped inside the pane for the window too narrow to hold the
-     width it is asking for. */
+     width it is asking for. It carries a hairline at rest -- asked for after the fact: at the right
+     edge of the text there is no seam to notice, so unlike the list's hand it had nothing to be
+     discovered by, and a control nobody can see is a control nobody uses. The line is `--line`,
+     the same colour as the borders, so it reads as part of the page rather than as a hint. */
   #read-grip {
     position: absolute; top: 0; bottom: 0; width: 5px;
     left: min(calc(var(--pad-x) + var(--read, 110ch)), calc(100% - 5px));
+    background-image: linear-gradient(var(--line), var(--line));
+    background-size: 1px 100%;
+    background-position: center;
+    background-repeat: no-repeat;
   }
+  #read-grip:hover { background-image: none; }
   .app.plain #grip, .app.plain #read-grip { display: none; }
   aside {
     background: var(--panel); border-right: 1px solid var(--line);
@@ -1083,14 +1091,22 @@ async function follow() {
   for (;;) {
     try {
       postLog("opening the feed · last " + applied);
-      const response = await fetch("/events?last=" + applied, {
-        headers: authHeader(),
-        // A stream that never answers must not become a page that never says anything: without a
-        // deadline this await waits forever, and "waiting forever" looks on screen exactly like
-        // everything else that has gone wrong here. Ten seconds is far longer than a loopback
-        // listener needs and far shorter than anybody's patience with a page that does nothing.
-        signal: AbortSignal.timeout(10000),
-      });
+      // A deadline on *connecting*, not on the stream. The first version armed it for the whole
+      // response, and a stream is silent between turns by design, so a healthy connection was
+      // aborted every ten seconds -- measured in the log as `AbortError: BodyStreamBuffer was
+      // aborted` on a ten-second cycle, forever. The timer is cleared the moment the response
+      // arrives, and a listener that never answers still cannot hang the page.
+      const deadline = new AbortController();
+      const giveUp = setTimeout(() => deadline.abort(), 10000);
+      let response;
+      try {
+        response = await fetch("/events?last=" + applied, {
+          headers: authHeader(),
+          signal: deadline.signal,
+        });
+      } finally {
+        clearTimeout(giveUp);
+      }
       if (!response.ok) throw new Error("HTTP " + response.status);
       await readSession();
       delay = 500;
@@ -1329,7 +1345,13 @@ if (typeof document !== "undefined" && document.getElementById) {
     // The reading width. The transcript still scrolls at the window's edge whatever this is,
     // because the cap is on the content inside the scroll container and not on the container.
     const readHand = document.getElementById("read-grip");
-    const doc = document.getElementById("doc");
+    // Not named `doc`: this is the element, and the page's conversation document is already called
+    // `doc` at this scope. It was named `doc` for one build, which shadowed the conversation
+    // everywhere below it in this block -- including the boot's `paint(doc)`, which then read
+    // `.blocks` off a `<div>` and threw, taking the sidebar, the session list and the feed with it.
+    // The log said so in one line: `boot failed: TypeError: Cannot read properties of undefined
+    // (reading 'length') at paint (...:862:19)`.
+    const reading = document.getElementById("doc");
     const setRead = (boundaryX) => {
       const box = pane.getBoundingClientRect();
       const pad = padX();
@@ -1341,7 +1363,7 @@ if (typeof document !== "undefined" && document.getElementById) {
       readHand.setAttribute("aria-valuenow", String(w));
     };
     dragBoundary(readHand, setRead, () => app.style.removeProperty("--read"));
-    readHand.setAttribute("aria-valuenow", String(Math.round(doc.getBoundingClientRect().width)));
+    readHand.setAttribute("aria-valuenow", String(Math.round(reading.getBoundingClientRect().width)));
 
     document.getElementById("new-conversation").addEventListener("click", async (e) => {
       // Disabled while it is in flight, because a second click before the process answers would
