@@ -1147,7 +1147,10 @@ where
 /// A redraw is frequently a row of spaces followed by a carriage return. Reporting that
 /// as the command's current activity would replace a useful line with nothing.
 fn clean_piece(raw: &[u8]) -> Option<String> {
-    let text = String::from_utf8_lossy(raw).trim().to_string();
+    // `decode_child_text` rather than `from_utf8_lossy`, because a Windows console program
+    // writes the console's code page: see its comment. Every path a child's output takes
+    // goes through here, which is why the decode lives at this line and not in each tool.
+    let text = util::decode_child_text(raw).trim().to_string();
     if text.is_empty() {
         None
     } else {

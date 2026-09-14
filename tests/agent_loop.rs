@@ -244,6 +244,49 @@ async fn shell_execution_actually_runs_the_command() {
     );
 }
 
+/// A Windows console program writes the machine's code page, and that is not UTF-8.
+///
+/// On a machine with a Chinese locale the page is 936, so every non-ASCII character in a
+/// child's output used to arrive at the model as U+FFFD: it was shown an unreadable error
+/// message and told nothing about why. The bytes are put in a file and handed over with
+/// `type`, which copies them through untouched, so what is being asserted is flint's decoding
+/// and not which code page some child happened to choose -- `chcp` is console-wide mutable
+/// state, and while measuring this the same terminal was seen at 936 and at 65001 depending on
+/// what had run in it before.
+///
+/// Skipped where the locale is not 936, rather than asserted around: the conversion itself has
+/// a unit test in `util` that names its code page explicitly and runs anywhere.
+#[cfg(windows)]
+#[tokio::test]
+async fn code_page_output_reaches_the_model_as_text() {
+    if flint::util::ansi_code_page() != 936 {
+        eprintln!("skipped: this machine's ANSI code page is not 936");
+        return;
+    }
+    let config = test_config("http://unused");
+    let dir = std::env::temp_dir().join(format!("flint-cp936-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // "你好.txt" as a CP936 console program writes it.
+    let gbk = [0xc4u8, 0xe3, 0xba, 0xc3, b'.', b't', b'x', b't'];
+    let file = dir.join("chars.txt");
+    std::fs::write(&file, gbk).expect("the fixture");
+    let command = format!("type {}", file.display());
+
+    let out = flint::tools::run_command_raw(&config, &command, &dir, 30)
+        .await
+        .expect("the command should run");
+
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !out.contains('\u{fffd}'),
+        "the code page bytes were replaced instead of decoded: {out:?}"
+    );
+    assert!(
+        out.contains("你好.txt"),
+        "the tool result must carry the text the command wrote, got: {out:?}"
+    );
+}
+
 /// A killed command must take its own children with it.
 ///
 /// The test above passes on Windows without any tree kill, and that is why this one exists:
