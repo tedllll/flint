@@ -1082,7 +1082,15 @@ async function follow() {
   // because a hint line can only be read by whoever is sitting in front of the screen.
   for (;;) {
     try {
-      const response = await fetch("/events?last=" + applied, { headers: authHeader() });
+      postLog("opening the feed · last " + applied);
+      const response = await fetch("/events?last=" + applied, {
+        headers: authHeader(),
+        // A stream that never answers must not become a page that never says anything: without a
+        // deadline this await waits forever, and "waiting forever" looks on screen exactly like
+        // everything else that has gone wrong here. Ten seconds is far longer than a loopback
+        // listener needs and far shorter than anybody's patience with a page that does nothing.
+        signal: AbortSignal.timeout(10000),
+      });
       if (!response.ok) throw new Error("HTTP " + response.status);
       await readSession();
       delay = 500;
@@ -1166,7 +1174,7 @@ async function follow() {
       // reasons are a flint that is being restarted and a laptop that was asleep.
       doc.status = feedTrouble(e.message);
       paint(doc);
-      postLog("feed failed: " + e.message + " · " + feedTrace(feedReceived, doc.blocks.length, feedLast));
+      postLog("feed failed: " + describe(e) + " · " + feedTrace(feedReceived, doc.blocks.length, feedLast));
       // ...but a refused token is not a case retrying can fix, so the page stops here and says
       // where the right address is, instead of saying "reconnecting" until somebody gives up.
       if (tokenRefused(e.message)) return;
@@ -1202,6 +1210,12 @@ function feedTrouble(message) {
 /// `?debug=1` on the address flint printed turns the hint line into the feed's trace. Guarded
 /// because this file also runs under Node, where there is no `location`.
 const debugFeed = typeof location !== "undefined" && /[?&]debug=1/.test(location.search);
+
+/// An error as one line a log can hold. The stack, not the message: "which line" is the only
+/// question worth asking of it, and this file has spent a long time being asked from a distance.
+function describe(e) {
+  return e && e.stack ? String(e.stack).split("\n").slice(0, 2).join(" | ") : String(e);
+}
 
 /// The feed's own counters. At module scope because the debug interval reads them between frames.
 let feedReceived = 0;
@@ -1384,9 +1398,21 @@ if (typeof document !== "undefined" && document.getElementById) {
       postLog(now);
     }, 3000);
 
-    paint(doc);
-    paintSessions();
-    readSessions();
+    try {
+      postLog("boot · painting");
+      paint(doc);
+      postLog("boot · painted");
+      paintSessions();
+      postLog("boot · sidebar drawn");
+      readSessions().catch((e) => postLog("sessions failed: " + describe(e)));
+      postLog("boot · sessions asked for");
+    } catch (e) {
+      // The boot had no error surface at all: a throw here skipped the sidebar, the sessions and
+      // the feed together, and the only thing that arrived was "page opened" -- which is exactly
+      // what the log showed. A page that cannot start has to be able to say where it stopped.
+      postLog("boot failed: " + describe(e));
+      setHint("this page cannot start: " + describe(e));
+    }
     follow().catch((e) => {
       doc.blocks = [
         { kind: "damage", text: "cannot follow this flint: " + e.message },
