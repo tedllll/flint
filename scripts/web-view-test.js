@@ -484,9 +484,17 @@ check("a page that cannot read says which kind of failure it is", () => {
   // The two lines are not interchangeable: a refused token is permanent (it is in the URL the page
   // was opened with, and a restart changes it) while an ended stream is retried. Showing the
   // retrying line for a refused token is what made a dead page look like a broken flint.
-  const refused = viewer.feedTrouble("HTTP 401");
+  //
+  // 403 and not 401: that is what the listener actually answers. Measured against a running flint
+  // with `curl /session` and no token header: `403 missing or wrong token`. The first version of
+  // the page checked 401, which the listener never sends, so this test would have passed while the
+  // page went on saying "reconnecting" -- which is why the measured code is in the test.
+  const refused = viewer.feedTrouble("HTTP 403");
   eq(/token/.test(refused), true, "a refused token says so");
   eq(/reconnecting/.test(refused), false, "and does not promise to reconnect");
+  eq(viewer.tokenRefused("HTTP 403"), true, "403 is the refused-token code");
+  eq(viewer.tokenRefused("HTTP 401"), true, "and 401 from something in front of it counts too");
+  eq(viewer.tokenRefused("Failed to fetch"), false, "a network failure is not a refused token");
   const ended = viewer.feedTrouble("the stream ended");
   eq(/reconnecting/.test(ended), true, "an ended stream is retried");
   eq(ended.includes("the stream ended"), true, "and says what ended");

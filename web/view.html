@@ -1154,11 +1154,20 @@ async function follow() {
       paint(doc);
       // ...but a refused token is not a case retrying can fix, so the page stops here and says
       // where the right address is, instead of saying "reconnecting" until somebody gives up.
-      if (/\b401\b/.test(e.message)) return;
+      if (tokenRefused(e.message)) return;
     }
     await new Promise((resolve) => setTimeout(resolve, delay));
     delay = Math.min(delay * 2, 10000);
   }
+}
+
+/// Whether the run answered "no token". **403 is the one to check**: it is what the listener
+/// sends for a missing or wrong token (measured with `curl /session` against a running flint:
+/// `403 missing or wrong token`), and the first version of this check tested for 401 -- which the
+/// listener never sends -- so the page went on saying "reconnecting" for the one failure that
+/// cannot be retried. 401 is kept because a proxy in front of loopback can produce one.
+function tokenRefused(message) {
+  return /\b40[13]\b/.test(message);
 }
 
 /// What the page says when it cannot read the run at all, and the two cases are different in
@@ -1169,7 +1178,7 @@ async function follow() {
 /// the conversation, and nothing on it changes": the second case's line was being shown for the
 /// first, and "reconnecting" forever is indistinguishable from a broken flint.
 function feedTrouble(message) {
-  if (/\b401\b/.test(message)) {
+  if (tokenRefused(message)) {
     return "this page's token is not this flint's — open the address flint printed (a restart changes the port and the token)";
   }
   return "live feed: " + message + " — reconnecting";
@@ -1332,7 +1341,7 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     newDoc, applyLine, applyText, applyEvent, tokenFromSearch, servedByFlint, sseFrames,
     sessionsFrom, messageBody, resumeLine, streamingAnswer, carryStreaming, setStreamingAnswer,
-    paint, feedTrouble,
+    paint, feedTrouble, tokenRefused,
   };
 }
 </script>
