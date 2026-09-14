@@ -265,12 +265,12 @@ most of a turn is text nobody could see. The retry rule is now explicit: the lad
 the first drawn character, because nothing in the chain can take text back. `docs/web-mode.md`
 §11 has the measurement; `src/provider.rs` has the rule.
 
-### 8. Web mode, from using it — **one fixed, three parked**
+### 8. Web mode, from using it — **one fixed, one decided, two parked**
 
 Four things turned up in the first real sessions with the browser page, after level 3 was
-finished. The fourth is fixed (below); the other three are parked, because the middle one needs a
-decision rather than a patch. They are listed here rather than in the small-ideas list because one of them needs a
-decision about *where a command's output lives*, which is a design question and not a patch.
+finished. Two are settled (below): the sidebar bug is fixed, and the commands gap now has a
+design rather than a patch. The other two are parked, because neither should be built before
+that design is.
 
 **A conversation archived or deleted in the terminal stayed in the sidebar — fixed.** Reported as
 "the page did not refresh", and it is worse than that. The numbers in the sidebar are the ones
@@ -293,23 +293,61 @@ and `/sessions` already share one listing, so it is one change in one place); or
 it — dim, or "new conversation", or leave it out until it has a first message. The second is
 probably right, and the thing to decide first is whether `/resume` should also stop offering it.
 
-**A command typed into the composer prints nothing.** `/provider`, `/config`, `/usage`, `/tools`,
-`/sessions`, `/skills`, `/model`, `/name`, `/readonly`, `/verbose`, `/detail`, `/reload`, `/help` —
-all of them answer on the terminal, and the page shows none of it, so the composer is a prompt for
-messages and not for commands. The cause is structural: command output goes to `printer.term()`,
-which draws in the terminal and exists nowhere else. It is neither a session event (commands do
-not write to the session file) nor a live frame (the feed carries the *turn's* events), and the page
-renders exactly those two. So this is the same class of gap as the one `turn.started` closed for
-user messages, and it needs the same kind of answer: either command output becomes something the
-feed carries, or the page gets a second source for it. Worth deciding before building, because
-"every line the terminal prints" is a large surface — the notice sink, the status line and the
-usage summary all take that path.
+**A command typed into the composer prints nothing — decided**, 2026-09-14. `/provider`,
+`/config`, `/usage`, `/tools`, `/sessions`, `/skills`, `/model`, `/name`, `/readonly`,
+`/verbose`, `/detail`, `/reload`, `/help` — all of them answer on the terminal, and the page
+shows none of it, so the composer is a prompt for messages and not for commands. The cause is
+structural: command output goes to `printer.term()`, which draws in the terminal and exists
+nowhere else. It is neither a session event (commands do not write to the session file) nor a
+live frame (the feed carries the *turn's* events), and the page renders exactly those two.
+
+The design, in the order the pieces depend on each other:
+
+- **The page sends the command *line*, not a command API.** `/provider llamacpp` goes over the
+  input channel the composer already uses. There is no second implementation of any command, so
+  the terminal and the page cannot drift, and the tests that cover a command cover both. Every
+  control below is a different way of composing that line.
+- **What is missing is a read channel, not a write channel.** A picker cannot be built without
+  knowing the options, and the page must not read `config.toml` itself — that is a second reader
+  of state, which is what "no derived state" and "one writer" both forbid. So the event stream
+  grows a `state` frame: the current provider and model, the configured providers and the models
+  each offers, the enumerable toggles and their values, and the command list. Nothing secret
+  goes in it.
+- **The controls are four classes, and they are not one feature:**
+
+  1. **Buttons** — no argument, one action: `/new`, `/reload`, `/usage`, `/tools`, `/skills`,
+     `/sessions`, `/help`, and the bare `/provider`, `/model` and `/config`, which are *reports*
+     and belong as panels rather than as buttons. `/exit` stays off the page: the page is a
+     window onto a process, and a misclick should not end a session.
+  2. **Selectors** — the argument is one of the settings that already exist: `/provider <name>`,
+     `/model <name>`, `/resume <n|id>`, `/skills <name>`, and the enumerable toggles
+     `/verbose on|off|full`, `/detail on|off`, `/readonly on|off`. A toggle is a switch that
+     shows its current value, not a button that blind-toggles. `/archive <n>` and `/delete <n>`
+     are selector-shaped with the argument supplied by *which row was clicked*, which the sidebar
+     already has.
+  3. **Forms** — free-form or typed input: `/name <text>`; `/provider key <key>`, a password
+     field that is never echoed back, never in a `state` frame and never in the transcript;
+     `/provider add` and `/provider edit <name>`, which are the terminal's interactive wizard as
+     a form; and `/config edit`, whose keys are enumerable and whose values are not (a shell
+     path, `max_steps`, a proxy URL), with the file it writes named on the form.
+  4. **Destructive** — `/delete`, `/archive`, `/provider rm`: a confirmation step, because there
+     is no undo anywhere in flint.
+
+- **Where the output lives is answered per class, not globally.** What an *action* answers goes
+  to the transcript, which means `printer.term()` has to become something the feed carries —
+  the same gap `turn.started` closed for user messages. What a *panel* shows (the provider
+  list, usage, the skill catalog) comes from the `state` frame and is rendered in the page only,
+  so the terminal is not flooded with a listing its reader did not ask for there.
+- **The page may write `config.toml`**, which is what `/provider add` is for. That is acceptable
+  because of what already exists rather than anything new: `--web` binds loopback and hands the
+  page a per-run token (docs/web-mode.md §4), and that token is checked on every request,
+  including the event stream.
 
 **Renaming a conversation from the sidebar.** Not tried by the person who asked, and the mechanism
 is already there: `/name <text>` appends a `title` line, the page already *renders* titles (its
 header shows one), and typing `/name x` in the composer works today. What is missing is an
 affordance and any feedback — and the feedback is the previous item. So this one is small once that
-is decided, and it is not worth doing first.
+is built, and it is not worth doing first.
 
 
 ## Small, agreed, unscheduled

@@ -469,6 +469,13 @@ section into it, so the two do not drift. The shape of it now:
 3. **Web mode** — `--web` as a window onto the running process rather than a mode. The first
    three steps need no decision, and the one open question (§7 of that document: a hand-rolled
    HTTP server or `hyper`, which is already in the tree via `reqwest`) blocks only step 4.
+   The next web work is §8's **commands and config from the page**, which is now decided rather
+   than parked: the page sends the command *line* over the channel the composer already uses; a
+   `state` frame is added to the event stream so pickers have options without the page reading
+   `config.toml`; controls are buttons, selectors, forms and confirmations, four classes and not
+   one feature; action output goes to the transcript while panel output is page-only; and
+   `config.toml` writes are allowed because the per-run loopback token already covers them.
+   `/exit` stays off the page.
 
 Both of the last two are platform-independent and can be done on either machine.
 
