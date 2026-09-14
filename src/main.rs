@@ -863,6 +863,17 @@ async fn interactive(
         // print here: the key thread redraws it after every keystroke.
         printer.term().prompt();
 
+        // Tell the page what its controls would show, if that is not what it was told.
+        //
+        // Here, at the top of the loop, because this is the one place every command comes back
+        // to -- including the ones that replace the agent -- so a command cannot forget to say
+        // that it changed something, and the frame cannot drift from the configuration it
+        // describes. `Live::state` drops it when it has not changed, so the cost of asking on
+        // every line is a comparison.
+        if let Some(viewer) = viewer.as_ref() {
+            viewer.live().state(state_frame(cfg, provider_cfg, agent, printer));
+        }
+
         // A line the turn could not use -- a command typed or clicked while the model was
         // working. It is handled here, next time round the loop, as if it had just been typed:
         // `run_turn` cannot run a command, and this is the only place that knows what a typed
@@ -2339,6 +2350,47 @@ fn status_named(printer: &Printer<'_>, live: Option<&web::Live>, text: &str) {
         return;
     }
     announce_status(printer, live, false);
+}
+
+/// What a page's controls can be drawn from, as the frame named `state`.
+///
+/// §8's read channel, and the reason it comes before any control: a picker cannot be built
+/// without knowing the options, and the page must not read `config.toml` for them. A second
+/// reader of the same state is a second thing that can disagree with the process -- the file may
+/// say one thing while this run does another, which is exactly what `/config`'s "this run; the
+/// file says" line exists to report -- so the process says what it knows and the page renders it.
+///
+/// Built from the values *in force* rather than from the file: the agent's guard rather than
+/// `cfg.readonly`, and the printer's verbosity, which is three-valued while the file's `verbose`
+/// is a bool. Nothing secret goes in it: names, models, and the settings that are enumerable.
+fn state_frame(
+    cfg: &config::Config,
+    provider: &config::ProviderConfig,
+    agent: &agent::Agent,
+    printer: &Printer<'_>,
+) -> String {
+    // `choices` is what `/model` offers, and the same function fills the page's picker, so the
+    // two cannot come to disagree about which model names are valid.
+    let providers: Vec<serde_json::Value> = cfg
+        .providers
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "name": p.name,
+                "models": p.choices(),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "type": "state",
+        "provider": provider.name,
+        "model": provider.model,
+        "readonly": agent.readonly(),
+        "verbose": display::verbosity_word(printer.verbosity()),
+        "detail": printer.tool_detail(),
+        "providers": providers,
+    })
+    .to_string()
 }
 
 /// Nothing is being waited for any more.

@@ -73,6 +73,21 @@ pub const QUIET: u8 = 0;
 pub const NORMAL: u8 = 1;
 pub const CHATTY: u8 = 2;
 
+/// The word `/verbose` takes for a level.
+///
+/// Here, beside the levels, because there are two directions and they have to agree: the command
+/// in `main.rs` reads a word and sets a level, and the `state` frame a page draws its switch from
+/// writes a level back as a word. `/verbose off|on|full` is what it takes, and any change to one
+/// direction that is not made in the other leaves a switch that labels itself one way and sets
+/// the other -- which is the shape of bug this whole frame exists to end.
+pub fn verbosity_word(level: u8) -> &'static str {
+    match level {
+        QUIET => "off",
+        CHATTY => "full",
+        _ => "on",
+    }
+}
+
 /// Budgets, so a runaway tool cannot flood the terminal.
 ///
 /// The summary is what the reader sees; the rest is available at `/verbose`.

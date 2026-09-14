@@ -2271,6 +2271,29 @@ fn read_until(sock: &mut std::net::TcpStream, needle: &str, secs: u64) -> String
     seen
 }
 
+/// POST one line to the running flint's prompt, the way the page's composer does.
+///
+/// The route and the body shape are the page's (`{"text": ...}`), not the process's stdin: what
+/// these tests are about is a page being able to change the thing a frame describes, which is
+/// §8's whole shape -- the page composes the terminal's own command line and the REPL decides
+/// what it means.
+fn post_message(port: u16, token: &str, text: &str) -> String {
+    use std::io::{Read, Write};
+
+    let body = format!("{{\"text\":{}}}", serde_json::Value::String(text.to_string()));
+    let mut sock = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect to the view");
+    write!(
+        sock,
+        "POST /message HTTP/1.1\r\nhost: 127.0.0.1:{port}\r\nX-Flint-Token: {token}\r\n\
+         content-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .expect("write the request");
+    let mut raw = Vec::new();
+    sock.read_to_end(&mut raw).expect("read the response");
+    String::from_utf8_lossy(&raw).to_string()
+}
+
 /// A turn that is stopped is over *on the page*, not only in the terminal.
 ///
 /// Reported from a real session: the browser went on showing a half answer as though it were still
@@ -2383,5 +2406,98 @@ fn readonly_guards_the_run_it_is_typed_into() {
     assert!(
         in_force.ends_with("= true"),
         "the next run is not guarded: {in_force:?} (whole transcript: {next_run})"
+    );
+}
+
+/// The page is told what its controls could offer, and told again when that changes.
+///
+/// §8's read channel, and it comes before any control because a picker cannot be drawn without
+/// knowing the options -- and because the page must not read `config.toml` for them: a second
+/// reader of the same state is a second thing that can disagree with the process. The frame is
+/// *state* rather than history, like `status`, so it is also what a page opening at any moment is
+/// handed. That is the half a cursor cannot cover: a client with no `last` is not replayed the
+/// ring at all, so a run that announced its state before this page loaded would otherwise say
+/// nothing for the rest of the session.
+///
+/// The second half is the write channel composing with it: the line a picker sends goes to
+/// `POST /message`, which is the route the composer uses, and what comes back on the feed
+/// describes the run that command made.
+#[tokio::test]
+async fn the_page_is_told_the_state_its_controls_would_show() {
+    // No stub server: `/model` rebuilds the agent and saves the config, and no turn is ever run,
+    // so nothing here talks to a provider. Two models, because a picker with one option would
+    // pass this test while being useless.
+    let home = test_home("state-frame", "http://127.0.0.1:9/v1");
+    std::fs::write(
+        home.join("config.toml"),
+        "default_provider = \"stub\"\n\n\
+         [[providers]]\n\
+         name = \"stub\"\n\
+         base_url = \"http://127.0.0.1:9/v1\"\n\
+         model = \"stub-model\"\n\
+         models = [\"stub-other\"]\n\
+         api_key = \"not-a-real-key\"\n",
+    )
+    .expect("the test config");
+
+    let log = home.join("transcript.txt");
+    let mut child = binary()
+        .arg("--web")
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::fs::File::create(&log).expect("transcript file"))
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to run flint");
+
+    let (port, token) = port_and_token(&wait_for_url(&log));
+    let mut watching = http_stream(port, "/events", &token);
+    // Read to the *last* field of the frame rather than to its first: a read that stopped at
+    // `"type":"state"` would be asserting on the fields behind it -- which is a test that passes
+    // or fails on where the kernel happened to split the segment.
+    let opening = read_until(&mut watching, "\"models\":[\"stub-model\",\"stub-other\"]", 20);
+
+    let answered = post_message(port, &token, "/model stub-other");
+    let changed = read_until(&mut watching, "\"model\":\"stub-other\"", 20);
+
+    // And a page that opens *now* -- a second subscriber with no backlog at all, so what it is
+    // sent can only be the snapshot.
+    let mut later_page = http_stream(port, "/events", &token);
+    let late = read_until(&mut later_page, "\"model\":\"stub-other\"", 20);
+
+    drop(later_page);
+    drop(watching);
+    drop(child.stdin.take());
+    let exited = wait_for_exit(&mut child, 20);
+    let transcript = std::fs::read_to_string(&log).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit");
+    assert!(
+        opening.contains("\"type\":\"state\""),
+        "the page was never told the state, so it has no options to draw. Frames: {opening:?} \
+         Terminal: {transcript:?}"
+    );
+    assert!(
+        opening.contains("\"provider\":\"stub\"") && opening.contains("\"model\":\"stub-model\""),
+        "the state does not name the provider and model in force: {opening:?}"
+    );
+    assert!(
+        opening.contains("\"models\":[\"stub-model\",\"stub-other\"]"),
+        "the state does not carry the models on offer, which is what a picker is drawn from: \
+         {opening:?}"
+    );
+    assert!(
+        answered.starts_with("HTTP/1.1 202"),
+        "the line the picker sends was not accepted: {answered:?}"
+    );
+    assert!(
+        changed.contains("\"model\":\"stub-other\""),
+        "the page was not told the state changed after its own command: {changed:?}"
+    );
+    assert!(
+        late.contains("\"type\":\"state\"") && late.contains("\"model\":\"stub-other\""),
+        "a page opening after the change is not handed where things are: {late:?}"
     );
 }

@@ -155,6 +155,17 @@ pub struct Live {
     /// nothing at all -- measured, not assumed: the first live capture of a six-second model
     /// call showed a page with no status line.
     status: Mutex<String>,
+    /// What the controls on a page could offer, and what they are set to now.
+    ///
+    /// State rather than history, like `status`, and for the same reason twice over: a page
+    /// opened in the middle of a session has missed every earlier frame, and the ring only
+    /// helps a client that says where it got to. So it is kept here and sent once on connect.
+    ///
+    /// It describes the *process* -- which provider and model are in force, what each provider
+    /// offers, the enumerable toggles -- and not the conversation, which is why `/new` and
+    /// `/resume` leave it alone: moving to another conversation changes nothing that is
+    /// configured. See [`Live::state`] for why it is a rendered string rather than a struct.
+    state: Mutex<String>,
 }
 
 impl Live {
@@ -168,6 +179,7 @@ impl Live {
             subscribers,
             sink: Mutex::new(crate::ndjson::Sink::new()),
             status: Mutex::new(String::new()),
+            state: Mutex::new(String::new()),
         })
     }
 
@@ -285,8 +297,10 @@ impl Live {
     /// named frame below is for the clients that are connected *right now*, which no cursor
     /// difference can reach.
     ///
-    /// The status goes with them. It is the one piece of state here, and it describes a turn
-    /// in the conversation that is over.
+    /// The status goes with them: it describes a turn *in the conversation that is being left*,
+    /// which is the same reason the ring goes. The `state` frame deliberately does not, and the
+    /// difference is the point of keeping the two apart: what is configured is a property of the
+    /// process, and starting or resuming a conversation changes no provider, model or toggle.
     pub fn restart(&self) {
         self.recent
             .lock()
@@ -304,6 +318,43 @@ impl Live {
     /// What the turn is waiting for, or empty when it is waiting for nothing.
     fn current_status(&self) -> String {
         self.status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Tell the page what its controls would show, as a frame named `state`.
+    ///
+    /// A named frame rather than a line of the run's vocabulary, because it is not an event: it
+    /// is where things *are*, like `status`, and it is re-derived from the live configuration
+    /// every time the REPL comes back round its loop. That is what makes it honest without being
+    /// derived state -- the process is the only writer of its own configuration, and this is a
+    /// view of it rather than a second copy to keep in step by hand. The alternative, letting the
+    /// page parse `config.toml`, is a second reader that can disagree with the process about a
+    /// setting the process is using right now.
+    ///
+    /// Pushed only when it differs from the last one. The caller runs once per line, so an
+    /// unchanged state would otherwise be a frame per keystroke on every open page -- and a
+    /// picker rebuilt under the pointer is a control nobody can use. The comparison is on the
+    /// rendered JSON, so anything the page can see is a difference that gets through.
+    ///
+    /// It takes a rendered string rather than a struct so that the vocabulary the page reads is
+    /// written in one place, beside the values it comes from (`state_frame` in `main.rs`, which
+    /// is what has the config, the agent and the printer).
+    pub fn state(&self, json: String) {
+        {
+            let mut held = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if *held == json {
+                return;
+            }
+            *held = json.clone();
+        }
+        self.push_named("state", json);
+    }
+
+    /// The state as it stands, for a client that has just connected.
+    fn current_state(&self) -> String {
+        self.state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
@@ -1217,6 +1268,13 @@ const SSE_STATUS_SNAPSHOT: &str = "event: status\n";
 /// in it and a `data:` line does not.
 const SSE_ANSWER_SNAPSHOT: &str = "event: answer\n";
 
+/// What a page's controls could offer, as state rather than as change.
+///
+/// The third of them, and the one a page needs before it can draw anything with a choice in it:
+/// which provider and model are in force, what each provider offers, and the toggles. Nothing
+/// secret goes in it, which is why it is a frame a page can be handed on connect -- and why
+/// `/provider key` is a form and not a picker.
+const SSE_STATE_SNAPSHOT: &str = "event: state\n";
 
 /// Tell a client its document is stale, so it re-reads the session.
 ///
@@ -1281,6 +1339,15 @@ async fn stream_events(mut stream: TcpStream, state: &State, last: Option<u64>) 
             .write_all(format!("{SSE_STATUS_SNAPSHOT}data: {status}\n\n").as_bytes())
             .await?;
     }
+    // The state, which is the one of the three that is always sent when it is known: a page with
+    // no status has nothing to wait for and a page with no answer is not missing anything, but a
+    // page with no state has no options to draw, and every control §8 adds is drawn from it.
+    let state = live.current_state();
+    if !state.is_empty() {
+        stream
+            .write_all(format!("{SSE_STATE_SNAPSHOT}data: {state}\n\n").as_bytes())
+            .await?;
+    }
     write_answer_snapshot(&mut stream, live).await?;
 
     let mut heartbeat = tokio::time::interval(HEARTBEAT);
@@ -1305,6 +1372,12 @@ async fn stream_events(mut stream: TcpStream, state: &State, last: Option<u64>) 
                     if !status.is_empty() {
                         stream
                             .write_all(format!("{SSE_STATUS_SNAPSHOT}data: {status}\n\n").as_bytes())
+                            .await?;
+                    }
+                    let state = live.current_state();
+                    if !state.is_empty() {
+                        stream
+                            .write_all(format!("{SSE_STATE_SNAPSHOT}data: {state}\n\n").as_bytes())
                             .await?;
                     }
                     write_answer_snapshot(&mut stream, live).await?;
@@ -2616,6 +2689,51 @@ mod snapshot_tests {
         assert!(
             !raw.contains("event: answer"),
             "the stopped answer is in the file now, not in flight: {raw}"
+        );
+    }
+
+    /// The state frame: sent when it changes, and kept for a page that opens afterwards.
+    ///
+    /// Two behaviours, and they are the two ways this can be wrong. The caller is the REPL's loop,
+    /// which re-derives the state on every line it reads, so pushing regardless would rebuild the
+    /// page's pickers under whoever is choosing from one -- measured on the frame, not assumed.
+    /// And a page that opens *after* the state was announced has missed the frame entirely: a
+    /// client with no cursor is not replayed the ring, so on connect is the only chance it gets.
+    #[tokio::test]
+    async fn the_state_frame_is_sent_when_it_changes_and_kept_for_a_later_page() {
+        let live = Live::new();
+        let first = "{\"type\":\"state\",\"model\":\"stub-model\"}";
+        let second = "{\"type\":\"state\",\"model\":\"stub-other\"}";
+        live.state(first.to_string());
+        live.state(first.to_string());
+        live.state(second.to_string());
+
+        {
+            let recent = live.recent.lock().unwrap_or_else(|e| e.into_inner());
+            let sent: Vec<&str> = recent
+                .iter()
+                .filter(|frame| frame.name == "state")
+                .map(|frame| frame.line.as_str())
+                .collect();
+            assert_eq!(
+                sent,
+                vec![first, second],
+                "the same state twice is one frame, and a change is a second: {sent:?}"
+            );
+        }
+
+        let window = Window::open(0, None, Some(Arc::clone(&live)))
+            .await
+            .expect("bind");
+        let raw = read_stream_of(&window).await;
+        assert_eq!(
+            raw.matches("event: state").count(),
+            1,
+            "a page that opens late is handed the state once, and no backlog of them: {raw}"
+        );
+        assert!(
+            raw.contains("stub-other"),
+            "and what it is handed is the state in force: {raw}"
         );
     }
 
