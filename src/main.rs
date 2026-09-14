@@ -1483,6 +1483,8 @@ async fn handle_command(
   !<command>            run a shell command without the model
 {dim}while the model is working{reset}
   Type and press Enter to interrupt it. Your line becomes the next input.
+  /stop                 the same thing as one short word, for when a key is not
+                        available -- ssh, a pipe, or the browser's composer.
 {dim}notes{reset}
   Permission model is full by default. /readonly is the only guard.
   Everything above is configurable from inside flint; the file is only there
@@ -2520,7 +2522,15 @@ async fn run_turn(
                     Err(tokio::sync::mpsc::error::TryRecvError::Empty)
                 } {
                     Ok(InputMsg::Line(line)) => {
-                        if for_the_repl(&line) {
+                        // `/stop` is the interrupt as a word, and the word exists because a key is
+                        // not always available: over ssh, in a piped session, or from the browser,
+                        // where the composer can send a line and nothing else. It is deliberately
+                        // *not* handed back to the REPL -- the line has done its work, and a command
+                        // running after the thing it stopped would have only "nothing is running" to
+                        // say, which reads as the stop having failed.
+                        if matches!(line.trim(), "/stop") {
+                            interrupted = true;
+                        } else if for_the_repl(&line) {
                             hand_back = Some(line);
                         } else {
                             steering = Some(line);
