@@ -7,7 +7,7 @@ the queue. The reasoning for each design lives next to the design itself:
 |---|---|
 | [`HANDOFF.md`](HANDOFF.md) | what state the tree is in, and what the last session learned |
 | [`docs/decisions.md`](docs/decisions.md) | why flint is built the way it is, decision by decision |
-| [`docs/windows-tooling.md`](docs/windows-tooling.md) | the settled, unimplemented plan for the Windows command line |
+| [`docs/windows-tooling.md`](docs/windows-tooling.md) | the measured record of the Windows command line, and what each fix cost |
 | [`docs/web-mode.md`](docs/web-mode.md) | the plan for the browser view (`--web`); levels 1 and 2 are built |
 | [`docs/deepseek-search.md`](docs/deepseek-search.md) | what a DeepSeek-keyed web search measured, and what it costs |
 | [`docs/session-format.md`](docs/session-format.md) | the session file, for readers and for hand-editing |
@@ -19,8 +19,9 @@ the queue. The reasoning for each design lives next to the design itself:
 - **One concern per commit**, with the reasoning in the message. The commit log is the
   review, because the project has one author and no reviewers.
 - **Design before code** when the design is the hard part. Writing a plan down is a real
-  state to stop in: `docs/windows-tooling.md` is settled and not implemented, and that is
-  better than half-implemented with the reasoning lost.
+  state to stop in, and a labelled one is worth more than a guess: the Windows work sat
+  written-down and unimplemented for several sessions, and when a Windows machine turned up
+  the measurements settled in an afternoon what reasoning had got wrong in five places.
 - **A test that has never been red has not been shown to test anything.** Write it, watch it
   fail for the right reason, then fix the code.
 - **Nothing is finished until all three pass**: `cargo test`, `cargo clippy --all-targets`
@@ -85,13 +86,15 @@ provider and requires the preview to equal the bytes the server received.
 
 ## Next
 
-### 5. The Windows command line — **step 1, 2 and one fix done; the rest needs the machine**
+### 5. The Windows command line — **done**
 
-[`docs/windows-tooling.md`](docs/windows-tooling.md) is the full design: why a command
-string loses quotes and backslashes, what a tool can and cannot delete from the problem, and
-five commits in order.
+[`docs/windows-tooling.md`](docs/windows-tooling.md) is the full design and now the measured
+record: why a command string loses quotes and backslashes, what a tool can and cannot delete
+from the problem, and five commits in order. All five are in the tree, and the parts that
+could only be settled on a Windows machine were settled on one (Windows 10.0.26200, rustc
+1.98.1, PowerShell 5.1 as the only PowerShell on `PATH`).
 
-**Done, and verifiable off Windows:**
+**The five steps:**
 
 - the shared runner: `run_program_streaming` is the implementation, `BashTool` its special
   case, so the timeout, the progress reporting, the spill and the kill have one owner;
@@ -101,25 +104,26 @@ five commits in order.
   around it;
 - the `\` separator fix in `glob`/`grep` (§6.3), which was a wrong answer rather than an
   error — the expensive kind — and which the document itself described incorrectly in two of
-  the three places it named.
+  the three places it named;
+- **`pwsh`** — the script written to a BOM'd `.ps1` and run through `-File` with
+  `-ExecutionPolicy Bypass`, both of which turned out to be required rather than prudent;
+- the process-tree kill (§6.1), the child output encoding (§6.2, built as code-page decoding
+  because `chcp` is shared console state and Python ignores it), the PowerShell facts in the
+  system prompt (§6.9), the reserved-name refusal (§6.6) and the `/web` browser line (§6.10).
 
-**Left, and it wants a real Windows session before any code is written:**
+**What the measurements changed**, which is the part worth reading before touching any of it:
 
-- `pwsh`, the script handed over as a BOM'd `.ps1` through `-File` (§4.2) — the
-  execution-policy wrinkle is unresolved;
-- the process-tree kill (§6.1) and the child output encoding (§6.2), both Windows-only
-  behaviour that cannot be observed from a Unix machine;
-- the PowerShell facts in the system prompt (§6.9);
-- §6.6's reserved names, trailing dots and long paths.
+- the documentation was wrong about which file names bite through `std::fs`: `NUL` wrote
+  nothing and reported success, `trailing.` became `trailing`, and `a:b.txt` became an
+  alternate data stream, while `CON`, `NUL.txt` and a 1619-character path all worked;
+- `-Command` does **not** mangle PowerShell quoting, so the file handover is for
+  artifact-ness and the command-line limit, not for correctness;
+- the browser line was broken for the same reason as everything else in the document: std
+  quotes an argument only when it has a space in it, and a URL does not.
 
-The two Windows assertions that would matter most are also unwritten for the same reason:
-that an argument survives the round trip, and that killing a command kills its children.
-
-**If the session is not on Windows, do not start 5's remainder — start 6 or 7.** The order
-below is the order for a Windows machine. 6 and 7 are platform-independent, and each is a
-larger piece of work than anything left in 5, so waiting for the right machine to do the
-small item first is the wrong trade. What 5's remainder needs is written down in full,
-labelled, and waiting; what 6 and 7 need is a session with room to hold a design in mind.
+**Left open, deliberately, and recorded in the document**: a Unix process-group kill for
+work a command backgrounds (§6.1) and the line-ending sentence for `apply_patch` (§6.4).
+Neither is a Windows item, and both need a test before they need code.
 
 ### 6. The transcript as cells — **designed, not implemented**
 

@@ -7,15 +7,17 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 328 passing (239 lib, 28
-`agent_loop`, 28 `cli_output`, 4 `json_output`, 4 `search_tool`, 18 `term_capture`, 7
-`web_view`), `cargo clippy --all-targets` is silent, and both `node
+As of the commit that carries this file, `cargo test` is 345 passing (248 lib, 1 in the
+binary's own tests, 33 `agent_loop`, 28 `cli_output`, 4 `json_output`, 4 `search_tool`, 18
+`term_capture`, 9 `web_view`), `cargo clippy --all-targets` is silent, and both `node
 scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
 
-**This round was on macOS** (Darwin arm64, rustc 1.98.1). That is worth knowing before
-anything below: the rounds before it were on Windows, and every Windows-specific item still
-outstanding is one that cannot be measured from here. `docs/windows-tooling.md` labels each
-by what it needs.
+**This round was on Windows** (10.0.26200, AMD64, rustc 1.98.1, PowerShell 5.1.26100.6584 as
+the only PowerShell on `PATH`, locale ANSI code page 936). That is the whole point of the
+round: every item left in the queue was waiting for exactly this machine, and
+`docs/windows-tooling.md` now records what the machine said rather than what the
+documentation implied. Five of its predictions were wrong, and the corrections are more
+useful than the fixes.
 
 Build with:
 
@@ -27,6 +29,48 @@ The binary is held open by any running `flint`, so close those before replacing 
 `docs/windows.md` is the field notes for the Windows terminal.
 
 ## What was just done
+
+**The Windows plan is finished, and the measurements are the useful part.**
+`docs/windows-tooling.md` had been "settled and unimplemented" for several sessions: a
+labelled design waiting for a Windows machine. This round was on one, so the five ordered
+steps from its §7 are all in the tree, in eight commits — plus the two defects that only
+turned up once something was actually run:
+
+- **A quoted command never reached `cmd`.** Measured: `echo "hello"` arrived as `\"hello\"`,
+  and `dir /b "C:\Windows\System32\drivers\etc"` failed outright with "The filename, directory
+  name, or volume label syntax is incorrect." std quoted the argument the way the C runtime
+  does, and `cmd` does not read a command line that way. Fixed with `/S /C` and the command
+  handed over verbatim through `raw_arg`, which is now one function
+  (`tools::apply_invocation`) because the same dance was about to exist in three places.
+- **GBK output became U+FFFD** — and the plan's own remedy did not survive contact: `chcp`
+  changes *shared console state* (the same terminal reported 936 and 65001 within one session)
+  and Python ignores it. The fix decodes with the locale ANSI code page (`GetACP`) instead,
+  which is what CPython uses and what `chcp` cannot move.
+- **`/web`'s browser line was broken** for the same reason as the first item: a URL has no
+  spaces, so std did not quote it, so `cmd` read `?a=1&b=2` as two commands. `start ""` was
+  right all along; the URL was the bug.
+- **File names Win32 rewrites silently** are now refused: `NUL` wrote nothing and said
+  "wrote 5 bytes", `trailing.` created `trailing`, `a:b.txt` created an alternate data
+  stream. `CON`, `NUL.txt` and a 1619-character path all work here, so the refusal is exactly
+  the silent cases and nothing else.
+- **A `\n` edit against a CRLF file** now says so in the refusal instead of "old_string not
+  found", which cost a turn every time and was the one place the fix is a sentence rather
+  than a mechanism.
+
+The new tools are `exec` (a program and its arguments as an array) and `pwsh` (a script
+written to a BOM'd `.ps1`, run with `-File` and `-ExecutionPolicy Bypass`) — both measured
+before being written, and the BOM and the policy switch both turned out to be required rather
+than prudent. The system prompt now states which PowerShell is on the machine and what it does
+with native arguments, which is the fact that stops a model writing `??` on 5.1.
+
+**Recorded rather than fixed**, because both need a test before they need code: a Unix
+process-group kill for work a command backgrounds (there is no process group and no `setsid`,
+and closing it means `libc`), and the same line-ending sentence for `apply_patch`.
+
+**One side effect worth knowing about**: measuring the browser launch opened two real browser
+windows on the desktop before the harness was rewritten to stand a `.cmd` file in for the
+browser. Nothing was damaged, but the lesson is general — a measurement that launches the
+thing under test can do it for real.
 
 **The step 7 measurement pass, and the four defects it found.** `docs/web-mode.md` §11 has the
 numbers; the short version is that three of the four had one cause — `paint` rebuilt the whole

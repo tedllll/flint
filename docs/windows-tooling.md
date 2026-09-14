@@ -4,14 +4,16 @@ Why a model driving `cmd.exe` and `powershell.exe` keeps losing quotes and backs
 what a flint tool could actually do about it, and the other Windows adaptations that fall
 out of the same work.
 
-The design here is **partly implemented**. Steps 1, 2 and one of the step-4 fixes are in the
-tree and marked `done` below; everything Windows-specific is still unbuilt, because nothing
-in this file has been measured on a Windows machine and those items are exactly the ones that
-cannot be written from reasoning alone. The order at the end is the plan.
+The design here is **implemented and measured**. Every step of §7 is in the tree, and the
+parts that could only be settled on a real machine were settled on one — Windows 10.0.26200
+(AMD64), rustc 1.98.1, PowerShell 5.1.26100.6584 as the only PowerShell on `PATH` — during the
+session that wrote §6.6, §6.9 and §6.10. Where a claim below rests on a measurement it is
+labelled `MEASURED` and the command is given, because the interesting results are the ones
+Microsoft's documentation gets wrong.
 
 ## How to read the labels
 
-As in [`docs/windows.md`](windows.md), plus one more, because this file leans on Microsoft's
+As in [`docs/windows.md`](windows.md), plus two more, because this file leans on Microsoft's
 documentation and that is a different kind of knowledge from a measured machine:
 
 | Label | Means |
@@ -19,8 +21,11 @@ documentation and that is a different kind of knowledge from a measured machine:
 | `VERIFIED` | read in this repository's source, with a `file:line` |
 | `DOCUMENTED` | stated in Microsoft's documentation, linked |
 | `UNVERIFIED` | reasoning that has not been checked on a Windows machine |
+| `MEASURED` | observed on the Windows machine described above, by the command given |
 
-Nothing in this file has been measured on Windows. That is the first thing to fix.
+Nothing in this file is `UNVERIFIED` any more. The measurements are the reason several
+predictions here turned out to be wrong, and the corrections are marked in place rather than
+quietly applied.
 
 ---
 
@@ -238,18 +243,29 @@ pwsh -NoProfile -NonInteractive -File <path> [args...]
   quoting and does not escape anything for an outer layer. That is the whole point.
 - The file must be written **UTF-8 with a BOM**. Windows PowerShell 5.1 reads a `.ps1`
   without one as ANSI, which turns any non-ASCII text into mojibake — the same fault
-  recorded in `docs/windows.md` §3, arriving through a different door. `UNVERIFIED` on the
-  machine, harmless on 7.
+  recorded in `docs/windows.md` §3, arriving through a different door. `MEASURED`: with the
+  BOM bytes removed, `Write-Output "你好"` in a `-File` script came back as `浣犲ソ` with exit
+  code **0** — the silent kind of wrong, and the reason the BOM is in `write_script` rather
+  than left to a convention that would look like noise to a later reader.
 - Preferred over `-EncodedCommand` (base64 UTF-16LE) because of the repository's own rule:
   state stays plain text a person can repair with `notepad`. A base64 blob is exactly the
   opaque thing the rules exclude, and when the script fails, being able to open the `.ps1`
   and read the real bytes is most of the debugging.
-- The tool result should name the script path and the PowerShell version it ran, so the
-  transcript shows what actually executed.
+- A **counter-measurement** to the reasoning that motivated the file handover: `-Command` is
+  *not* broken here. A command string with quotes, a newline, non-ASCII text and a `'b'`
+  inside `"` all arrived at PowerShell intact, because PowerShell parses a command line the
+  way the C runtime does and not the way `cmd` does. The file handover is still right, but
+  for the other reasons: the script is an artifact a person can re-run and read, it is named
+  in the result, and it is not capped by the ~32k command-line limit. Do not repeat the claim
+  that `-Command` mangles quoting.
+- The tool result names the script path and the PowerShell version it ran, so the transcript
+  shows what actually executed: `5.1.26100.6584 (powershell) -- script: C:\...\script-1.ps1`.
 - Wrinkle: on a machine whose execution policy refuses scripts, `-File` is rejected.
-  `-ExecutionPolicy Bypass` covers the process scope unless a group policy overrides it, in
-  which case the script has to go in over stdin instead. `UNVERIFIED`; needs one check on
-  the real machine.
+  `-ExecutionPolicy Bypass` covers the process scope unless a group policy overrides it.
+  `MEASURED`: the effective policy on this machine is `Restricted`, and a `-File` run without
+  the switch failed with "cannot be loaded because running scripts is disabled on this
+  system" and exit 1. With `-ExecutionPolicy Bypass` in the argv it runs. The stdin fallback
+  is therefore not needed, and is not implemented.
 
 ### 4.3 Payloads that do not belong on a command line
 
@@ -302,9 +318,24 @@ Fix: on Windows, kill the tree with `taskkill /PID <child id> /T /F`, using `Chi
 No new dependency. The alternative — a Job Object — is stricter (nothing escapes, and the
 job dies with flint) but needs `windows-sys`, which has to be argued against "dependencies
 are the enemy" rather than assumed. Recommend `taskkill` first and revisit only if a tree
-escapes it.
+escapes it. **Built as recommended**: `KillTree::arm` in `src/tools.rs`.
 
-### 6.2 GBK output becomes U+FFFD — `VERIFIED`
+`MEASURED`, and the plan above was too optimistic in two ways:
+
+- `taskkill /T` walks the tree from a **live** parent. When the shell has already exited —
+  which is what `start /b` does, and what a command that ends by backgrounding work does —
+  `taskkill` answers "The process \"<pid>\" not found." with exit code **128**, and the
+  children it would have walked survive. So the kill is a backstop for the *interrupt and
+  timeout* cases, which is where it is used, and not a guarantee about anything a command
+  deliberately detached.
+- On **Unix** the gap is the same shape and is *not* fixed: `sh -c 'sleep 300 & wait'`
+  leaves a child that `kill_on_drop` does not reach, because there is no process group in
+  play and no `setsid` to put one there. Closing it means `libc` (a dev-dependency today) and
+  either `killpg` after `setsid` or a scan of `/proc`. Unmeasured here — this machine is
+  Windows — and left undone deliberately rather than half-done: the Windows path is where
+  the damage was observed, and the Unix case needs a test before it needs code.
+
+### 6.2 GBK output becomes U+FFFD — `MEASURED`, fixed differently than planned
 
 `clean_piece` decodes with `String::from_utf8_lossy` (`src/tools.rs:945`). On a CP936
 machine, every byte a child writes in the console code page — `dir`, Windows' own error
@@ -316,6 +347,21 @@ Prefer **making children speak UTF-8** over teaching flint to read GBK: the latt
 in the command and `PYTHONIOENCODING=utf-8` / `[Console]::OutputEncoding` in the child's
 environment. Note that `docs/windows.md` §3 records the same root cause on flint's *own*
 output side; this is the input side of it.
+
+**That recommendation did not survive the measurement**, and the reason is the interesting
+part. `chcp` changes the *console* code page, which is shared state: the same terminal was
+seen reporting 936 and then 65001 during one session, `chcp` run by a command therefore
+changes the console of everything else attached to it, and a child that ignores the console
+code page — Python is the standard example — still emits its own locale encoding. A fix that
+depends on it is a fix that works until two commands overlap.
+
+What was built instead: `util::decode_child_text` tries UTF-8 first and, when the bytes are
+not UTF-8, decodes them with the **locale's ANSI code page** (`GetACP`, via
+`MultiByteToWideChar`), which is what CPython uses and what `chcp` cannot move. No new
+dependency (two hand-declared functions in `util.rs`), no table to maintain, and the honest
+answer for bytes that are neither. The test is `code_page_output_reaches_the_model_as_text`,
+which skips itself unless `ansi_code_page() == 936`, because on a UTF-8 machine it would be
+asserting nothing.
 
 ### 6.3 `glob` and `grep` silently miss a backslash pattern — **done**
 
@@ -342,7 +388,7 @@ which was wrong three ways, and the difference matters more than the fix:**
   what makes the translation safe: it can only turn a pattern that matches nothing into one
   that matches.
 
-### 6.4 CRLF is invisible to `read` and `edit` — `VERIFIED`, decision needed
+### 6.4 CRLF is invisible to `read` and `edit` — `MEASURED`, decided and done
 
 The runner splits output on both terminators (`src/tools.rs:921`, and
 `split_progress_lines` at `:961`), so the transcript never carries a stray `\r`. But `read`
@@ -352,21 +398,39 @@ nothing stripped), so a Windows file's `\r\n` reaches the model, and an `edit` w
 
 Two options, and they are not equivalent: normalise on match, which is convenient but lets
 an edit silently rewrite a file's line endings, or detect the mismatch and say so, which
-costs a turn and keeps the file's own convention intact. Prefer the second — an unrequested
-whole-file line-ending change is a diff nobody wanted and is hard to see in review.
+costs a turn and keeps the file's own convention intact. **The second, now built.** The
+measurement is the message the model used to get, and it is the whole argument for the
+change:
 
-### 6.5 In-place writes are already the Windows-correct choice — `VERIFIED`
+```
+old_string not found in C:\...\dos.txt. Read the file first to get the exact text.
+```
+
+Nothing there says that a character it cannot see is the reason, so the next thing it does
+is guess. The message now ends with "This file uses CRLF line endings: put \r\n between
+lines in old_string", and the mirror case -- an `old_string` carrying `\r\n` against an LF
+file -- says that instead. The test also asserts that an LF file gets no line-ending lecture,
+and that the same edit with the `\r` in it succeeds and leaves the file's endings as they
+were.
+
+`read` still hands the bytes over unchanged, and that is a decision rather than an
+unfinished item: the `\r` *is* in the text the model is shown, and a `read` that rewrote it
+would be hiding the very thing the `edit` above needs to know. `apply_patch` does not yet
+name the line endings when a hunk fails to match; that is the same one-sentence omission,
+and it is recorded here rather than fixed blind.
+
+### 6.5 In-place writes are already the Windows-correct choice — `VERIFIED`, commented
 
 `write`, `edit` and patch updates all call `tokio::fs::write` directly on the target
 (`src/tools.rs:1273`, `:1367`, `:1478`); none of them writes a temporary file and renames it
 over the target. That matters on Windows, where a rename cannot replace a file another
-process holds open. Worth keeping, and worth a comment saying so — it reads like an
-oversight otherwise, and it is the kind of "improvement" a later session would undo.
+process holds open. Kept, and the comment it wanted is now at the `write` call site: it read
+like an oversight, and it is the kind of "improvement" a later session would undo.
 
 The one `fs::rename` in the tree is archiving a session (`src/session.rs:356`), which will
 fail if that file is open in another flint. A retry or a clearer error, not a redesign.
 
-### 6.6 Reserved names, trailing dots, long paths — `UNVERIFIED`
+### 6.6 Reserved names, trailing dots, long paths — `MEASURED`, fixed
 
 `CON`, `NUL`, `COM1`, a trailing dot or space in a filename, and paths past 260 characters:
 Win32 truncates or rejects these, and some of it happens below the layer that reports
@@ -374,19 +438,63 @@ errors. `write` should refuse a name it cannot write literally rather than repor
 a different path. Needs one pass on the real machine to see which of these actually bite
 through `std::fs` before writing any code.
 
-### 6.7 PowerShell 5.1's redirection writes UTF-16LE — `DOCUMENTED`
+The pass was made, and the documentation's list is not the list that bites. Through
+`std::fs` on the machine described at the top, every one of these returned `Ok` from
+`fs::write`:
+
+| name | what actually happened |
+|---|---|
+| `NUL` | nothing was created; reading it back gave 0 bytes. The data went to the null device. |
+| `trailing.` | `Ok`, and the file on disk was `trailing` |
+| `trailing ` (space) | `Ok`, and the file on disk was `trailing` |
+| `colon:stream.txt` | `Ok`, and the file on disk was an empty `colon`, with the bytes in an alternate data stream: invisible to `dir`, and a later `read` of the path that was written agrees with the empty file |
+| `NUL.txt`, `con.txt` | real files, created and readable |
+| `CON`, `COM1`, `AUX`, `LPT1`, `PRN` | real files here, and this is the version-dependent part |
+| `q?`, `a\|b`, `a<b`, `a>b`, `star*` | refused by the OS: error 123, `InvalidFilename` |
+| a 1619-character nested path | `create_dir_all` and `write` both `Ok` (long paths are enabled on this machine) |
+| a single 300-character component | refused: error 123. 255 per component, reported honestly |
+
+So the fix is exactly the silent cases and nothing else: the bare device names, a trailing
+dot or space, and a `:` in the name. Refusing `NUL.txt` would be the same mistake in the
+other direction — it is a real file here — and the illegal characters already produce an
+error worth reading. `windows_name_problem` in `src/tools.rs` is the list, with the table
+above as its comment; `write`, `edit` and `apply_patch` each call it before the read gate.
+
+Two things about the implementation that are not obvious:
+
+- It checks the **raw argument**, not the resolved path. `Path::join` parses `a:b.txt` as
+  "file `b.txt` on drive A", so by the time there is a resolved path the colon is gone. This
+  was found by a test that asserted the refusal for `a:b.txt` and failed: the check is about
+  what the model wrote.
+- The test asserts the *reason* for each name rather than that something failed. For
+  `a:b.txt` the OS also fails — by resolving to drive A — so a test that accepted any error
+  would have passed with the check removed. Verified red first: with the call deleted,
+  `write` to `NUL` answers "wrote 5 bytes".
+
+### 6.7 PowerShell 5.1's redirection writes UTF-16LE — `DOCUMENTED`, in the description
 
 `Get-Content x > y` and `Out-File` default to UTF-16LE on 5.1 (UTF-8 without BOM on 7). A
 model that captures output with `>` leaves a file full of NUL bytes for `read` to show it.
 Belongs in the `pwsh` tool description, and in the same breath as a nudge to
 `Set-Content -Encoding utf8`.
 
-### 6.8 There is no `sudo` — obvious, but it costs turns
+Which is where it now is, tied to the version fact from §6.9 rather than left as general
+advice: the description says "On Windows PowerShell 5.1 (the version is stated in your
+instructions) `>` and `Out-File` write UTF-16LE, which the `read` tool will show as a file of
+NUL bytes: write files with `Set-Content -Encoding utf8` instead." The parenthetical matters
+-- on 7 the warning would be wrong, and a description that is wrong about the machine is
+worse than a silent one.
+
+### 6.8 There is no `sudo` — obvious, but it costs turns — `VERIFIED`, in the description
 
 Elevation is a separate UAC process that cannot be driven from a tool. `exec` should say so
 plainly instead of letting the model try `sudo` and then `runas` and then `gsudo`.
 
-### 6.9 Tell the model which PowerShell it is talking to — cheap, and no tool needed
+It does: the `exec` description ends "There is no approval prompt and nothing here can answer
+one, so a step that needs a password or an elevation prompt is the user's to run." `sudo` is
+also in `is_readonly_words`, so `readonly` refuses it as the mutating command it is.
+
+### 6.9 Tell the model which PowerShell it is talking to — `MEASURED`, done
 
 `build_system_prompt` already probes the shell at run time and states it in "Local facts"
 (`src/agent.rs:83-98`). Probing `$PSVersionTable.PSVersion` and
@@ -394,50 +502,88 @@ plainly instead of letting the model try `sudo` and then `runas` and then `gsudo
 one process spawn per session and removes the guess in 1.4 entirely — the model would know
 whether it is on 5.1 or 7.3 rather than writing `\"` from habit.
 
+Built as described: one `-Command` probe at first use (`tools::powershell`, a `OnceLock`),
+preferring `pwsh` and falling back to `powershell`, and one line added to the prompt under
+`#[cfg(windows)]`:
+
+```
+- PowerShell (use the `pwsh` tool): powershell 5.1.26100.6584 — arguments to native
+  commands: not defined (before 7.3), so 7-only syntax (`??`, `?:`, `-Parallel`) will not parse
+```
+
+`MEASURED` through `flint debug prompt-input`, which is the honest way to see what the model
+is given. The 5.x clause is there because the fact is only useful with its consequence: a
+version number alone does not stop a model from writing `??`.
+
 ---
+
+### 6.10 Launching a browser from `/web` — `MEASURED`, fixed
+
+`--web` and `/web` call the browser rather than only printing the URL. The command was
+`cmd /C start "" <url>` on Windows, and it was written from the documented behaviour rather
+than from a measurement: `start` is a `cmd` builtin rather than an executable, and its **first
+quoted argument is taken as the new window's title**, which is why the empty `""` is there —
+without it a URL containing `&` is read as a command separator and the rest of the address is
+run as a command. `std::process::Command` quoting into `cmd` is the exact class of problem the
+rest of this file is about.
+
+The doubt was well placed, and it was the *last* piece of the line that was wrong rather than
+the empty quotes. Measured by putting the character under test in the *name* of a `.cmd` file
+standing in for the browser — one quoted argument, in the position the URL sits — with `/b` so
+that nothing opened a window, and with the child's stdio detached and a deadline, because a
+`start` that opens a console window holds the pipe:
+
+| target | `["/C", "start", "", target]` | `/S /C` and the line verbatim |
+|---|---|---|
+| `plain.cmd` | ran | ran |
+| `a&b.cmd` | did not run: cmd read `&` as a new command | ran |
+| `a^b.cmd` | did not run: the caret was eaten | ran |
+| `a%20b.cmd` | ran | ran |
+| `a b.cmd` | did not run | ran |
+
+The reason is the same one as §6.1's: std quotes an argument only when it contains a space,
+and a URL does not. So the URL arrived as bare text in the middle of a command line, and
+`?a=1&b=2` was two commands. The fix is the form every other command string in flint now
+uses — `/S /C`, the whole line quoted, the URL quoted inside it — and the empty quotes stay.
+`browser_invocation` in `src/main.rs` is that line, with the table above as its comment, and
+the test asserts the shape because running the real line opens a window.
+
+macOS (`open`) and Linux (`xdg-open`) are both exercised on this machine, by replacing the
+program on `PATH` with a script that records its argument. Windows has no equivalent trick —
+`start` is a builtin, not a program — which is why the stand-in above is a *target* rather
+than a program.
 
 ## 7. The plan
 
-In order, each one its own commit:
+In order, each one its own commit. **All five are done**, on the machine described at the
+top of this file:
 
 1. **Extract `run_program_streaming`,** with `BashTool` as its special case. Pure refactor;
    existing tests pass unchanged. (§5) — **done**
 2. **`exec`,** arguments as an array. (§4.1) — **done**, registered on every platform
    rather than Windows only, with `stdin` for payloads that are not arguments (§4.3) and a
    `readonly` judgement made on the program and its verb rather than on a command line.
-3. **`pwsh`,** script to a BOM'd `.ps1` and in through `-File`. Windows only. (§4.2) —
-   **not started**, and deliberately so: §4.2's execution-policy wrinkle and §6.6 both want
-   measurements from a real Windows session before any code is written.
+3. **`pwsh`,** script to a BOM'd `.ps1` and in through `-File`, with
+   `-ExecutionPolicy Bypass`. Windows only. (§4.2) — **done**; the BOM and the execution
+   policy were both measured first, and both were needed.
 4. **The three small fixes:** `\` normalisation in `glob`/`grep` (§6.3) — **done**; the
-   process-tree kill (§6.1) and child output encoding (§6.2) — **not started**, both of them
-   Windows-only behaviour that cannot be observed from a Unix machine.
+   process-tree kill (§6.1) — **done**, with the `taskkill /T` and Unix limits recorded
+   there; child output encoding (§6.2) — **done**, as code-page decoding rather than `chcp`.
 5. **The facts in the system prompt:** PowerShell version and
-   `$PSNativeCommandArgumentPassing`. (§6.9) — **not started**, same reason.
+   `$PSNativeCommandArgumentPassing`. (§6.9) — **done**.
 
-Then measure. §6.6 and the `-File` execution-policy wrinkle in §4.2 are the two places where
-a real Windows session is required before any code is written; everything else in this file
-is settled enough to implement.
-
-### 6.10 Launching a browser from `/web` — `UNVERIFIED` on Windows
-
-`--web` and `/web` call the browser rather than only printing the URL. The command is
-`cmd /C start "" <url>` on Windows, and it is written from the documented behaviour rather than
-from a measurement: `start` is a `cmd` builtin rather than an executable, and its **first
-quoted argument is taken as the new window's title**, which is why the empty `""` is there —
-without it a URL containing `&` is read as a command separator and the rest of the address is
-run as a command. `std::process::Command` quoting into `cmd` is the exact class of problem the
-rest of this file is about.
-
-None of that has been tried on Windows. If it misbehaves the symptom is small and local — no
-window, and the URL is printed either way, so the fallback is a paste — but the check is worth
-making the first time somebody has a Windows session, alongside step 4. macOS (`open`) and
-Linux (`xdg-open`) are both exercised on this machine, by replacing the program on `PATH` with
-a script that records its argument.
+Step 3 also produced the one measurement that changed the design: the tool hands the script
+over as a file for the reasons in §4.2, but *not* because `-Command` mangles quoting. It does
+not.
 
 Deliberately not doing: a PowerShell *parser* (a tool that rewrites the model's quoting for
 it would be a large amount of code that is wrong in the cases that matter), `-EncodedCommand`
 (opaque state, against the repository's rules), and a permission layer for `exec` beyond the
 existing `readonly` switch.
+
+Still open, and left open on purpose rather than by oversight: a Unix process-group kill for
+backgrounded work (§6.1), and the line-ending sentence for `apply_patch` (§6.4). Both are
+recorded where they belong, with what is missing and why the fix is not free.
 
 As always: write the failing test first, watch it fail for the right reason, then fix the
 code. The process-tree kill and the `\` normalisation are both cheap to test; the quoting

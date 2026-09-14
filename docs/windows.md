@@ -176,6 +176,18 @@ same one that produced the corruption below.
 Cheap to fix at startup, and cheap to test: run flint on the Windows machine and see
 whether the banner's `—` survives.
 
+**Measured, and the "switch the console" advice is not the whole story** (the same session
+that produced `docs/windows-tooling.md` §6.2, on 10.0.26200 with locale code page 936):
+`chcp` mutates *shared console state*, so a command that runs `chcp 65001` changes the
+console everything else attached to it is writing to, and a child that keeps its own opinion —
+CPython uses the locale's ANSI code page and ignores the console entirely — still emits
+CP936. The same terminal was observed reporting 936 and then 65001 inside one session. For
+*reading children's output*, what worked was decoding by `GetACP` rather than by the console
+code page. For flint's own output the switch above is still the proposal and still
+`UNVERIFIED`: the two directions have different answers, because flint controls one side of
+each and not the other. This paragraph measured the input side, and only reasons about the
+output side.
+
 ### At development time: the source tree, silently
 
 This one already happened, on this project, and it is why `tests/cli_output.rs` has a
