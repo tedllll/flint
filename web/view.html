@@ -1087,6 +1087,7 @@ async function follow() {
       await readSession();
       delay = 500;
       feedLast = "connected, applied " + applied;
+      postLog("connected · " + feedTrace(feedReceived, doc.blocks.length, feedLast));
       if (debugFeed) setHint(feedTrace(feedReceived, doc.blocks.length, feedLast));
 
       const reader = response.body.getReader();
@@ -1103,6 +1104,7 @@ async function follow() {
           // whole reason the trace exists, and a counter after the skipping would show zero.
           feedReceived++;
           feedLast = (frame.event || "message") + " seq " + frame.id;
+          if (feedReceived === 1) postLog("first frame · " + feedTrace(feedReceived, doc.blocks.length, feedLast));
           if (debugFeed) setHint(feedTrace(feedReceived, doc.blocks.length, feedLast));
           // A named event, not a line of the run's vocabulary: it means this page's
           // document is stale, so it re-reads rather than trying to catch up.
@@ -1366,10 +1368,21 @@ if (typeof document !== "undefined" && document.getElementById) {
     // frames arrived, how many became blocks, and what the last one was. The hint line shows the
     // same thing, but the hint belongs to whoever is looking at the screen -- and this question was
     // asked four times over a console nobody could read from anywhere else.
-    if (debugFeed) {
-      postLog("page opened · " + feedTrace(0, 0, "boot"));
-      setInterval(() => postLog(feedTrace(feedReceived, doc.blocks.length, feedLast)), 3000);
-    }
+    // Written by default, and that is a correction rather than a preference: the first version put
+    // this behind `?debug=1`, and the bug it was built for was then reported again without a single
+    // line of it -- a diagnostic that has to be switched on is one nobody switches on. The file is
+    // the record; `?debug=1` only decides whether the same numbers are also shown on screen, which
+    // is a display choice rather than a fact worth keeping.
+    postLog("page opened · " + feedTrace(0, 0, "boot"));
+    // Only when something has changed since the last line, so an idle page is silent and a stream
+    // cannot write faster than the interval.
+    let loggedTrace = "";
+    setInterval(() => {
+      const now = feedTrace(feedReceived, doc.blocks.length, feedLast);
+      if (now === loggedTrace) return;
+      loggedTrace = now;
+      postLog(now);
+    }, 3000);
 
     paint(doc);
     paintSessions();
