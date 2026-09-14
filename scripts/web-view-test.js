@@ -500,6 +500,17 @@ check("a page that cannot read says which kind of failure it is", () => {
   eq(ended.includes("the stream ended"), true, "and says what ended");
 });
 
+check("the feed trace says what the page cannot work out for itself", () => {
+  // No frames, skipped frames and frames rendered out of sight look identical from outside, so the
+  // `?debug=1` line has to carry all three numbers: what arrived, what it became, and what the last
+  // one was. This is the line a bug report can quote.
+  const line = viewer.feedTrace(7, 3, "status seq 12");
+  eq(line.includes("7 frames"), true, "how many frames arrived");
+  eq(line.includes("3 blocks"), true, "how many became blocks");
+  eq(line.includes("status seq 12"), true, "which frame was last");
+  eq(viewer.debugFeed, false, "off unless the address asks for it");
+});
+
 if (failures) {
   console.log(`\n${failures} failed`);
   process.exit(1);

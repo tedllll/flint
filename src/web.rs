@@ -643,6 +643,9 @@ pub fn respond(request: &Request, body: &str, state: &State) -> Answer {
         },
         // A line typed into the browser, into the same channel the keyboard feeds.
         ("POST", "/message") => accept_message(body, state),
+        // The page's own account of itself, written where it can be read afterwards. See
+        // `accept_log` for why the browser's console was not good enough.
+        ("POST", "/log") => accept_log(body.as_bytes()),
         // Before the catch-alls, or `POST /` would be reported as a missing route rather
         // than as a route that exists and takes no body.
         (_, "/") => Response::text(
@@ -663,6 +666,63 @@ pub fn respond(request: &Request, body: &str, state: &State) -> Answer {
 /// named and filed away, and a cached copy would be wrong exactly while somebody is looking at
 /// it. `session::list` reads only the two ends of each file, so listing is cheap whatever the
 /// conversations weigh.
+/// Where the page's own account of itself goes: `<FLINT_HOME>/web.log`, one plain line per entry.
+///
+/// The browser's console is not a place a report can be read from. It belongs to whoever is
+/// sitting at that machine, and "the page does not change" was reported four times over it without
+/// a single line of it reaching the person who could act -- while from the outside three different
+/// failures (no frames, frames skipped, frames rendered out of sight) look exactly the same. A
+/// file can be read afterwards, by whoever is looking, from wherever they are, and this repository
+/// already keeps its state as plain files for the same reason.
+///
+/// It sits beside the sessions because that is `FLINT_HOME` and nothing here needs a second notion
+/// of where flint keeps things. Capped, because a page left open overnight must not be able to
+/// fill a disk; single-lined, because a log in which one entry can look like several is a log that
+/// lies; and it timestamps entries, because "which of these happened before the restart" is the
+/// only question a log like this is ever asked.
+fn accept_log(body: &[u8]) -> Response {
+    accept_log_in(&crate::config::sessions_dir().with_file_name("web.log"), body)
+}
+
+/// The same, with the file given, so a test does not have to touch a real `FLINT_HOME`.
+fn accept_log_in(path: &std::path::Path, body: &[u8]) -> Response {
+    const CAP: u64 = 1024 * 1024;
+    let line: String = String::from_utf8_lossy(body)
+        // Collapsed rather than only replaced: one entry is one line, and a page that ends its
+        // entry with a newline must not leave a trailing space that reads as a stray field.
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(500)
+        .collect();
+    if line.trim().is_empty() {
+        return Response::text(400, "Bad Request", "an empty log line is not a record\n");
+    }
+    let written = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if written > CAP {
+        return Response::text(200, "OK", "the log is full\n");
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let entry = format!("{stamp} {line}\n");
+    let appended = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, entry.as_bytes()));
+    match appended {
+        Ok(()) => Response::text(200, "OK", "logged\n"),
+        Err(e) => Response::text(
+            500,
+            "Internal Server Error",
+            format!("cannot write the log: {e}\n"),
+        ),
+    }
+}
+
 fn serve_sessions(state: &State) -> Response {
     serve_sessions_in(&crate::config::sessions_dir(), state)
 }
@@ -1943,6 +2003,45 @@ mod socket_tests {
 #[cfg(test)]
 mod live_tests {
     use super::*;
+
+    /// The page's log is appended, single-lined and readable by a person afterwards.
+    ///
+    /// All three are the point of it: appended because two entries must both survive, single-lined
+    /// because a page that sends a newline must not be able to forge a second entry, and readable
+    /// because the entire reason it exists is that somebody reads it later on a machine that is not
+    /// the one it ran on.
+    #[test]
+    fn the_pages_log_is_appended_one_plain_line_at_a_time() {
+        let dir = std::env::temp_dir().join(format!("flint-weblog-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let path = dir.join("web.log");
+
+        assert_eq!(accept_log_in(&path, b"first").status, 200);
+        assert_eq!(accept_log_in(&path, b"second\r\nthird").status, 200);
+
+        let text = std::fs::read_to_string(&path).expect("the log exists");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "two entries, not three: {text:?}");
+        assert!(lines[0].ends_with(" first"), "{:?}", lines[0]);
+        assert!(
+            lines[1].ends_with(" second third"),
+            "the newline inside an entry was flattened: {:?}",
+            lines[1]
+        );
+        assert!(
+            lines[0].split(' ').next().unwrap().parse::<u64>().is_ok(),
+            "an entry is stamped: {:?}",
+            lines[0]
+        );
+
+        assert_eq!(
+            accept_log_in(&path, b"   \n  ").status,
+            400,
+            "an empty line is not a record"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// `/new` and `/resume` have to reach a browser that is already connected.
     ///

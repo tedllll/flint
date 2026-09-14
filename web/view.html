@@ -1075,12 +1075,19 @@ async function readSession() {
 /// the file first would leave a window in which a frame belonged to neither source.
 async function follow() {
   let delay = 500;
+  // `?debug=1`, and only then: the trace answers the one question the page cannot ask itself (is
+  // the feed delivering, and do the frames become blocks?) and it is noise in every session that
+  // works. Added after "the page does not change at all", where no frames, skipped frames and
+  // frames rendered out of sight were indistinguishable -- and then given a file to write to,
+  // because a hint line can only be read by whoever is sitting in front of the screen.
   for (;;) {
     try {
       const response = await fetch("/events?last=" + applied, { headers: authHeader() });
       if (!response.ok) throw new Error("HTTP " + response.status);
       await readSession();
       delay = 500;
+      feedLast = "connected, applied " + applied;
+      if (debugFeed) setHint(feedTrace(feedReceived, doc.blocks.length, feedLast));
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -1092,6 +1099,11 @@ async function follow() {
         const cut = sseFrames(buffer);
         buffer = cut.rest;
         for (const frame of cut.frames) {
+          // Counted before anything decides what to do with it: a frame this page skips is the
+          // whole reason the trace exists, and a counter after the skipping would show zero.
+          feedReceived++;
+          feedLast = (frame.event || "message") + " seq " + frame.id;
+          if (debugFeed) setHint(feedTrace(feedReceived, doc.blocks.length, feedLast));
           // A named event, not a line of the run's vocabulary: it means this page's
           // document is stale, so it re-reads rather than trying to catch up.
           if (frame.event === "reset") {
@@ -1152,6 +1164,7 @@ async function follow() {
       // reasons are a flint that is being restarted and a laptop that was asleep.
       doc.status = feedTrouble(e.message);
       paint(doc);
+      postLog("feed failed: " + e.message + " · " + feedTrace(feedReceived, doc.blocks.length, feedLast));
       // ...but a refused token is not a case retrying can fix, so the page stops here and says
       // where the right address is, instead of saying "reconnecting" until somebody gives up.
       if (tokenRefused(e.message)) return;
@@ -1182,6 +1195,33 @@ function feedTrouble(message) {
     return "this page's token is not this flint's — open the address flint printed (a restart changes the port and the token)";
   }
   return "live feed: " + message + " — reconnecting";
+}
+
+/// `?debug=1` on the address flint printed turns the hint line into the feed's trace. Guarded
+/// because this file also runs under Node, where there is no `location`.
+const debugFeed = typeof location !== "undefined" && /[?&]debug=1/.test(location.search);
+
+/// The feed's own counters. At module scope because the debug interval reads them between frames.
+let feedReceived = 0;
+let feedLast = "-";
+
+/// Send one line of the page's account of itself to the server, which appends it to
+/// `<FLINT_HOME>/web.log`. Failures are swallowed on purpose: a page that cannot log must not stop
+/// being a page, and the log is a diagnostic rather than a guarantee.
+function postLog(line) {
+  try {
+    fetch("/log", { method: "POST", headers: authHeader(), body: line }).catch(() => {});
+  } catch (e) {
+    // Nothing to say about it: this is the last thing that should ever take the view down.
+  }
+}
+
+/// The line the debug switch shows in the hint, kept as a pure function so the shape is pinned:
+/// what the answer to "the page does not change" has to distinguish is whether the feed connects,
+/// whether frames arrive at all, and whether they become blocks -- three failures that look
+/// identical from the outside, which is why the switch exists.
+function feedTrace(received, blocks, last) {
+  return "live · " + received + " frames · " + blocks + " blocks · last " + last;
 }
 
 function readFile(file) {
@@ -1322,6 +1362,15 @@ if (typeof document !== "undefined" && document.getElementById) {
       }
     });
 
+    // With `?debug=1`, the page reports itself to `<FLINT_HOME>/web.log` every few seconds: how many
+    // frames arrived, how many became blocks, and what the last one was. The hint line shows the
+    // same thing, but the hint belongs to whoever is looking at the screen -- and this question was
+    // asked four times over a console nobody could read from anywhere else.
+    if (debugFeed) {
+      postLog("page opened · " + feedTrace(0, 0, "boot"));
+      setInterval(() => postLog(feedTrace(feedReceived, doc.blocks.length, feedLast)), 3000);
+    }
+
     paint(doc);
     paintSessions();
     readSessions();
@@ -1341,7 +1390,7 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     newDoc, applyLine, applyText, applyEvent, tokenFromSearch, servedByFlint, sseFrames,
     sessionsFrom, messageBody, resumeLine, streamingAnswer, carryStreaming, setStreamingAnswer,
-    paint, feedTrouble, tokenRefused,
+    paint, feedTrouble, tokenRefused, feedTrace, debugFeed,
   };
 }
 </script>
