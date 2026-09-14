@@ -790,6 +790,11 @@ pub async fn run_program_streaming(
     let mut child = cmd
         .spawn()
         .with_context(|| format!("cannot spawn program '{program}'"))?;
+    // Armed while the command runs. On the abnormal paths below -- a timeout, an idle kill, or
+    // a turn the user interrupted, which drops this whole future -- the shell is still alive
+    // and this still has something to walk. Declared after `child` so that it drops *before*
+    // it, which is the order the tree kill needs; see its own comment.
+    let mut tree = KillTree::arm(child.id());
 
     // The caller's text goes in through the pipe, never through the command line.
     if let Some(text) = stdin {
@@ -933,6 +938,9 @@ pub async fn run_program_streaming(
         }
     };
 
+    // It ended on its own, so there is no tree left to end.
+    tree.defuse();
+
     // The readers may still be delivering the tail of the output after the child exits.
     // A short grace period collects it, so a command's last lines are not lost at the
     // finish line -- which is exactly where the interesting error message usually is.
@@ -976,6 +984,69 @@ pub async fn run_program_streaming(
         report.push_str(&format!("\n[exit code: {code}]"));
     }
     Ok(CommandOutcome { report, code })
+}
+
+/// Ends a command's whole process tree on Windows, when the command did not end on its own.
+///
+/// `kill_on_drop` terminates the process tokio spawned and nothing else, and `cmd.exe` has no
+/// exec: it stays as the parent of whatever it was asked to run. So a timed-out `cargo build`
+/// killed `cmd.exe` and left `cargo`/`rustc` running, holding `target/` and the release binary
+/// -- the next build then fails with a lock error that has nothing to do with the code.
+/// Measured on this machine: killing the shell leaves both `PING.EXE` and `conhost.exe` alive;
+/// `taskkill /PID <pid> /T /F` ends the tree, and costs 358 ms against 345 ms for `/F` alone.
+///
+/// It has to run **before** the shell is gone, which is why this is a guard and not a cleanup
+/// at the end: `/T` walks the shell's children, and once the shell has exited its children are
+/// already reparented and `taskkill` reports "not found" (measured: exit 128) with the tree
+/// still running. So the guard is defused the moment the command finishes by itself, and fires
+/// only on the paths that kill it -- a timeout, an idle kill, or an interrupted turn dropping
+/// the future this lives in.
+///
+/// On Unix this is nothing at all, and deliberately: `sh -c` usually *becomes* a lone command,
+/// so the process killed is the command. A script that backgrounds work is the case where that
+/// is not true, and it is not measured here -- see `docs/windows-tooling.md` §6.1.
+struct KillTree {
+    #[cfg(windows)]
+    pid: Option<u32>,
+}
+
+impl KillTree {
+    fn arm(pid: Option<u32>) -> Self {
+        #[cfg(windows)]
+        {
+            KillTree { pid }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = pid;
+            KillTree {}
+        }
+    }
+
+    /// The command ended by itself; leave whatever it started alone.
+    fn defuse(&mut self) {
+        #[cfg(windows)]
+        {
+            self.pid = None;
+        }
+    }
+}
+
+impl Drop for KillTree {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        if let Some(pid) = self.pid {
+            // Blocking, and on purpose: this runs while the future is being dropped, so there
+            // is no async context left to hand the wait to. It is the abnormal path only, and
+            // the measured cost is under half a second.
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
 }
 
 /// How large the file a download is writing to has become, if it can be told.

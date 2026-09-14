@@ -244,6 +244,65 @@ async fn shell_execution_actually_runs_the_command() {
     );
 }
 
+/// A killed command must take its own children with it.
+///
+/// The test above passes on Windows without any tree kill, and that is why this one exists:
+/// its work was the second half of the same `cmd` line, so killing the shell was enough. A
+/// command that *starts* something is the case that shows the difference -- `cmd.exe` has no
+/// exec, so it is the parent of whatever it runs, and `kill_on_drop` ends the shell and
+/// nothing else. Measured before the fix: both the child `cmd` and the `ping` under it were
+/// still running after the shell was killed, and the marker appeared.
+///
+/// The child here is a real second process that outlives its parent unless the tree is ended.
+/// The control run first is what makes the killed run mean something: without it, a quoting
+/// mistake would look exactly like a successful kill.
+#[cfg(windows)]
+#[tokio::test]
+async fn a_killed_command_takes_its_children_with_it() {
+    let config = test_config("http://unused");
+    let dir = std::env::temp_dir().join(format!("flint-tree-kill-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let marker = dir.join("child-survived.txt");
+    let child = dir.join("child.cmd");
+    // A batch file rather than one long quoted command line: the shell reads it from a file,
+    // so nothing in this test depends on how a nested quote survives `/C`. `ping` is the
+    // sleep Windows has without a shell builtin to run it.
+    std::fs::write(
+        &child,
+        format!(
+            "@echo off\r\nping -n 4 127.0.0.1 > nul\r\necho alive > \"{}\"\r\n",
+            marker.display()
+        ),
+    )
+    .expect("the child script");
+    let command = format!("cmd /C {}", child.display());
+
+    // The control: uninterrupted, this command leaves the marker, so the assertion below is
+    // about the kill and not about the command never having run.
+    let _ = std::fs::remove_file(&marker);
+    let out = flint::tools::run_command_raw(&config, &command, &dir, 30)
+        .await
+        .expect("the control run should finish");
+    assert!(
+        marker.exists(),
+        "the control did not produce the marker, so this test proves nothing: {out:?}"
+    );
+
+    // Now under a budget that runs out while the child is still sleeping.
+    let _ = std::fs::remove_file(&marker);
+    let result = flint::tools::run_command_raw(&config, &command, &dir, 1).await;
+    assert!(result.is_err(), "a command over its budget must report an error");
+
+    // Well past when the child would have written the marker on its own.
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    assert!(
+        !marker.exists(),
+        "the command's child outlived the kill and wrote {} -- the shell was killed, not the tree",
+        marker.display()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A command that outlives its budget must be **killed**, not merely abandoned.
 ///
 /// The old code wrapped `wait_with_output` in a timeout and returned an error, which
