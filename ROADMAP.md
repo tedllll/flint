@@ -446,6 +446,29 @@ The design, in the order the pieces depend on each other:
   page a per-run token (docs/web-mode.md §4), and that token is checked on every request,
   including the event stream.
 
+**The toggle this would put a switch on did not work — fixed, 2026-09-14, and it was measured
+before the `state` frame was written because a frame that *reports* `readonly` out of a command
+that does not set it is the same lie in a new place.** `/readonly on` printed "no writes, no
+mutating commands", the `/config` line under it printed `readonly = false`, and `config.toml` had
+no `readonly` key at all: the arm worked out the value it meant to set, printed it, and set
+nothing. The guard flint's own manual calls its only permission control had never been on, and a
+session that believed it was guarded had full permissions — worse than a command that fails,
+because it reports a permission the session does not have.
+
+`/readonly` now writes the file and then **rebuilds the tool set**, because the flag is baked into
+the tools at construction (`ToolBox::new` hands `readonly` to `write`, `edit`, `patch`, `bash`,
+`exec` and `pwsh`): the guard is in force from the next tool call rather than from the next
+process, which is what someone typing it wants. The rebuild is deliberately *not*
+`continue_conversation`: that writes a new session file, and this is a change of permission, not
+of conversation, so the agent is rebuilt around the same file, history and model
+(`SessionWriter::resume`, the route `/resume` uses for the same reason). What it costs is what
+every rebuild here costs — the tool box's read history starts over — and it is the consequence
+already accepted for `/model` and `/provider` below. The file is written first, so what the next
+run reads agrees with what this one enforces; a run guarded only by `--readonly` is reported
+honestly by `/config` (this run's value, and the file's) and can be unguarded from inside by an
+explicit `/readonly off`, which writes the file too. `readonly_guards_the_run_it_is_typed_into` is
+red without the fix on the first of its two halves (the file) and green on both after it.
+
 **Renaming a conversation from the sidebar.** Not tried by the person who asked, and the mechanism
 is already there: `/name <text>` appends a `title` line, the page already *renders* titles (its
 header shows one), and typing `/name x` in the composer works today. What is missing is an

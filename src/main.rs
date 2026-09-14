@@ -1807,9 +1807,47 @@ async fn handle_command(
             } else {
                 printer.term().line(format_args!("{}", printer.style(RED, "readonly OFF — full permissions")));
             }
+
+            // Saved first, so that what the next run reads agrees with what this one is about to
+            // enforce. It did not, and worse: this arm used to work out the value it meant to set,
+            // print it, and set nothing at all. `/readonly on` therefore reported a guard that did
+            // not exist, in a tool whose manual calls this its only permission control -- a
+            // command that says it changed something and did not is worse than one that fails.
+            cfg.readonly = turn_on;
+            cfg.save()?;
+
+            // The tools are built *with* the flag, so changing it means building them again, and
+            // on this conversation's own session file rather than a new one: this is a change of
+            // permission, not of conversation, so the file, the history and the model stay put.
+            // (`Flow::NewAgent` is the shape for it -- the loop re-points the page at the session
+            // the new agent is writing, which here is the file it was already writing.)
+            //
+            // What it costs is what every rebuild costs, and it is the trade `ROADMAP.md` §9
+            // records for `/model` and `/provider`: a fresh tool set has read nothing, so the
+            // model may be asked to read a file it read a moment ago.
+            if turn_on == agent.readonly() {
+                printer.term().line(format_args!(
+                    "{dim}note: {} says readonly = {}{reset}",
+                    config::config_path().display(),
+                    turn_on
+                ));
+                return Ok(Flow::Continue);
+            }
+            let writer = match agent.session_path() {
+                Some(path) => Some(session::SessionWriter::resume(&path)?),
+                None => None,
+            };
+            let cwd = agent.cwd().clone();
+            let provider = provider::Provider::new(provider_cfg.clone())?;
+            let mut next = agent::Agent::new(cfg, provider, turn_on, cwd.clone(), writer);
+            next.splice_loaded_history(cfg, &cwd, agent.history().to_vec());
             printer.term().line(format_args!(
-                "{dim}note: takes effect on the next /new or restart (the tool set is per agent).{reset}"
+                "{dim}note: the tool set is rebuilt, so its read history starts over; {} now says \
+                 readonly = {}{reset}",
+                config::config_path().display(),
+                turn_on
             ));
+            return Ok(Flow::NewAgent(next, provider_cfg.clone()));
         }
 
         "/verbose" => {

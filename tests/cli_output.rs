@@ -2335,3 +2335,53 @@ async fn a_stopped_turn_tells_the_page_it_is_over() {
         "the page's status line still says what the stopped turn was doing. Frames: {settled:?}"
     );
 }
+
+/// `/readonly` is the only switch this tool has, so it has to be a switch.
+///
+/// Measured before it was fixed: `/readonly on` printed "no writes, no mutating commands", the
+/// `/config` line printed under it said `readonly = false`, and the file had no `readonly` key at
+/// all. The arm worked out the value it meant to set, printed it, and set nothing -- so the guard
+/// that flint's own manual calls its only permission control had never been on, and a session that
+/// believed it was guarded had full permissions. That is worse than a command that does nothing:
+/// it reports a permission the session does not have.
+///
+/// Both halves are asserted, because they are two different promises: the run in progress, whose
+/// tool set is built with the flag, and the file, which is what a later run starts from.
+#[test]
+fn readonly_guards_the_run_it_is_typed_into() {
+    let home = test_home("readonly-on", "http://127.0.0.1:9/v1");
+    let text = repl(&home, &["/readonly on", "/config"]);
+    let file = std::fs::read_to_string(home.join("config.toml")).expect("the config file");
+    // A second process, because what has to survive is the file: nothing else carries across.
+    let next_run = repl(&home, &["/config"]);
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(
+        file.contains("readonly = true"),
+        "the config file was not changed, so the setting does not outlive the run: {file}"
+    );
+
+    // The line `/config` prints is the value *in force*: the agent's, not the file's -- see the
+    // comment there. A parenthetical would mean the two disagree, which is the bug in miniature.
+    let in_force = text
+        .lines()
+        .find(|line| line.contains("readonly") && line.contains('='))
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    assert!(
+        in_force.ends_with("= true"),
+        "the run that typed it is not guarded, and says so: {in_force:?} (whole transcript: {text})"
+    );
+
+    let in_force = next_run
+        .lines()
+        .find(|line| line.contains("readonly") && line.contains('='))
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    assert!(
+        in_force.ends_with("= true"),
+        "the next run is not guarded: {in_force:?} (whole transcript: {next_run})"
+    );
+}
