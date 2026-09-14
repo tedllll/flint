@@ -452,10 +452,13 @@ section into it, so the two do not drift. The shape of it now:
    [`docs/windows-tooling.md`](docs/windows-tooling.md) and now **half built**: the runner
    extraction, `exec` and the `glob`/`grep` separator fix are in the tree. What is left is
    the part that needs the machine.
-2. **The transcript as cells** — measure the transcript as cells, paint only what changed,
-   then re-render for real on resize — which is also what deletes the interim state the clock
-   fix left behind: `begin_answer`, `last_segment_text`, the `committed` count and
-   `fresh_segment`.
+2. **The transcript as cells** — step 1, the measurement, is done: one 40-line answer streamed
+   in 256 deltas paints **10×** the characters it contains for a screen identical to the one a
+   single delta produces, at about 78 characters of waste per delta. `ROADMAP.md` §6 has the
+   table and the tool (`cargo test --test term_capture -- --ignored --nocapture
+   measured_cost_of_streaming`). What is left is paint only what changed, then re-render for
+   real on resize — which is also what deletes the interim state the clock fix left behind:
+   `begin_answer`, `last_segment_text`, the `committed` count and `fresh_segment`.
 3. **Web mode** — `--web` as a window onto the running process rather than a mode. The first
    three steps need no decision, and the one open question (§7 of that document: a hand-rolled
    HTTP server or `hyper`, which is already in the tree via `reqwest`) blocks only step 4.

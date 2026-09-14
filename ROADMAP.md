@@ -125,7 +125,7 @@ could only be settled on a Windows machine were settled on one (Windows 10.0.262
 work a command backgrounds (§6.1) and the line-ending sentence for `apply_patch` (§6.4).
 Neither is a Windows item, and both need a test before they need code.
 
-### 6. The transcript as cells — **designed, not implemented**
+### 6. The transcript as cells — **step 1 measured**
 
 Three steps: measure the transcript as cells, paint only what changed, then re-render for
 real on resize. This is also what deletes the interim state the clock fix left behind —
@@ -133,6 +133,34 @@ real on resize. This is also what deletes the interim state the clock fix left b
 because the strip is a text offset rather than a model. Deliberately after the Windows
 stream: it is a rewrite of the rendering core, it touches the byte-exact terminal tests, and
 it wants a session with room to hold the whole layout in mind.
+
+**Step 1 is measured**, 2026-09-14, by
+`tests/term_capture.rs::measured_cost_of_streaming_an_answer` — an `#[ignore]`d measurement
+(`cargo test --test term_capture -- --ignored --nocapture measured_cost_of_streaming`), so it
+runs the real painter through the capture path instead of a model of it. One 40-line answer of
+2,191 characters, streamed in a growing number of deltas, the *same final screen* every time
+(`scripts/vtscreen.js` output is byte-identical across all five), so the only thing that varies
+is what it cost to arrive:
+
+| deltas | bytes | row writes | row erases | characters painted | × the answer |
+|---|---|---|---|---|---|
+| 1 | 5,557 | 80 | 75 | 2,224 | 1.0× |
+| 4 | 6,186 | 101 | 90 | 2,413 | 1.1× |
+| 16 | 9,212 | 185 | 143 | 3,373 | 1.5× |
+| 64 | 20,210 | 404 | 253 | 7,507 | 3.4× |
+| 256 | 56,813 | 1,124 | 434 | 21,973 | **10.0×** |
+
+A delta is charged for **rows, not for the text it carries**: the marginal cost is about 78
+characters painted and about 200 bytes per delta, whether that delta carried two characters or
+nine. Answer text arriving whole costs 1.0× its own length, which says the painter is not
+wasteful about a single frame — the waste is entirely in *repeating* one, and it scales with how
+finely the answer was chopped rather than with the answer. That is what a text offset does: it
+has no way to know that 77 of the 78 characters it just drew were already on the screen.
+
+It also sets step 2's acceptance rule, which is what the measurement was for: **the same final
+screen — byte-identical under `scripts/vtscreen.js` — at a cost that grows with the text and not
+with the delta count.** The 256-delta row is the one to watch, and the byte-exact tests in
+`tests/term_capture.rs` already pin the screens it must not change.
 
 ### 7. Web mode: a window onto the running process — **levels 1 and 2 built**
 

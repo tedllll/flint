@@ -1205,3 +1205,143 @@ fn a_later_turn_does_not_recommit_the_earlier_turns_narration() {
         );
     }
 }
+
+/// What drawing a streaming answer costs today, before the strip is changed at all.
+///
+/// ROADMAP §6 step 1. The strip is a text offset rather than a model, so a delta can mean
+/// repainting rows that already hold exactly the right characters -- the rewrite is about a
+/// delta costing the cells that differ and nothing else. This is the number it has to beat:
+/// one 40-line answer, streamed in a growing number of deltas, with the same final screen
+/// every time.
+///
+/// `#[ignore]`d because it measures rather than asserts. A measurement is not a regression
+/// gate: the numbers are meant to change the day the strip is replaced, and a test asserting
+/// them would have to be rewritten with the code it is judging. The point of writing it as a
+/// test is that it runs the *real* painter through the capture path, in the same process
+/// state the byte-exact tests use, instead of a model of it.
+///
+///     cargo test --test term_capture -- --ignored --nocapture measured_cost_of_streaming
+#[test]
+#[ignore]
+fn measured_cost_of_streaming_an_answer() {
+    let _guard = stdout_lock().lock().unwrap_or_else(|e| e.into_inner());
+
+    // Mixed CJK and ASCII, so the measurement is not accidentally about a byte being a
+    // character, and long enough to scroll a 24-row screen several times over.
+    let answer: String = (1..=40)
+        .map(|i| {
+            format!("第 {i} 行：这是用来测量重画成本的一句话，中间夹着 ASCII words and a bit more.\n")
+        })
+        .collect();
+    let answer_chars = answer.chars().count();
+    println!(
+        "\nthe answer: {answer_chars} characters, {} rows, {} bytes\n",
+        answer.lines().count(),
+        answer.len()
+    );
+    println!(
+        "{:>7} {:>9} {:>9} {:>8} {:>9} {:>10} {:>8}",
+        "deltas", "bytes", "row-wr", "erases", "painted", "paint/ans", "b/delta"
+    );
+
+    let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
+    for deltas in [1usize, 4, 16, 64, 256] {
+        let path = target.join(format!("stream-cost-{deltas}.bin"));
+        let restore = capture_into(&path);
+        std::env::set_var("FLINT_TERM_CAPTURE", "1");
+        std::env::set_var("FLINT_TERM_SIZE", "100x24");
+
+        let bytes;
+        {
+            let term = Term::start().expect("term");
+            term.line(format_args!("> 请总结一下"));
+            // The REPL's own rule: every delta sends the *cumulative* text, because that is
+            // what a model that resends or resumes produces. Feeding only the new fragment
+            // here would measure a path flint does not take.
+            let marks: Vec<usize> = answer
+                .char_indices()
+                .map(|(b, _)| b)
+                .step_by(answer_chars.div_ceil(deltas).max(1))
+                .collect();
+            let mut cumulative = String::new();
+            for k in 0..deltas {
+                let end = marks.get(k + 1).copied().unwrap_or(answer.len());
+                let start = marks.get(k).copied().unwrap_or(answer.len());
+                if start >= answer.len() {
+                    break;
+                }
+                cumulative.push_str(&answer[start..end.min(answer.len())]);
+                term.stream(&cumulative);
+            }
+            term.end_stream();
+            drop(term);
+            bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        }
+        restore();
+
+        let captured = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).to_string();
+        let cost = paint_cost(&captured);
+        println!(
+            "{deltas:>7} {bytes:>9} {:>9} {:>8} {:>9} {:>9.1}x {:>8.1}",
+            cost.row_writes,
+            cost.erases,
+            cost.painted,
+            cost.painted as f64 / answer_chars as f64,
+            bytes as f64 / deltas as f64,
+        );
+    }
+    println!();
+}
+
+/// What a capture asked the terminal to do: cells painted, rows addressed, rows erased.
+struct PaintCost {
+    painted: usize,
+    row_writes: usize,
+    erases: usize,
+}
+
+/// Walk a capture the way a terminal would, counting cells and cursor moves.
+///
+/// Escape sequences are skipped rather than counted: the question is how much *content* was
+/// drawn, and a cursor move is counted separately because moving to a row and writing it is
+/// how a repaint of that row shows up in a byte stream.
+fn paint_cost(capture: &str) -> PaintCost {
+    let mut cost = PaintCost { painted: 0, row_writes: 0, erases: 0 };
+    let mut chars = capture.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            if c != '\r' && c != '\n' {
+                cost.painted += 1;
+            }
+            continue;
+        }
+        match chars.next() {
+            // CSI: parameters and intermediates, then a final byte in @..~.
+            Some('[') => {
+                while let Some(&next) = chars.peek() {
+                    chars.next();
+                    if ('@'..='~').contains(&next) {
+                        match next {
+                            'H' => cost.row_writes += 1,
+                            'K' => cost.erases += 1,
+                            _ => {}
+                        }
+                        break;
+                    }
+                }
+            }
+            // OSC: terminated by BEL, or by ST which begins with ESC. Only the second form
+            // appears here, and neither is drawn, so both are skipped.
+            Some(']') => {
+                while let Some(&next) = chars.peek() {
+                    chars.next();
+                    if next == '\x07' {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    cost
+}
