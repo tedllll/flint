@@ -453,29 +453,76 @@ affordance and any feedback — and the feedback is the previous item. So this o
 is built, and it is not worth doing first.
 
 
-### 9. The page, and the interrupt that loses the conversation
+### 9. The page, and the conversations that get thrown away
 
 The browser view was worked on hard in one round (six commits, all pushed). What belongs here is
 what is *not* done, because the page is further along than §7 and §8 say.
 
-**First, and before anything else: an interrupted turn loses the conversation.** Reported after
-`/stop` was added — the stop succeeds, and the next thing said has no memory of what came before.
-The history lives **in memory** in the agent (`agent.rs:186 history_mut`), handed to `run_turn` as
-`&mut agent`; an interrupt drops the in-flight future, which can leave that copy holding the user's
-line and not the answer. **The session file is intact** (append-only, written before the request
-goes out) and `/resume` on the same session restores the context, which is the proof of where the
-fault is — not the remedy, because a user should not have to know a session number to keep talking.
+**First: an interrupted turn loses the conversation — fixed, 2026-09-14, and the diagnosis that
+was written down here first was wrong in two places.** Reported after `/stop` was added: the stop
+succeeds, and the next thing said has no memory of what came before. What was written here said the
+in-flight future leaves the history holding the user's line and not the answer, and that
+re-deriving from the session file was the fix.
 
-The fix is to re-derive from the file automatically, on the spot. `/resume` already contains the
-work (`main.rs:2004–2027`: `session::load`, then `splice_loaded_history` — and that method is not
-optional, because a session file holds the conversation and *not* the system prompt, so assigning
-the messages directly sends the model no instructions at all). The open decision is where to call
-it: `run_turn` has no `cfg` handle, so either thread one through, or have `run_turn` report the
-interrupt and let the REPL rebuild the agent through the existing `Flow::NewAgent` route that
-`/resume` returns — better, because that path is already exercised. **Test first**: interrupt a
-turn, then assert the next *request body* still carries the earlier conversation (the
-`debug prompt-input` machinery; the request is not the transcript). Until it lands, `/stop` and
-Ctrl-C are unsafe for a conversation that matters.
+**Measured, against a stub provider that draws an answer and then holds the connection open** (a
+body delivered in one piece ends the turn, so there is no window to interrupt in it):
+the history is *not* what goes missing. After `/stop`, and after a line typed mid-turn, the next
+request still carries the earlier conversation *and* the interrupted question; the earlier plan's
+remedy would have changed nothing, because the file did not hold the missing thing either.
+
+**What goes missing is the answer that was already drawn.** Text arrives delta by delta and becomes
+a message only when the step that produced it *completes* -- so an interrupt, which is a dropped
+future, takes the answer with it, out of the history and out of the file at once. The session this
+was reported from has exactly that shape: two user messages in a row with no answer between them
+(`~/.flint/sessions/1789373441-50.jsonl`), the user's second line asking the model to *finish* an
+article, and the model's reply saying in its own words that it had no draft -- "我上一轮只做了检查
+就被打断了" -- before going off to search the disk for words it had written and could not find. The
+session a few minutes later ends the same way (`1789373985-837.jsonl`: an article, then "写长一点",
+and the file stops there). A half answer on screen that the model denies writing is a conversation
+the user and the model disagree about, and the user is the one who is right.
+
+**The fix keeps the drawn text where dropping the turn cannot reach it.** `Agent::drawn` holds what
+the step in flight has drawn -- a field, because every local of that future goes with it;
+`Agent::commit_drawn_answer` turns what is left into an ordinary assistant message and appends it to
+the file; and `run_turn` calls it straight after the drop, because the agent cannot do it for itself
+once its future is gone. Verbatim, with no marker inside it: the words are the model's, and an
+answer that stopped mid-sentence says what happened better than a note would. Both doors are
+covered, and both are gated end to end by a test that is red without the call
+(`a_stopped_turn_keeps_the_answer_it_drew`, `a_steered_turn_keeps_the_answer_it_drew`).
+
+**Next, measured and not fixed: `/model`, `/provider` and `/reload` throw the conversation away.**
+Same stub, same session: `/resume <id>` on a file holding a question and an answer, then
+`/model <other>`, then one message -- and the request that goes out has **two** messages, the system
+prompt and the new line. All three commands build a fresh `agent::Agent` with an empty history and a
+*new* session file (`switch_provider`, `/model` and `/reload` in `main.rs`), while the transcript on
+screen keeps showing the conversation they dropped. It is the same complaint through a different
+door, and it is reachable from the browser the moment §8 puts a model picker on the page -- worse
+there, because the page's transcript can outlive the context that produced it.
+
+The design decision it needs before it needs code, which is why it is written down rather than
+attempted: does the conversation continue in the **same file**, or in a **new one seeded with it**?
+
+- *Same file* is the cheapest: the history is already in memory, so only the `Provider` changes. But
+  `meta` names the provider and model at creation and `/resume` trusts it, so the switch has to be
+  recorded -- a new session event, a line in `docs/session-format.md`, and `session::load` applying
+  the last one. A format addition for something a user expects to be invisible.
+- *A new file seeded with the old messages* needs nothing new in the format: the file keeps naming
+  the model that was in force for the part it holds, and what is written is a copy of what is
+  already in memory. It is the same operation as the `--fork` item under "small, agreed,
+  unscheduled", which is that operation with a flag on it.
+
+The second looks right, and it needs one measurement before it is called cheap: what copying a
+multi-megabyte conversation costs, and whether the seeded file should be written through
+`SessionWriter` (a new constructor) or by copying the file and appending a second `meta`.
+
+**And a smaller hole in the same family, measured by accident and left alone on purpose.** A line
+that is already waiting in the channel when a turn starts is taken as an interrupt *before the turn
+future is ever polled*: the turn's `user` message is pushed on its first poll, so a `/model` or a
+second line that arrives first is executed with the turn never having existed -- not in the history
+and not in the file. It showed up while measuring the item above, where the first question produced
+no request at all. The fix is a turn polled once before the input channel is read, but a test for it
+would be a race with the reader thread rather than an assertion, so it wants the two lines that make
+it structural rather than a gate over a 2ms window.
 
 **Second: a stop button in the composer**, shown only while a turn is in flight, sending
 `sendText("/stop")` — no new route and no new verb, because the composer's route already carries

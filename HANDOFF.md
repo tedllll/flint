@@ -7,10 +7,10 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 345 passing (248 lib, 1 in the
-binary's own tests, 33 `agent_loop`, 28 `cli_output`, 4 `json_output`, 4 `search_tool`, 18
-`term_capture`, 9 `web_view`), `cargo clippy --all-targets` is silent, and both `node
-scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
+As of the commit that carries this file, `cargo test` is 350 passing, 1 ignored (249 lib, 1 in
+the binary's own tests, 33 `agent_loop`, 30 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
+`term_capture` plus the ignored cost measurement, 9 `web_view`), `cargo clippy --all-targets` is
+silent, and both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
 
 **This round was on Windows** (10.0.26200, AMD64, rustc 1.98.1, PowerShell 5.1.26100.6584 as
 the only PowerShell on `PATH`, locale ANSI code page 936). That is the whole point of the
@@ -30,10 +30,14 @@ The binary is held open by any running `flint`, so close those before replacing 
 
 ## What was just done
 
-**The browser view, the page's own log, and an interrupt that loses the conversation.**
+**An interrupt no longer throws away the answer it was drawing.** That is this round's fix: the
+drawn text lives in a field of the agent rather than in a local of the future that the interrupt
+drops, and `run_turn` commits what is left into the conversation. The measurement that corrected
+last round's diagnosis, the two tests that gate it, and the bug that is still *not* fixed are the
+two sections below.
 
-Six commits on the page, all pushed, and one bug that is *not* fixed — written down here rather
-than left to be rediscovered:
+**And the round before it, recorded here so it is not re-done — six commits on the page, all
+pushed:**
 
 - **The scrollbars are themed, and both boundaries drag.** `scrollbar-width`/`scrollbar-color`
   plus the `-webkit-` longhands with the thumb inset by `background-clip`, so the default grey
@@ -62,31 +66,56 @@ than left to be rediscovered:
   deliberately *not* handed back to the REPL, so a stopped turn does not then print "nothing is
   running", which reads as the stop having failed.
 
-### The bug to fix first: an interrupted turn loses the conversation
+### The interrupt does not lose the conversation any more — and the diagnosis here was wrong
 
 Reported once `/stop` worked: *the stop succeeds, and the next thing said does not know what was
-said before.* The fault is structural and is not in `/stop`, which only reaches it.
+said before.* That part was exact. What was written down here about *why* was not, in two places:
+the history does **not** lose the user's line, and re-deriving from the session file would have
+changed nothing, because the file did not hold the missing thing either.
 
-- The history lives **in memory**, in the agent (`agent.rs:186 history_mut`), handed to `run_turn`
-  as `&mut agent`. An interrupt drops the in-flight future (`interrupted = true; break;`), which
-  can leave that copy holding the user's line and not the answer — and everything after it
-  continues from a conversation that never happened. **The file is intact** (append-only, written
-  before the request goes out), and `/resume` on the same session restores the context: that is
-  the proof of where the fault is, not the remedy.
-- **The fix is to re-derive from the file automatically, on the spot** — no command and no
-  session number, which the report rightly insisted on. `/resume` already does the work
-  (`main.rs:2004–2027`): `session::load(&path)`, then `new_agent.splice_loaded_history(cfg, &cwd,
-  loaded.messages)`. That method is not optional: a session file holds the conversation and
-  **not** the system prompt, so assigning the messages directly sends the model no instructions
-  at all. (`/resume` had exactly that bug once; see "The round before".)
-- **Where to put it is the open decision.** `run_turn` has no `cfg` handle, so either `cfg` is
-  threaded into it, or — better, because it reuses an exercised path — `run_turn` reports the
-  interrupt to the REPL and the REPL rebuilds the agent through the existing `Flow::NewAgent`
-  route that `/resume` returns.
-- **Test first**: interrupt a turn, then assert the *next* request body still carries the
-  conversation from before it — the `debug prompt-input` machinery, because the request is not
-  the transcript. Red before green.
-- **Until it is in, do not `/stop` or Ctrl-C a turn** whose conversation matters.
+**Measured**, with a stub that draws an answer and then holds the connection open (a body delivered
+in one piece ends the turn, so there is no window to interrupt in it — `HangingProvider` in
+`tests/cli_output.rs`):
+
+- After `/stop`, and after a line typed mid-turn, the next request still carries the earlier
+  conversation *and* the interrupted question. The history was intact all along.
+- **What was missing is the answer that had already been drawn.** Text becomes a message only when
+  the step that produced it *completes*, so an interrupt — which is a dropped future — takes the
+  answer out of the history and out of the file at once. The session it was reported from has the
+  shape (`~/.flint/sessions/1789373441-50.jsonl`: two user messages in a row with no answer between
+  them; the model's own reply says it had no draft, "我上一轮只做了检查就被打断了", and then goes
+  looking on disk for what it had written). The next session ends the same way
+  (`1789373985-837.jsonl`: an article, then "写长一点", and the file stops there).
+
+**The fix** keeps the drawn text where dropping the turn cannot reach it: `Agent::drawn` is a field
+rather than a local of the future, every delta lands in it as it is drawn, `commit_drawn_answer`
+turns what is left into an ordinary assistant message and appends it to the file, and `run_turn`
+calls it straight after the drop — the agent cannot do it for itself once its future is gone.
+Verbatim, with no marker inside it: the words are the model's, and an answer that stopped
+mid-sentence says what happened better than a note would. Both doors are gated end to end by a test
+that was watched red without the call (`a_stopped_turn_keeps_the_answer_it_drew`,
+`a_steered_turn_keeps_the_answer_it_drew`).
+
+### The bug to fix first: `/model`, `/provider` and `/reload` throw the conversation away
+
+Found while measuring the above, and it is the same complaint through a different door. Same stub,
+same session: `/resume <id>` on a file holding a question and an answer, then `/model <other>`, then
+one message — and the request that goes out has **two** messages, the system prompt and the new
+line. All three commands build a fresh `agent::Agent` with an empty history *and a new session file*
+(`switch_provider`, `/model` and `/reload` in `main.rs`), while the transcript on screen keeps
+showing the conversation they dropped. Nothing fails, and nothing says so.
+
+The decision it needs before it needs code, written out in `ROADMAP.md` §9: continue in the same
+file (needs a session event recording the switch, and `load` applying the last one) or start a new
+file seeded with the old messages (nothing new in the format, and it is the `--fork` operation).
+The second looks right; it wants one measurement of what copying a large conversation costs.
+
+**Also measured, smaller, and left alone on purpose**: a line already waiting in the channel when a
+turn starts is taken as an interrupt before the turn's future is ever polled, so that turn never
+existed — not in the history and not in the file. It is what made the first question in the probe
+above produce no request at all. The fix is a poll before the channel is read; a test for it would
+be a race with the reader thread rather than an assertion, which is why §9 asks for the two lines
+that make it structural first.
 
 ### Still owed on the page
 
