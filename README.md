@@ -385,6 +385,7 @@ program and its verb rather than by re-reading a command line it never had. Use 
 |---|---|
 | `bash` | run a shell command (120s default timeout, `timeout_secs` to raise) |
 | `exec` | run a program with its arguments as an array — no shell, so nothing re-parses them |
+| `pwsh` | run a PowerShell script, written to a `.ps1` file (Windows only) |
 | `read` | read a file with line numbers, pageable via `offset`/`limit` |
 | `write` | create or overwrite a file |
 | `edit` | exact string replacement, unique-match enforced |
@@ -424,6 +425,21 @@ is passed, rather than on a command line at all.
 `exec` is offered on every platform rather than only on Windows, because it is the right
 tool everywhere: the model stops writing a command line and starts writing a list, and
 `/readonly` gets to judge a program and its verb instead of guessing where the words are.
+
+`pwsh` is Windows-only and exists for the case the other two handle badly: Windows
+management. A service, a registry key, a CIM query or an event log is a multi-line script
+with quoting of its own, and as a `bash` command line it is unreadable and fragile. The
+script is written to `<FLINT_HOME>/spill/<session>/<n>.ps1` — UTF-8 with a BOM, because
+Windows PowerShell 5.1 reads a `.ps1` without one as ANSI and turns every non-ASCII
+character into mojibake — and run with `-File` and `-ExecutionPolicy Bypass`. The result
+names the file, so the script can be read, edited and run again by hand.
+
+Worth being precise about why it is a file: **not** because `-Command` mangles quoting. It
+was measured, and `-Command` handles quotes, newlines and non-ASCII exactly as written —
+PowerShell parses a command line the way the C runtime does, unlike `cmd`. The file is the
+better shape because it is an artifact a person can keep, because the result can name it,
+and because a script is not capped by the ~32k command-line limit. Reaching for `pwsh` for
+something one program with arguments can do is what `exec` is for.
 
 Tool output is capped at `max_tool_output` characters before going back to the model. When
 it goes over, the whole of it is written to `~/.flint/spill/<session>/<n>.txt` and the
