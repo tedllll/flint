@@ -125,7 +125,7 @@ could only be settled on a Windows machine were settled on one (Windows 10.0.262
 work a command backgrounds (§6.1) and the line-ending sentence for `apply_patch` (§6.4).
 Neither is a Windows item, and both need a test before they need code.
 
-### 6. The transcript as cells — **step 2 landed, step 3 started**
+### 6. The transcript as cells — **all three steps landed**
 
 Three steps: measure the transcript as cells, paint only what changed, then re-render for
 real on resize. This is also what deletes the interim state the clock fix left behind —
@@ -270,6 +270,29 @@ deletion the roadmap promised is the *locks and the agreeing-by-hand*, not the i
   strips to nothing, and the answer is still in flight then: `close_stream` has to commit and blank
   and reset `committed` for that frame, and the text is not around to say so. Every piece of this
   state has turned out to be load-bearing; the rewrite moves it, it does not shrink it.
+
+**The merge landed**, 2026-09-14, as three commits, one per unit: the screen pair
+(`stream_rows` + `stream_first`) into `Mutex<Strip>`; the three text records (`stream_text`,
+`segment_text`, `last_segment_text`) into `Mutex<Answer>`; then the two counters (`committed`,
+`stream_active`) into `Answer` beside the text they measure. Eight fields behind five locks,
+kept in agreement by hand across `stream`, `close_stream`, `clear_viewport` and `begin_answer`,
+are now two models under two locks — one per question, *what is on screen* and *what was said*.
+
+Nothing was deleted, because measuring each field showed it carries something that cannot be
+reconstructed, and two of the fields the plan named as interim are not interim at all:
+`begin_answer` is the turn boundary, which the `Term` cannot infer (a new turn's answer can
+open with the previous turn's words), and `committed` is what lets an answer be readable in the
+transcript *while* it streams. What the merge removes is the chance to read the state
+half-updated: `close_stream` used to take the drawn text under one lock and its row count under
+another, so a frame landing between the two left it committing rows measured against text that
+had already moved on — the rows in between committed twice or dropped. It takes both under one
+lock now.
+
+The step-3 resize behaviour is the deliberate deviation recorded above: a resize closes the
+in-flight answer rather than re-wrapping it, because re-wrapping commits rows against a count
+measured in the old wrapping. So §6 is complete in the form the measurements allow, and the
+three things the plan got wrong about how it would go are written down here rather than
+quietly dropped.
 
 **One piece of it did come out**, 2026-09-14: `stream_rows` — the painter's memory of what is
 on the strip — used to be cleared by hand in `begin_answer` and again at a segment boundary,
