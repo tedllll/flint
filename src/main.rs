@@ -920,7 +920,47 @@ async fn interactive(
         };
 
         if input.starts_with('/') {
-            match handle_command(&input, cfg, agent, provider_cfg, printer, reader, viewer).await? {
+            // A command's answer, for the page as well as the terminal.
+            //
+            // Commands answer through `printer.term()`, which is a terminal and nothing else, so a
+            // command typed into the page's composer used to print nothing the page could read.
+            // Recording starts here and stops below, which is what keeps a *turn's* lines out of
+            // it: they go through the same funnel and are already frames of their own.
+            if viewer.is_some() {
+                printer.term().answer_start();
+            }
+            let flow = match handle_command(&input, cfg, agent, provider_cfg, printer, reader, viewer).await {
+                Ok(flow) => flow,
+                // A command that fails is an answer, not the end of the session.
+                //
+                // These arms return `Result`, and this used to hand the error straight out of
+                // `interactive` with `?` -- where it became the process's exit status. So one
+                // mistyped word (`/verbose loud`) printed `flint: error: ...` and killed the
+                // conversation. The page made it worse: its composer sends lines to the same
+                // place, so a mistyped command in the browser ended the run the page was
+                // watching, and the browser could not even see why -- the message went to stderr.
+                //
+                // The line the input reader refuses is answered two branches above, for the same
+                // reason and in the same shape. One `line` call per line of the message: an error
+                // carrying a newline would otherwise move the cursor down through the rows the
+                // layout reserved.
+                Err(why) => {
+                    for (n, text) in format!("{why:#}").lines().enumerate() {
+                        let said = if n == 0 {
+                            format!("{input}: {text}")
+                        } else {
+                            text.to_string()
+                        };
+                        printer.term().line(format_args!("{red}{said}{reset}"));
+                    }
+                    Flow::Continue
+                }
+            };
+            if let Some(viewer) = viewer.as_ref() {
+                let said = printer.term().answer_take();
+                viewer.live().command(&input, &said);
+            }
+            match flow {
                 Flow::Continue => continue,
                 Flow::Exit => break,
                 Flow::NewAgent(new_agent, new_provider) => {

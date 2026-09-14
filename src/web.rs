@@ -202,6 +202,24 @@ impl Live {
         }
     }
 
+    /// What a command answered, to every reader of the stream.
+    ///
+    /// §8's other half. A command's answer is not one of the turn's events -- it runs *between*
+    /// turns, and the session file deliberately does not hold it -- so it could not be carried by
+    /// [`Live::event`], and without it a command typed into the page's composer printed nothing
+    /// the page could read. It belongs on the same stream all the same, because the page renders
+    /// the transcript from that stream and an action's answer belongs in the transcript.
+    ///
+    /// An empty answer sends nothing rather than an empty block: `/exit` and a command that only
+    /// moves the session say what they have to say another way, and a blank block in the
+    /// transcript would read as a rendering fault.
+    pub fn command(&self, input: &str, lines: &[String]) {
+        if lines.is_empty() {
+            return;
+        }
+        self.push(crate::ndjson::command(input, &lines.join("\n")));
+    }
+
     /// What the turn in flight has written so far, or empty between turns.
     ///
     /// Read out of the sink rather than accumulated separately: it is the same string

@@ -233,6 +233,7 @@
   .turn:first-child { border-top: 0; margin-top: 0; }
   .who { color: var(--dim); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
   .user .body { color: var(--user); }
+.command .body { color: var(--dim); }
   .body { white-space: pre-wrap; word-wrap: break-word; margin: 2px 0 0; }
   .reasoning { color: var(--dim); font-style: italic; }
   details {
@@ -358,6 +359,9 @@ const KNOWN = new Set([
   "session.started", "turn.started", "message.delta", "reasoning.delta",
   "message.completed", "tool.started", "tool.args", "tool.completed",
   "warning", "turn.completed", "error", "status",
+  // Not a turn's event: what a command answered. It is on this stream because the transcript is
+  // built from it, and an answer typed into the composer belongs in the transcript (ROADMAP §8).
+  "command",
 ]);
 
 function newDoc() {
@@ -643,6 +647,14 @@ function applyEvent(doc, ev) {
 
     case "warning":
       push(doc, { kind: "notice", level: "warning", text: text(ev.message) });
+      return;
+
+    case "command":
+      // What a command answered. A block rather than a notice because the answer can be a
+      // listing -- `/config`, `/tools`, `/help` are a dozen lines each -- and because the input
+      // is half of what a reader needs: a `/model` in the transcript with no answer under it is
+      // a question, and one with an answer and no question is a mystery.
+      push(doc, { kind: "command", input: text(ev.input), text: text(ev.text) });
       return;
 
     case "error":
@@ -977,6 +989,7 @@ function renderBlock(block) {
   const turn = el("div", "turn " + block.kind);
   if (block.kind === "user") turn.appendChild(el("div", "who", "you"));
   if (block.kind === "assistant") turn.appendChild(el("div", "who", "flint"));
+  if (block.kind === "command") turn.appendChild(el("div", "who", block.input));
   if (block.reasoning) {
     const r = el("details", "reasoning");
     r.open = block.reasoningOpen === true;

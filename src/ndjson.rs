@@ -152,6 +152,19 @@ pub fn warning(message: &str) -> String {
     frame("warning", json!({ "message": message }))
 }
 
+/// What a command answered, for the page's transcript.
+///
+/// Not one of the turn's events: a command runs *between* turns, and its answer is not part of
+/// the conversation the session file holds -- which is exactly why it needs a line of its own
+/// rather than a file the page can re-read. It is on the same stream, though, because the page
+/// renders the transcript from that stream, and §8 puts an action's answer in the transcript.
+///
+/// The `input` is the line as it was typed: the page shows which command this answers, and a
+/// person reading the transcript later needs it as much as the output.
+pub fn command(input: &str, text: &str) -> String {
+    frame("command", json!({ "input": input, "text": text }))
+}
+
 /// What a turn is waiting for, for a reader that cannot see a terminal.
 ///
 /// `restarted` is what makes this usable rather than merely present: a renderer showing

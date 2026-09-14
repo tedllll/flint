@@ -374,6 +374,42 @@ fn the_toggles_are_switches_that_show_their_value() {
     );
 }
 
+/// A command's answer is a block in the transcript, with the line that asked for it.
+///
+/// §8's other half, over the page's own bytes. The composer sends whatever is typed to the REPL,
+/// which is what makes every command reachable from here -- and until this, a command's answer
+/// went to the terminal and nowhere the page could read, so `/config` typed into the composer
+/// printed nothing at all. The block is not a notice: the answer is often a listing, and the input
+/// is half of what a reader needs, since an answer with no question above it is a mystery and a
+/// question with nothing under it is a program that ignored you.
+#[test]
+fn a_command_answer_is_a_block_with_the_line_that_asked_for_it() {
+    // In the vocabulary the page accepts, or the handler below is dead code: an event type the
+    // page does not list is skipped in silence, which is the format's own rule.
+    let known = from("const KNOWN = new Set([", 12);
+    assert!(
+        known.contains("\"command\""),
+        "the page does not know the event a command's answer arrives as: {known}"
+    );
+
+    // The block, built from the frame's own two fields.
+    let handler = from("case \"command\":", 7);
+    assert!(
+        handler.contains("kind: \"command\"")
+            && handler.contains("text(ev.input)")
+            && handler.contains("text(ev.text)"),
+        "the answer is not built from the input and the text the frame carries: {handler}"
+    );
+
+    // And drawn with the input as its label: a block whose body appears under the previous
+    // message's label reads as part of that message.
+    let painted = from("if (block.kind === \"command\")", 1);
+    assert!(
+        painted.contains("el(\"div\", \"who\", block.input)"),
+        "a command's answer is drawn without saying which command it answers: {painted}"
+    );
+}
+
 /// A conversation archived or deleted in the terminal has to leave the sidebar.
 ///
 /// Reported from a real session: history tidied in the terminal and the page still offering it.

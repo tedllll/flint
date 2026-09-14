@@ -2484,6 +2484,34 @@ fn the_old_bool_for_verbose_still_reads_as_it_did() {
     );
 }
 
+/// A command that fails is an answer, not the end of the session.
+///
+/// Found by driving it: `/verbose loud` — one word wrong — printed
+/// `flint: error: expected on|off|full, got 'loud'` and **exited**, taking the conversation with
+/// it. The command arms return `Result`, and the REPL loop handed that error out of `interactive`
+/// with `?`, where it became the process's exit status. So every command a person can mistype is a
+/// way to lose a session — and the page makes it worse rather than better: its composer sends
+/// lines to the same place, so a mistyped command typed in the browser ends the run the page is
+/// watching, with no way to say why.
+///
+/// The line the reader refuses already had the right treatment two branches above — print it and
+/// carry on — and this is the same answer for the same reason.
+#[test]
+fn a_command_that_fails_does_not_end_the_session() {
+    let home = test_home("bad-command", "http://127.0.0.1:9/v1");
+    let text = repl(&home, &["/verbose loud", "/config"]);
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(
+        text.contains("expected on|off|full"),
+        "the command's failure was not reported on the terminal: {text}"
+    );
+    assert!(
+        text.contains("verbose          = "),
+        "the session ended on a mistyped command instead of answering it: {text}"
+    );
+}
+
 /// The page is told what its controls could offer, and told again when that changes.
 ///
 /// §8's read channel, and it comes before any control because a picker cannot be drawn without
@@ -2599,3 +2627,85 @@ async fn the_page_is_told_the_state_its_controls_would_show() {
         "a page opening after the change is not handed where things are: {late:?}"
     );
 }
+
+/// What a command answered reaches the page, and a command that fails answers instead of ending
+/// the run.
+///
+/// §8's other half, and the two bugs it fixes are the reason it comes before any button. A
+/// command's output went to `printer.term()` and existed nowhere else, so a command typed into the
+/// page's composer printed nothing the page could read; and a command that *failed* returned its
+/// error out of the REPL loop, where it became the process's exit status -- one mistyped word
+/// (`/verbose loud`) took the whole session with it, and the page could not even say why, because
+/// the message went to stderr. A button that could do that to a run would be worse than no button,
+/// which is why the channel is built before the controls that need it.
+///
+/// A process, and not a function, because that is where both bugs were: the frames have to arrive
+/// on the live stream the page watches, from the same REPL the composer writes into.
+#[tokio::test]
+async fn the_page_is_told_what_a_command_answered() {
+    let home = test_home("command-answer", "http://127.0.0.1:9/v1");
+    let log = home.join("transcript.txt");
+    let mut child = binary()
+        .arg("--web")
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::fs::File::create(&log).expect("transcript file"))
+        .stderr(std::fs::File::create(home.join("stderr.txt")).expect("stderr file"))
+        .spawn()
+        .expect("failed to run flint");
+
+    let (port, token) = port_and_token(&wait_for_url(&log));
+    let mut watching = http_stream(port, "/events", &token);
+    // Wait for the opening snapshot, so what is read below is the answer to a command and not the
+    // page's own backlog.
+    read_until(&mut watching, "\"type\":\"state\"", 20);
+
+    let reported = post_message(port, &token, "/config");
+    // To the answer itself, not to the type: a frame carrying no text would pass a test that only
+    // looked for `"type":"command"`, and the text is the whole point of the channel.
+    let answered = read_until(&mut watching, "\"input\":\"/config\"", 20);
+
+    // Then a command that fails. It is an answer too -- and the run has to still be there
+    // afterwards, which is what the state frame below is read for: only a live run sends one.
+    let mistyped = post_message(port, &token, "/verbose loud");
+    let refused = read_until(&mut watching, "\"input\":\"/verbose loud\"", 20);
+    post_message(port, &token, "/verbose full");
+    let after = read_until(&mut watching, "\"value\":\"full\"", 20);
+
+    drop(watching);
+    drop(child.stdin.take());
+    let exited = wait_for_exit(&mut child, 20);
+    let transcript = std::fs::read_to_string(&log).unwrap_or_default();
+    let complaints = std::fs::read_to_string(home.join("stderr.txt")).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit. Terminal: {transcript:?}");
+    assert!(
+        reported.starts_with("HTTP/1.1 202"),
+        "the command a page sends was not accepted: {reported:?}"
+    );
+    assert!(
+        answered.contains("\"type\":\"command\""),
+        "the page was never told what the command answered, which is the whole of §8's other half: \
+         {answered:?} Terminal: {transcript:?}"
+    );
+    assert!(
+        answered.contains("config.toml"),
+        "the frame carries no answer, only the fact that there was one: {answered:?}"
+    );
+    assert!(
+        refused.contains("\"type\":\"command\"") && refused.contains("expected on|off|full"),
+        "a command that failed was not answered on the page: {refused:?}"
+    );
+    assert!(
+        after.contains("\"name\":\"verbose\"") && after.contains("\"value\":\"full\""),
+        "the run did not survive a mistyped command, so the session ended the way it used to: \
+         {after:?} stderr: {complaints:?}"
+    );
+    assert!(
+        mistyped.starts_with("HTTP/1.1 202"),
+        "the mistake was refused at the route rather than answered by the command: {mistyped:?}"
+    );
+}
+

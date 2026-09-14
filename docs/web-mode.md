@@ -219,6 +219,7 @@ Four routes. No cookies, no HTTP/2, no TLS, no keep-alive, no streaming request 
 | `GET /sessions` | the conversations `/resume` can reach, numbered the way `/resume` numbers them |
 | *`event: sessions`* | not a route but its counterpart: the list has changed, re-read it |
 | *`event: state`* | the run's own configuration: provider, model, what each provider offers, the toggles |
+| `type: command` | what a command answered, on the same stream as the turn's events: `input` and `text` |
 
 **All five are implemented.** `/session` and `/events` read the session path and the event feed
 through a shared handle, which is what lets `/new` and `/resume` move an open window to the
@@ -585,6 +586,28 @@ header with a real font, or used a picker or a switch from the keyboard. Everyth
 that says "measured" means a process and a socket; §9 step 7 is still the rule for the rest.
 
 The command list is deliberately not in the frame yet: it belongs with the buttons and panels that
-read it, and an action's *output* has to reach the transcript in the same round — `printer.term()`
-is drawn in the terminal and exists nowhere else, which is the other half of what §8 calls the read
-channel. A field nothing renders is a field that drifts.
+read it, and a field nothing renders is a field that drifts. What that paragraph used to call "the
+other half" — an action's *output* reaching the page — is the next section.
+
+### What a command answered, and the bug under it — measured, 2026-09-14
+
+`printer.term()` draws in a terminal and exists nowhere else, so a command typed into the composer
+answered into a place its reader could not see. The fix is at the funnel rather than at a hundred
+call sites: `Term` records what is printed while a command is being handled (`answer_start` /
+`answer_take`, called by the REPL around `handle_command`), stripping the printer's colour codes as
+it records, and `Live::command` pushes the result as one `{"type":"command","input":…,"text":…}`
+line. Scoping the recording by the caller is what keeps a *turn* out of it: a turn's lines come
+through the same funnel and are already frames of their own, so recording them here would send every
+tool result twice.
+
+| Claim | How | Result |
+|---|---|---|
+| The answer reaches the page | `POST /message` with `/config`, `/events` read live | `{"type":"command","input":"/config","text":"config: …default_provider = stub…"}`. A *listing* answered a command that used to answer nothing a page could read |
+| A command's failure is an answer, not the end of the run | `POST /message` with `/verbose loud`, then `/verbose full` | the frame carried `expected on|off|full`, and the state frame that followed carried `"value":"full"`: the run was still there. Before this it printed `flint: error: …` and exited — one mistyped word took the session, and from the page there was not even a message, because the error went to stderr |
+| Colour does not reach the page | `Term::plain`'s two escape forms, in the unit test | `\x1b[2mdim\x1b[0m` records as `dim`, an OSC title records as nothing, and a truncated sequence loses its tail rather than printing junk. The e2e run cannot see this: its stdout is a file, so it has no colour to strip |
+| The page draws it as a transcript block | the page's real `paint` under Node, over the stub DOM | one `turn command` row, with `/tools` as its label and `bash\nread\nedit` as its body; a frame with no `text` paints nothing rather than the word `undefined` |
+
+**Not yet measured in a browser**: nobody has watched a `/config` typed into the composer land in the
+transcript with a real font and a real scroll position. The block is drawn like a user message with
+the command as its label, and that is a guess until someone looks at it.
+

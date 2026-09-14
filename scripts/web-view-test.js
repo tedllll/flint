@@ -282,6 +282,51 @@ check("a tool result with no matching call is kept, not dropped", () => {
   eq(d.blocks[0].output, "orphan", "output");
 });
 
+console.log("what a command answered");
+
+// §8's other half. A command's answer is not a turn and not a session event, so nothing else on
+// this page could carry it -- and a command typed into the composer answered into a terminal the
+// reader could not see. What is pinned here is that it lands in the transcript with the line that
+// asked for it, because the answer alone ("verbose = on") does not say what was asked, and the
+// question alone is what the composer already shows.
+check("a command's answer becomes a block, with the line that asked for it", () => {
+  const d = doc(
+    `{"input":"/config","text":"config: /home/me/.flint/config.toml\\n  verbose          = on","type":"command"}`
+  );
+  eq(kinds(d), ["command"], "blocks");
+  eq(d.blocks[0].input, "/config", "the command");
+  ok(
+    d.blocks[0].text.includes("verbose          = on"),
+    "the answer must keep its lines: " + d.blocks[0].text
+  );
+});
+
+check("a command's answer is drawn as a transcript block with its own label", () => {
+  // A page of its own, because painting is incremental: `painted` remembers the nodes it built for
+  // the *previous* document and leaves a block alone when its revision has not changed -- which a
+  // one-block fixture shares with the one-block fixture before it. Sharing the viewer across
+  // checks is what the rest of this file does with documents it never paints.
+  const page = loadViewer();
+  const d = page.applyText(page.newDoc(), `{"input":"/tools","text":"bash\\nread\\nedit","type":"command"}`);
+  page.paint(d);
+  const rows = page.__node("doc").children.filter((n) => n.className === "turn command");
+  eq(rows.length, 1, "one command row");
+  eq(rows[0].children[0].textContent, "/tools", "the label is the command that was run");
+  eq(rows[0].children[1].textContent, "bash\nread\nedit", "the answer is the body");
+});
+
+check("a command frame with no text in it paints nothing rather than `undefined`", () => {
+  // The server sends nothing at all when a command has nothing to say, so this is the shape of a
+  // frame from a build that did -- and the page's job with a field it is not given is to draw
+  // nothing, not to draw the word `undefined` into the transcript.
+  const page = loadViewer();
+  const d = page.applyText(page.newDoc(), `{"input":"/new","type":"command"}`);
+  page.paint(d);
+  const rows = page.__node("doc").children.filter((n) => n.className === "turn command");
+  eq(rows.length, 1, "one command row");
+  eq(rows[0].children[1].textContent, "", "an absent answer is empty, not the string undefined");
+});
+
 // The header's controls are drawn from the `state` frame, which is the page's only read channel:
 // it may not read `config.toml` itself, because a second reader of the same state can disagree
 // with the process -- the file says one thing while a run does another as soon as `--readonly` or

@@ -7,9 +7,9 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 365 passing, 1 ignored (252 lib, 1 in
-the binary's own tests, 33 `agent_loop`, 39 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
-`term_capture` plus the ignored cost measurement, 12 `web_view`), `cargo clippy --all-targets` is
+As of the commit that carries this file, `cargo test` is 370 passing, 1 ignored (254 lib, 1 in
+the binary's own tests, 33 `agent_loop`, 41 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
+`term_capture` plus the ignored cost measurement, 13 `web_view`), `cargo clippy --all-targets` is
 silent, and both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
 
 **This round was on Windows** (10.0.26200, AMD64, rustc 1.98.1, PowerShell 5.1.26100.6584 as
@@ -32,12 +32,13 @@ The binary is held open by any running `flint`, so close those before replacing 
 
 **An interrupt no longer throws away the answer it was drawing, the commands that rebuild the agent
 no longer throw the conversation away, a stopped turn now ends on the page as well as in the
-terminal, `/readonly` sets the guard it says it sets, `/verbose off` outlives the run, and the page
-can change the model or the provider from its own header.** That is this round and the one before
-it: six items in one family — what the user has already read must not go missing, a surface must not
-go on saying a turn is running after it has stopped, a switch must not report a state it did not
-set, a setting must not be forgotten by the file that is supposed to hold it, and a page must have
-a *read channel* before it can offer a control at all. Each with a test watched red first. The
+terminal, `/readonly` sets the guard it says it sets, `/verbose off` outlives the run, the page
+can change the model or the provider from its own header, and a command typed into the page's
+composer answers there — because a command that failed no longer ends the run.** That is this round
+and the two before it: eight items in one family — what the user has already read must not go
+missing, a surface must not go on saying a turn is running after it has stopped, a switch must not
+report a state it did not set, a setting must not be forgotten by the file that is supposed to hold
+it, a page must have a *read channel* and an *output channel* before it can offer a control at all. Each with a test watched red first. The
 measurement that corrected last round's diagnosis is below, then the second bug, which the first
 one's measurement is what found, then the third, then this round's three.
 
@@ -268,9 +269,50 @@ is the page's policy (drawn from `toggle.name`/`values`/`value`, exactly one lin
 was watched red by hard-coding `/verbose` in the handler); and the page's Node check runs the real
 `showToggles` over the stub DOM, including the frame-with-no-toggles case.
 
-**Not in the frame yet, deliberately: the command list.** It belongs with the buttons and panels
-that read it, and that round also has to carry an action's *output* to the transcript — `printer.term()`
-is drawn in the terminal and exists nowhere else. The frame grows one consumer at a time.
+### A command's answer reaches the page — and the bug that was under it
+
+**The other half of the read channel.** A command answers through `printer.term()`, which draws in a
+terminal and exists nowhere else, so every command typed into the composer answered into a place the
+page's reader could not see. The capture is at the funnel: `Term::answer_start` / `answer_take`
+record what is printed, and the REPL calls them immediately around `handle_command`, so what is
+recorded is exactly one command's output. That scoping is the whole trick — a *turn* prints through
+the same funnel and is already frames of its own, so recording it here would send every tool result
+to the page twice. Recording at the funnel rather than converting a hundred `printer.term().line(…)`
+call sites is why this was a small change. The printer's colour codes are stripped as the line is
+recorded (`Term::plain`, both escape forms), because a browser draws escapes rather than obeying
+them; the end-to-end run cannot see that half — its stdout is a file, so it has no colour — which is
+why the stripper has its own unit test.
+
+`Live::command` pushes the result as one `{"type":"command","input":…,"text":…}` line. It is not an
+`event::Event`: that vocabulary is documented as a turn's, and a command runs *between* turns, with
+its output deliberately outside the session file. It is on the same stream because the page renders
+the transcript from that stream. The page draws it as a transcript block with the input as its label
+— an answer with no question above it is a mystery, and the answer is often a listing (`/config`,
+`/tools`, `/help`).
+
+**The bug under it: a command that failed ended the session.** The command arms return `Result`, and
+the REPL loop handed that error straight out of `interactive` with `?`, where it became the process's
+exit status. `/verbose loud` — one word wrong — printed `flint: error: expected on|off|full, got
+'loud'` and exited, taking the conversation with it. From the page it was worse: the composer sends
+lines to the same place, so a mistyped command in the browser ended the run the page was watching,
+and the page could not even say why, because the message went to stderr. A failure is an answer now:
+printed on the terminal in the shape the input reader's own refusal already used (one `line` call per
+line of the message — a single call carrying a newline moves the cursor down through the rows the
+layout reserved), and carried to the page like any other. Found by running it, not by reading it:
+`/verbose loud` followed by `/config` in a scratch `FLINT_HOME` showed the process dying after the
+banner.
+
+Gates: `a_command_that_fails_does_not_end_the_session` (red on its second assertion before the fix),
+`the_page_is_told_what_a_command_answered` (a real process, `/events` read live), the two `term.rs`
+unit tests, `a_command_answer_is_a_block_with_the_line_that_asked_for_it` for the page's bytes, and
+three Node checks over the real `paint` and the real `applyEvent`. Two of them were mutation-checked
+rather than watched red, because the code came first: neutering `Live::command`'s push fails the e2e
+on "the page was never told what the command answered", and making `plain` keep the escape fails the
+unit test.
+
+**Not in the frame yet, deliberately: the command list.** It belongs with the buttons and panels that
+read it — the output half is built now, the read half of it is not — and a field nothing renders is a
+field that drifts. The frame grows one consumer at a time.
 
 **Not measured yet: the controls in a browser.** They are pinned as behaviour (`applyState`,
 `fillSelect` and `showToggles` over the stub DOM in `scripts/web-view-test.js`) and as bytes
@@ -278,17 +320,17 @@ is drawn in the terminal and exists nowhere else. The frame grows one consumer a
 the frame end to end (`the_page_is_told_the_state_its_controls_would_show`, which reads `/events` on
 connect, sends `/model stub-other` and `/verbose full` to `POST /message`, and then opens a *second*
 stream, which can only have been handed the snapshot). Nobody has looked at the header with a real
-font, or used a picker or a switch from the keyboard; `docs/web-mode.md` §11 says so in the same
-words.
+font, or used a picker or a switch from the keyboard, or watched a command's answer land in the
+transcript; `docs/web-mode.md` §11 says so in the same words.
 
 ### Still owed on the page
 
-- **`ROADMAP.md` §8's remaining controls**, in the order it gives: the read channel, the pickers and
-  the toggles are built, so what is left is buttons for the no-argument actions, forms (`/name`,
-  `/provider key`, `/provider add`, `/config edit`), a confirmation step for the destructive ones,
-  and the selector-shaped commands that are not settings (`/resume`, `/skills`, `/archive`, `/delete`
-  from the sidebar rows). The command list joins the `state` frame with the buttons that read it, and
-  command *output* reaching the transcript is the other half of the same item.
+- **`ROADMAP.md` §8's remaining controls**, in the order it gives: the read channel, the pickers, the
+  toggles and the command *output* channel are built, so what is left is buttons for the no-argument
+  actions, forms (`/name`, `/provider key`, `/provider add`, `/config edit`), a confirmation step for
+  the destructive ones, and the selector-shaped commands that are not settings (`/resume`, `/skills`,
+  `/archive`, `/delete` from the sidebar rows). The command list and the panels (`/config`, `/tools`,
+  `/skills`, `/help`) join the `state` frame with the buttons that read them.
 - The small queued-line hole above still wants its two structural lines before a test can hold it.
 
 **The Windows plan is finished, and the measurements are the useful part.**

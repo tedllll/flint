@@ -368,7 +368,7 @@ most of a turn is text nobody could see. The retry rule is now explicit: the lad
 the first drawn character, because nothing in the chain can take text back. `docs/web-mode.md`
 §11 has the measurement; `src/provider.rs` has the rule.
 
-### 8. Web mode, from using it — **one fixed, one decided, two parked**
+### 8. Web mode, from using it — **the read channel is in; the controls are being built**
 
 Four things turned up in the first real sessions with the browser page, after level 3 was
 finished. Two are settled (below): the sidebar bug is fixed, and the commands gap now has a
@@ -523,10 +523,50 @@ is present, since the pickers say it and offer the alternatives; a dropped file 
 from the session's `meta`.
 
 **The command list is deliberately not in the frame yet.** It belongs with the buttons and panels
-that read it — the design above wants an action's *output* carried too, which is the other half of
-this — and a field nothing renders is a field that drifts. The frame grew its consumers one at a
-time, which is also how it stays small: the toggles are in it because a picker needs their values,
-and nothing else is.
+that read it — and a field nothing renders is a field that drifts. The frame grew its consumers one
+at a time, which is also how it stays small: the toggles are in it because a picker needs their
+values, and nothing else is. What this round built instead is the *output* half of the same design,
+because every class below needs it:
+
+**What a command answers is on the feed now — built, 2026-09-14.** The design above splits output by
+class, and the missing half was the action's: a command answers through `printer.term()`, which draws
+in a terminal and exists nowhere else, so a button that does something and then says nothing would
+have been a button nobody could trust — and a command typed into the composer already answered into
+a terminal its reader could not see. The capture is at the funnel, and only for the length of a
+command: the REPL starts recording just before `handle_command` and takes the recording just after,
+pushing one `{"type":"command","input":…,"text":…}` line. Capturing there, rather than converting
+every `printer.term().line(…)` call site, is what made this small; scoping it by the caller is what
+keeps a *turn*'s lines out, because they come through the same funnel and are already frames of their
+own — recording them here would send every tool result to the page twice. The recorded text is
+stripped of the printer's colour codes at the same point, since a browser draws escapes rather than
+obeying them. The line is not one of the turn's events — a command runs *between* turns, and its
+output is deliberately not in the session file — so `Live::command` pushes it directly rather than
+widening `event::Event`, which is documented as the vocabulary of a turn. The page renders it as a
+transcript block with the input as its label: an answer with no question above it is a mystery, and
+the answer is often a listing.
+
+One bug had to be fixed before the channel was worth anything, and it is the reason the page could
+never have been trusted with a button: **a command that failed ended the session.** The arms return
+`Result`, and the REPL loop handed that error out of `interactive` with `?`, where it became the
+process's exit status — `/verbose loud`, one word wrong, printed `flint: error: …` and took the
+conversation with it. From the page it was worse rather than better: the composer sends lines to the
+same place, so a mistyped command in the browser ended the run the page was watching, and the browser
+could not even say why, because the message went to stderr. A failure is an answer now — printed on
+the terminal in the shape the input reader's own refusal already used, and carried to the page like
+any other — and it is one `line` call per line of the message, since a single call carrying a newline
+moves the cursor down through the rows the layout reserved.
+
+Gates. `a_command_that_fails_does_not_end_the_session` was red on the second of its two assertions
+(the failure was reported *and* the session ended); `the_page_is_told_what_a_command_answered` needs
+a real process — `/config` over `POST /message`, its answer read off the live `/events` stream, then
+`/verbose loud` answered rather than fatal, and a state frame afterwards proving the run is still
+there. In-crate, `what_a_command_says_is_recorded_for_the_page_as_plain_text` (recorded plain, and
+not recorded after the take) and `both_escape_forms_a_terminal_uses_are_stripped` pin the two halves
+of the funnel; `a_command_answer_is_a_block_with_the_line_that_asked_for_it` is the page's policy,
+and the Node check paints a real command frame and reads the label and the body back. Two of them
+were mutation-checked rather than watched red, because the code came first: neutering `Live::command`'s
+push fails the e2e on "the page was never told what the command answered", and neutering the
+colour-stripping fails the unit test on the escape it should have removed.
 
 Four gates. `the_page_is_told_the_state_its_controls_would_show` is the one that needs a real
 process: `--web`, `/events` read as it arrives, the state frame read on connect, then `/model

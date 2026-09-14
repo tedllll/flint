@@ -378,6 +378,45 @@ fn elapsed_label(d: std::time::Duration) -> String {
     }
 }
 
+/// The same text with the terminal's escape sequences taken out.
+///
+/// A coloured run wraps a path in `\x1b[2m` and `\x1b[0m`. A browser does not interpret those, it
+/// draws them, so an answer sent to the page from the terminal's own funnel has to be cleaned
+/// first -- and cleaning it there, where the text is still known to be a terminal line, is harder
+/// to forget than remembering not to style a command's output.
+///
+/// Two introducers, because they are the two forms this program produces: CSI (escape, `[`,
+/// parameters, one final byte) for colour and cursor motion, and OSC (escape, `]`, a string, then
+/// BEL or `\x1b\\`) for a window title. Anything else after an escape goes with the escape, since
+/// leaving either half prints as junk.
+fn plain(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('\x1b') {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at + 1..];
+        let mut chars = tail.char_indices();
+        let skipped = match chars.next() {
+            Some((_, '[')) => chars
+                .find(|(_, c)| ('\u{40}'..='\u{7e}').contains(c))
+                .map(|(i, c)| i + c.len_utf8()),
+            Some((_, ']')) => tail
+                .find('\u{7}')
+                .map(|i| i + 1)
+                .or_else(|| tail.find("\x1b\\").map(|i| i + 2)),
+            Some((_, c)) => Some(c.len_utf8()),
+            // Nothing after the escape: a truncated line. Dropping it is the honest reading.
+            None => None,
+        };
+        match skipped {
+            Some(n) => rest = &tail[n..],
+            None => return out,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 pub struct Term {
     interactive: bool,
     /// Last row of the screen (1-based, inclusive).
@@ -453,6 +492,20 @@ pub struct Term {
     /// drawing paths call other drawing paths, and a lock held across one of those is a
     /// deadlock. Interleaving is no worse than it already is on stdout.
     capture: Option<std::fs::File>,
+    /// Whether what is printed now is a command's answer, and the answer so far.
+    ///
+    /// §8's other half. A command's answer is not a session event -- commands do not write to the
+    /// session file -- and not a turn event, so the feed had no way to carry it, and a command
+    /// typed into the page's composer printed nothing anywhere the page could read. What a command
+    /// says goes through this funnel and nowhere else, so the funnel records it.
+    ///
+    /// Scoped by the caller rather than always on, and that is the point of the flag: a *turn*
+    /// prints through the same funnel, and every line of it is already a frame of its own, so
+    /// recording it here would send each tool result to the page twice. A command runs between
+    /// turns, in the same thread, so "recording" is a fact about the next few lines and not a
+    /// thing two writers race over.
+    answering: AtomicBool,
+    answered: Mutex<Vec<String>>,
 }
 
 impl Term {
@@ -478,6 +531,8 @@ impl Term {
             activity_painted: AtomicBool::new(false),
             last_ctrl_c: Mutex::new(None),
             capture: None,
+            answering: AtomicBool::new(false),
+            answered: Mutex::new(Vec::new()),
         }
     }
 
@@ -552,6 +607,8 @@ impl Term {
             activity_shown: AtomicU16::new(0),
             activity_painted: AtomicBool::new(false),
             last_ctrl_c: Mutex::new(None),
+            answering: AtomicBool::new(false),
+            answered: Mutex::new(Vec::new()),
         };
 
         // Raw mode and the panic hook need a real console; laying out the screen does
@@ -949,12 +1006,42 @@ impl Term {
     /// alternative is `term.line(&format!(...))` at seventy places, which is
     /// seventy chances to get a bracket wrong.
     pub fn line(&self, args: std::fmt::Arguments<'_>) {
+        if self.answering.load(Ordering::Relaxed) {
+            // Without the colour codes, and stripped here rather than where the answer is sent:
+            // the escapes belong to a terminal, the page is not one, and a line that reached it
+            // with `\x1b[2m` in the middle would be a transcript with junk in it. Undoing the
+            // styling at the one point that knows the text is a terminal line is cheaper and
+            // harder to forget than remembering not to style a command's output.
+            self.answered
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(plain(&format!("{args}")));
+        }
         if !self.interactive {
             println!("{args}");
             return;
         }
         self.close_stream();
         self.emit_history(&format!("{args}"));
+    }
+
+    /// Start recording what is printed, so a command's answer can be told to the page.
+    ///
+    /// Paired with [`Term::answer_take`], and deliberately a pair rather than one call around a
+    /// closure: the command is an `await`ed call with a dozen `return`s inside it, so there is
+    /// nowhere to put a closure that both covers all of them and reads well.
+    pub fn answer_start(&self) {
+        self.answered
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.answering.store(true, Ordering::Relaxed);
+    }
+
+    /// Stop recording, and take the answer, line by line.
+    pub fn answer_take(&self) -> Vec<String> {
+        self.answering.store(false, Ordering::Relaxed);
+        std::mem::take(&mut *self.answered.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// Say something that is not part of the conversation.
@@ -1787,6 +1874,56 @@ mod tests {
         // wrong adds a blank row to every full-width line of every answer.
         let rows = wrap_rows(&"x".repeat(80), 80);
         assert_eq!(rows.len(), 1);
+    }
+
+    /// What a command says is recorded for the page, in plain text, and only while a command is
+    /// being handled.
+    ///
+    /// The three claims are one behaviour: comments in the printer's palette are escapes a browser
+    /// would draw rather than obey, the recording has to survive the `line` call that prints to a
+    /// non-interactive stdout (which is the case this test runs in), and a turn's lines -- which
+    /// come through the same funnel and are already frames of their own -- must not be swept into
+    /// the next command's answer.
+    #[test]
+    fn what_a_command_says_is_recorded_for_the_page_as_plain_text() {
+        let t = Term::plain();
+        t.answer_start();
+        t.line(format_args!(
+            "\u{1b}[2mconfig: {}\u{1b}[0m",
+            "/home/me/.flint/config.toml"
+        ));
+        t.line(format_args!("verbose          = on"));
+
+        assert_eq!(
+            t.answer_take(),
+            vec![
+                "config: /home/me/.flint/config.toml".to_string(),
+                "verbose          = on".to_string(),
+            ]
+        );
+
+        // And the recording stopped with the take.
+        t.line(format_args!("this is a turn's line, not an answer"));
+        assert!(
+            t.answer_take().is_empty(),
+            "a line printed after the take was recorded into the next command's answer"
+        );
+    }
+
+    #[test]
+    fn both_escape_forms_a_terminal_uses_are_stripped() {
+        assert_eq!(plain("\u{1b}[2mdim\u{1b}[0m"), "dim");
+        assert_eq!(
+            plain("\u{1b}[1;31mred\u{1b}[0m and \u{1b}[32mgreen\u{1b}[0m"),
+            "red and green"
+        );
+        // A window title, which is the other escape this program writes.
+        assert_eq!(plain("\u{1b}]0;flint\u{7}done"), "done");
+        // Text with no escapes is untouched, and so is the colourless case every piped run has.
+        assert_eq!(plain("plain text"), "plain text");
+        // A truncated line: the escape goes, and so does whatever was left of the sequence.
+        assert_eq!(plain("half \u{1b}"), "half ");
+        assert_eq!(plain("half \u{1b}[3"), "half ");
     }
 
     fn press(term: &Term, code: KeyCode) -> Key {
