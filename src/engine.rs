@@ -385,12 +385,7 @@ fn spawn(command: &str, config: &Config, log: &Path) -> Result<()> {
     // path unless the string is handed over verbatim. See `tools::shell_invocation`.
     let run = crate::tools::shell_invocation(config, command);
     let mut cmd = std::process::Command::new(&run.program);
-    cmd.args(&run.args);
-    #[cfg(windows)]
-    if let Some(raw) = run.raw.as_deref() {
-        use std::os::windows::process::CommandExt;
-        cmd.raw_arg(raw);
-    }
+    crate::tools::apply_invocation(&mut cmd, &run);
     cmd
         // A server has no business reading flint's keyboard: it would take keystrokes meant
         // for the prompt. On Windows it matters twice, because a child that inherits the

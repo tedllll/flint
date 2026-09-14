@@ -469,6 +469,21 @@ impl Invocation {
     }
 }
 
+/// Point a command at what an [`Invocation`] says, including the argument that must not be
+/// re-quoted.
+///
+/// One function because there would otherwise be three copies of the `raw_arg` dance -- the
+/// runner, the engine launcher and the browser launcher -- and the whole point of `raw` is
+/// that it is easy to get subtly wrong.
+pub fn apply_invocation(cmd: &mut std::process::Command, run: &Invocation) {
+    cmd.args(&run.args);
+    #[cfg(windows)]
+    if let Some(raw) = run.raw.as_deref() {
+        use std::os::windows::process::CommandExt;
+        cmd.raw_arg(raw);
+    }
+}
+
 /// Decide how a command string reaches the shell.
 ///
 /// `cmd.exe` is not a program that takes an argument list. It takes a command line, parsed by
@@ -843,24 +858,12 @@ pub async fn run_program_streaming(
     timeout_secs: u64,
     idle_kill: bool,
 ) -> Result<CommandOutcome> {
-    let Invocation {
-        program,
-        args,
-        raw,
-    } = run;
-    let label = label_of(program, args);
+    let label = label_of(&run.program, &run.args);
     let label = label.as_str();
-    let mut cmd = tokio::process::Command::new(program);
-    cmd.args(args);
-    #[cfg(windows)]
-    if let Some(raw) = raw.as_deref() {
-        use std::os::windows::process::CommandExt;
-        // On the std command, because that is where the extension trait lives; tokio's is a
-        // wrapper around it and hands out the same handle.
-        cmd.as_std_mut().raw_arg(raw);
-    }
-    #[cfg(not(windows))]
-    let _ = raw;
+    let mut cmd = tokio::process::Command::new(&run.program);
+    // Through the std command, because that is where the raw-argument extension lives; tokio's
+    // is a wrapper around it and hands out the same handle.
+    apply_invocation(cmd.as_std_mut(), run);
     cmd.current_dir(cwd);
     // Only piped when there is something to write; `null` is the honest default, since a
     // program that waits for input on a terminal flint does not have would hang until the
@@ -892,7 +895,7 @@ pub async fn run_program_streaming(
     cmd.kill_on_drop(true);
     let mut child = cmd
         .spawn()
-        .with_context(|| format!("cannot spawn program '{program}'"))?;
+        .with_context(|| format!("cannot spawn program '{}'", run.program))?;
     // Armed while the command runs. On the abnormal paths below -- a timeout, an idle kill, or
     // a turn the user interrupted, which drops this whole future -- the shell is still alive
     // and this still has something to walk. Declared after `child` so that it drops *before*

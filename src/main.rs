@@ -990,24 +990,47 @@ enum Flow {
 /// Called only when stdout is a terminal. Opening a window is a courtesy to a person, and a
 /// pipe is not a person -- without that check, `cargo test` would launch browsers.
 fn open_in_browser(url: &str) -> bool {
-    // Windows is the odd one: `start` is a `cmd` builtin, and its first quoted argument is
-    // taken as the *window title*. Passing an empty one is what keeps a URL containing `&`
-    // from being read as a command separator. Unverified from here -- see
-    // `docs/windows-tooling.md`.
-    let (program, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
-        ("open", &[url])
-    } else if cfg!(target_os = "windows") {
-        ("cmd", &["/C", "start", "", url])
-    } else {
-        ("xdg-open", &[url])
-    };
-    std::process::Command::new(program)
-        .args(args)
-        .stdin(std::process::Stdio::null())
+    let run = browser_invocation(url);
+    let mut cmd = std::process::Command::new(&run.program);
+    flint::tools::apply_invocation(&mut cmd, &run);
+    cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
         .is_ok()
+}
+
+/// The command that shows a URL, as a program and the one argument that must not be re-quoted.
+///
+/// Windows needs the invocation `cmd` documents for a command *line*: `/S /C`, and the whole
+/// line quoted, with the URL inside quotes of its own. Measured here by putting the character
+/// under test in the *name* of a `.cmd` file standing in for the browser, so that nothing
+/// opened a window -- one quoted argument, in the position the URL sits:
+///
+/// | target | as a plain argument | `/S /C` and the line verbatim |
+/// |---|---|---|
+/// | `plain.cmd` | ran | ran |
+/// | `a&b.cmd` | did not run: cmd read `&` as a new command | ran |
+/// | `a^b.cmd` | did not run: the caret was eaten | ran |
+/// | `a%20b.cmd` | ran | ran |
+/// | `a b.cmd` | did not run | ran |
+///
+/// `start` is why the empty quotes are there: its first quoted argument is the new window's
+/// title, so without them a URL is read as the program to run. The bug this replaced was not
+/// the empty quotes -- those were right -- but the URL: as an ordinary argument it is quoted
+/// only when it contains a space, and a URL that is not quoted is a command line.
+fn browser_invocation(url: &str) -> flint::tools::Invocation {
+    if cfg!(target_os = "windows") {
+        flint::tools::Invocation {
+            program: "cmd".to_string(),
+            args: vec!["/S".to_string(), "/C".to_string()],
+            raw: Some(format!("\"start \"\" \"{url}\"\"")),
+        }
+    } else if cfg!(target_os = "macos") {
+        flint::tools::Invocation::plain("open", vec![url.to_string()])
+    } else {
+        flint::tools::Invocation::plain("xdg-open", vec![url.to_string()])
+    }
 }
 
 /// Say where the view is, and open it when there is somebody there to look at it.
@@ -2888,4 +2911,45 @@ fn print_help(color: bool, term: &Term) {
   your usual tooling is not.",
         config::config_path().display()
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The browser line is a command *line*, so the URL is quoted inside it and handed over
+    /// verbatim rather than passed as an ordinary argument.
+    ///
+    /// The form this replaced -- `["/C", "start", "", url]` -- was measured cutting a URL at
+    /// `&`, eating a caret, and failing outright when the target had a space in it: see the
+    /// table on `browser_invocation`. What is asserted here is the shape, because the
+    /// behaviour was measured with a `.cmd` standing in for the browser and running the real
+    /// line would open a window.
+    #[test]
+    fn the_browser_line_is_a_quoted_command_line() {
+        let url = "http://127.0.0.1:3080/?a=1&b=2";
+        let run = browser_invocation(url);
+        if cfg!(target_os = "windows") {
+            assert_eq!(run.program, "cmd");
+            assert_eq!(run.args, vec!["/S".to_string(), "/C".to_string()]);
+            let raw = run.raw.expect("cmd needs the line verbatim");
+            assert_eq!(raw, format!("\"start \"\" \"{url}\"\""));
+            assert!(
+                raw.contains(&format!("\"{url}\"")),
+                "the URL must be inside quotes of its own, or `&` ends the command: {raw}"
+            );
+            assert!(
+                raw.starts_with("\"start \"\" "),
+                "the empty quotes are the window title, not decoration: {raw}"
+            );
+        } else {
+            assert_eq!(run.raw, None, "only cmd needs the verbatim form");
+            if cfg!(target_os = "macos") {
+                assert_eq!(run.program, "open");
+            } else {
+                assert_eq!(run.program, "xdg-open");
+            }
+            assert_eq!(run.args, vec![url.to_string()]);
+        }
+    }
 }
