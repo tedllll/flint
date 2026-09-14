@@ -107,6 +107,14 @@ pub fn build_system_prompt(config: &Config, cwd: &std::path::Path) -> String {
         sessions = crate::config::sessions_dir().display(),
     );
 
+    // Which PowerShell this machine has, asked once per process. A model on Windows that needs
+    // PowerShell otherwise has to guess whether it is 5.1 or 7, and the two do not parse the
+    // same language: a script written with `??` is a parse error with no hint as to why.
+    #[cfg(windows)]
+    if let Some(facts) = tools::powershell_facts() {
+        prompt.push_str(&format!("\n- PowerShell (use the `pwsh` tool): {facts}"));
+    }
+
     // What the project has written down. Discovered here, once per agent, because the
     // answer depends on the working directory -- and rebuilt by `/model` and friends,
     // which is how a file added mid-session gets noticed without a restart.
@@ -793,6 +801,10 @@ mod tests {
                 "it must name the replacement command, not just refuse `ls`"
             );
             assert!(
+                p.contains("PowerShell (use the `pwsh` tool):"),
+                "a Windows build must say which PowerShell it is talking to: {p}"
+            );
+            assert!(
                 !p.contains("POSIX shell: `ls`"),
                 "must not advertise POSIX tools on Windows"
             );
@@ -803,6 +815,30 @@ mod tests {
             );
             assert!(!p.contains("cmd.exe"), "must not mention cmd.exe on Unix");
         }
+    }
+
+    /// The PowerShell facts are measured from the machine, not written into the binary.
+    ///
+    /// A version baked into a constant would be a lie on the next machine, and a lie that is
+    /// only discovered by writing a script that will not parse. Asserted on the shape rather
+    /// than on the number: this has to keep working on a machine with PowerShell 7.
+    #[cfg(windows)]
+    #[test]
+    fn the_powershell_facts_come_from_the_machine() {
+        let facts =
+            crate::tools::powershell_facts().expect("Windows ships with Windows PowerShell");
+        assert!(
+            facts.starts_with("pwsh ") || facts.starts_with("powershell "),
+            "the facts must name the program that answered: {facts}"
+        );
+        assert!(
+            facts.contains("arguments to native commands:"),
+            "the argument-passing mode is one of the two reasons this exists: {facts}"
+        );
+        assert!(
+            facts.chars().any(|c| c.is_ascii_digit()) && facts.contains('.'),
+            "there is no version in {facts}"
+        );
     }
 
     /// The task must come from the user, not from the prompt.

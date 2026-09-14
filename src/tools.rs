@@ -1351,6 +1351,93 @@ impl Tool for BashTool {
     }
 }
 
+/// The PowerShell on this machine, and what it says about itself.
+///
+/// Two facts, from one spawn. Which PowerShell it is matters because 5.1 and 7 do not parse the
+/// same language -- a script written with `??` is a parse error on 5.1 and nothing says why --
+/// and `$PSNativeCommandArgumentPassing` (7.3+) decides whether the arguments flint's model
+/// writes for a native program are rewritten on the way, which is exactly the class of bug this
+/// document exists for.
+///
+/// Asked once per process and cached, because the answer cannot change while flint runs and a
+/// spawn is not free. Asked *synchronously*, because the system prompt is built off the async
+/// path; the command is a one-liner under `-NoProfile -NonInteractive`, so the only way it can
+/// fail to return is a broken installation, and the alternative -- not telling the model which
+/// PowerShell it is talking to -- is a guess it cannot check.
+#[cfg(windows)]
+pub fn powershell() -> Option<&'static Powershell> {
+    static FOUND: std::sync::OnceLock<Option<Powershell>> = std::sync::OnceLock::new();
+    FOUND.get_or_init(probe_powershell).as_ref()
+}
+
+#[cfg(windows)]
+pub struct Powershell {
+    /// The program that answered: `pwsh` when it exists, `powershell` otherwise.
+    pub program: String,
+    /// Its version, as it reports it: `5.1.26100.6584`.
+    pub version: String,
+    /// How it passes arguments to native commands, or that the variable does not exist.
+    pub native_args: String,
+}
+
+#[cfg(windows)]
+fn probe_powershell() -> Option<Powershell> {
+    // One statement, so that the version and the variable cannot come from two different
+    // PowerShells. `Test-Path variable:` rather than `$null -eq`, because on 5.1 the variable
+    // is not defined at all and reading it (even to compare) is the kind of thing that gets
+    // stricter in later versions.
+    let ask = "$PSVersionTable.PSVersion.ToString() + '|' + \
+               $(if (Test-Path variable:PSNativeCommandArgumentPassing) \
+                 { $PSNativeCommandArgumentPassing } else { 'not defined (before 7.3)' })";
+    for program in ["pwsh", "powershell"] {
+        if !command_exists(program) {
+            continue;
+        }
+        let Ok(out) = std::process::Command::new(program)
+            .args(["-NoProfile", "-NonInteractive", "-Command", ask])
+            .stdin(Stdio::null())
+            .output()
+        else {
+            continue;
+        };
+        if !out.status.success() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let line = text.trim().lines().next().unwrap_or("").trim();
+        let Some((version, native_args)) = line.split_once('|') else {
+            continue;
+        };
+        if version.is_empty() {
+            continue;
+        }
+        return Some(Powershell {
+            program: program.to_string(),
+            version: version.trim().to_string(),
+            native_args: native_args.trim().to_string(),
+        });
+    }
+    None
+}
+
+/// One line for the system prompt's "Local facts", or nothing when there is no PowerShell.
+///
+/// The 5.1 warning is here rather than left to the model to derive: it is the single fact that
+/// changes what to write next, and a model that has it does not spend a turn finding out.
+#[cfg(windows)]
+pub fn powershell_facts() -> Option<String> {
+    let ps = powershell()?;
+    let older = if ps.version.starts_with("5.") || ps.version.starts_with("4.") {
+        ", so 7-only syntax (`??`, `?:`, `-Parallel`) will not parse"
+    } else {
+        ""
+    };
+    Some(format!(
+        "{} {} — arguments to native commands: {}{older}",
+        ps.program, ps.version, ps.native_args
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // pwsh
 // ---------------------------------------------------------------------------
@@ -1408,50 +1495,14 @@ impl PwshTool {
         }
     }
 
-    /// The PowerShell to run, and the version it says it is.
+    /// The PowerShell to run: the one the process has already found, or a fresh search.
     ///
-    /// Probed once for the process, because it costs a process to ask and the answer cannot
-    /// change while flint runs. The probe is the same decider as the tool itself: if the
-    /// version cannot be asked for, that PowerShell is not usable, and the next candidate is
-    /// tried -- so `pwsh` installed but broken falls back rather than failing every call.
-    async fn shell(&self) -> Option<Shell> {
-        static FOUND: std::sync::OnceLock<Option<Shell>> = std::sync::OnceLock::new();
-        if let Some(found) = FOUND.get() {
-            return found.clone();
-        }
-        let found = self.find_shell().await;
-        let _ = FOUND.set(found.clone());
-        found
-    }
-
-    async fn find_shell(&self) -> Option<Shell> {
-        for program in ["pwsh", "powershell"] {
-            if !command_exists(program) {
-                continue;
-            }
-            let run = Invocation::plain(
-                program,
-                vec![
-                    "-NoProfile".to_string(),
-                    "-NonInteractive".to_string(),
-                    "-Command".to_string(),
-                    "$PSVersionTable.PSVersion.ToString()".to_string(),
-                ],
-            );
-            let Ok(outcome) =
-                run_program_streaming(&self.config, &run, None, &self.cwd, 30, false).await
-            else {
-                continue;
-            };
-            let version = outcome.report.trim().lines().next().unwrap_or("").trim();
-            if outcome.code == 0 && !version.is_empty() {
-                return Some(Shell {
-                    program: program.to_string(),
-                    version: version.to_string(),
-                });
-            }
-        }
-        None
+    /// The same probe the system prompt uses, so a session asks once and both readers of the
+    /// answer agree. The probe is the same decider as the tool itself: a PowerShell that
+    /// cannot answer a question cannot run a script, so a `pwsh` that is installed but broken
+    /// falls back to Windows PowerShell rather than failing every call.
+    fn shell(&self) -> Option<&'static Powershell> {
+        powershell()
     }
 
     /// Write the script where a person can find it, with the mark that makes it read as UTF-8.
@@ -1472,14 +1523,6 @@ impl PwshTool {
             .with_context(|| format!("cannot write {}", path.display()))?;
         Ok(path)
     }
-}
-
-/// The PowerShell that was found, and what it calls itself.
-#[cfg(windows)]
-#[derive(Clone)]
-struct Shell {
-    program: String,
-    version: String,
 }
 
 #[cfg(windows)]
@@ -1559,7 +1602,7 @@ impl Tool for PwshTool {
             .unwrap_or(DEFAULT_BASH_TIMEOUT)
             .clamp(1, 24 * 3600);
 
-        let shell = self.shell().await.ok_or_else(|| {
+        let shell = self.shell().ok_or_else(|| {
             anyhow!("no PowerShell on this machine: neither `pwsh` nor `powershell` could be run")
         })?;
         let script_path = self.write_script(script)?;
