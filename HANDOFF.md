@@ -67,6 +67,24 @@ with native arguments, which is the fact that stops a model writing `??` on 5.1.
 process-group kill for work a command backgrounds (there is no process group and no `setsid`,
 and closing it means `libc`), and the same line-ending sentence for `apply_patch`.
 
+**The terminal side was measured too** (`docs/windows.md` §1–§3, all four items of the
+checklist at its end). Two things came out of it that the next session should not re-derive:
+
+- **§1's prediction is wrong.** The `DISABLE_NEWLINE_AUTO_RETURN` bit is clear, as the file
+  said — but a linefeed at the last column then lands at column 0 of the next row, one row,
+  exactly where `\r\n` lands. Measured in a private hidden console (`FreeConsole`,
+  `AllocConsole`, `ShowWindow(SW_HIDE)`), through both the wide and the byte write path. No
+  double advance, so `insert_history` is fine and the remedy §1 argued for is not needed.
+- **The code-page mojibake is real and the fix works**, both measured: a fresh console starts
+  at output code page **936**, and flint's three UTF-8 bytes for `—` land in its screen buffer
+  as U+9225; at 65001 they land as U+2014. **The fix is deliberately not applied** — it writes
+  shared console state, which is what the tooling document rejected for reading — so it is a
+  decision with its evidence attached, not a measurement left undone. That is the one thing
+  this stretch leaves open on purpose.
+
+The method is worth keeping: a private console is how Windows terminal behaviour gets measured
+without a human watching a window and without writing test bytes into somebody's terminal.
+
 **One side effect worth knowing about**: measuring the browser launch opened two real browser
 windows on the desktop before the harness was rewritten to stand a `.cmd` file in for the
 browser. Nothing was damaged, but the lesson is general — a measurement that launches the
