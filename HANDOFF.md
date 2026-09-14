@@ -495,13 +495,16 @@ section into it, so the two do not drift. The shape of it now:
    pair in `stream`, cleared in `clear_viewport`), and `stream_text` + `segment_text` +
    `last_segment_text` are the `drawn`/`arrived`/`handed` trio inside `Mutex<Answer>` (written as
    a pair in `stream`, `drawn` taken by `close_stream`, `handed` cleared in `begin_answer` and
-   appended to in `close_stream`). Still free-standing: `committed` (read and written in
-   `stream`, reset in `begin_answer`, read in `close_stream`) and `stream_active` (set in
-   `stream`, swapped off in `close_stream`), which are the counters rather than the records, and
-   `strip`/`answer` are two locks rather than one because they answer two questions — what is on
-   screen, and what was said. The two sites that used to hold a guard across a region are both
-   scoped now (the head-strip borrow, and the `push_str` in `close_stream`), which is the rule to
-   keep if these two locks ever become one.
+   appended to in `close_stream`). Still free-standing: nothing.
+   `committed` and `stream_active` were the last two, and they are inside `Mutex<Answer>` now,
+   with the text they measure. **So the strip's state is two locks and no free-standing fields**:
+   `strip` for what is on screen, `answer` for what was said and how far it has got — which is the
+   merge ROADMAP §6 asked for, done as a move rather than a deletion because every one of the
+   eight turned out to be load-bearing. The one change beyond the move: `close_stream` takes the
+   drawn text and its row count under a single lock, because the count measures that text, and
+   sampling them separately is how one frame's text gets measured against the previous frame's
+   rows — the rows in between are then either committed twice or dropped. The two sites that used
+   to hold a guard across a region are both scoped.
 3. **Web mode** — `--web` as a window onto the running process rather than a mode. The first
    three steps need no decision, and the one open question (§7 of that document: a hand-rolled
    HTTP server or `hyper`, which is already in the tree via `reqwest`) blocks only step 4.

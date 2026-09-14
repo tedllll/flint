@@ -342,6 +342,17 @@ struct Answer {
     /// against it would compare two different origins, and the segment-boundary test
     /// would then fire on the very fragments the strip is meant to be dropping.
     handed: String,
+    /// How many rows of `drawn` have already gone to the transcript.
+    ///
+    /// A count of screen rows, not lines: a line longer than the screen is several rows, and
+    /// rows are what the terminal scrolls and what the strip can hold.
+    committed: u16,
+    /// Whether an answer is mid-stream and still has to be committed.
+    ///
+    /// Not the same as `drawn` being empty: a restatement that strips to nothing leaves the
+    /// answer in flight with nothing to draw, and `close_stream` still has to commit, blank and
+    /// reset the counter for that frame.
+    active: bool,
 }
 
 /// What is running right now.
@@ -384,13 +395,14 @@ pub struct Term {
     input: Mutex<Input>,
     /// Text before the input, e.g. "> " or "  name: ".
     prefix: Mutex<String>,
-    /// Whether an answer is mid-stream and still has to be committed.
-    stream_active: AtomicBool,
-    /// The answer's text: what arrived, what the strip is drawing, and what has been handed to
-    /// the transcript. One lock for all three, because they are decided together -- see `Answer`.
+    /// Every record of what the answer is doing: its text in the three forms the painter needs,
+    /// how many of its rows are already in the transcript, and whether one is in flight.
+    ///
+    /// One lock, because they are decided together -- see `Answer`. The counter belongs here
+    /// rather than beside the strip for the same reason: it counts rows *of `drawn`*, so a
+    /// reader that takes the text and the count under separate locks can count one frame's rows
+    /// against another frame's text, and `close_stream` is exactly that reader.
     answer: Mutex<Answer>,
-    /// How many of the streaming answer's lines have already gone to history.
-    committed: AtomicU16,
     /// The row the next transcript line is written on.
     ///
     /// Transcript grows *downward* from the top of the history region, so the first line
@@ -457,9 +469,7 @@ impl Term {
             input_row: AtomicU16::new(24),
             input: Mutex::new(Input::default()),
             prefix: Mutex::new("> ".to_string()),
-            stream_active: AtomicBool::new(false),
             answer: Mutex::new(Answer::default()),
-            committed: AtomicU16::new(0),
             history_row: AtomicU16::new(1),
             strip: Mutex::new(Strip::default()),
             activity: Mutex::new(None),
@@ -534,9 +544,7 @@ impl Term {
             input_row: AtomicU16::new(24),
             input: Mutex::new(Input::default()),
             prefix: Mutex::new("> ".to_string()),
-            stream_active: AtomicBool::new(false),
             answer: Mutex::new(Answer::default()),
-            committed: AtomicU16::new(0),
             history_row: AtomicU16::new(1),
             strip: Mutex::new(Strip::default()),
             activity: Mutex::new(None),
@@ -1024,7 +1032,7 @@ impl Term {
         // it contributed to is thrown away. Committing blanks the strip, and the blanking
         // is what empties the painter's memory of it; only the text record is left to clear.
         self.close_stream();
-        self.committed.store(0, Ordering::Relaxed);
+        self.answer.lock().unwrap().committed = 0;
         self.answer.lock().unwrap().handed.clear();
     }
 
@@ -1119,7 +1127,7 @@ impl Term {
             let _ = std::io::stdout().flush();
             return;
         }
-        self.stream_active.store(true, Ordering::Relaxed);
+        self.answer.lock().unwrap().active = true;
 
         // A model that resends the *cumulative* text rather than only the continuation
         // hands us a segment whose head is already in the transcript. Drawing it whole
@@ -1186,7 +1194,7 @@ impl Term {
                 // painter's memory of those rows; see `clear_viewport`.
                 self.close_stream();
                 self.clear_viewport();
-                self.committed.store(0, Ordering::Relaxed);
+                self.answer.lock().unwrap().committed = 0;
             }
             // What is recorded is the text being *drawn*, not the text as it arrived.
             //
@@ -1234,13 +1242,13 @@ impl Term {
         // Every row of the slice is accounted for, so a row that leaves the top of the
         // slice must be handed to history or it would be lost when the slice scrolls
         // it away.
-        let committed = self.committed.load(Ordering::Relaxed);
+        let committed = self.answer.lock().unwrap().committed;
         if height > capacity {
             let drop = (height - capacity).min(settled);
             if drop > committed {
                 let fresh: Vec<String> = rows[committed as usize..drop as usize].to_vec();
                 self.insert_history(&fresh);
-                self.committed.store(drop, Ordering::Relaxed);
+                self.answer.lock().unwrap().committed = drop;
             }
         }
 
@@ -1250,7 +1258,7 @@ impl Term {
         // what is already in the transcript -- and drawing from the boundary then puts
         // those committed rows back on screen, directly beneath a transcript that already
         // has them.
-        let committed_now = self.committed.load(Ordering::Relaxed) as usize;
+        let committed_now = self.answer.lock().unwrap().committed as usize;
         let first = (height.saturating_sub(capacity) as usize).max(committed_now);
         let visible = &rows[first.min(rows.len())..];
         let start = top + capacity.saturating_sub(visible.len() as u16);
@@ -1429,7 +1437,7 @@ impl Term {
     /// every row the scroll touches is already empty. Doing it the other way round
     /// loses the answer's last line and duplicates another.
     fn close_stream(&self) {
-        if !self.stream_active.swap(false, Ordering::Relaxed) {
+        if !std::mem::replace(&mut self.answer.lock().unwrap().active, false) {
             return;
         }
         // Take the text rather than copy it: this runs more than once per turn -- a tool
@@ -1437,7 +1445,14 @@ impl Term {
         // first fragment closes it again -- and if the text stayed behind, the second run
         // would commit the same rows a second time. Taking it makes the function
         // idempotent, which is what its callers already assume.
-        let text = std::mem::take(&mut self.answer.lock().unwrap().drawn);
+        // The text and the count of its rows are taken together, because the count measures
+        // *this* text: sampling them under separate locks is how one frame's text gets measured
+        // against the previous frame's rows, and the rows that fall between the two are then
+        // either committed twice or dropped.
+        let (text, committed) = {
+            let mut answer = self.answer.lock().unwrap();
+            (std::mem::take(&mut answer.drawn), answer.committed as usize)
+        };
 
         if text.is_empty() {
             return;
@@ -1456,12 +1471,12 @@ impl Term {
         let last = self.answer_bottom();
         let capacity = last.saturating_sub(top).saturating_add(1) as usize;
         let shown = lines.len().min(capacity);
-        let sent = (self.committed.load(Ordering::Relaxed) as usize).min(lines.len());
+        let sent = committed.min(lines.len());
         let remaining: Vec<String> = lines[sent..].to_vec();
         if !remaining.is_empty() {
             self.insert_history(&remaining);
-            self.committed
-                .store(lines.len().min(u16::MAX as usize) as u16, Ordering::Relaxed);
+            self.answer.lock().unwrap().committed =
+                lines.len().min(u16::MAX as usize) as u16;
         }
         // Record what is now in the transcript, so a later segment that restates it can
         // drop the repeat instead of drawing a second copy.
@@ -1514,7 +1529,7 @@ impl Term {
         }
         let _ = write!(out, "\x1b[r");
         let _ = out.flush();
-        self.committed.store(0, Ordering::Relaxed);
+        self.answer.lock().unwrap().committed = 0;
         // A blank line keeps the answer from running into whatever comes next.
         // `insert_history` clears a stream, so calling it here is safe: the answer
         // has already been handed over above.
