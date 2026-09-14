@@ -254,15 +254,16 @@ A Windows console has an output code page; on a Chinese-locale machine that is C
 are interpreted as GBK and every non-ASCII character is mangled.
 
 The switch is `SetConsoleOutputCP(CP_UTF8)` (65001). **crossterm does not do this** —
-`ansi_support.rs`, quoted above, touches only the VT bit. So on Windows flint prints
-mojibake for any non-ASCII text, and the same applies to anything the model writes in
-Chinese. That was `UNVERIFIED` when it was written and is **measured below**: a fresh console
-starts at code page 936, and the em dash's bytes land in its screen buffer as U+9225. The
-mechanism was not speculative — it is the same one that produced the corruption at the end of
-this section.
+`ansi_support.rs`, quoted above, touches only the VT bit.
 
-Cheap to fix at startup, and cheap to test: run flint on the Windows machine and see
-whether the banner's `—` survives.
+That was the reasoning. It was `UNVERIFIED` when it was written, and **the measurement below
+says it is wrong**: flint's non-ASCII output arrives intact in a console at 936, because
+Rust's standard library never hands the console those bytes. The paragraph is kept as written
+because the failure is real for other writers — and because the next person will reason exactly
+this way until they have read the numbers.
+
+Cheap to check, and it was checked: run flint in a real console at 936 and see whether the
+banner's `—` survives. It does.
 
 **Measured, and the "switch the console" advice is not the whole story** (the same session
 that produced `docs/windows-tooling.md` §6.2, on 10.0.26200 with locale code page 936):
@@ -271,11 +272,9 @@ console everything else attached to it is writing to, and a child that keeps its
 CPython uses the locale's ANSI code page and ignores the console entirely — still emits
 CP936. The same terminal was observed reporting 936 and then 65001 inside one session. For
 *reading children's output*, what worked was decoding by `GetACP` rather than by the console
-code page. For flint's own output the measurement below settles it — a fresh console is at 936,
-flint's bytes land there as U+9225, and the switch above turns the same bytes into U+2014 — so
-what is left is a decision about shared state, not a measurement. The two directions have
-different answers because flint controls one side of each and not the other, but only one of
-them needed a console to be believed.
+code page, and that half stands: it is what `util.rs::decode_child_text` does, and its test
+runs on any CP936 machine. It is also the half where the console code page could not be
+trusted, because a key another program can change is not a key.
 
 ### The numbers, and what flint's own bytes actually are — `MEASURED`
 
@@ -311,34 +310,47 @@ mutating commands are refused` among the lines. So **flint's output is UTF-8 and
 inside flint mangles it** — the same conclusion `tests/term_capture.rs` reaches, now from a
 real interactive start on Windows rather than from the test fixtures.
 
-The other half — what the console does with those bytes — was measured too, in the same
-private console, by writing flint's exact three bytes and reading the characters back out of
-the screen buffer. Not a model this time: the console's own buffer.
+**And then the whole path was measured end to end**, with the real binary in a real console
+rather than with the byte API. A hidden console — §1's private console, plus `CreateProcessW`
+with `STARTF_USESTDHANDLES` so the child's stdout *is* that console — at output code page 936,
+running `flint --readonly`, with the screen buffer read back afterwards:
 
 ```
-CP=936   : wrote 3 bytes e2 80 94 -> console holds: U+9225 ...
-CP=65001 : wrote 3 bytes e2 80 94 -> console holds: U+2014 ...
+console 120x30, output code page set to 936 before the run
+code page while it runs: 936
+  readonly <U+2014> writes and mutating commands are refused
+non-ASCII code points in the buffer: U+2014     (one em dash, zero damaged)
 ```
 
-And a **fresh** console comes up at `GetConsoleOutputCP=936` on this machine (measured, not
-assumed: `GetACP`, `GetOEMCP` and a new console's output code page all read 936), so this is
-what a person sees today — the em dash's three UTF-8 bytes decoded as one GBK character, U+9225,
-which is the same damage this session's own PowerShell file reads produced all session long
-from the other direction. It is described by code point rather than reproduced, which is the
-convention the section below keeps and for the same reason: the scan in `tests/cli_output.rs`
-would find it.
+**The em dash arrives intact at code page 936.** The same three bytes through the byte API
+become U+9225 — measured in §1's private console, and that is what made this section's advice
+look right. The binary and the byte API disagree at the same code page, so the difference
+cannot be the console. It is the *writer*: Rust's standard library converts text written to a
+console handle to UTF-16 and calls `WriteConsoleW`, so the console's code page never applies.
+Each path flint could use, measured in the same 936 console:
 
-With the code page set to 65001 the console holds `U+2014`, the em dash, correctly. **So both
-halves are now measured: the symptom is real on a fresh console, and the fix works.**
+| written as | what the console held |
+|---|---|
+| `write!`/`writeln!` — fmt, which the transcript and the banner use | U+2014 |
+| `write_all` of a valid UTF-8 buffer | U+2014 |
+| `write_all` of those three bytes alone | U+2014 |
+| `print!` | U+2014 |
+| `WriteConsoleA` of those three bytes — the byte API | U+9225 |
+| a lone `0x94`, which is not valid UTF-8 | `?` |
 
-**The fix, and why it is still not applied.** `SetConsoleOutputCP(65001)` at startup, restored
-on exit, is small, needs no dependency (the same hand-declared `extern` block `util.rs` already
-has for `GetACP`), and is now measured to do exactly what is wanted. What it is not is free of
-consequences: it writes shared console state, which is the thing the tooling document rejected
-for *reading*, and it changes the code page for every other program in that console window while
-flint runs. That is a product decision, not a measurement one, and it is written down here with
-the evidence so it can be made deliberately — the change is a handful of lines plus a test that
-skips itself where there is no console to ask.
+The last two rows are the whole story: **invalid UTF-8 falls back to the byte path and is
+mangled there; valid UTF-8 never takes that path at all.** Everything flint prints is a
+`String`, so nothing flint prints can be mangled by the console's code page. One case could
+have leaked bytes back to that path and was checked separately — a single 10,500-byte CJK write,
+where the `LineWriter` inside `std::io::Stdout` could in principle split a character across a
+capacity flush: it came through with every character intact.
+
+**So there is nothing to fix.** `SetConsoleOutputCP(65001)` at startup would write shared
+console state — the thing `docs/windows-tooling.md` §6.2 rejected for *reading*, for the same
+reason — and would buy nothing, because the characters are already right. The previous version
+of this section called the mojibake real and the fix measured-to-work, on the evidence of the
+byte-API experiment plus this session's own PowerShell mangling UTF-8 files through CP936. Both
+of those are real, and both are a *different program's* byte path. flint does not have one.
 
 ### At development time: the source tree, silently
 
@@ -388,12 +400,16 @@ because it is the right order for the next machine, with what each item produced
    `\r\n` lands. **No double advance**, so `insert_history` is not broken by the default and
    option 2 is not needed. §1 has the table, the two constant corrections, and the case where
    the bit *is* set.
-2. **Check §3 at runtime** — *answered.* A fresh console comes up at output CP 936, and flint's
-   three UTF-8 bytes for `—` land in that console's screen buffer as U+9225: the mojibake is
-   real, measured on a console rather than modelled, and at CP 65001 the same bytes land as
-   U+2014. flint's own bytes are clean (13 em dashes in a captured start screen, zero damaged).
-   The fix is measured to work and is deliberately left as a decision: it writes shared console
-   state. **No human needed; a product decision remains, written down with its evidence.**
+2. **Check §3 at runtime** — *answered, and the answer is that there is nothing to fix.* The
+   real binary was run in a hidden console at output code page 936 and its screen buffer read
+   back: `readonly <U+2014> writes and mutating commands are refused`, with the em dash intact
+   and nothing damaged. The same three bytes through the byte API in the same console become
+   U+9225, so the difference is the writer and not the console: Rust's standard library writes
+   text to a console as UTF-16, and the code page never applies. Measured for every write path
+   flint uses, including a 10,500-byte single CJK write. §3 has the table; the proposed
+   `SetConsoleOutputCP(65001)` is **not needed** and would only change shared console state.
+   This replaced an earlier conclusion in this file that the mojibake was real — the byte-API
+   experiment and this session's own PowerShell were the evidence for it, and neither is flint.
 3. **Then run the suite** — *done.* `cargo test` is 345 passing on this machine, including
    `tests/term_capture.rs`, and `node scripts/term-layout-test.js` replays the byte capture
    this machine produced (`target/term-capture.bin`, written by that test run) and reports

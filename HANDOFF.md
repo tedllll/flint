@@ -75,12 +75,16 @@ checklist at its end). Two things came out of it that the next session should no
   exactly where `\r\n` lands. Measured in a private hidden console (`FreeConsole`,
   `AllocConsole`, `ShowWindow(SW_HIDE)`), through both the wide and the byte write path. No
   double advance, so `insert_history` is fine and the remedy §1 argued for is not needed.
-- **The code-page mojibake is real and the fix works**, both measured: a fresh console starts
-  at output code page **936**, and flint's three UTF-8 bytes for `—` land in its screen buffer
-  as U+9225; at 65001 they land as U+2014. **The fix is deliberately not applied** — it writes
-  shared console state, which is what the tooling document rejected for reading — so it is a
-  decision with its evidence attached, not a measurement left undone. That is the one thing
-  this stretch leaves open on purpose.
+- **The console is not mangling flint's output, measured end to end.** Run in a hidden console
+  at output code page 936 with its screen buffer read back, `flint --readonly` prints
+  `readonly <U+2014> writes and mutating commands are refused` — the em dash intact. The same
+  three bytes through the byte API become U+9225 in the same console, so the difference is the
+  writer: Rust's standard library writes text to a console as UTF-16, so the code page never
+  applies, for any path flint uses (including a 10,500-byte single CJK write). Earlier in this
+  stretch the opposite was written down here — that the mojibake was real and the fix measured
+  to work — on the evidence of the byte-API experiment and PowerShell's own UTF-8-through-CP936
+  file reads. Both are real, and both belong to other programs. **`SetConsoleOutputCP(65001)`
+  is not needed**, and that is no longer an open decision.
 
 The method is worth keeping: a private console is how Windows terminal behaviour gets measured
 without a human watching a window and without writing test bytes into somebody's terminal.
@@ -396,15 +400,17 @@ all want a Windows session, and a guessed implementation would be worse than an 
 that would matter most — that an argument survives the round trip, and that a killed command
 takes its children with it — are also unwritten for the same reason.
 
-**Windows terminal behaviour is still unverified.** Read
+**Windows terminal behaviour has now been measured, in a private console.** Read
 [`docs/windows.md`](docs/windows.md) first — it has the mechanisms, labelled by what was
-measured versus reasoned. The short version: the layout is built on terminal *behaviour*
+measured versus reasoned, and §1–§3 are all measured as of the session that finished
+`docs/windows-tooling.md`. The short version: the layout is built on terminal *behaviour*
 (scroll regions, absolute row addressing, what a newline does at the bottom margin),
 `crossterm` sets only `ENABLE_VIRTUAL_TERMINAL_PROCESSING` and never
-`DISABLE_NEWLINE_AUTO_RETURN` — the bit that decides whether `\n` also returns the carriage,
-while `insert_history` counts on `\r\n` advancing exactly one row — and the console output
-code page (`SetConsoleOutputCP`) is never set, so non-ASCII text very likely prints as
-mojibake.
+`DISABLE_NEWLINE_AUTO_RETURN` — the bit that decides whether `\n` also returns the carriage —
+while `insert_history` counts on `\r\n` advancing exactly one row. Both of those were settled
+rather than reasoned: the bit is clear, and a linefeed at the last column still advances one
+row, so nothing there is broken. The console output code page is never set, and that turned out
+not to matter either, because Rust writes text to a console as UTF-16.
 
 **Do not trust a test run after restoring a file by copy.** Windows `CopyFile` preserves
 the source's modification time, so `cargo` can decide nothing changed and run the
