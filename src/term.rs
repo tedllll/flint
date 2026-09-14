@@ -1611,6 +1611,17 @@ impl Term {
                 // transcript to row 1, so calling it here erased the whole conversation
                 // on every resize -- which is also why dragging the window used to look
                 // like it "fixed" a stale-glyph artefact: it was clearing the screen.
+                //
+                // An answer that is still arriving is closed **first**, while the width it
+                // was wrapped at is still the width in force. `close_stream` wraps with
+                // `screen_cols`, so closing it after the layout moved would hand the
+                // transcript rows wrapped for the new window measured against a `committed`
+                // count that counts rows of the old one: text the transcript already has
+                // would be written again, and the same sentence would sit in the scrollback
+                // twice. Closing it here gives the transcript what only the strip had, empties
+                // the strip, and lets the next fragment start a fresh segment that is wrapped
+                // for the window the reader now has.
+                self.close_stream();
                 self.reclaim();
                 Key::Redraw
             }

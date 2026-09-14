@@ -467,12 +467,15 @@ section into it, so the two do not drift. The shape of it now:
    row from its first differing character and erases what the old row had past the end — so it
    overwrites a row remembered from another width instead of trusting it, and no width tag is
    needed. The test written for it was dropped after three mutations all failed to make it fail
-   (`ROADMAP.md` §6 has the detail). What step 3 still owes: a **paused resize** (no fragment
-   after the resize re-renders the strip, so it keeps the old wrapping until one arrives), which
-   needs the repaint split from the commit — calling `stream()` re-commits a re-wrapped tail and
-   duplicates text in the transcript — and then the larger half, deleting the interim state
-   (`begin_answer`, `last_segment_text`, `committed`, `fresh_segment`) so the strip becomes a
-   cell grid rather than a text offset.
+   (`ROADMAP.md` §6 has the detail). Step 3 has started: a resize now **closes the in-flight
+   answer first**, while the width it was drawn at is still in force, so the transcript gets what
+   only the strip had, the strip is emptied, and the next fragment starts a fresh segment at the
+   new width (`a_resize_closes_the_answer_that_was_still_arriving`; re-wrapping instead would
+   commit rows against a `committed` count measured in the old wrapping and duplicate text in the
+   scrollback). What step 3 still owes: deleting the interim state (`begin_answer`,
+   `last_segment_text`, `committed`, `fresh_segment`) so the strip becomes a cell grid rather
+   than a text offset — `committed` counting *rows* rather than characters is what forces the
+   segment boundary above, and it goes with that rewrite.
 3. **Web mode** — `--web` as a window onto the running process rather than a mode. The first
    three steps need no decision, and the one open question (§7 of that document: a hand-rolled
    HTTP server or `hyper`, which is already in the tree via `reqwest`) blocks only step 4.

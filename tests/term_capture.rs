@@ -928,6 +928,71 @@ fn starting_up_asks_the_terminal_to_repaint() {
 
 /// Resizing the window must not erase the conversation.
 ///
+/// A resize must not leave an answer stranded on the strip, wrapped for a window that is gone.
+///
+/// The strip's rows were wrapped at the width in force when they were drawn, and so were the
+/// rows above them that are already in the transcript. A resize changes that width, and the
+/// answer that is still arriving cannot be re-wrapped into the transcript that already exists:
+/// committing it again would measure `committed` -- a row count -- against the old wrapping and
+/// write text the transcript already has, which is how the same sentence ends up in the
+/// scrollback twice. So the in-flight answer is closed *first*, in the geometry it was drawn
+/// with: whatever is still only on the strip goes to the transcript where it belongs, the strip
+/// is emptied, and the next fragment starts a new segment at the new width.
+///
+/// This is what can be checked without a screen: after the resize, the text that was only on
+/// the strip is in the transcript, and the strip has been emptied. Both are false before the
+/// fix, because the handler only recomputed the layout and repainted the input row.
+#[test]
+fn a_resize_closes_the_answer_that_was_still_arriving() {
+    let _guard = stdout_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("term-resize-answer.bin");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let restore = capture_into(&path);
+
+    std::env::set_var("FLINT_TERM_CAPTURE", "1");
+    std::env::set_var("FLINT_TERM_SIZE", "70x24");
+    let term = Term::start().expect("term");
+    // Three short rows against a two-row strip: the first is handed to the transcript as it
+    // goes, the other two -- the marker among them -- are only on the strip.
+    term.stream("第一行，短。\n第二行，也短。\nTAIL-MARKER。\n");
+
+    let before = std::fs::read(&path).unwrap().len();
+    std::env::set_var("FLINT_TERM_SIZE", "40x24");
+    let key = term.on_event(crossterm::event::Event::Resize(40, 24));
+    assert!(
+        matches!(key, flint::term::Key::Redraw),
+        "a resize must ask for a redraw"
+    );
+    term.redraw();
+
+    let bytes = std::fs::read(&path).unwrap();
+    restore();
+    std::env::remove_var("FLINT_TERM_CAPTURE");
+    std::env::remove_var("FLINT_TERM_SIZE");
+
+    let frame = String::from_utf8_lossy(&bytes[before..]).to_string();
+    // The marker was on the strip and nowhere else, so seeing it written in this frame is
+    // seeing it handed over. `CSI 1;20r` is the transcript's own scroll region, which only
+    // `insert_history` sets -- so this is the transcript, not another strip paint.
+    assert!(
+        frame.contains("TAIL-MARKER。"),
+        "the resize left the answer on the strip instead of the transcript:\n{frame:?}"
+    );
+    assert!(
+        frame.contains("\u{1b}[1;20r"),
+        "the resize did not hand the remaining rows to the transcript:\n{frame:?}"
+    );
+    // And the strip is empty afterwards: every strip row is cleared in this frame.
+    for row in [21u16, 22] {
+        assert!(
+            frame.contains(&format!("\u{1b}[{row};1H\u{1b}[2K")),
+            "the resize left strip row {row} as it was:\n{frame:?}"
+        );
+    }
+}
+
 /// The resize handler called `setup`, which scrolls and blanks the display and rewinds
 /// the transcript to row 1 -- so every resize wiped everything that had been said. It
 /// looked like a cure for a stale-glyph artefact (dragging the window edge did clear

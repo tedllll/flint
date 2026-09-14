@@ -125,7 +125,7 @@ could only be settled on a Windows machine were settled on one (Windows 10.0.262
 work a command backgrounds (§6.1) and the line-ending sentence for `apply_patch` (§6.4).
 Neither is a Windows item, and both need a test before they need code.
 
-### 6. The transcript as cells — **step 2 landed, step 3 measured**
+### 6. The transcript as cells — **step 2 landed, step 3 started**
 
 Three steps: measure the transcript as cells, paint only what changed, then re-render for
 real on resize. This is also what deletes the interim state the clock fix left behind —
@@ -226,18 +226,24 @@ gate, so it is not in the tree; what is here is the measurement and the reason.
 
 What step 3 still owes, and the shape of it:
 
-- **A resize with no new delta leaves the old wrapping on the strip.** The re-render happens
-  when the next fragment arrives, which is milliseconds later in a live stream and *never* if
-  the answer is paused between rounds. Fixing it means re-drawing the strip from `stream_text`
-  at the resize — and that is where the trap is: the obvious implementation calls `stream()`,
-  which also *commits* rows to the transcript, and a re-wrapped tail committed against a
-  `committed` count measured in the old wrapping duplicates text in the scrollback. So the
-  re-render has to be a repaint that commits nothing, which means splitting `stream()` into the
-  part that hands rows to the transcript and the part that draws them. The test for it is red
-  today by construction — after the resize and before any fragment, nothing at all is written
-  to the strip — and it bites, because removing the re-render call is a mutation that fails it.
+- **A resize with no fragment after it left the old wrapping on the strip — fixed**, 2026-09-14.
+  The strip is re-drawn when the next fragment arrives, which is milliseconds later in a live
+  stream and *never* if the answer is paused between rounds, so a paused answer sat on a strip
+  wrapped for a window that no longer existed. The fix is not to re-wrap it: the transcript
+  above already holds part of that answer in the old wrapping, and committing a re-wrapped
+  remainder against a `committed` count that counts rows of the old one writes text the
+  transcript already has, which is how a sentence ends up in the scrollback twice. Instead the
+  resize **closes the in-flight answer first**, while the width it was drawn at is still the
+  width in force: `close_stream` hands the transcript what only the strip had, empties the
+  strip, and the next fragment starts a fresh segment wrapped for the window the reader now
+  has. `a_resize_closes_the_answer_that_was_still_arriving` is the gate, red before the change
+  because the handler only recomputed the layout and repainted the input row.
+  What it deliberately does not do is re-wrap the rows already in the transcript: those are
+  scrollback, drawn at the width they were drawn at, and the answer keeps the seam.
 - The interim state is still there. Deleting it is what makes the strip a cell grid rather than
-  a text offset, and it is the larger half of step 3.
+  a text offset, and it is the larger half of step 3. The character/row mismatch behind the
+  paragraph above is one of the things that goes with it: `committed` counts *rows*, which is
+  why a width change has to end the segment rather than continue it.
 
 One trap worth remembering, because it cost an afternoon: the `\r\n` that carries the cursor
 from one strip row to the next belongs to the row that was *written*. Emitted after a row that
