@@ -490,17 +490,18 @@ section into it, so the two do not drift. The shape of it now:
 
    **Where every one of those fields is touched** (checked while mapping the merge, so nobody has
    to map it again; line numbers drift, the functions do not):
-   `stream_text` — written in `stream` (the pair of stores that record what is being drawn) and
-   taken in `close_stream` with `mem::take`; `segment_text` — read and written in `stream` only
-   (the segment-boundary origin); `last_segment_text` — cleared in `begin_answer`, borrowed as a
-   guard across the head-strip in `stream`, appended to in `close_stream`; `stream_rows` and
-   `stream_first` — **already merged**, they are the `rows`/`first` pair inside `Mutex<Strip>`
-   (one lock, taken as a pair in `stream`, cleared in `clear_viewport`), which leaves the three
-   text records and the two counters below; `committed` — read and written in
-   `stream`, reset in `begin_answer`, read in `close_stream`. Two of those sites hold a guard
-   across a region rather than a statement: the head-strip borrow in `stream` (it ends before the
-   `close_stream` call below it, which is why there is no deadlock today) and the `push_str` in
-   `close_stream`. Those are the two to scope tightly when the lock becomes one.
+   **Both groups are now merged**, and what that leaves is the point of the exercise:
+   `stream_rows` + `stream_first` are the `rows`/`first` pair inside `Mutex<Strip>` (taken as a
+   pair in `stream`, cleared in `clear_viewport`), and `stream_text` + `segment_text` +
+   `last_segment_text` are the `drawn`/`arrived`/`handed` trio inside `Mutex<Answer>` (written as
+   a pair in `stream`, `drawn` taken by `close_stream`, `handed` cleared in `begin_answer` and
+   appended to in `close_stream`). Still free-standing: `committed` (read and written in
+   `stream`, reset in `begin_answer`, read in `close_stream`) and `stream_active` (set in
+   `stream`, swapped off in `close_stream`), which are the counters rather than the records, and
+   `strip`/`answer` are two locks rather than one because they answer two questions — what is on
+   screen, and what was said. The two sites that used to hold a guard across a region are both
+   scoped now (the head-strip borrow, and the `push_str` in `close_stream`), which is the rule to
+   keep if these two locks ever become one.
 3. **Web mode** — `--web` as a window onto the running process rather than a mode. The first
    three steps need no decision, and the one open question (§7 of that document: a hand-rolled
    HTTP server or `hyper`, which is already in the tree via `reqwest`) blocks only step 4.

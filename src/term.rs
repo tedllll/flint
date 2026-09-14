@@ -306,6 +306,44 @@ struct Strip {
     first: u16,
 }
 
+/// The answer's text, in the three forms the painter needs at the same time.
+///
+/// One lock, because `stream` decides them together: it computes what the strip draws and
+/// records what arrived in one step, and `close_stream` takes what was drawn to append to what
+/// has been handed over. Behind separate locks the transcript could be handed a `drawn` from
+/// one frame measured against an `arrived` from the next.
+#[derive(Default)]
+struct Answer {
+    /// The full, unstripped text of the segment currently streaming.
+    ///
+    /// Needed because stripping and segment detection want opposite things from the same
+    /// string. A model that resends the cumulative text puts us in a position where a
+    /// fragment can start with the *committed head* rather than with the previous
+    /// fragment -- that is precisely what makes it a repeat -- so once the head has been
+    /// stripped, the stripped text is no longer a prefix of the next stripped text, and
+    /// the boundary test fires mid-segment. Keeping the unstripped text here gives the
+    /// boundary test the origin it needs, while `drawn` holds what is being drawn.
+    arrived: String,
+    /// The answer currently being streamed, as the strip draws it: the arrival minus the head
+    /// that is already in the transcript, so it can be finished off later.
+    drawn: String,
+    /// The text of the segment most recently committed to history, so a later segment
+    /// that repeats it at its head does not draw it a second time.
+    ///
+    /// A model that narrates, calls a tool, and then *resends the cumulative text*
+    /// rather than only its continuation produces exactly that. Nothing in `committed`
+    /// can tell us: it counts rows, and when the repeated head is short the answer never
+    /// overflows the strip, so `committed` stays 0 while the head is nevertheless on
+    /// screen. The result was the opening line printed twice -- once in the transcript
+    /// and once at the head of the next segment, with no break before its continuation.
+    ///
+    /// Deliberately *not* derived from `drawn`. That field holds the text the
+    /// strip is drawing, which is this text minus the head; comparing a new fragment
+    /// against it would compare two different origins, and the segment-boundary test
+    /// would then fire on the very fragments the strip is meant to be dropping.
+    handed: String,
+}
+
 /// What is running right now.
 struct Activity {
     /// The tool name, or empty while the model is thinking rather than running one.
@@ -348,35 +386,11 @@ pub struct Term {
     prefix: Mutex<String>,
     /// Whether an answer is mid-stream and still has to be committed.
     stream_active: AtomicBool,
-    /// The answer currently being streamed, so it can be finished off later.
-    stream_text: Mutex<String>,
+    /// The answer's text: what arrived, what the strip is drawing, and what has been handed to
+    /// the transcript. One lock for all three, because they are decided together -- see `Answer`.
+    answer: Mutex<Answer>,
     /// How many of the streaming answer's lines have already gone to history.
     committed: AtomicU16,
-    /// The full, unstripped text of the segment currently streaming.
-    ///
-    /// Needed because stripping and segment detection want opposite things from the same
-    /// string. A model that resends the cumulative text puts us in a position where a
-    /// fragment can start with the *committed head* rather than with the previous
-    /// fragment -- that is precisely what makes it a repeat -- so once the head has been
-    /// stripped, the stripped text is no longer a prefix of the next stripped text, and
-    /// the boundary test fires mid-segment. Keeping the unstripped text here gives the
-    /// boundary test the origin it needs, while `stream_text` holds what is being drawn.
-    segment_text: Mutex<String>,
-    /// The text of the segment most recently committed to history, so a later segment
-    /// that repeats it at its head does not draw it a second time.
-    ///
-    /// A model that narrates, calls a tool, and then *resends the cumulative text*
-    /// rather than only its continuation produces exactly that. Nothing in `committed`
-    /// can tell us: it counts rows, and when the repeated head is short the answer never
-    /// overflows the strip, so `committed` stays 0 while the head is nevertheless on
-    /// screen. The result was the opening line printed twice -- once in the transcript
-    /// and once at the head of the next segment, with no break before its continuation.
-    ///
-    /// Deliberately *not* derived from `stream_text`. That field holds the text the
-    /// strip is drawing, which is this text minus the head; comparing a new fragment
-    /// against it would compare two different origins, and the segment-boundary test
-    /// would then fire on the very fragments the strip is meant to be dropping.
-    last_segment_text: Mutex<String>,
     /// The row the next transcript line is written on.
     ///
     /// Transcript grows *downward* from the top of the history region, so the first line
@@ -444,11 +458,9 @@ impl Term {
             input: Mutex::new(Input::default()),
             prefix: Mutex::new("> ".to_string()),
             stream_active: AtomicBool::new(false),
-            stream_text: Mutex::new(String::new()),
+            answer: Mutex::new(Answer::default()),
             committed: AtomicU16::new(0),
             history_row: AtomicU16::new(1),
-            segment_text: Mutex::new(String::new()),
-            last_segment_text: Mutex::new(String::new()),
             strip: Mutex::new(Strip::default()),
             activity: Mutex::new(None),
             cwd: Mutex::new(String::new()),
@@ -523,11 +535,9 @@ impl Term {
             input: Mutex::new(Input::default()),
             prefix: Mutex::new("> ".to_string()),
             stream_active: AtomicBool::new(false),
-            stream_text: Mutex::new(String::new()),
+            answer: Mutex::new(Answer::default()),
             committed: AtomicU16::new(0),
             history_row: AtomicU16::new(1),
-            segment_text: Mutex::new(String::new()),
-            last_segment_text: Mutex::new(String::new()),
             strip: Mutex::new(Strip::default()),
             activity: Mutex::new(None),
             cwd: Mutex::new(String::new()),
@@ -1015,7 +1025,7 @@ impl Term {
         // is what empties the painter's memory of it; only the text record is left to clear.
         self.close_stream();
         self.committed.store(0, Ordering::Relaxed);
-        self.last_segment_text.lock().unwrap().clear();
+        self.answer.lock().unwrap().handed.clear();
     }
 
     /// Insert history lines `lines` above the answer strip.
@@ -1123,13 +1133,14 @@ impl Term {
         // So drop the committed head first, and let everything downstream -- the strip's
         // text, `committed`, and `close_stream` -- work on what is left. They must all
         // agree on one text: `committed` counts rows of *the text being drawn*, and
-        // `close_stream` commits from it, so leaving `stream_text` holding the unstripped
+        // `close_stream` commits from it, so leaving `drawn` holding the unstripped
         // text applies one text's row offsets to another's rows.
         let incoming = text;
 
         let stripped;
         let text = {
-            let head = self.last_segment_text.lock().unwrap();
+            let answer = self.answer.lock().unwrap();
+            let head = &answer.handed;
 
             if !head.is_empty() {
                 // Leading blank space is not new content, and a model that restates
@@ -1153,7 +1164,7 @@ impl Term {
             // that begins a repeat does not start with the previous fragment at all -- it
             // starts with the committed head instead. Comparing the stripped form would
             // fire a segment reset on exactly the fragments the strip is dropping.
-            let held = self.segment_text.lock().unwrap().clone();
+            let held = self.answer.lock().unwrap().arrived.clone();
 
             // Within one streamed answer the text only ever grows, so text that does not
             // start with what came before is a *new segment*: the reasoning is over and
@@ -1188,11 +1199,16 @@ impl Term {
             //   I'll see how it was installed. Let me check the update options.
             //   I'll see how it was installed. Let me check the update options. Confirmed.
             //
-            // `segment_text` keeps the unstripped form, because the segment-boundary test
+            // `arrived` keeps the unstripped form, because the segment-boundary test
             // needs an origin that stays monotonic -- the stripped form shrinks when a
             // restatement is removed, and comparing against it fired a reset mid-segment.
-            *self.stream_text.lock().unwrap() = text.to_string();
-            *self.segment_text.lock().unwrap() = incoming.to_string();
+            // One lock for the pair, because they are decided in one step: what the strip draws
+            // and what arrived.
+            {
+                let mut answer = self.answer.lock().unwrap();
+                answer.drawn = text.to_string();
+                answer.arrived = incoming.to_string();
+            }
         }
 
         // Rows are *screen* rows, not lines. A line longer than the screen is several
@@ -1421,7 +1437,7 @@ impl Term {
         // first fragment closes it again -- and if the text stayed behind, the second run
         // would commit the same rows a second time. Taking it makes the function
         // idempotent, which is what its callers already assume.
-        let text = std::mem::take(&mut *self.stream_text.lock().unwrap());
+        let text = std::mem::take(&mut self.answer.lock().unwrap().drawn);
 
         if text.is_empty() {
             return;
@@ -1480,8 +1496,14 @@ impl Term {
         //
         // `text` here is what was drawn, so it is already missing any head that was
         // stripped; appending it to the running prefix reproduces the model's own text.
-        let mut prefix = self.last_segment_text.lock().unwrap();
-        prefix.push_str(&text);
+        // Scoped rather than held: the guard used to live until the end of the method, across
+        // the clearing and scrolling below, which is fine only while nothing in between wants
+        // this lock -- and with the three text records behind one lock that is a rule worth
+        // keeping true by construction.
+        {
+            let mut answer = self.answer.lock().unwrap();
+            answer.handed.push_str(&text);
+        }
         self.clear_viewport();
         // Scroll the now-blank slice up, so the strip is empty and the transcript
         // above is untouched.
