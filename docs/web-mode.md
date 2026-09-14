@@ -218,7 +218,7 @@ Four routes. No cookies, no HTTP/2, no TLS, no keep-alive, no streaming request 
 | `POST /message` | one message from the browser, into the steering channel |
 | `GET /sessions` | the conversations `/resume` can reach, numbered the way `/resume` numbers them |
 | *`event: sessions`* | not a route but its counterpart: the list has changed, re-read it |
-| *`event: state`* | the run's own configuration: provider, model, what each provider offers, the toggles |
+| *`event: state`* | the run's own configuration: provider, model, what each provider offers, the toggles, and the command list with §8's class for each row |
 | `type: command` | what a command answered, on the same stream as the turn's events: `input` and `text` |
 
 **All five are implemented.** `/session` and `/events` read the session path and the event feed
@@ -585,9 +585,9 @@ hidden, one line per control, the frame applied where it arrives), but nobody ha
 header with a real font, or used a picker or a switch from the keyboard. Everything in this section
 that says "measured" means a process and a socket; §9 step 7 is still the rule for the rest.
 
-The command list is deliberately not in the frame yet: it belongs with the buttons and panels that
-read it, and a field nothing renders is a field that drifts. What that paragraph used to call "the
-other half" — an action's *output* reaching the page — is the next section.
+The command list was deliberately not in the frame until something read it — and what reads it is the
+panel in the next section, which is why it arrived then rather than here. The other half of that
+paragraph — an action's *output* reaching the page — is the section below it.
 
 ### What a command answered, and the bug under it — measured, 2026-09-14
 
@@ -610,4 +610,36 @@ tool result twice.
 **Not yet measured in a browser**: nobody has watched a `/config` typed into the composer land in the
 transcript with a real font and a real scroll position. The block is drawn like a user message with
 the command as its label, and that is a guess until someone looks at it.
+
+### The command list, and the panel drawn from it — measured, 2026-09-15
+
+The read channel needed one more field before a control could be drawn from it: *which* commands
+there are. `/help` printed a hand-written block, dispatch is a `match`, and a third copy for the
+frame is exactly the drift this project spends its comments preventing, so the list became one table
+in `src/main.rs` (`COMMANDS`), with `/help` printing it and the frame carrying it.
+
+An entry is `{label, send, help, class}`. `label` is what `/help` prints (`/provider key <key>`);
+`send` is what the page puts on the wire (`/provider key`) — carried beside the label rather than
+split out of it, because the split is not uniform (`add` is part of `/provider add`, `<key>` is not)
+and a page re-deriving that would be re-deriving this program's grammar. `class` is §8's own, and
+two kinds of row are *not* in the frame: the toggles (the `toggles` field already carries them in the
+shape a switch needs) and the terminal's own — `/exit`, `/web`, `!`, `/stop`.
+
+| Claim | How | Result |
+|---|---|---|
+| The page is told what commands exist | `/events` on connect, read off a real `--web` process | twenty rows, each with `label`, `send`, `help` and `class`; `/exit`, `/web`, `!<command>` and the three toggles absent. `send` is what the page posts, so nothing in the page assembles a command line out of parts |
+| The two lists are one list | the same test reads the frame off `/events` *and* `/help` off the run's stdout | every row the page was handed is a row `/help` prints, with the same description. Mutation-checked: dropping the destructive rows from `/help` fails it on `/provider rm <name>` |
+| Every offered command exists | the frame's own `send` strings posted to `POST /message`, the answers read off the feed | no `unknown command` for any `panel` or `button` row, and a floor on how many rows were checked. Mutation-checked: `/tools` → `/tool` in the table fails it naming that row |
+| The help is generated, and unchanged | the `/help` output captured before the rewrite, diffed after | byte-identical, `/stop`'s hand-made continuation included (a greedy wrap at the width the column leaves reproduces the same break) — with one deliberate change, `/config [edit]` split into `/config` and `/config edit`, because one row cannot carry two classes |
+| The panel is drawn from the frame | `showCommands` under Node, over the stub DOM | one group per class the page was taught, in the page's reading order (reports, actions, selectors, forms, destructive), each row showing what to type and what it does; a frame with no command list takes the panel away |
+| The page holds no copy of the list | `tests/web_view.rs`, over the page's own bytes | the panel is built from `state.commands`, and `/provider key`, `/delete <n|id>` and `/reload` appear nowhere in the page |
+
+The panel is deliberately not a control: it lists the rows and groups them, and clicking one does
+nothing yet. A report should be *shown* rather than sent (§8 keeps `/config` and `/sessions` off this
+page's wire), and a button that sends a command the page has not been taught to confirm would be a
+button that destroys a conversation on one click.
+
+**Not yet measured in a browser**: nobody has opened the `commands` panel with a real font and read
+it against `/help` in the terminal, or used it while an answer was streaming. It is pinned as
+behaviour and as bytes, and that is all it is pinned as.
 
