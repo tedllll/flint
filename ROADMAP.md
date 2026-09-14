@@ -265,6 +265,12 @@ the committed count — instead of six fields behind three different locks whose
 maintained by hand across `stream`, `close_stream`, `clear_viewport` and `begin_answer`. The
 deletion the roadmap promised is the *locks and the agreeing-by-hand*, not the information.
 
+- `stream_active` — set when a frame draws, swapped off by `close_stream` — cannot become a check
+  on `stream_text` either, though it reads like one. The drawn text is empty whenever a restatement
+  strips to nothing, and the answer is still in flight then: `close_stream` has to commit and blank
+  and reset `committed` for that frame, and the text is not around to say so. Every piece of this
+  state has turned out to be load-bearing; the rewrite moves it, it does not shrink it.
+
 **One piece of it did come out**, 2026-09-14: `stream_rows` — the painter's memory of what is
 on the strip — used to be cleared by hand in `begin_answer` and again at a segment boundary,
 two places that had to remember, and neither of them the place that erased the rows. Clearing
