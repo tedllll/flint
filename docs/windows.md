@@ -109,6 +109,42 @@ chcp
 `936` (or anything that is not `65001`) means the console is not in UTF-8 mode, which is
 section 3 below.
 
+### What was measured — `MEASURED`, and the effect is still unobserved
+
+The premise is now measured rather than reasoned about, on the console flint inherits
+(10.0.26200, the session that finished `docs/windows-tooling.md`). `GetConsoleMode` on
+`CONOUT$`, through the same handle chain a console application gets:
+
+```
+mode = 0x0007
+  ENABLE_PROCESSED_OUTPUT              (0x0001) = set
+  ENABLE_WRAP_AT_EOL_OUTPUT            (0x0002) = set
+  ENABLE_VIRTUAL_TERMINAL_PROCESSING   (0x0004) = set
+  DISABLE_NEWLINE_AUTO_RETURN          (0x0008) = clear
+```
+
+So the bit this section is about is **clear**, which is the Windows default, and crossterm
+never sets it (the `VERIFIED` grep above). The risk is live on this machine.
+
+Two corrections for anyone repeating the measurement, both of which cost time here:
+
+- **The bit is `0x0008`, not `0x0004`.** In the *output* mode word `0x0004` is
+  `ENABLE_VIRTUAL_TERMINAL_PROCESSING`; `DISABLE_NEWLINE_AUTO_RETURN` is the next bit up.
+  (In the *input* word `0x0004` is `ENABLE_ECHO_INPUT`, which is how the confusion starts.)
+  A first version of this probe printed the wrong bit under the right name.
+- `0x0007` also says something useful: **VT processing is already on** in this console
+  before flint starts, because something enabled it and the mode persists on the screen
+  buffer. crossterm's `ansi_support.rs` sets it, so an earlier interactive run is the likely
+  cause — the mode is shared state, like the code page in §3.
+
+**What is still not observed is the effect**: a row that ends at the last column advancing
+*two* rows. Observing it needs a real terminal to look at, or a headless pseudoconsole
+(`CreatePseudoConsole`) to read a screen buffer from. Both were out of reach in that
+session: the console inherited by a tool call is the user's own visible PowerShell window,
+and writing test bytes into somebody's window is not a measurement anybody asked for. The
+prediction stands, the fix below is unchanged, and the honest label for the *effect* is
+still `UNVERIFIED` even though the bit that causes it is measured.
+
 ### The two ways to fix it
 
 1. **Set the bit at startup.** `SetConsoleMode(handle, mode | DISABLE_NEWLINE_AUTO_RETURN)`.
@@ -144,6 +180,31 @@ let in_windows_terminal = std::env::var_os("WT_SESSION").is_some();
 That matters because it decides the shape of the fix. If §1 is a conhost-only problem,
 the answer may be a small amount of host detection. If it affects both, it is the
 `\n`-dependency itself and should be removed outright.
+
+### Which host this machine is, and one surprise — `MEASURED`
+
+**It is conhost.** `WT_SESSION` is empty, `GetConsoleWindow` returns a window, and its title
+is `Administrator: 管理员: Windows PowerShell`. Windows Terminal is not in play here, so §1 is
+the conhost case, which is the harder of the two and the one this document is about.
+
+The surprise is the screen buffer:
+
+```
+screen buffer = 126x29, window 126x29, cursor 0,0
+```
+
+**The buffer is exactly the window size, so there is no scrollback.** That is not the conhost
+default (120x9001, with scrollbars); it is this window's own configuration, or a newer
+default. It matters because `insert_history` is built around a scroll region and Windows'
+scrollback: on a buffer with no history rows, the arithmetic that decides how much can be
+scrolled has nothing to work with, and the region behaves differently from the machine the
+layout was designed on. Not a defect on its own — flint reads the size rather than assuming
+one — but the next person measuring a layout problem should know that on this machine
+"scrolled out of the window" means "gone", and that a capture which looks correct can coexist
+with a window that cannot scroll back.
+
+A `126x29` window is also narrower and shorter than the `100x24` the tests use, which is the
+useful part: it is a real size that nobody chose.
 
 ### Degrading on purpose
 
@@ -188,6 +249,64 @@ code page. For flint's own output the switch above is still the proposal and sti
 each and not the other. This paragraph measured the input side, and only reasons about the
 output side.
 
+### The numbers, and what flint's own bytes actually are — `MEASURED`
+
+```
+GetACP (locale ANSI)   = 936
+GetOEMCP (OEM)         = 936
+GetConsoleOutputCP     = 65001      <- and see the warning below
+GetConsoleCP (input)   = 65001
+```
+
+The machine is a CP936 machine in every sense that outlives a console (`GetACP` and
+`GetOEMCP` both 936), which is what `docs/windows-tooling.md` §6.2 keys the child decoding on.
+
+**The console's own output code page read 65001, and that is very likely this session's
+fault**: an earlier measurement in the same session ran `chcp 65001` to test whether the code
+page could be steered, and the setting is shared, so it outlived the command that set it.
+Which is the finding, not an aside — `GetConsoleOutputCP` is not a fact about the machine, it
+is a fact about what has been run in this window since it opened. A fresh console starts at
+the OEM code page, `936` here.
+
+What flint itself writes was measured the way §4 of this document prefers — by reading the
+bytes, not by eye. A debug build with `FLINT_TERM_CAPTURE_FILE` captured the real start screen
+(2,773 bytes, session `--readonly`, `100x24`):
+
+| in the capture | count |
+|---|---|
+| UTF-8 em dash `e2 80 94` | 13 |
+| CP936-decoded em dash `e9 88 a5` | 0 |
+| U+FFFD `ef bf bd` | 0 |
+
+and `node scripts/vtscreen.js <capture> 24 100` draws it correctly, `readonly — writes and
+mutating commands are refused` among the lines. So **flint's output is UTF-8 and nothing
+inside flint mangles it** — the same conclusion `tests/term_capture.rs` reaches, now from a
+real interactive start on Windows rather than from the test fixtures.
+
+The other half is the console's decode, and it is a one-line model rather than a render,
+because rendering needs the user's window to be written into:
+
+```
+UTF-8 bytes e2 80 94 -> UTF-8 decode: '—'   CP936 decode: U+9225 then '?'  (0x9225 0x003F)
+```
+
+That damaged form — U+9225 followed by `?` — is exactly what this session's own PowerShell
+file reads produced for `—` all session long, from a different direction (a UTF-8 file read
+through the CP936 console). It is described by code point rather than reproduced, which is
+the same convention the section below keeps and for the same reason: the scan in
+`tests/cli_output.rs` would find it. So the mechanism is observed, twice, and the remaining
+unknown is only whether a fresh console at 936 still does it — which it will, unless
+something sets the code page.
+
+**The fix, and why it is not applied blind.** `SetConsoleOutputCP(65001)` at startup, restored
+on exit, is small, needs no dependency (the same hand-declared `extern` block `util.rs`
+already has for `GetACP`), and is what other full-screen console programs do. It is also a
+write to shared state — the thing §6.2 of the other document rejected for *reading* — so it
+deserves a decision rather than a reflex: what a person should check first is whether the
+banner is actually mangled in a fresh console at 936, which is a ten-second look at a real
+terminal and the one item in this file that still needs a human. Until somebody has looked,
+the mojibake is `MEASURED` as a mechanism and the fix is a proposal.
+
 ### At development time: the source tree, silently
 
 This one already happened, on this project, and it is why `tests/cli_output.rs` has a
@@ -224,19 +343,34 @@ Treat Windows as the environment where this will happen again. Concretely:
 
 ## What to do first on the Windows machine
 
-1. **Settle §1**, because it decides the shape of everything else. Ten minutes with the
-   LF experiment above, no flint changes required.
-2. **Check §3 at runtime** — start a session and look at the banner. If the em dash is
-   mangled, the code page needs setting; that is a small, well-understood fix.
-3. **Then** run the suite. `cargo test` covers the layout logic without a terminal
-   through `scripts/vtscreen.js`, but that model encodes *this* machine's understanding
-   of a terminal, so a passing suite on Windows is not evidence that Windows is fine.
-   The tests to trust are the ones that read the real byte stream:
-   `tests/term_capture.rs` with `FLINT_TERM_CAPTURE=1`.
-4. **Report the layout by reading the buffer, not by eye**, when something looks wrong:
+**Worked through on 2026-09-14** (10.0.26200, rustc 1.98.1, the session that finished
+`docs/windows-tooling.md`). The list is kept, because it is the right order for the next
+machine, with what each item produced:
 
-   There is no `osascript` equivalent, so the option is to make the session write its
-   own byte stream and read that instead of a picture:
+1. **Settle §1** — *the premise is settled, the effect is not.* `GetConsoleMode` says the
+   console has mode `0x0007`: `DISABLE_NEWLINE_AUTO_RETURN` (0x0008) **clear**, VT processing
+   on, and crossterm never sets the bit. The double-advance itself still has not been watched,
+   because watching it means a human at a real terminal or a headless pseudoconsole. See §1
+   for the two corrections that cost time here, starting with the bit's value.
+2. **Check §3 at runtime** — *half answered.* flint's own bytes are UTF-8 with no mojibake
+   (13 em dashes in a captured start screen, 0 damaged), and the console's CP936 decode of
+   those same bytes is U+9225 followed by `?`, reproduced in the same session from the other
+   direction. Whether a *fresh* console still starts at 936 — and so whether the banner is
+   mangled for a person — needs one look at a real terminal, because this session's own
+   `chcp` had already left the console at 65001. **This is the one item still open.**
+3. **Then run the suite** — *done.* `cargo test` is 345 passing on this machine, including
+   `tests/term_capture.rs`, and `node scripts/term-layout-test.js` replays the byte capture
+   this machine produced (`target/term-capture.bin`, written by that test run) and reports
+   `全部通过`. The Chinese prose in the fixtures renders through the screen model, which is
+   the canary §3 asks for.
+4. **Report the layout by reading the buffer, not by eye** — *done, and it is what the
+   numbers above come from*: a debug build with `FLINT_TERM_CAPTURE_FILE` wrote the real
+   start screen to a file, and `scripts/vtscreen.js` drew it back at `100x24`. Nothing was
+   read by eye, because there was no eye available — which is exactly why this mechanism
+   exists.
+
+   The method, for next time: make the session write its own byte stream and read that
+   instead of a picture — there is no `osascript` equivalent on Windows.
 
    ```cmd
    set FLINT_TERM_CAPTURE=1
@@ -264,8 +398,10 @@ Treat Windows as the environment where this will happen again. Concretely:
 
 ## What is known to be already handled
 
-- Windows-specific code in this repository is small — eighteen `cfg(windows)` sites,
-  covering the shell dialect hint, the path separator, and test paths.
+- Windows-specific code in this repository is small — thirty `cfg(windows)` sites in `src/`
+  and five in `tests/`, covering the shell dialect hint, the path separator, the PowerShell
+  probe and the `pwsh` tool, the child-text decoding, the process-tree kill, the reserved
+  file names, and test paths.
 - The default config is platform-aware: `shell = "cmd"` with `args = ["/C"]` on Windows,
   and the shell probe falls back through `cmd -> powershell -> pwsh -> bash -> sh`.
 - `glob` and `grep` are built in rather than shelled out, precisely because `grep` does
@@ -274,6 +410,8 @@ Treat Windows as the environment where this will happen again. Concretely:
 - CI **does not run on push**. `.github/workflows/release.yml` triggers only on `v*`
   tags and `workflow_dispatch`. So nothing checks Windows unless that workflow is run by
   hand or a tag is pushed.
-- This session could not even type-check for Windows: `cargo check --target
-  x86_64-pc-windows-msvc` fails inside `aws-lc-sys` (rustls's C backend), which needs a
-  Windows C toolchain, not just `rustup target add`.
+- **Building and testing on Windows needs no cross-compilation at all**, which is worth
+  saying because an earlier round recorded the opposite: `cargo check --target
+  x86_64-pc-windows-msvc` from macOS fails inside `aws-lc-sys` (rustls's C backend), which
+  wants a Windows C toolchain. On the machine itself `cargo test` runs natively — 345 tests,
+  including the real-byte terminal tests — and that is where the Windows work was settled.
