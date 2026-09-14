@@ -461,11 +461,18 @@ section into it, so the two do not drift. The shape of it now:
    visible tail, then again when it scrolls out into the transcript. `ROADMAP.md` §6 has both
    tables, and `tests/term_capture.rs::streaming_in_many_deltas_paints_only_what_changed` gates
    the part that matters (four times the deltas, under 1.25× the paint). The tool is
-   `cargo test --test term_capture -- --ignored --nocapture measured_cost_of_streaming`. What
-   is left is step 3, re-render for real on resize — which is also what deletes the interim
-   state the clock fix left behind: `begin_answer`, `last_segment_text`, the `committed` count
-   and `fresh_segment`. Step 3 has a new reason to exist as well: the strip caches the rows it
-   drew for the width in force at the time, so a resize has to invalidate them.
+   `cargo test --test term_capture -- --ignored --nocapture measured_cost_of_streaming`. Step 3,
+   re-render on resize, was **measured before it was written and half of it is already true**: a
+   resize re-wraps the strip correctly in both directions, because the painter writes the new
+   row from its first differing character and erases what the old row had past the end — so it
+   overwrites a row remembered from another width instead of trusting it, and no width tag is
+   needed. The test written for it was dropped after three mutations all failed to make it fail
+   (`ROADMAP.md` §6 has the detail). What step 3 still owes: a **paused resize** (no fragment
+   after the resize re-renders the strip, so it keeps the old wrapping until one arrives), which
+   needs the repaint split from the commit — calling `stream()` re-commits a re-wrapped tail and
+   duplicates text in the transcript — and then the larger half, deleting the interim state
+   (`begin_answer`, `last_segment_text`, `committed`, `fresh_segment`) so the strip becomes a
+   cell grid rather than a text offset.
 3. **Web mode** — `--web` as a window onto the running process rather than a mode. The first
    three steps need no decision, and the one open question (§7 of that document: a hand-rolled
    HTTP server or `hyper`, which is already in the tree via `reqwest`) blocks only step 4.

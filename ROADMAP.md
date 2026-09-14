@@ -125,7 +125,7 @@ could only be settled on a Windows machine were settled on one (Windows 10.0.262
 work a command backgrounds (§6.1) and the line-ending sentence for `apply_patch` (§6.4).
 Neither is a Windows item, and both need a test before they need code.
 
-### 6. The transcript as cells — **step 2 landed**
+### 6. The transcript as cells — **step 2 landed, step 3 measured**
 
 Three steps: measure the transcript as cells, paint only what changed, then re-render for
 real on resize. This is also what deletes the interim state the clock fix left behind —
@@ -203,8 +203,41 @@ what is on screen:
   cell grid. `stream_rows`, `stream_first` and `previous_drawn` are the beginnings of that
   grid; the interim text-offset state (`begin_answer`, `last_segment_text`, `committed`,
   `fresh_segment`) is untouched so far.
-- A resize still does not re-render: the strip caches rows for the width that was in force
-  when they were drawn, and step 3 has to invalidate them when `screen_cols` changes.
+- The **paused resize** below.
+
+**Step 3, measured before it was written — half of it is already true.** A resize wraps the
+answer differently, and the strip remembers rows wrapped at the width in force when they were
+drawn, so it looked like the obvious next job was to tag the cache with a width and throw it
+away when `screen_cols` changed. Captured and replayed, both directions already come out right:
+70 → 40 columns re-breaks the text into more rows and writes every one of them from column 1,
+and 40 → 100 re-breaks it into fewer and clears the rows the answer no longer reaches, both
+ending with the strip showing the new wrapping and nothing of the old. The reason is worth more
+than the fix would have been: the painter never *trusts* a row it remembers. It writes the new
+row's text from the first character that differs and erases what the old row had past the end,
+so a row remembered from another width is overwritten rather than believed, and a width tag
+would be state kept for a case the diff already handles.
+
+That is also why the test for it was not kept. It was written, and then three mutations were run
+against it — never erasing a departed row, trusting every remembered row, and mapping
+remembered rows by index instead of by screen row — and **all three passed**. The reason is the
+same one that makes the behaviour correct: the scenario's old and new rows share so little text
+that even the wrong mapping writes from column 1. A gate that cannot be shown to fail is not a
+gate, so it is not in the tree; what is here is the measurement and the reason.
+
+What step 3 still owes, and the shape of it:
+
+- **A resize with no new delta leaves the old wrapping on the strip.** The re-render happens
+  when the next fragment arrives, which is milliseconds later in a live stream and *never* if
+  the answer is paused between rounds. Fixing it means re-drawing the strip from `stream_text`
+  at the resize — and that is where the trap is: the obvious implementation calls `stream()`,
+  which also *commits* rows to the transcript, and a re-wrapped tail committed against a
+  `committed` count measured in the old wrapping duplicates text in the scrollback. So the
+  re-render has to be a repaint that commits nothing, which means splitting `stream()` into the
+  part that hands rows to the transcript and the part that draws them. The test for it is red
+  today by construction — after the resize and before any fragment, nothing at all is written
+  to the strip — and it bites, because removing the re-render call is a mutation that fails it.
+- The interim state is still there. Deleting it is what makes the strip a cell grid rather than
+  a text offset, and it is the larger half of step 3.
 
 One trap worth remembering, because it cost an afternoon: the `\r\n` that carries the cursor
 from one strip row to the next belongs to the row that was *written*. Emitted after a row that
