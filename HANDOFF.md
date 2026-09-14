@@ -7,8 +7,8 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 350 passing, 1 ignored (249 lib, 1 in
-the binary's own tests, 33 `agent_loop`, 30 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
+As of the commit that carries this file, `cargo test` is 355 passing, 1 ignored (250 lib, 1 in
+the binary's own tests, 33 `agent_loop`, 34 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
 `term_capture` plus the ignored cost measurement, 9 `web_view`), `cargo clippy --all-targets` is
 silent, and both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
 
@@ -30,11 +30,11 @@ The binary is held open by any running `flint`, so close those before replacing 
 
 ## What was just done
 
-**An interrupt no longer throws away the answer it was drawing.** That is this round's fix: the
-drawn text lives in a field of the agent rather than in a local of the future that the interrupt
-drops, and `run_turn` commits what is left into the conversation. The measurement that corrected
-last round's diagnosis, the two tests that gate it, and the bug that is still *not* fixed are the
-two sections below.
+**An interrupt no longer throws away the answer it was drawing, and neither do the commands that
+rebuild the agent.** That is this round: two fixes in the same family — what the user has already
+read must not go missing — each with a test watched red first. The measurement that corrected last
+round's diagnosis is below, and after it the second bug, which the first one's measurement is what
+found.
 
 **And the round before it, recorded here so it is not re-done — six commits on the page, all
 pushed:**
@@ -96,19 +96,40 @@ mid-sentence says what happened better than a note would. Both doors are gated e
 that was watched red without the call (`a_stopped_turn_keeps_the_answer_it_drew`,
 `a_steered_turn_keeps_the_answer_it_drew`).
 
-### The bug to fix first: `/model`, `/provider` and `/reload` throw the conversation away
+### `/model`, `/provider` and `/reload` threw the conversation away — fixed in the same round
 
 Found while measuring the above, and it is the same complaint through a different door. Same stub,
 same session: `/resume <id>` on a file holding a question and an answer, then `/model <other>`, then
-one message — and the request that goes out has **two** messages, the system prompt and the new
-line. All three commands build a fresh `agent::Agent` with an empty history *and a new session file*
-(`switch_provider`, `/model` and `/reload` in `main.rs`), while the transcript on screen keeps
-showing the conversation they dropped. Nothing fails, and nothing says so.
+one message — and the request that went out had **two** messages, the system prompt and the new
+line. All three commands build a fresh `agent::Agent`, and a fresh agent has an empty history *and a
+session file of its own*: the conversation was gone from the request and from the session directory
+at once, while the transcript on screen went on showing it. Nothing failed, and nothing said so.
 
-The decision it needs before it needs code, written out in `ROADMAP.md` §9: continue in the same
-file (needs a session event recording the switch, and `load` applying the last one) or start a new
-file seeded with the old messages (nothing new in the format, and it is the `--fork` operation).
-The second looks right; it wants one measurement of what copying a large conversation costs.
+**The shape it took** (the decision `ROADMAP.md` §9 had written down before it was built): a *new*
+file, seeded with the conversation. `SessionWriter::seed` writes a `meta` naming the provider and
+model the conversation is being continued with, then every message in hand except the system prompt
+— rebuilt for every run, and a copy in the file would come back through `/resume` as a stale message
+— then the conversation's name if it had one. `continue_conversation` in `main.rs` puts the history
+back through `splice_loaded_history`, the route `/resume` takes. Nothing was added to the session
+format. The other shape, appending to the old file, was rejected because `meta` names the model a
+session is held with and `load` and `/resume` believe it.
+
+**The page follows the conversation now too.** `/new` and `/resume` pointed the viewer at their new
+file; `/model` and `/provider` — the two the page's own pickers reach — did not, so the view stayed
+on a file nobody was writing and stopped moving. The call moved to the one place that swaps the
+agent (`Flow::NewAgent` in the REPL), where the next such command gets it for free.
+
+One consequence is accepted rather than fixed, and it is written down in §9: the
+read-before-mutate gate lives in the tool box, so after a switch the model can be asked to read a
+file it read just before it. It re-reads it.
+
+Four tests, each watched red first — the three commands fail with a request body of
+`[system, "and now?"]`, and the view test serves a run's own empty file:
+`a_model_switch_keeps_the_conversation`, `a_provider_switch_keeps_the_conversation`,
+`a_reload_keeps_the_conversation`, `the_view_follows_the_conversation_through_a_switch`. Each of the
+three drives the switch between two requests the stub actually received, so what it asserts is the
+*next request* — the context — and then that a file holding all of it exists, which is what survives
+the process.
 
 **Also measured, smaller, and left alone on purpose**: a line already waiting in the channel when a
 turn starts is taken as an interrupt before the turn's future is ever polled, so that turn never

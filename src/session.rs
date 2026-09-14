@@ -104,6 +104,46 @@ impl SessionWriter {
         Ok(writer)
     }
 
+    /// Start a new file that already holds a conversation.
+    ///
+    /// For a conversation that is moving to another model rather than beginning: `/model`,
+    /// `/provider` and `/reload` each replace the agent, and a new agent wants a file of its
+    /// own. A *new* file rather than the old one because `Meta` names the provider and model
+    /// the session is held with, and `resume` believes it -- continuing to append to the old
+    /// file would leave it claiming a model that nothing has been sent to since.
+    ///
+    /// Nothing is added to the format for this: the result is an ordinary session that happens
+    /// to begin with a conversation already in it.
+    ///
+    /// `title` travels with it, because a name is a line in the file it was given to and a
+    /// switch that quietly renamed a conversation would be the same kind of loss this exists
+    /// to prevent.
+    pub fn seed(
+        dir: &Path,
+        cwd: &Path,
+        provider: &str,
+        model: &str,
+        messages: &[Message],
+        title: Option<&str>,
+    ) -> Result<Self> {
+        let writer = Self::create(dir, cwd, provider, model)?;
+        for message in messages {
+            // The system prompt is not part of the conversation: it is rebuilt for every run
+            // from the machine flint is on, so a copy written here would come back through
+            // `/resume` as a message -- a stale one, from another directory or another build.
+            if matches!(message, Message::System { .. }) {
+                continue;
+            }
+            writer.append(&SessionEvent::Chat {
+                message: message.clone(),
+            })?;
+        }
+        if let Some(name) = title {
+            writer.title(name)?;
+        }
+        Ok(writer)
+    }
+
     /// Reopen an existing session file so the conversation keeps being saved.
     ///
     /// Resuming used to be read-only, which meant the answers you gave after
@@ -514,6 +554,57 @@ mod tests {
         dir.file("old.jsonl", &[meta("old", None), user("hi")]);
         let loaded = load(&dir.0.join("old.jsonl")).unwrap();
         assert_eq!(loaded.version, 1, "a file without a version is v1");
+    }
+
+    /// A seeded file is an ordinary session that happens to start with a conversation.
+    ///
+    /// The two things worth holding still: the system prompt is *not* written (it is rebuilt
+    /// for every run, and a copy in the file would come back through `/resume` as a stale
+    /// message), and what is written is everything else, in order, under the new model -- a
+    /// conversation that arrives at `/resume` one message short is a conversation that
+    /// disagrees with the terminal that produced it.
+    #[test]
+    fn a_seeded_file_holds_the_conversation_and_not_the_prompt() {
+        use crate::event::Message;
+
+        let dir = TempDir::new("seed");
+        let messages = vec![
+            Message::system("the prompt as it was on the day"),
+            Message::user("what was said"),
+            Message::Assistant {
+                content: Some("what was answered".to_string()),
+                reasoning: None,
+                tool_calls: Vec::new(),
+            },
+        ];
+        let writer = SessionWriter::seed(
+            &dir.0,
+            Path::new("/tmp"),
+            "other",
+            "other-model",
+            &messages,
+            Some("a name"),
+        )
+        .unwrap();
+
+        let loaded = load(writer.path()).unwrap();
+        assert_eq!(loaded.provider, "other");
+        assert_eq!(loaded.model, "other-model");
+        assert_eq!(loaded.title.as_deref(), Some("a name"));
+        assert!(
+            !loaded
+                .messages
+                .iter()
+                .any(|m| matches!(m, Message::System { .. })),
+            "the system prompt was written into the file: {:?}",
+            loaded.messages
+        );
+        assert_eq!(loaded.messages.len(), 2, "{:?}", loaded.messages);
+        assert!(
+            std::fs::read_to_string(writer.path())
+                .unwrap()
+                .contains("what was said")
+        );
     }
 
     #[test]

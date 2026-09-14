@@ -917,6 +917,17 @@ async fn interactive(
                 Flow::Continue => continue,
                 Flow::Exit => break,
                 Flow::NewAgent(new_agent, new_provider) => {
+                    // The page follows whichever file the run is writing, and it is told here
+                    // rather than in each command because every one of them that replaces the
+                    // agent also gives it a session file of its own. `/new` and `/resume` said
+                    // so themselves; `/model` and `/provider` -- the two the page's own pickers
+                    // reach -- did not, so the view went on tailing the file nobody was writing.
+                    // The session changes first and the readers are told second, so a page that
+                    // re-reads on the `reset` reads the file the run is now writing rather than
+                    // the one it just left. A no-op when the file is the same one.
+                    if let Some(viewer) = viewer.as_mut() {
+                        viewer.follow(new_agent.session_path());
+                    }
                     *agent = new_agent;
                     *provider_cfg = new_provider;
                     continue;
@@ -1354,16 +1365,57 @@ async fn provider_wizard(
     if confirm(reader, &format!("switch to '{name}' now?"), true).await? {
         cfg.default_provider = name.clone();
         cfg.save()?;
-        return switch_provider(cfg, from, &name, agent.cwd(), agent.readonly(), printer.term(), printer.pal).await;
+        return switch_provider(cfg, from, &name, agent, printer.term(), printer.pal).await;
     }
     Ok(Flow::Continue)
 }
 
+/// Hand a conversation to a new agent, in a new session file that already holds it.
+///
+/// `/model`, `/provider` and `/reload` all replace the agent -- a different model, a different
+/// endpoint, or a config that was just edited -- and all three used to build the replacement
+/// empty: a fresh history *and* a brand new file, while the transcript on screen went on showing
+/// the conversation they had just dropped. Measured, with `/resume` on a session holding a
+/// question and an answer, then `/model <other>`, then one line: the request that went out had
+/// two messages, the system prompt and the new line. Nothing fails and nothing says so; the model
+/// simply answers as a stranger, which is the same complaint as a stopped turn losing the answer
+/// it had drawn, through a different door.
+///
+/// The file is seeded rather than reused -- [`session::SessionWriter::seed`] has why -- and the
+/// messages go back through `splice_loaded_history` rather than being assigned, which is the
+/// route `/resume` takes and for the same reason: a session file holds the conversation and not
+/// the system prompt, and the prompt is rebuilt for the machine flint is on now.
+fn continue_conversation(
+    cfg: &config::Config,
+    provider: provider::Provider,
+    target: &config::ProviderConfig,
+    old: &agent::Agent,
+) -> Result<agent::Agent> {
+    let cwd = old.cwd().clone();
+    // The name is a line in the file the conversation was in, and the file it is moving to is a
+    // new one: without this, switching model would quietly rename the conversation.
+    let title = old
+        .session_path()
+        .and_then(|path| session::scan(&path).ok())
+        .and_then(|summary| summary.title);
+    let writer = session::SessionWriter::seed(
+        &config::sessions_dir(),
+        &cwd,
+        &target.name,
+        &target.model,
+        old.history(),
+        title.as_deref(),
+    )?;
+    let mut next = agent::Agent::new(cfg, provider, old.readonly(), cwd.clone(), Some(writer));
+    next.splice_loaded_history(cfg, &cwd, old.history().to_vec());
+    Ok(next)
+}
+
 /// Build an agent for `name` and hand it back to the REPL.
 ///
-/// `cwd` and `readonly` are carried over from the running agent rather than
-/// re-derived, so switching provider does not silently change where commands
-/// run or drop the read-only guard.
+/// The conversation and the two things that say how commands run -- the working directory and
+/// the read-only guard -- are carried over from the running agent rather than re-derived, so
+/// switching provider does not silently change where commands run or drop the guard.
 ///
 /// This is also where engines are dealt with, because a switch is the only moment either
 /// half of that makes sense: arriving somewhere is a chance to start what is not running,
@@ -1372,8 +1424,7 @@ async fn switch_provider(
     cfg: &config::Config,
     from: Option<&str>,
     name: &str,
-    cwd: &std::path::Path,
-    readonly: bool,
+    old: &agent::Agent,
     term: &Term,
     pal: Palette,
 ) -> Result<Flow> {
@@ -1416,13 +1467,9 @@ async fn switch_provider(
     }
 
     let provider = provider::Provider::new(target.clone())?;
-    let writer = Some(session::SessionWriter::create(
-        &config::sessions_dir(),
-        cwd,
-        &target.name,
-        &target.model,
-    )?);
-    let new_agent = agent::Agent::new(cfg, provider, readonly, cwd.to_path_buf(), writer);
+    // The conversation comes with it: it is the same conversation on a different model, and the
+    // transcript above the prompt is still showing it.
+    let new_agent = continue_conversation(cfg, provider, &target, old)?;
     term.line(format_args!(
         "switched to {bold}{}{reset} ({})",
         target.name, target.model
@@ -1618,7 +1665,7 @@ async fn handle_command(
                         printer.style(GREEN, "ok")
                     ));
                     if provider_cfg.name == rest {
-                        return switch_provider(cfg, Some(&provider_cfg.name), &fallback, agent.cwd(), agent.readonly(), printer.term(), printer.pal).await;
+                        return switch_provider(cfg, Some(&provider_cfg.name), &fallback, agent, printer.term(), printer.pal).await;
                     }
                 }
 
@@ -1639,7 +1686,7 @@ async fn handle_command(
                         target.name,
                         config::config_path().display()
                     ));
-                    return switch_provider(cfg, Some(&provider_cfg.name), &target.name, agent.cwd(), agent.readonly(), printer.term(), printer.pal).await;
+                    return switch_provider(cfg, Some(&provider_cfg.name), &target.name, agent, printer.term(), printer.pal).await;
                 }
 
                 _ => {
@@ -1662,8 +1709,7 @@ async fn handle_command(
                         cfg,
                         Some(&provider_cfg.name),
                         &target.name,
-                        agent.cwd(),
-                        agent.readonly(),
+                        agent,
                         printer.term(),
                         printer.pal,
                     )
@@ -1715,19 +1761,7 @@ async fn handle_command(
                 let mut target = provider_cfg.clone();
                 target.model = arg.to_string();
                 let provider = provider::Provider::new(target.clone())?;
-                let writer = Some(session::SessionWriter::create(
-                    &config::sessions_dir(),
-                    agent.cwd(),
-                    &target.name,
-                    &target.model,
-                )?);
-                let new_agent = agent::Agent::new(
-                    cfg,
-                    provider,
-                    agent.readonly(),
-                    agent.cwd().clone(),
-                    writer,
-                );
+                let new_agent = continue_conversation(cfg, provider, &target, agent)?;
                 // Persisted as well as applied: the next run should use it, which is
                 // what the old hint was promising the user they had to do by hand.
                 cfg.upsert_provider(target.clone());
@@ -2025,9 +2059,6 @@ async fn handle_command(
             // all and no sign that anything was wrong: the REPL looked normal, and the
             // answers just got worse.
             new_agent.splice_loaded_history(cfg, &cwd, loaded.messages);
-            if let Some(viewer) = viewer.as_mut() {
-                viewer.follow(new_agent.session_path());
-            }
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -2055,17 +2086,7 @@ async fn handle_command(
             *cfg = fresh;
             let provider = provider::Provider::new(target.clone())?;
             *provider_cfg = target.clone();
-            let writer = Some(session::SessionWriter::create(
-                &config::sessions_dir(),
-                agent.cwd(),
-                &provider_cfg.name,
-                &provider_cfg.model,
-            )?);
-            let new_agent =
-                agent::Agent::new(cfg, provider, agent.readonly(), agent.cwd().clone(), writer);
-            if let Some(viewer) = viewer.as_mut() {
-                viewer.follow(new_agent.session_path());
-            }
+            let new_agent = continue_conversation(cfg, provider, &target, agent)?;
             let state = if target.resolved_key().trim().is_empty()
                 && !is_local_endpoint(&target.base_url)
             {
@@ -2154,11 +2175,6 @@ async fn handle_command(
             )?);
             let new_agent =
                 agent::Agent::new(cfg, provider, agent.readonly(), agent.cwd().clone(), writer);
-            // Before the browser is told, so a page that re-reads on the `reset` reads the
-            // file this run is about to write rather than the one it just left.
-            if let Some(viewer) = viewer.as_mut() {
-                viewer.follow(new_agent.session_path());
-            }
             printer.term().line(format_args!("started a new session"));
             return Ok(Flow::NewAgent(new_agent, provider_cfg.clone()));
         }

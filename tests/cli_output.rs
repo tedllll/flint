@@ -1800,3 +1800,426 @@ fn wait_for_exit(child: &mut std::process::Child, secs: u64) -> bool {
         }
     }
 }
+
+/// Drive one of the commands that rebuilds the agent, and report what the model was sent.
+///
+/// The conversation is driven a step at a time. The line *after* a switch is only interesting
+/// if the line before it had already been sent, so the test waits for the request rather than
+/// for a stopwatch -- the stub's own record of what it received says when that happened, and a
+/// sleep would be a guess about a machine this test does not control.
+///
+/// Returns the terminal text, the session files as (name, contents), and every request body.
+async fn through_a_switch(
+    server: &MockServer,
+    tag: &str,
+    config: &str,
+    command: &str,
+) -> (String, Vec<(String, String)>, Vec<String>) {
+    use std::io::Write;
+
+    let home = test_home(tag, &server.uri());
+    std::fs::write(home.join("config.toml"), config).expect("failed to write the test config");
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("working directory");
+    let sessions = home.join("sessions");
+    write_session(
+        &sessions,
+        "111-1.jsonl",
+        &[
+            &meta_line("111-1"),
+            r#"{"type":"chat","message":{"role":"user","content":"the earlier question"}}"#,
+            r#"{"type":"chat","message":{"role":"assistant","content":"the earlier answer"}}"#,
+        ],
+        10,
+    );
+
+    let mut child = binary()
+        .current_dir(&work)
+        .env("FLINT_HOME", &home)
+        .env("FLINT_TERM_CAPTURE", "1")
+        .env("FLINT_TERM_SIZE", "100x24")
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to run flint");
+    {
+        let stdin = child.stdin.as_mut().expect("no stdin handle");
+        // By id, not by list number: this run opened a session of its own at startup, and
+        // that one is the newest.
+        stdin
+            .write_all(b"/resume 111-1\nthe question in this run\n")
+            .expect("failed to write stdin");
+    }
+
+    wait_for_requests(server, 1).await;
+    {
+        let stdin = child.stdin.as_mut().expect("no stdin handle");
+        stdin
+            .write_all(format!("{command}\nand now?\n").as_bytes())
+            .expect("failed to write stdin");
+    }
+    let out = child.wait_with_output().expect("flint did not finish");
+
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let bodies = server
+        .received_requests()
+        .await
+        .expect("requests")
+        .iter()
+        .map(|request| String::from_utf8_lossy(&request.body).to_string())
+        .collect();
+    let files = std::fs::read_dir(&sessions)
+        .expect("the sessions directory")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| {
+            (
+                entry.file_name().to_string_lossy().to_string(),
+                std::fs::read_to_string(entry.path()).unwrap_or_default(),
+            )
+        })
+        .collect();
+    let _ = std::fs::remove_dir_all(&home);
+    (text, files, bodies)
+}
+
+/// Wait until the stub has received `n` requests, without blocking the runtime it runs on.
+async fn wait_for_requests(server: &MockServer, n: usize) {
+    for _ in 0..200 {
+        let seen = server
+            .received_requests()
+            .await
+            .map(|requests| requests.len())
+            .unwrap_or(0);
+        if seen >= n {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("the stub was sent fewer than {n} requests, so the run stopped somewhere unexpected");
+}
+
+/// What every one of these commands owes the conversation.
+///
+/// `says` is the word the command prints when it worked. Without it a run that refused the
+/// switch -- a typo in a model name, a provider that is not there -- would pass this by never
+/// making the request the rest of it is about.
+///
+/// The conversation has to survive in two places, and they are not the same place. What the
+/// model is sent is the context; the file is what survives the process. A fix that kept one and
+/// not the other would look complete from either end alone.
+fn the_switch_kept_the_conversation(
+    text: &str,
+    says: &str,
+    command: &str,
+    files: &[(String, String)],
+    bodies: &[String],
+) {
+    assert!(
+        text.contains(says),
+        "`{command}` did not switch anything, so this proves nothing: {text:?}"
+    );
+    assert_eq!(
+        bodies.len(),
+        2,
+        "expected one request before the switch and one after it: {bodies:?}"
+    );
+    let after = sent_messages(&bodies[1]);
+    for needle in [
+        "the earlier question",
+        "the earlier answer",
+        "the question in this run",
+        "and now?",
+    ] {
+        assert!(
+            after.contains(needle),
+            "`{command}` lost {needle:?} from what the model is sent: {after}"
+        );
+    }
+
+    // The conversation has to be *in a file*, and in one that holds all of it: a switch that
+    // only fixed the request would leave a conversation that a restart cannot recover, and
+    // `/resume` is the only way back to one.
+    let (name, written) = files
+        .iter()
+        .find(|(name, text)| name != "111-1.jsonl" && text.contains("the earlier question"))
+        .unwrap_or_else(|| {
+            panic!("`{command}` carried the conversation into no new session file: {files:?}")
+        });
+    for needle in [
+        "the earlier question",
+        "the earlier answer",
+        "the question in this run",
+        "and now?",
+    ] {
+        assert!(
+            written.contains(needle),
+            "the file `{command}` started is missing {needle:?}: {name}"
+        );
+    }
+}
+
+/// The messages out of a request body, so a failure reads as a conversation.
+///
+/// The body also carries every tool schema, which is a screenful per tool and says nothing about
+/// what this is asserting.
+fn sent_messages(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("messages").map(|messages| messages.to_string()))
+        .unwrap_or_else(|| body.to_string())
+}
+
+/// The config `test_home` writes, as a string, for the tests that need to change it.
+fn stub_config(uri: &str) -> String {
+    format!(
+        "default_provider = \"stub\"\n\n\
+         [[providers]]\n\
+         name = \"stub\"\n\
+         base_url = \"{uri}\"\n\
+         model = \"stub-model\"\n\
+         api_key = \"not-a-real-key\"\n"
+    )
+}
+
+/// Switching model must not throw the conversation away.
+///
+/// Measured before it was fixed: `/resume` a file holding a question and an answer, `/model
+/// <other>`, then one line -- and the request that went out had two messages, the system
+/// prompt and the new line. The command builds a fresh agent around the new model, and a fresh
+/// agent has an empty history and a new session file, so everything said before it was gone
+/// from the request *and* from the file while the transcript on screen went on showing it.
+#[tokio::test]
+async fn a_model_switch_keeps_the_conversation() {
+    let server = MockServer::start().await;
+    answer_once(&server).await;
+    let config = format!(
+        "default_provider = \"stub\"\n\n\
+         [[providers]]\n\
+         name = \"stub\"\n\
+         base_url = \"{}\"\n\
+         model = \"stub-model\"\n\
+         models = [\"stub-other\"]\n\
+         api_key = \"not-a-real-key\"\n",
+        server.uri()
+    );
+
+    let (text, files, bodies) =
+        through_a_switch(&server, "model-switch-keeps", &config, "/model stub-other").await;
+    let named = files
+        .iter()
+        .find(|(_, text)| text.contains(r#""model":"stub-other""#))
+        .map(|(name, _)| name.clone());
+
+    the_switch_kept_the_conversation(
+        &text,
+        "model stub-other",
+        "/model stub-other",
+        &files,
+        &bodies,
+    );
+    // The file the conversation moved into has to name the model it is being continued with:
+    // `Meta` is what `/resume` believes about which model a session was held with.
+    assert!(
+        named.is_some(),
+        "the conversation was carried into a file that names a different model: {files:?}"
+    );
+}
+
+/// The same guarantee through `/provider`, which is the other way to reach it.
+///
+/// Both commands end in `switch_provider`, and the test is separate because they do not reach
+/// it by the same route: `/provider` also starts and stops local engines, and it is the one the
+/// help text points at for changing endpoints.
+#[tokio::test]
+async fn a_provider_switch_keeps_the_conversation() {
+    let server = MockServer::start().await;
+    answer_once(&server).await;
+    let config = format!(
+        "default_provider = \"stub\"\n\n\
+         [[providers]]\n\
+         name = \"stub\"\n\
+         base_url = \"{uri}\"\n\
+         model = \"stub-model\"\n\
+         api_key = \"not-a-real-key\"\n\n\
+         [[providers]]\n\
+         name = \"other\"\n\
+         base_url = \"{uri}\"\n\
+         model = \"stub-model\"\n\
+         api_key = \"not-a-real-key\"\n",
+        uri = server.uri()
+    );
+
+    let (text, files, bodies) =
+        through_a_switch(&server, "provider-switch-keeps", &config, "/provider other").await;
+
+    the_switch_kept_the_conversation(&text, "switched to other", "/provider other", &files, &bodies);
+    assert!(
+        files
+            .iter()
+            .any(|(_, text)| text.contains(r#""provider":"other""#)),
+        "the conversation was carried into a file that names a different provider: {files:?}"
+    );
+}
+
+/// And through `/reload`, which is the one the model is told to use.
+///
+/// The system prompt tells the model to run `/reload` after editing its own config, so this is
+/// the route a conversation is most likely to be destroyed by -- and it destroyed it for no
+/// reason at all, since a reload changes nothing about the conversation.
+#[tokio::test]
+async fn a_reload_keeps_the_conversation() {
+    let server = MockServer::start().await;
+    answer_once(&server).await;
+    let config = stub_config(&server.uri());
+
+    let (text, files, bodies) =
+        through_a_switch(&server, "reload-keeps", &config, "/reload").await;
+
+    the_switch_kept_the_conversation(&text, "reloaded", "/reload", &files, &bodies);
+}
+
+/// The page follows the file the run is writing, through a switch as well.
+///
+/// Every command that replaces the agent also gives it a session file of its own, and the view
+/// has to be told which one: it is the file `/session` serves and the one the feed tails.
+/// `/new` and `/resume` said so; `/model` and `/provider` -- the two the page's own pickers
+/// reach -- did not, so the view stayed on a file nobody was writing and simply stopped moving.
+///
+/// `/session` serves the followed file **byte for byte**, which makes the assertion a sharp one:
+/// the line typed after the switch is in the new file and in no other.
+#[tokio::test]
+async fn the_view_follows_the_conversation_through_a_switch() {
+    use std::io::Write;
+
+    let server = MockServer::start().await;
+    answer_once(&server).await;
+    let home = test_home("view-follows", &server.uri());
+    let config = format!(
+        "default_provider = \"stub\"\n\n\
+         [[providers]]\n\
+         name = \"stub\"\n\
+         base_url = \"{}\"\n\
+         model = \"stub-model\"\n\
+         models = [\"stub-other\"]\n\
+         api_key = \"not-a-real-key\"\n",
+        server.uri()
+    );
+    std::fs::write(home.join("config.toml"), config).expect("failed to write the test config");
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("working directory");
+    write_session(
+        &home.join("sessions"),
+        "111-1.jsonl",
+        &[
+            &meta_line("111-1"),
+            r#"{"type":"chat","message":{"role":"user","content":"the earlier question"}}"#,
+        ],
+        10,
+    );
+
+    // The transcript goes to a file rather than a pipe: the URL has to be read while the
+    // process is still running, and this is where it is printed.
+    let log = home.join("transcript.txt");
+    let mut child = binary()
+        .arg("--web")
+        .current_dir(&work)
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::fs::File::create(&log).expect("transcript file"))
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to run flint");
+
+    let (port, token) = port_and_token(&wait_for_url(&log));
+    {
+        let stdin = child.stdin.as_mut().expect("no stdin handle");
+        stdin
+            .write_all(b"/resume 111-1\nthe question in this run\n")
+            .expect("failed to write stdin");
+    }
+    wait_for_requests(&server, 1).await;
+    {
+        let stdin = child.stdin.as_mut().expect("no stdin handle");
+        stdin
+            .write_all(b"/model stub-other\nand now?\n")
+            .expect("failed to write stdin");
+    }
+    // The second request means the turn after the switch is under way, so the switch itself has
+    // happened and the new file has the line in it.
+    wait_for_requests(&server, 2).await;
+
+    let served = http_get(port, "/session", &token);
+    drop(child.stdin.take());
+    let exited = wait_for_exit(&mut child, 20);
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit");
+    assert!(
+        served.contains("and now?"),
+        "the view is not following the conversation after the switch: {served:?}"
+    );
+}
+
+/// Wait for the view to print where it is, and return the URL.
+fn wait_for_url(log: &std::path::Path) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let text = std::fs::read_to_string(log).unwrap_or_default();
+        if let Some(at) = text.find("http://127.0.0.1:") {
+            // Taken character by character rather than by splitting on whitespace: the line
+            // carries colour codes when the terminal is not asked to drop them.
+            let url: String = text[at..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || ":/?=&._-".contains(*c))
+                .collect();
+            if url.contains("token=") {
+                return url;
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("the view never printed a URL: {text:?}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+/// The port and the token out of the URL the view prints.
+fn port_and_token(url: &str) -> (u16, String) {
+    let after = url
+        .strip_prefix("http://127.0.0.1:")
+        .unwrap_or_else(|| panic!("not the view's URL: {url}"));
+    let (port, rest) = after.split_once('/').unwrap_or_else(|| panic!("no path in {url}"));
+    let port: u16 = port.parse().unwrap_or_else(|_| panic!("no port in {url}"));
+    let token = rest
+        .split_once("token=")
+        .unwrap_or_else(|| panic!("no token in {url}"))
+        .1
+        .to_string();
+    (port, token)
+}
+
+/// GET one route from the view and return the body.
+///
+/// The token goes in `X-Flint-Token` and never in the query string: `/` is the one route that
+/// accepts it there, because `/` is the one a person pastes into a browser. A token in a query
+/// string travels into `Referer` headers and logs, which is why no other route will read one.
+fn http_get(port: u16, route: &str, token: &str) -> String {
+    use std::io::{Read, Write};
+
+    let mut sock = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect to the view");
+    write!(
+        sock,
+        "GET {route} HTTP/1.1\r\nhost: 127.0.0.1:{port}\r\nX-Flint-Token: {token}\r\n\
+         connection: close\r\n\r\n"
+    )
+    .expect("write the request");
+    let mut raw = Vec::new();
+    sock.read_to_end(&mut raw).expect("read the response");
+    let text = String::from_utf8_lossy(&raw).to_string();
+    text.split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_string())
+        .unwrap_or(text)
+}

@@ -490,30 +490,49 @@ answer that stopped mid-sentence says what happened better than a note would. Bo
 covered, and both are gated end to end by a test that is red without the call
 (`a_stopped_turn_keeps_the_answer_it_drew`, `a_steered_turn_keeps_the_answer_it_drew`).
 
-**Next, measured and not fixed: `/model`, `/provider` and `/reload` throw the conversation away.**
-Same stub, same session: `/resume <id>` on a file holding a question and an answer, then
-`/model <other>`, then one message -- and the request that goes out has **two** messages, the system
-prompt and the new line. All three commands build a fresh `agent::Agent` with an empty history and a
-*new* session file (`switch_provider`, `/model` and `/reload` in `main.rs`), while the transcript on
-screen keeps showing the conversation they dropped. It is the same complaint through a different
-door, and it is reachable from the browser the moment §8 puts a model picker on the page -- worse
-there, because the page's transcript can outlive the context that produced it.
+**Second: `/model`, `/provider` and `/reload` throw the conversation away — fixed, same day.**
+Found while measuring the item above, and it is the same complaint through a different door:
+`/resume` a file holding a question and an answer, `/model <other>`, then one line -- and the
+request that goes out has **two** messages, the system prompt and the new line. All three commands
+build a fresh `agent::Agent`, and a fresh agent has an empty history and a session file of its own,
+so everything said before the switch was gone from the request *and* from the session directory
+while the transcript on screen went on showing it. Nothing failed and nothing said so. It is
+reachable from the browser the moment §8 puts a model picker on the page -- worse there, because
+the page's transcript outlives the context that produced it.
 
-The design decision it needs before it needs code, which is why it is written down rather than
-attempted: does the conversation continue in the **same file**, or in a **new one seeded with it**?
+**The shape it took, of the two written down here before it was built: a new file seeded with the
+conversation.** `SessionWriter::seed` writes a `meta` naming the provider and model the
+conversation is being *continued* with, then every message in hand except the system prompt (which
+is rebuilt for every run, and a copy in the file would come back through `/resume` as a stale
+message), then the conversation's name if it had one. `continue_conversation` in `main.rs` puts the
+history back through `splice_loaded_history` -- the same route `/resume` takes and for the same
+reason. Nothing was added to the session format: the file is an ordinary session that happens to
+begin with a conversation already in it.
 
-- *Same file* is the cheapest: the history is already in memory, so only the `Provider` changes. But
-  `meta` names the provider and model at creation and `/resume` trusts it, so the switch has to be
-  recorded -- a new session event, a line in `docs/session-format.md`, and `session::load` applying
-  the last one. A format addition for something a user expects to be invisible.
-- *A new file seeded with the old messages* needs nothing new in the format: the file keeps naming
-  the model that was in force for the part it holds, and what is written is a copy of what is
-  already in memory. It is the same operation as the `--fork` item under "small, agreed,
-  unscheduled", which is that operation with a flag on it.
+- The road not taken was to keep appending to the *same* file, which is cheaper by one file write.
+  It is rejected because `meta` names the provider and model a session is held with, and `load`,
+  `/resume` and the session header all believe it: carrying on in the old file leaves it claiming a
+  model that nothing has been sent to since. Recording the switch instead means a new session
+  event, a line in `docs/session-format.md` and a rule in `load` -- a format addition for something
+  the user expects to be invisible.
+- **One consequence, accepted rather than fixed**: the read-before-mutate gate lives in the tool
+  box, so after a switch the model can be told to read a file it read a moment before the switch.
+  That is one extra read with the reason in the message; the alternative was throwing the
+  conversation away, and the gate exists to catch flint being wrong about a file, not to remember
+  what was read.
+- **The page follows the conversation now too.** The viewer was pointed at the new file by `/new`
+  and `/resume` only, so `/model` and `/provider` -- the two the page's own pickers reach -- left it
+  tailing a file nobody was writing, and the page simply stopped moving. The call moved into the one
+  place that swaps the agent (`Flow::NewAgent` in the REPL), which is where the next command that
+  replaces an agent gets it for free. Gated end to end by
+  `the_view_follows_the_conversation_through_a_switch`, which reads `/session` -- the route that
+  serves the followed file byte for byte.
 
-The second looks right, and it needs one measurement before it is called cheap: what copying a
-multi-megabyte conversation costs, and whether the seeded file should be written through
-`SessionWriter` (a new constructor) or by copying the file and appending a second `meta`.
+The tests are the other half of the record: `a_model_switch_keeps_the_conversation`,
+`a_provider_switch_keeps_the_conversation` and `a_reload_keeps_the_conversation` drive one command
+each and then assert that the *next request* carries the whole conversation and that a file holding
+all of it exists. All three were watched red first, failing on precisely that: the body was
+`[system, "and now?"]`.
 
 **And a smaller hole in the same family, measured by accident and left alone on purpose.** A line
 that is already waiting in the channel when a turn starts is taken as an interrupt *before the turn
@@ -524,7 +543,7 @@ no request at all. The fix is a turn polled once before the input channel is rea
 would be a race with the reader thread rather than an assertion, so it wants the two lines that make
 it structural rather than a gate over a 2ms window.
 
-**Second: a stop button in the composer**, shown only while a turn is in flight, sending
+**Third: a stop button in the composer**, shown only while a turn is in flight, sending
 `sendText("/stop")` — no new route and no new verb, because the composer's route already carries
 lines and `/stop` is a line. The server should follow a stop with a status frame so the page
 settles rather than staying half-streamed; codex's tracker has that lesson twice

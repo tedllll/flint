@@ -195,6 +195,14 @@ impl Agent {
         }
     }
 
+    /// The conversation as it stands.
+    ///
+    /// For the code that has to carry it into a *new* agent: `/model`, `/provider` and
+    /// `/reload` all replace the agent wholesale, and a replacement starts empty.
+    pub fn history(&self) -> &[Message] {
+        &self.history
+    }
+
     pub fn history_mut(&mut self) -> &mut Vec<Message> {
         &mut self.history
     }
