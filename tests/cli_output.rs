@@ -1132,17 +1132,30 @@ fn a_port_without_web_is_refused() {
 ///
 /// The start command leaves a file, and the endpoint is a port nothing is listening on, so
 /// the wait ends in a second rather than in a model load.
+///
+/// Two things here have to be written for both platforms, and both were wrong the first time
+/// this ran on Windows: the start command goes through the platform's shell, so it is spelled
+/// in the one language `cmd /C` and `sh -c` agree on (`echo`), and the marker path is a TOML
+/// **literal** string. In a basic string a Windows path is a parse error rather than a path --
+/// `C:\Users` is read as a unicode escape, and flint refuses the whole config with "too few
+/// unicode value digits". That is TOML being TOML, not a flint bug, but a test that writes a
+/// path by `display()` has to know it.
 #[cfg(debug_assertions)]
 #[test]
 fn switching_provider_runs_the_engines_start_command() {
     let home = test_home("engine-switch", "http://127.0.0.1:1/v1");
     let marker = home.join("the-engine-was-started");
+    let (shell, shell_args) = if cfg!(windows) {
+        ("cmd", "[\"/C\"]")
+    } else {
+        ("sh", "[\"-c\"]")
+    };
     std::fs::write(
         home.join("config.toml"),
         format!(
             "default_provider = \"stub\"\n\
-             shell = \"sh\"\n\
-             shell_args = [\"-c\"]\n\
+             shell = \"{shell}\"\n\
+             shell_args = {shell_args}\n\
              \n\
              [[providers]]\n\
              name = \"stub\"\n\
@@ -1155,7 +1168,7 @@ fn switching_provider_runs_the_engines_start_command() {
              base_url = \"http://127.0.0.1:9/v1\"\n\
              api_key = \"x\"\n\
              model = \"something\"\n\
-             start = \"touch {marker}\"\n\
+             start = 'echo started > {marker}'\n\
              start_timeout_secs = 1\n",
             marker = marker.display()
         ),

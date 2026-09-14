@@ -146,7 +146,7 @@ fn known_engine(provider: &ProviderConfig) -> Option<Known> {
         "ollama" => Some(Known {
             needs: "ollama",
             start: "ollama serve".to_string(),
-            stop: Some("pkill -f 'ollama serve'".to_string()),
+            stop: Some(stop_for("ollama", "ollama serve")),
         }),
         "mlx" | "mlx-lm" | "mlxlm" if !model.is_empty() => Some(Known {
             needs: "mlx_lm.server",
@@ -157,7 +157,7 @@ fn known_engine(provider: &ProviderConfig) -> Option<Known> {
                 "mlx_lm.server --host 127.0.0.1 --port {port} --model {}",
                 shell_word(model)
             ),
-            stop: Some("pkill -f 'mlx_lm.server'".to_string()),
+            stop: Some(stop_for("mlx_lm.server", "mlx_lm.server")),
         }),
         "llamacpp" | "llama-server" | "llamacpp-server" if !model.is_empty() => Some(Known {
             needs: "llama-server",
@@ -165,7 +165,7 @@ fn known_engine(provider: &ProviderConfig) -> Option<Known> {
                 "llama-server -m {} --host 127.0.0.1 --port {port}",
                 shell_word(model)
             ),
-            stop: Some("pkill -f 'llama-server'".to_string()),
+            stop: Some(stop_for("llama-server", "llama-server")),
         }),
         _ => None,
     }
@@ -177,9 +177,17 @@ fn port_of(base_url: &str) -> Option<u16> {
 }
 
 /// Quote a value for the shell if it needs it.
+///
+/// The two shells disagree about which quote character quotes: `'` is an ordinary character to
+/// `cmd`, so a single-quoted Windows path is a path with a quote in it. A Windows file name
+/// cannot contain `"` at all, which is what makes the double quote total here — the value this
+/// is ever handed is a model path.
 fn shell_word(text: &str) -> String {
     if text.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:+".contains(c)) {
-        text.to_string()
+        return text.to_string();
+    }
+    if cfg!(windows) {
+        format!("\"{text}\"")
     } else {
         format!("'{}'", text.replace('\'', "'\\''"))
     }
@@ -339,30 +347,63 @@ pub async fn shut_down(
 
 /// Start it in the background, through a shell, and return as soon as the shell has forked.
 ///
+/// The output goes to a file rather than to flint's terminal: the engine keeps printing after
+/// flint has moved on, and a background process writing to a terminal that is being repainted
+/// would tear the layout apart. When a start fails, this file is the only place the reason
+/// exists.
+///
+/// That file is handed over as an open handle rather than named in the command with
+/// `>> file 2>&1`, and the engine is detached by not waiting rather than with `&`. Both of
+/// those are shell *syntax*, and flint's two shells do not agree about either one: `cmd` has no
+/// `&` at all, and it reads a single-quoted path as part of the name, so `>> 'C:\...\log'` is
+/// not a redirection to it but a file that cannot exist. Handing over a handle removes the
+/// second reader instead of escaping for it.
+///
 /// Backgrounded rather than held as a child for the reason in the module comment: the two
-/// natural ways to write a launcher need opposite treatment, and `&` is the one form that
-/// satisfies both. The engine ends up owned by the system rather than by flint, which is what
-/// it should be — it outlives any one conversation, and a long-lived flint is not a service
-/// manager.
+/// natural ways to write a launcher need opposite treatment, and never waiting is the one form
+/// that satisfies both. The engine ends up owned by the system rather than by flint, which is
+/// what it should be — it outlives any one conversation, and a long-lived flint is not a
+/// service manager.
 fn spawn(command: &str, config: &Config, log: &Path) -> Result<()> {
     let shell = crate::tools::probe_shell(&config.shell, &config.shell_args);
     let (program, args) = shell.split_first().expect("probe_shell always names a program");
-    // The output goes to a file rather than to flint's terminal: the engine keeps printing
-    // after flint has moved on, and a background process writing to a terminal that is being
-    // repainted would tear the layout apart. When a start fails, this file is the only place
-    // the reason exists.
-    let script = format!("{command} >> {} 2>&1 &", quote(log));
-    let status = std::process::Command::new(program)
-        .args(args)
-        .arg(&script)
-        .status()
+
+    // Opened before the spawn, so that a log flint cannot write is an error about the log
+    // rather than a start that failed with nowhere to say why. Appended, because an engine's
+    // output from the run before this one is the context for this one.
+    let open = |path: &Path| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .with_context(|| format!("cannot write the engine log {}", path.display()))
+    };
+    let out = open(log)?;
+    let err = out
+        .try_clone()
+        .with_context(|| format!("cannot write the engine log {}", log.display()))?;
+
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args)
+        .arg(command)
+        // A server has no business reading flint's keyboard: it would take keystrokes meant
+        // for the prompt. On Windows it matters twice, because a child that inherits the
+        // console shares it with whatever is drawing on it.
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(out))
+        .stderr(std::process::Stdio::from(err));
+
+    let child = cmd
+        .spawn()
         .with_context(|| format!("cannot run `{command}`"))?;
-    if !status.success() {
-        return Err(anyhow!(
-            "the start command for the engine exited with {status}: `{command}` (output in {})",
-            log.display()
-        ));
-    }
+
+    // Never waited on, but reaped: a launcher that `nohup`s and exits leaves a zombie behind
+    // for as long as flint lives, and one thread per engine start is cheaper than a process
+    // table slowly filling with them.
+    std::thread::spawn(move || {
+        let mut child = child;
+        let _ = child.wait();
+    });
     Ok(())
 }
 
@@ -398,12 +439,19 @@ fn safe_name(provider: &str) -> String {
         .collect()
 }
 
-/// Single-quote a path for the shell.
+/// The command that stops a recognised engine.
 ///
-/// Inside single quotes the shell reads everything literally, so the only character that
-/// needs care is a single quote itself, which is closed, escaped and reopened.
-fn quote(path: &Path) -> String {
-    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+/// Neither shell has the other's way to say "the process running this". `pkill -f` matches
+/// against the command line, and Windows has no `pkill`; `taskkill /IM` matches against the
+/// image name instead, which for these engines is the same program spelled the way Windows
+/// spells it. Both are as broad as their pattern: the switch says the command before it runs
+/// it, which is what makes a broad match something the user can see and object to.
+fn stop_for(image: &str, pattern: &str) -> String {
+    if cfg!(windows) {
+        format!("taskkill /IM {image}.exe /F")
+    } else {
+        format!("pkill -f '{pattern}'")
+    }
 }
 
 #[cfg(test)]
@@ -534,11 +582,19 @@ mod tests {
     }
 
     /// A path with a space has to survive being put in a command.
+    ///
+    /// The expected string is written per platform because that *is* the assertion: the point
+    /// is not that a space gets quoted but that it is quoted the way the shell in use reads it.
     #[test]
     fn a_model_path_is_quoted_when_it_needs_to_be() {
         assert_eq!(shell_word("/Users/me/model"), "/Users/me/model");
-        assert_eq!(shell_word("/Users/me/my model"), "'/Users/me/my model'");
-        assert_eq!(shell_word("it's"), r#"'it'\''s'"#);
+        if cfg!(windows) {
+            assert_eq!(shell_word(r"C:\models\my model.gguf"), r#""C:\models\my model.gguf""#);
+            assert_eq!(shell_word("it's"), "\"it's\"");
+        } else {
+            assert_eq!(shell_word("/Users/me/my model"), "'/Users/me/my model'");
+            assert_eq!(shell_word("it's"), r#"'it'\''s'"#);
+        }
     }
 
     #[test]
@@ -548,11 +604,53 @@ mod tests {
         assert_eq!(port_of("not a url"), None);
     }
 
-    /// A stop command is quoted like any other path, and a path with a quote in it survives.
+    /// The stop command is written in the shell that will read it.
+    ///
+    /// Asserted per platform rather than around it: `pkill -f` reaching `cmd` is not a command
+    /// that fails, it is a program `cmd` has never heard of, and a switch that cannot stop an
+    /// engine is a machine that holds the memory until somebody reboots it.
     #[test]
-    fn the_log_path_is_single_quoted() {
-        assert_eq!(quote(Path::new("/tmp/a b.log")), "'/tmp/a b.log'");
-        assert_eq!(quote(Path::new("/tmp/it's.log")), r#"'/tmp/it'\''s.log'"#);
+    fn a_stop_command_speaks_the_shell_that_will_read_it() {
+        let expected = if cfg!(windows) {
+            "taskkill /IM ollama.exe /F"
+        } else {
+            "pkill -f 'ollama serve'"
+        };
+        assert_eq!(stop_for("ollama", "ollama serve"), expected);
+    }
+
+    /// The engine's output has to land in its log, and the log's path must never be part of a
+    /// command string.
+    ///
+    /// This is the Windows defect written down as a test. The spawn used to build
+    /// `{command} >> 'C:\...\engine.log' 2>&1 &`, and none of that means to `cmd` what it means
+    /// to `sh`: a single-quoted path with a colon in it is not a redirection target at all, so
+    /// the start command never ran and the log that the failure message pointed at was never
+    /// created. `echo` is the one command both shells agree on.
+    #[test]
+    fn a_started_engine_writes_its_output_to_the_log() {
+        let log = std::env::temp_dir().join(format!("flint-engine-log-{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&log);
+        let config = Config::default();
+
+        spawn("echo engine is starting", &config, &log).expect("the spawn itself must work");
+
+        // The command is deliberately not waited on, so the file appears whenever the child
+        // gets round to it; the deadline is what keeps that from being a race.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut seen = String::new();
+        while std::time::Instant::now() < deadline {
+            seen = std::fs::read_to_string(&log).unwrap_or_default();
+            if seen.contains("engine is starting") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let _ = std::fs::remove_file(&log);
+        assert!(
+            seen.contains("engine is starting"),
+            "the engine's output never reached the log: {seen:?}"
+        );
     }
 
     /// Which provider a log belongs to, as a file name.
