@@ -417,6 +417,80 @@ pub fn probe_shell(program: &str, args: &[String]) -> Vec<String> {
     argv
 }
 
+/// A program to run, the arguments to run it with, and the one string that cannot be one.
+///
+/// `raw` is for a program that parses a command *line* rather than an argument list: it cannot
+/// be handed the command as an ordinary argument, so it gets it here instead, appended
+/// verbatim. Public because it is what [`run_program_streaming`] takes; both callers that run
+/// a command string build it with `shell_invocation`, so the runner and the engine launcher
+/// cannot disagree about `cmd`.
+pub struct Invocation {
+    pub program: String,
+    pub args: Vec<String>,
+    pub raw: Option<String>,
+}
+
+impl Invocation {
+    /// A program and its arguments, with nothing that has to arrive verbatim.
+    ///
+    /// This is what `exec` is: no shell, and therefore no shell's quoting rules to satisfy.
+    pub fn plain(program: &str, args: Vec<String>) -> Self {
+        Invocation {
+            program: program.to_string(),
+            args,
+            raw: None,
+        }
+    }
+}
+
+/// Decide how a command string reaches the shell.
+///
+/// `cmd.exe` is not a program that takes an argument list. It takes a command line, parsed by
+/// its own rules, and std quotes arguments the C runtime's way — so a command containing a
+/// double quote, which is most of them, reached cmd with a backslash in front of every quote,
+/// and a quoted path failed outright. Measured on this machine, as an ordinary argument and
+/// then through `/S /C` with the string appended verbatim:
+///
+/// | command | ordinary argument | `/S /C` and verbatim |
+/// |---|---|---|
+/// | `echo "hello"` | `\"hello\"` | `"hello"` |
+/// | `dir /b "C:\Windows\System32\drivers\etc"` | "The filename, directory name, or volume label syntax is incorrect." | a listing |
+/// | `echo one > "%TEMP%\f" && type "%TEMP%\f"` | the same error | `one` |
+/// | `echo bad ^& rm` | `bad & rm` | `bad & rm` |
+///
+/// `/S` is the part that makes it exact: it says the quotes around the rest are the shell's
+/// own delimiters, to strip them and use what is between them as written. Without it cmd
+/// applies its quote-stripping heuristics and decides for itself where the command ends.
+///
+/// A POSIX shell needs none of this: `sh -c "the command"` takes the string as one argument,
+/// and the kernel keeps it whole.
+pub(crate) fn shell_invocation(config: &Config, command: &str) -> Invocation {
+    let shell = probe_shell(&config.shell, &config.shell_args);
+    let (program, shell_args) = shell.split_first().expect("probe_shell always names a program");
+    let program = program.clone();
+    let mut args: Vec<String> = shell_args.to_vec();
+
+    #[cfg(windows)]
+    if program_stem(&program) == "cmd" {
+        // `/S` first: everything after `/C` is what it applies to.
+        if !args.iter().any(|a| a.eq_ignore_ascii_case("/s")) {
+            args.insert(0, "/S".to_string());
+        }
+        return Invocation {
+            program,
+            args,
+            raw: Some(format!("\"{command}\"")),
+        };
+    }
+
+    args.push(command.to_string());
+    Invocation {
+        program,
+        args,
+        raw: None,
+    }
+}
+
 /// The arguments that make a given shell run a command string and exit.
 fn default_args_for(program: &str) -> Vec<String> {
     let stem = std::path::Path::new(program)
@@ -692,25 +766,11 @@ pub async fn run_command_streaming(
     timeout_secs: u64,
     idle_kill: bool,
 ) -> Result<CommandOutcome> {
-    let shell = probe_shell(&config.shell, &config.shell_args);
-    let (program, shell_args) = shell
-        .split_first()
-        .expect("probe_shell always names a program");
-    let mut argv: Vec<String> = shell_args.to_vec();
-    argv.push(command.to_string());
+    let run = shell_invocation(config, command);
     // No context is wrapped around the result: `killed after 120s` does not need to be
     // prefixed with the shell that was running it, and a spawn that fails already names
     // the program it could not start.
-    run_program_streaming(
-        config,
-        program,
-        &argv,
-        None,
-        cwd,
-        timeout_secs,
-        idle_kill,
-    )
-    .await
+    run_program_streaming(config, &run, None, cwd, timeout_secs, idle_kill).await
 }
 
 /// What a person would call this command: the program, then its arguments.
@@ -745,19 +805,36 @@ fn label_of(program: &str, argv: &[String]) -> String {
 /// The label is derived from the argv rather than passed in, and `stdin` is the one payload
 /// that cannot be an argument: a document, a JSON body or a regex belongs on the child's
 /// standard input, where nothing re-parses it on the way.
+///
+/// `run.raw` is a command string that must reach the program **verbatim**, with no quoting
+/// added, for the one program that reads a command line instead of an argument list. It comes
+/// from [`shell_invocation`], which is where the argument for it lives.
 pub async fn run_program_streaming(
     config: &Config,
-    program: &str,
-    argv: &[String],
+    run: &Invocation,
     stdin: Option<&str>,
     cwd: &Path,
     timeout_secs: u64,
     idle_kill: bool,
 ) -> Result<CommandOutcome> {
-    let label = label_of(program, argv);
+    let Invocation {
+        program,
+        args,
+        raw,
+    } = run;
+    let label = label_of(program, args);
     let label = label.as_str();
     let mut cmd = tokio::process::Command::new(program);
-    cmd.args(argv);
+    cmd.args(args);
+    #[cfg(windows)]
+    if let Some(raw) = raw.as_deref() {
+        use std::os::windows::process::CommandExt;
+        // On the std command, because that is where the extension trait lives; tokio's is a
+        // wrapper around it and hands out the same handle.
+        cmd.as_std_mut().raw_arg(raw);
+    }
+    #[cfg(not(windows))]
+    let _ = raw;
     cmd.current_dir(cwd);
     // Only piped when there is something to write; `null` is the honest default, since a
     // program that waits for input on a terminal flint does not have would hang until the
@@ -1347,16 +1424,13 @@ impl Tool for ExecTool {
             ));
         }
 
-        let outcome = run_program_streaming(
-            &self.config,
-            program,
-            &argv,
-            stdin,
-            &self.cwd,
-            timeout,
-            download,
-        )
-        .await?;
+        // No shell, and therefore no shell's quoting rules to satisfy: `exec` hands over an
+        // argument list. A caller that wants shell syntax wants `bash`, whose invocation is
+        // built by `shell_invocation`.
+        let run = Invocation::plain(program, argv);
+
+        let outcome = run_program_streaming(&self.config, &run, stdin, &self.cwd, timeout, download)
+            .await?;
         Ok(util::truncate(&outcome.report, self.config.max_tool_output))
     }
 }
@@ -2687,6 +2761,68 @@ mod progress_parse_tests {
         // The tail of the output usually arrives without one, and it is where the error
         // message lives.
         assert_eq!(split_progress_lines(b"last words"), vec!["last words"]);
+    }
+}
+
+#[cfg(test)]
+mod invocation_tests {
+    use super::*;
+    use crate::config::Config;
+
+    /// A command string reaches the shell in one piece, and `cmd` gets it on its own terms.
+    ///
+    /// This is the decision that `bash` on Windows lives or dies by: std quotes an argument the
+    /// C runtime's way, and `cmd` reads a command line by its own rules, so a command with a
+    /// quote in it arrived with a backslash in front of every one. Asserted per platform,
+    /// because the difference between the two is the whole point of the function.
+    #[test]
+    fn a_command_string_is_shaped_for_the_shell_that_reads_it() {
+        let config = Config {
+            shell: if cfg!(windows) { "cmd" } else { "sh" }.to_string(),
+            shell_args: if cfg!(windows) {
+                vec!["/C".to_string()]
+            } else {
+                vec!["-c".to_string()]
+            },
+            ..Config::default()
+        };
+
+        let run = shell_invocation(&config, "echo \"hello\"");
+        assert_eq!(run.program.to_ascii_lowercase().contains("cmd"), cfg!(windows));
+
+        if cfg!(windows) {
+            assert_eq!(
+                run.args,
+                vec!["/S".to_string(), "/C".to_string()],
+                "cmd needs /S to strip the quotes around the string itself"
+            );
+            assert_eq!(
+                run.raw.as_deref(),
+                Some("\"echo \"hello\"\""),
+                "the string must be handed over verbatim, wrapped once for /S"
+            );
+            assert!(
+                !run.args.iter().any(|a| a.contains("hello")),
+                "the command must not also be passed as a normal argument"
+            );
+        } else {
+            assert_eq!(run.args, vec!["-c".to_string(), "echo \"hello\"".to_string()]);
+            assert_eq!(run.raw, None, "only cmd needs the verbatim form");
+        }
+    }
+
+    /// A shell named with `/S` already, or by its full path, is still cmd.
+    #[cfg(windows)]
+    #[test]
+    fn the_cmd_check_reads_a_path_and_does_not_double_the_flag() {
+        let config = Config {
+            shell: r"C:\Windows\System32\cmd.exe".to_string(),
+            shell_args: vec!["/S".to_string(), "/C".to_string()],
+            ..Config::default()
+        };
+        let run = shell_invocation(&config, "dir");
+        assert_eq!(run.args, vec!["/S".to_string(), "/C".to_string()]);
+        assert_eq!(run.raw.as_deref(), Some("\"dir\""));
     }
 }
 

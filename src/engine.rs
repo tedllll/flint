@@ -365,9 +365,6 @@ pub async fn shut_down(
 /// what it should be — it outlives any one conversation, and a long-lived flint is not a
 /// service manager.
 fn spawn(command: &str, config: &Config, log: &Path) -> Result<()> {
-    let shell = crate::tools::probe_shell(&config.shell, &config.shell_args);
-    let (program, args) = shell.split_first().expect("probe_shell always names a program");
-
     // Opened before the spawn, so that a log flint cannot write is an error about the log
     // rather than a start that failed with nowhere to say why. Appended, because an engine's
     // output from the run before this one is the context for this one.
@@ -383,9 +380,18 @@ fn spawn(command: &str, config: &Config, log: &Path) -> Result<()> {
         .try_clone()
         .with_context(|| format!("cannot write the engine log {}", log.display()))?;
 
-    let mut cmd = std::process::Command::new(program);
-    cmd.args(args)
-        .arg(command)
+    // The same invocation the runner builds, because a configured start command is a command
+    // string like any other: on Windows it is `cmd` that reads it, and `cmd` mangles a quoted
+    // path unless the string is handed over verbatim. See `tools::shell_invocation`.
+    let run = crate::tools::shell_invocation(config, command);
+    let mut cmd = std::process::Command::new(&run.program);
+    cmd.args(&run.args);
+    #[cfg(windows)]
+    if let Some(raw) = run.raw.as_deref() {
+        use std::os::windows::process::CommandExt;
+        cmd.raw_arg(raw);
+    }
+    cmd
         // A server has no business reading flint's keyboard: it would take keystrokes meant
         // for the prompt. On Windows it matters twice, because a child that inherits the
         // console shares it with whatever is drawing on it.

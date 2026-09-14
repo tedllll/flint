@@ -244,7 +244,64 @@ async fn shell_execution_actually_runs_the_command() {
     );
 }
 
-/// A Windows console program writes the machine's code page, and that is not UTF-8.
+/// A quoted command has to reach the shell exactly as the model wrote it.
+///
+/// `cmd.exe` takes a command line, not an argument list, and its parsing is not the C
+/// runtime's; std quotes arguments the C runtime's way. So on Windows `echo "hello"` used to
+/// come back as `\"hello\"`, and a quoted path -- an everyday thing to write -- failed with
+/// "The filename, directory name, or volume label syntax is incorrect", which reads like the
+/// path is wrong. Both cases are asserted here, because the first is the character-level
+/// damage and the second is what it costs: a command that cannot be run at all.
+#[cfg(windows)]
+#[tokio::test]
+async fn a_quoted_command_reaches_the_shell_verbatim() {
+    let config = test_config("http://unused");
+
+    let out = flint::tools::run_command_raw(&config, "echo \"hello world\"", &std::env::temp_dir(), 30)
+        .await
+        .expect("the command should run");
+    assert!(
+        out.contains("\"hello world\""),
+        "the quotes must arrive as quotes: {out:?}"
+    );
+    assert!(
+        !out.contains('\\'),
+        "a backslash was inserted in front of a quote: {out:?}"
+    );
+
+    // The system directory is one whose path nobody controls, and it exists on every Windows.
+    let out = flint::tools::run_command_raw(
+        &config,
+        "dir /b \"C:\\Windows\\System32\\drivers\\etc\"",
+        &std::env::temp_dir(),
+        30,
+    )
+    .await
+    .expect("the command should run");
+    assert!(
+        out.contains("hosts"),
+        "a quoted path must be usable, got: {out:?}"
+    );
+
+    // And a redirect into a quoted path, which is how a script writes a file.
+    let dir = std::env::temp_dir().join(format!("flint-quoted-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("written by a command.txt");
+    let command = format!(
+        "echo one > \"{}\" && type \"{}\"",
+        file.display(),
+        file.display()
+    );
+    let out = flint::tools::run_command_raw(&config, &command, &dir, 30)
+        .await
+        .expect("the command should run");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        out.contains("one"),
+        "a quoted redirect target must work, got: {out:?}"
+    );
+}
+
 ///
 /// On a machine with a Chinese locale the page is 936, so every non-ASCII character in a
 /// child's output used to arrive at the model as U+FFFD: it was shown an unreadable error
