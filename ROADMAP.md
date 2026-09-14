@@ -245,6 +245,26 @@ What step 3 still owes, and the shape of it:
   paragraph above is one of the things that goes with it: `committed` counts *rows*, which is
   why a width change has to end the segment rather than continue it.
 
+**What that rewrite has to keep**, worked out 2026-09-14 by trying to derive each piece instead
+of storing it. Two of the four cannot go, and it is worth knowing why before starting:
+
+- `segment_text` — the text as it actually *arrived* — is not `last_segment_text + stream_text`.
+  That concatenation looks right and is wrong twice over: the strip drops the leading blank space
+  when it strips a restated head, so the bought-back string is missing it, and when the strip
+  does not fire at all (a fragment that does not repeat the committed head) the concatenation
+  glues the head onto text that never followed it. It is the only record of what arrived, which
+  is what the segment-boundary test compares against.
+- `committed` — rows of the drawn text already handed to the transcript — cannot go either while
+  answers stream *into* the transcript rather than appearing in it at the end. Incremental commit
+  is the feature: it is why a long answer is readable while it arrives. So the cell model does not
+  delete the boundary, it owns it.
+
+Which makes the rewrite a consolidation rather than a deletion: one model holding the rows on the
+strip, the answer row the first of them holds, the arrival, the drawn text, the handed prefix and
+the committed count — instead of six fields behind three different locks whose invariants are
+maintained by hand across `stream`, `close_stream`, `clear_viewport` and `begin_answer`. The
+deletion the roadmap promised is the *locks and the agreeing-by-hand*, not the information.
+
 **One piece of it did come out**, 2026-09-14: `stream_rows` — the painter's memory of what is
 on the strip — used to be cleared by hand in `begin_answer` and again at a segment boundary,
 two places that had to remember, and neither of them the place that erased the rows. Clearing
