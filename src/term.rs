@@ -761,10 +761,15 @@ impl Term {
     }
 
     /// The tool finished: stop the clock.
+    ///
+    /// The activity is cleared even when there is no terminal to draw on, which is the rule
+    /// `activity_started` already follows and for the same reason: the browser behind `--web` reads
+    /// `activity_label`, so a run with piped output announced every wait it began and never
+    /// announced the end of one. The page then said what the stopped turn had been doing until it
+    /// was closed -- measured against a stub provider that hangs, with `--web` and a redirected
+    /// stdout: the last frame after `/stop` was `{"text":"writing the answer","type":"status"}`.
+    /// Only the drawing needs a terminal, and `paint_activity` checks for one itself.
     pub fn activity_done(&self) {
-        if !self.interactive {
-            return;
-        }
         *self.activity.lock().unwrap() = None;
         self.activity_shown.store(0, Ordering::Relaxed);
         self.paint_activity();

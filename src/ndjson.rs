@@ -59,6 +59,17 @@ impl Sink {
         &self.answer
     }
 
+    /// Drop the answer in flight, because it is not in flight any more.
+    ///
+    /// `Done` takes it; this is for the turn that never reaches `Done`, where an interrupt dropped
+    /// the future and somebody else committed the text to the conversation. Left here it is not
+    /// harmless: `answer_so_far` is what a reader arriving mid-turn is handed as the answer so far,
+    /// so a stopped turn's half would be read as one still being written -- and it would be joined
+    /// to the next turn's answer, since the accumulator is only ever emptied by `Done`.
+    pub fn forget_answer(&mut self) {
+        self.answer.clear();
+    }
+
     /// The line for an event, or `None` for the ones that are already fully described by
     /// another event.
     pub fn line(&mut self, event: &Event) -> Option<String> {

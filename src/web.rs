@@ -203,6 +203,21 @@ impl Live {
             .to_string()
     }
 
+    /// The answer that was in flight has been committed to the conversation.
+    ///
+    /// `Event::Done` normally drains the accumulator, and an interrupted turn never reaches it --
+    /// the future is dropped, and `Agent::commit_drawn_answer` puts the drawn text into the session
+    /// file instead. The feed has to be told the same thing, because `answer_so_far` is what a page
+    /// arriving mid-turn is handed as the answer *so far*: left alone, a stopped turn's half would
+    /// be read by the next page as an answer still being written, and the turn after it would carry
+    /// the stopped text along in its own `message.completed`.
+    pub fn answer_committed(&self) {
+        self.sink
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .forget_answer();
+    }
+
     /// One already-rendered line of the run's vocabulary, to every reader of the stream.
     ///
     /// For a frame that no `Event` produces. `turn.started` is the one, and it is the same line
@@ -2577,6 +2592,30 @@ mod snapshot_tests {
         assert!(
             !raw.contains("event: answer"),
             "the turn is over and the file has the answer: {raw}"
+        );
+    }
+
+    /// A stopped turn is over the same way, even though nothing ever reaches `Done`.
+    ///
+    /// An interrupt is a dropped future, so `message.completed` -- the thing that drains the
+    /// accumulator the snapshot reads -- never happens for it. The text that had been drawn is
+    /// committed to the conversation by `Agent::commit_drawn_answer`, and the feed is told the
+    /// same thing. Without that the next page to open would be handed a stopped half as an answer
+    /// still being written, which is the one thing a stop is supposed to end.
+    #[tokio::test]
+    async fn a_page_opened_after_a_stop_is_not_told_the_stopped_answer_is_still_arriving() {
+        let live = Live::new();
+        let window = Window::open(0, None, Some(Arc::clone(&live)))
+            .await
+            .expect("bind");
+
+        live.event(&Event::Text("half an article".to_string()));
+        live.answer_committed();
+
+        let raw = read_stream_of(&window).await;
+        assert!(
+            !raw.contains("event: answer"),
+            "the stopped answer is in the file now, not in flight: {raw}"
         );
     }
 

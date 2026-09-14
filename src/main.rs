@@ -2309,6 +2309,23 @@ fn status_done(printer: &Printer<'_>, live: Option<&web::Live>) {
     announce_status(printer, live, false);
 }
 
+/// Nothing is being waited for any more, and the turn is over.
+///
+/// The terminal clears its status row; a browser is told both facts -- the cleared status, and that
+/// the turn has ended. The second half is not cosmetic. An answer that is still arriving is closed
+/// by `message.completed`, which the agent emits when a step *finishes*, and an interrupted turn
+/// never gets there: the future was dropped. So the page that pressed stop went on showing a half
+/// answer as though it were still being written, which is the one thing a stop is supposed to end.
+///
+/// The line is the one `--json` ends a turn with, from the same function, because a second spelling
+/// of "the turn is over" is a second thing to keep in step with the first.
+fn turn_over(printer: &Printer<'_>, live: Option<&web::Live>, agent: &agent::Agent) {
+    status_done(printer, live);
+    if let Some(live) = live {
+        live.line(ndjson::turn_completed(agent.last_usage()));
+    }
+}
+
 /// What the status row now says, to whoever else is rendering this run.
 ///
 /// The words come from `Term::activity_label` and not from the caller's argument. They are
@@ -2604,18 +2621,25 @@ async fn run_turn(
         // written. Committed here, by the code that did the dropping, because the agent
         // cannot do it for itself after its future is gone.
         agent.commit_drawn_answer();
+        // ...and it is not the answer *in flight* any more, for the same reason: it is in the file.
+        // See `Live::answer_committed` -- a page opening after a stop would otherwise be handed the
+        // stopped half as an answer still being written, because `message.completed` is what
+        // normally drains that state and an interrupted turn never reaches it.
+        if let Some(live) = live {
+            live.answer_committed();
+        }
 
         // The line was not for the model, so the turn stops here rather than answering it. The
         // request in flight is dropped, which is what `Interrupt` does too -- a command is not a
         // reason to keep paying for an answer nobody is waiting for any more.
         if let Some(line) = hand_back {
-            status_done(printer, live);
+            turn_over(printer, live, agent);
             return Ok(Some(line));
         }
 
         // Whatever happened, nothing is running now: leaving a stale clock on the strip
         // would be worse than showing none.
-        status_done(printer, live);
+        turn_over(printer, live, agent);
 
         match steering {
             None => {

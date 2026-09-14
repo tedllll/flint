@@ -2223,3 +2223,115 @@ fn http_get(port: u16, route: &str, token: &str) -> String {
         .map(|(_, body)| body.to_string())
         .unwrap_or(text)
 }
+
+/// Open a route that never ends -- `/events` -- and leave the socket ready to read frames from.
+///
+/// Not `http_get`: that reads to the end of the response, and this response has no end. A live
+/// feed is read as it arrives, which is also the only way to see the order things arrived in.
+fn http_stream(port: u16, route: &str, token: &str) -> std::net::TcpStream {
+    use std::io::Write;
+
+    let mut sock = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect to the view");
+    write!(
+        sock,
+        "GET {route} HTTP/1.1\r\nhost: 127.0.0.1:{port}\r\nX-Flint-Token: {token}\r\n\
+         accept: text/event-stream\r\nconnection: keep-alive\r\n\r\n"
+    )
+    .expect("write the request");
+    sock
+}
+
+/// Read a live stream until `needle` has been seen, and return everything read so far.
+///
+/// The deadline is the point: what this waits for is a frame that a broken build never sends, so
+/// without one it would hang instead of failing -- and a test that hangs is a test nobody can read
+/// the answer from. The read timeout is what lets one thread watch the clock between reads: a
+/// timeout means "nothing yet", and a read of zero bytes means the stream ended.
+fn read_until(sock: &mut std::net::TcpStream, needle: &str, secs: u64) -> String {
+    use std::io::Read;
+
+    sock.set_read_timeout(Some(std::time::Duration::from_millis(200)))
+        .expect("set a read timeout");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    let mut seen = String::new();
+    let mut chunk = [0u8; 8192];
+    while std::time::Instant::now() < deadline {
+        match sock.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => seen.push_str(&String::from_utf8_lossy(&chunk[..n])),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(_) => break,
+        }
+        if seen.contains(needle) {
+            break;
+        }
+    }
+    seen
+}
+
+/// A turn that is stopped is over *on the page*, not only in the terminal.
+///
+/// Reported from a real session: the browser went on showing a half answer as though it were still
+/// arriving, and nothing about it ever changed again. The page closes an answer when
+/// `message.completed` arrives and an interrupted turn never reaches it -- the future is dropped --
+/// so the end of the turn has to be said separately. The button that sends the stop is checked over
+/// the page's own bytes in `tests/web_view.rs`; this is the half that needs a real process, because
+/// the frame has to come out of a run that was actually interrupted.
+#[tokio::test]
+async fn a_stopped_turn_tells_the_page_it_is_over() {
+    use std::io::Write;
+
+    let provider = HangingProvider::start("A HALF-WRITTEN ARTICLE\n");
+    let home = test_home("stop-settles-view", &provider.base_url);
+    let log = home.join("transcript.txt");
+    let mut child = binary()
+        .arg("--web")
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::fs::File::create(&log).expect("transcript file"))
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to run flint");
+
+    let (port, token) = port_and_token(&wait_for_url(&log));
+    // Watching *before* the turn starts, so what is read below is the run's own frames and not the
+    // snapshot a page gets when it arrives mid-turn.
+    let mut events = http_stream(port, "/events", &token);
+
+    let mut stdin = child.stdin.take().expect("no stdin handle");
+    stdin
+        .write_all(b"write me an article\n")
+        .expect("failed to write stdin");
+    let drawn = read_until(&mut events, "A HALF-WRITTEN ARTICLE", 20);
+    assert!(
+        drawn.contains("\"type\":\"message.delta\""),
+        "the answer never reached the page, so nothing was interrupted: {drawn:?}"
+    );
+
+    stdin.write_all(b"/stop\n").expect("failed to write stdin");
+    let settled = read_until(&mut events, "turn.completed", 20);
+    drop(stdin);
+    let exited = wait_for_exit(&mut child, 20);
+    // Read before the directory goes: when this fails, the terminal's own account of the same
+    // moment is the other half of what happened.
+    let transcript = std::fs::read_to_string(&log).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit");
+    assert!(
+        settled.contains("\"type\":\"turn.completed\""),
+        "the page was never told the stopped turn was over, so its half answer stays open. \
+         Frames: {settled:?} Terminal: {transcript:?}"
+    );
+    // And the status line ends with it. This is the same fact for a run whose stdout is not a
+    // terminal, and it was the same failure: `activity_done` cleared the activity only when there
+    // was a terminal to draw it on, so the browser was told what the stopped turn had been doing
+    // for as long as the page stayed open.
+    assert!(
+        settled.contains("\"text\":\"\",\"type\":\"status\""),
+        "the page's status line still says what the stopped turn was doing. Frames: {settled:?}"
+    );
+}
