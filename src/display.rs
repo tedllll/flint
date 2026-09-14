@@ -96,6 +96,10 @@ pub enum Verbosity {
 }
 
 impl Verbosity {
+    /// All of them, in order, for anything that offers the choice -- `/verbose`'s help text and
+    /// the page's switch both need the same list, and a list written twice is a list that drifts.
+    pub const ALL: [Verbosity; 3] = [Verbosity::Off, Verbosity::On, Verbosity::Full];
+
     /// The level the printer compares against.
     pub fn level(self) -> u8 {
         match self {

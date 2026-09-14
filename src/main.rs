@@ -2385,12 +2385,41 @@ fn state_frame(
         "type": "state",
         "provider": provider.name,
         "model": provider.model,
-        "readonly": agent.readonly(),
-        "verbose": display::Verbosity::from_level(printer.verbosity()).word(),
-        "detail": printer.tool_detail(),
+        "toggles": toggles(agent, printer),
         "providers": providers,
     })
     .to_string()
+}
+
+/// The settings a page can switch, each with the values it takes and the value it is on.
+///
+/// The same shape for all of them, and the shape is the point: `name`, `values`, `value` is
+/// everything a `<select>` needs and everything the command needs (`/<name> <value>`), so the
+/// page carries no list of its own -- not the toggles, not the words they take, not which one is
+/// on. A page with its own copy of that is a page that can offer a word the command refuses.
+///
+/// Built from the values *in force*: the printer's level, which is three-valued while the file's
+/// key is a word, and the agent's guard rather than `cfg.readonly`. Nothing secret goes in it.
+fn toggles(agent: &agent::Agent, printer: &Printer<'_>) -> serde_json::Value {
+    /// The word for a two-valued toggle. `/detail` and `/readonly` both take `on` and `off`.
+    fn on_off(on: bool) -> &'static str {
+        if on {
+            "on"
+        } else {
+            "off"
+        }
+    }
+
+    let verbose = display::Verbosity::ALL.map(|level| level.word());
+    serde_json::json!([
+        {
+            "name": "verbose",
+            "values": verbose,
+            "value": display::Verbosity::from_level(printer.verbosity()).word(),
+        },
+        { "name": "detail", "values": ["off", "on"], "value": on_off(printer.tool_detail()) },
+        { "name": "readonly", "values": ["off", "on"], "value": on_off(agent.readonly()) },
+    ])
 }
 
 /// Nothing is being waited for any more.

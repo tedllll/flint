@@ -484,6 +484,23 @@ defaulted, because that file is meant to be hand-edited. `verbose_off_is_what_th
 (the file, the run that typed it, and a second process) and `the_old_bool_for_verbose_still_reads_as_it_did`
 (both spellings, and a typo) are each red without their half.
 
+**The toggles are switches, and the frame says what they can be — built, 2026-09-14.** §8's second
+class is selectors, and its smallest members are the enumerable toggles: `/verbose on|off|full`,
+`/detail on|off`, `/readonly on|off`. The frame carries each one in the shape a `<select>` wants and
+the command needs — a name, the values that name takes, and the value in force — so the page holds
+no list of its own: not the toggles, not the words they take, and not which one is on. That is the
+difference between a switch that tells the truth and one that lies, and it is why the words had to
+stop being a `bool` in the file first. A switch sends `/<name> <value>` — the terminal's own line —
+through the same `sendText` as everything else, and a refused send puts it back to the value in
+force. A two-valued toggle is a two-valued switch, and a switch with only one value is disabled
+rather than hidden, so it still says what is in force. Measured end to end in
+`the_page_is_told_the_state_its_controls_would_show`, which now posts `/verbose full` over the
+route the switch uses and reads the new value back off the feed; `the_toggles_are_switches_that_show_their_value`
+is the page's policy (drawn from `toggle.name`/`values`/`value`, one line per change), and the page's
+Node check runs the real `showToggles` over the stub DOM. What is left of the selector class is what
+is not a setting: `/resume <n|id>`, which the sidebar already composes, `/skills <n|name>`, and the
+sidebar rows' `/archive <n>` and `/delete <n>`, which belong with the confirmation step.
+
 **First: the read channel — built, 2026-09-14, which is the piece every control below waits
 for.** The event stream grew the `state` frame: the provider and model in force, the configured
 providers and the models each offers (through `ProviderConfig::choices`, the same function

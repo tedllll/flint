@@ -2536,6 +2536,16 @@ async fn the_page_is_told_the_state_its_controls_would_show() {
     let answered = post_message(port, &token, "/model stub-other");
     let changed = read_until(&mut watching, "\"model\":\"stub-other\"", 20);
 
+    // A switch, over the same route: the page sends `/<name> <value>` -- `/verbose full` here --
+    // and what it is told afterwards is the value in force. The three things a switch needs are
+    // the name, the values that name takes and the value it is on, and the page carries none of
+    // them: it is handed all three, which is what keeps a switch from offering a word the
+    // command refuses.
+    let switched = post_message(port, &token, "/verbose full");
+    // The value, not the whole object: a JSON object's key order is serde's business, and a test
+    // that pinned it would fail on a change that means nothing to the page.
+    let told = read_until(&mut watching, "\"value\":\"full\"", 20);
+
     // And a page that opens *now* -- a second subscriber with no backlog at all, so what it is
     // sent can only be the snapshot.
     let mut later_page = http_stream(port, "/events", &token);
@@ -2570,6 +2580,19 @@ async fn the_page_is_told_the_state_its_controls_would_show() {
     assert!(
         changed.contains("\"model\":\"stub-other\""),
         "the page was not told the state changed after its own command: {changed:?}"
+    );
+    assert!(
+        opening.contains("\"name\":\"verbose\"") && opening.contains("\"values\":[\"off\",\"on\",\"full\"]"),
+        "the state does not carry a toggle as a name and the values that name takes, which is \
+         what a switch is drawn from and what the page must not carry a copy of: {opening:?}"
+    );
+    assert!(
+        switched.starts_with("HTTP/1.1 202"),
+        "the line a switch sends was not accepted: {switched:?}"
+    );
+    assert!(
+        told.contains("\"name\":\"verbose\"") && told.contains("\"value\":\"full\""),
+        "a switch was not told the value it had just set: {told:?}"
     );
     assert!(
         late.contains("\"type\":\"state\"") && late.contains("\"model\":\"stub-other\""),

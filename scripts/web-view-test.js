@@ -364,6 +364,45 @@ check("a warning and an error read differently", () => {
   eq(d.blocks.map((b) => b.level), ["warning", "error"], "levels");
 });
 
+// A toggle is a switch that shows its current value rather than a button that blind-toggles, and
+// the value it shows has to be the one the *run* is on -- not the one the file last held, and not
+// one this page remembers. So the names, the values a toggle can take and the value it is on all
+// come from the frame, and the page adds nothing of its own: `/verbose` takes off|on|full today,
+// and a second copy of that list here is how a switch comes to offer a word the command refuses.
+check("each toggle in the frame becomes a switch showing what is in force", () => {
+  const d = viewer.newDoc();
+  viewer.applyState(d, JSON.stringify({
+    type: "state", provider: "stub", model: "stub-model",
+    providers: [{ name: "stub", models: ["stub-model"] }],
+    toggles: [
+      { name: "verbose", values: ["off", "on", "full"], value: "full" },
+      { name: "detail", values: ["off", "on"], value: "off" },
+    ],
+  }));
+
+  const box = viewer.__node("toggles");
+  eq(box.children.length, 2, "one switch per toggle");
+  eq(box.children.map((l) => l.children[0].textContent), ["verbose", "detail"], "named for the command they send");
+  const switches = box.children.map((l) => l.children[1]);
+  eq(switches[0].children.map((o) => o.value), ["off", "on", "full"], "the values the command takes");
+  eq(switches[0].value, "full", "the value in force");
+  eq(switches[1].children.map((o) => o.value), ["off", "on"], "and the two-valued one");
+  eq(switches[1].value, "off", "showing off, which a bare on/off button could not");
+});
+
+check("a state frame with no toggles in it takes the switches away", () => {
+  const d = viewer.newDoc();
+  viewer.applyState(d, JSON.stringify({
+    type: "state", provider: "stub", model: "stub-model", providers: [],
+    toggles: [{ name: "verbose", values: ["off", "on", "full"], value: "on" }],
+  }));
+  eq(viewer.__node("toggles").children.length, 1, "a switch while the frame lists one");
+  // An older or narrower frame: the switches must go rather than stay behind showing values that
+  // nothing is reporting any more.
+  viewer.applyState(d, JSON.stringify({ type: "state", provider: "stub", model: "stub-model", providers: [] }));
+  eq(viewer.__node("toggles").children.length, 0, "none listed, none shown");
+});
+
 console.log("where the lines come from");
 
 check("the token is read out of the URL that --web printed", () => {

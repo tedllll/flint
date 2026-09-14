@@ -556,7 +556,7 @@ Node check, which runs the real `paint` over a stub DOM and reads the button bac
 assertion that failed there was `doc.running` being `undefined`, which is what a page that has never
 heard of a turn's end looks like from the inside.
 
-### The read channel, and the first two controls — measured, 2026-09-14
+### The read channel, and the controls drawn from it — measured, 2026-09-14
 
 `ROADMAP.md` §8 orders the work: the page sends the command *line*, so what it needs first is a
 read channel — the options a control would offer. The page may not read `config.toml` for them, and
@@ -575,12 +575,14 @@ way as everything else in this section, against a real `--web` process:
 | A page that opens later is told it | a *second* `/events` connection, after the state had already been announced | carried from the snapshot. A client with no cursor is not replayed the ring at all, so on connect is the only chance it gets |
 | The page can change it | `POST /message` with `/model stub-other`, the route the picker uses | the feed carried `"model":"stub-other"` a moment later: the command the picker composes is the terminal's own, and the frame describes the run that command made |
 | The pickers are drawn right | the page's real `applyState` under Node, over the stub DOM | options in, the value in force selected, a single-option picker disabled. The case that needed care: a current value the frame does not list — a provider's own `model` is offered by `/model` whether or not it is repeated in `models` — where a `<select>` keeps its first option and would then *send* it |
+| A setting can be switched from the page | `POST /message` with `/verbose full`, the line the switch composes | the feed carried `"name":"verbose"…"value":"full"` a moment later. The frame carries each toggle as a name, the values that name takes and the value in force, so the page holds no list of its own — not the toggles, not the words, and not which one is on |
+| The switches are drawn right | `showToggles` under Node, over the stub DOM | one labelled switch per toggle in the frame, each holding that toggle's values with the value in force selected; a frame with no toggles in it removes them rather than leaving values behind that nothing is reporting |
 
-**Not yet measured in a browser**, and it is the next thing to look at: the two pickers were
-checked as *behaviour* (which options, which value, what a change sends) and as bytes (the markup
-starts hidden, one line per picker, the frame applied where it arrives), but nobody has looked at
-the header with a real font, or used a picker with a keyboard. Everything in this section that says
-"measured" means a process and a socket; §9 step 7 is still the rule for the rest.
+**Not yet measured in a browser**, and it is the next thing to look at: the controls were checked as
+*behaviour* (which options, which value, what a change sends) and as bytes (the markup starts
+hidden, one line per control, the frame applied where it arrives), but nobody has looked at the
+header with a real font, or used a picker or a switch from the keyboard. Everything in this section
+that says "measured" means a process and a socket; §9 step 7 is still the rule for the rest.
 
 The command list is deliberately not in the frame yet: it belongs with the buttons and panels that
 read it, and an action's *output* has to reach the transcript in the same round — `printer.term()`

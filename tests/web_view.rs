@@ -331,6 +331,49 @@ fn the_pickers_offer_the_runs_own_commands() {
     );
 }
 
+/// A toggle is a switch that shows its value, and the value it shows comes from the run.
+///
+/// §8 again, and the failure mode is specific: a control built from a list the page carries is a
+/// control that can offer a word the command refuses, or show a value the run is not on. Three
+/// of them matter here -- `/verbose on|off|full`, `/detail on|off` and `/readonly on|off` -- and
+/// the page knows none of those words: it is handed a name, the values that name takes and the
+/// value in force, and sends `/<name> <value>`. That is one command line, spelling and all, which
+/// is the rule the whole of §8 rests on.
+#[test]
+fn the_toggles_are_switches_that_show_their_value() {
+    // The markup has to have somewhere to put them, inside the controls a state frame reveals.
+    let controls = from("<div class=\"controls\" id=\"controls\" hidden>", 8);
+    assert!(
+        controls.contains("id=\"toggles\""),
+        "the header has nowhere to draw the switches: {controls}"
+    );
+
+    // Built from the frame, not from a table in the page.
+    let built = from("function showToggles(doc)", 12);
+    for (needed, why) in [
+        ("toggle.name", "the command a switch sends"),
+        ("toggle.values", "the values that command takes"),
+        ("toggle.value", "the value in force"),
+    ] {
+        assert!(
+            built.contains(needed),
+            "the switches are not drawn from the frame's `{needed}` ({why}): {built}"
+        );
+    }
+
+    // And what a change sends is the terminal's own line, composed from those two.
+    let handler = from("select.addEventListener(\"change\"", 3);
+    assert!(
+        handler.contains("sendText(\"/\" + toggle.name + \" \" + e.target.value)"),
+        "a switch must send the command it is named after: {handler}"
+    );
+    assert_eq!(
+        handler.matches("sendText(").count(),
+        1,
+        "a switch sends exactly one thing: {handler}"
+    );
+}
+
 /// A conversation archived or deleted in the terminal has to leave the sidebar.
 ///
 /// Reported from a real session: history tidied in the terminal and the page still offering it.

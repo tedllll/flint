@@ -7,9 +7,9 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 364 passing, 1 ignored (252 lib, 1 in
+As of the commit that carries this file, `cargo test` is 365 passing, 1 ignored (252 lib, 1 in
 the binary's own tests, 33 `agent_loop`, 39 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
-`term_capture` plus the ignored cost measurement, 11 `web_view`), `cargo clippy --all-targets` is
+`term_capture` plus the ignored cost measurement, 12 `web_view`), `cargo clippy --all-targets` is
 silent, and both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
 
 **This round was on Windows** (10.0.26200, AMD64, rustc 1.98.1, PowerShell 5.1.26100.6584 as
@@ -243,23 +243,51 @@ refused. The header stops printing the model and provider itself once a state is
 pickers say it and offer the alternatives, and the same fact twice, one copy unchangeable, reads as
 two facts. A dropped file still gets it from the session's `meta`.
 
+### The toggles are switches now — the rest of §8's selector class
+
+**Drawn from the frame, not from the page.** Each toggle arrives as a name, the values that name
+takes and the value in force — `{name, values, value}` — which is everything a `<select>` needs and
+everything the command needs (`/<name> <value>`), so the page carries no list of its own: not the
+toggles, not the words they take, and not which one is on. That is the shape that keeps a switch
+from offering a word the command refuses, and it is why `/verbose`'s three-valued file key had to
+come first: a switch drawn from a `bool` would have shown a value the file could not keep.
+
+Three switches: `verbose` (off|on|full), `detail` (on|off) and `readonly` (on|off). A change sends
+`/verbose full` or `/detail on` through `sendText` — the terminal's own line — and a refused send
+puts the switch back to the value in force. A switch with only one value is disabled rather than
+hidden, because it still has something to say. The `readonly` switch is here rather than in the
+destructive class on purpose: the composer can already type `/readonly off` today, so the switch is
+no new power over the run — and after this round's first discovery it is the one setting most worth
+being able to *see*.
+
+`showToggles` rebuilds the row when a state frame arrives, which is only when something actually
+changed, and removes it when a frame carries no toggles at all — a switch showing a value nothing
+reports any more is worse than no switch. Gates: the end-to-end test posts `/verbose full` over the
+route the switch uses and reads the new value back off the feed; `the_toggles_are_switches_that_show_their_value`
+is the page's policy (drawn from `toggle.name`/`values`/`value`, exactly one line per change, and it
+was watched red by hard-coding `/verbose` in the handler); and the page's Node check runs the real
+`showToggles` over the stub DOM, including the frame-with-no-toggles case.
+
 **Not in the frame yet, deliberately: the command list.** It belongs with the buttons and panels
 that read it, and that round also has to carry an action's *output* to the transcript — `printer.term()`
 is drawn in the terminal and exists nowhere else. The frame grows one consumer at a time.
 
-**Not measured yet: the pickers in a browser.** They are pinned as behaviour (`applyState` over the
-stub DOM in `scripts/web-view-test.js`) and as bytes (`the_pickers_offer_the_runs_own_commands`), and
+**Not measured yet: the controls in a browser.** They are pinned as behaviour (`applyState`,
+`fillSelect` and `showToggles` over the stub DOM in `scripts/web-view-test.js`) and as bytes
+(`the_pickers_offer_the_runs_own_commands`, `the_toggles_are_switches_that_show_their_value`), and
 the frame end to end (`the_page_is_told_the_state_its_controls_would_show`, which reads `/events` on
-connect, sends `/model stub-other` to `POST /message`, and then opens a *second* stream, which can
-only have been handed the snapshot). Nobody has looked at the header with a real font or used a
-picker from the keyboard; `docs/web-mode.md` §11 says so in the same words.
+connect, sends `/model stub-other` and `/verbose full` to `POST /message`, and then opens a *second*
+stream, which can only have been handed the snapshot). Nobody has looked at the header with a real
+font, or used a picker or a switch from the keyboard; `docs/web-mode.md` §11 says so in the same
+words.
 
 ### Still owed on the page
 
-- **`ROADMAP.md` §8's remaining controls**, in the order it gives: the read channel is built, so what
-  is left is buttons for the no-argument actions, the toggles as switches that show their value,
-  forms (`/name`, `/provider key`, `/provider add`, `/config edit`), and a confirmation step for the
-  destructive ones. The command list joins the `state` frame with the buttons that read it, and
+- **`ROADMAP.md` §8's remaining controls**, in the order it gives: the read channel, the pickers and
+  the toggles are built, so what is left is buttons for the no-argument actions, forms (`/name`,
+  `/provider key`, `/provider add`, `/config edit`), a confirmation step for the destructive ones,
+  and the selector-shaped commands that are not settings (`/resume`, `/skills`, `/archive`, `/delete`
+  from the sidebar rows). The command list joins the `state` frame with the buttons that read it, and
   command *output* reaching the transcript is the other half of the same item.
 - The small queued-line hole above still wants its two structural lines before a test can hold it.
 

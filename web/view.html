@@ -89,6 +89,10 @@
   }
   .controls select:hover:enabled { border-color: var(--user); }
   .controls select:disabled { color: var(--dim); cursor: default; }
+  /* The toggles, drawn from the frame rather than written here: each is a label, the command's
+     own name, and a select of the values that command takes. */
+  .toggle { display: inline-flex; align-items: baseline; gap: 5px; }
+  .toggle-name { color: var(--dim); font-size: 12.5px; }
   .meta { color: var(--dim); font-size: 12.5px; word-break: break-all; }
   .meta span { margin-right: 14px; white-space: nowrap; }
   /* Two columns: the conversations on the left, this one on the right. A grid rather than
@@ -292,6 +296,8 @@
       <div class="controls" id="controls" hidden>
         <select id="pick-provider" title="the provider this run is using"></select>
         <select id="pick-model" title="the model this run is using"></select>
+        <!-- Where the switches go, drawn from the frame: see `showToggles`. -->
+        <span id="toggles"></span>
       </div>
       <div class="meta" id="meta"></div>
     </header>
@@ -753,6 +759,36 @@ function fillSelect(select, options, current) {
   select.disabled = named.length < 2;
 }
 
+/// The toggles the run reports, as one switch each: a name, and the values that name takes.
+///
+/// Built from the frame rather than written into this page, and that is the difference between a
+/// switch that tells the truth and one that lies. `/verbose` takes `off`, `on` and `full` today;
+/// a page carrying its own copy of that list offers a word the command may refuse, and a page
+/// deciding for itself what "on" means shows a run that is not the one in front of it. The frame
+/// says the name, the values and the value in force, and the switch sends `/<name> <value>` --
+/// the terminal's own command, composed the same way every other control here composes one.
+///
+/// Rebuilt when a state frame arrives, which is only when something has actually changed: a
+/// `<select>` rebuilt on every paint would close under whoever was choosing from it.
+function showToggles(doc) {
+  const box = document.getElementById("toggles");
+  if (!box) return;
+  while (box.firstChild) box.removeChild(box.firstChild);
+  const toggles = doc.state && Array.isArray(doc.state.toggles) ? doc.state.toggles : [];
+  for (const toggle of toggles) {
+    if (!toggle || typeof toggle.name !== "string") continue;
+    const select = el("select", "");
+    fillSelect(select, toggle.values || [], toggle.value);
+    select.addEventListener("change", async (e) => {
+      if (!(await sendText("/" + toggle.name + " " + e.target.value))) showState(doc);
+    });
+    const label = el("label", "toggle");
+    label.appendChild(el("span", "toggle-name", toggle.name));
+    label.appendChild(select);
+    box.appendChild(label);
+  }
+}
+
 /// Draw the header's controls from `doc.state`, or hide them when there is no state to draw.
 ///
 /// Separate from applying a frame so that a refused send can put the controls back to what is in
@@ -763,6 +799,9 @@ function showState(doc) {
   if (!controls) return;
   const state = doc.state;
   controls.hidden = !state;
+  // Before the early return: a state that has gone away has to take its switches with it, and
+  // leaving them behind would leave a control showing a value nothing is reporting any more.
+  showToggles(doc);
   if (!state) return;
   const providers = Array.isArray(state.providers) ? state.providers : [];
   const named = providers.filter((p) => p && typeof p.name === "string");
@@ -1629,6 +1668,7 @@ if (typeof module !== "undefined" && module.exports) {
     newDoc, applyLine, applyText, applyEvent, tokenFromSearch, servedByFlint, sseFrames,
     sessionsFrom, messageBody, resumeLine, streamingAnswer, carryStreaming, setStreamingAnswer,
     paint, feedTrouble, tokenRefused, feedTrace, debugFeed, applyState, showState, fillSelect,
+    showToggles,
   };
 }
 </script>
