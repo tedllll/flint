@@ -493,8 +493,10 @@ section into it, so the two do not drift. The shape of it now:
    `stream_text` — written in `stream` (the pair of stores that record what is being drawn) and
    taken in `close_stream` with `mem::take`; `segment_text` — read and written in `stream` only
    (the segment-boundary origin); `last_segment_text` — cleared in `begin_answer`, borrowed as a
-   guard across the head-strip in `stream`, appended to in `close_stream`; `stream_rows` — swapped
-   in `stream`, cleared in `clear_viewport`; `stream_first` and `committed` — read and written in
+   guard across the head-strip in `stream`, appended to in `close_stream`; `stream_rows` and
+   `stream_first` — **already merged**, they are the `rows`/`first` pair inside `Mutex<Strip>`
+   (one lock, taken as a pair in `stream`, cleared in `clear_viewport`), which leaves the three
+   text records and the two counters below; `committed` — read and written in
    `stream`, reset in `begin_answer`, read in `close_stream`. Two of those sites hold a guard
    across a region rather than a statement: the head-strip borrow in `stream` (it ends before the
    `close_stream` call below it, which is why there is no deadlock today) and the `push_str` in

@@ -291,6 +291,21 @@ fn activity_words(name: &str) -> String {
     }
 }
 
+/// The answer strip's memory of itself: the rows the last frame drew into it, and which
+/// answer row the first of those rows held.
+///
+/// One lock, because a frame needs the pair to agree. The row index is what says how far
+/// the window slid and the rows are what is on them, so reading the two separately can pair
+/// one frame's index with the next frame's rows -- and a slide that never happened is a
+/// whole block's worth of wrong cells, not a cosmetic difference.
+#[derive(Default)]
+struct Strip {
+    /// The rows the last frame drew, in screen order.
+    rows: Vec<String>,
+    /// The answer row `rows[0]` was drawn from; zero when the strip is empty.
+    first: u16,
+}
+
 /// What is running right now.
 struct Activity {
     /// The tool name, or empty while the model is thinking rather than running one.
@@ -373,16 +388,13 @@ pub struct Term {
     /// It stops at `history_bottom`, because that is where a newline scrolls the region:
     /// beyond that the screen moves rather than the cursor.
     history_row: AtomicU16,
-    /// Where the last frame's visible slice began, so the rows it used and this frame
-    /// does not can be cleared.
-    stream_first: AtomicU16,
-    /// The rows the last frame drew into the answer strip.
+    /// What the last frame drew into the strip, and the answer row its first row held.
     ///
-    /// Needed to erase the tail of rows that have just got shorter. Clearing the
+    /// The rows are needed to erase the tail of rows that have just got shorter. Clearing the
     /// whole row instead is what caused the answer to repeat its first line: a row
     /// filled to the exact width leaves the cursor in the *next* row, so the erase
     /// lands on a row that has not been drawn yet.
-    stream_rows: Mutex<Vec<String>>,
+    strip: Mutex<Strip>,
     /// What is running right now, and since when.
     ///
     /// A tool can take minutes -- a build, a package download, a hung network call --
@@ -437,8 +449,7 @@ impl Term {
             history_row: AtomicU16::new(1),
             segment_text: Mutex::new(String::new()),
             last_segment_text: Mutex::new(String::new()),
-            stream_rows: Mutex::new(Vec::new()),
-            stream_first: AtomicU16::new(0),
+            strip: Mutex::new(Strip::default()),
             activity: Mutex::new(None),
             cwd: Mutex::new(String::new()),
             activity_shown: AtomicU16::new(0),
@@ -517,8 +528,7 @@ impl Term {
             history_row: AtomicU16::new(1),
             segment_text: Mutex::new(String::new()),
             last_segment_text: Mutex::new(String::new()),
-            stream_rows: Mutex::new(Vec::new()),
-            stream_first: AtomicU16::new(0),
+            strip: Mutex::new(Strip::default()),
             activity: Mutex::new(None),
             cwd: Mutex::new(String::new()),
             activity_shown: AtomicU16::new(0),
@@ -1229,8 +1239,17 @@ impl Term {
         let visible = &rows[first.min(rows.len())..];
         let start = top + capacity.saturating_sub(visible.len() as u16);
         let mut out = self.sink();
-        let previous = std::mem::take(&mut *self.stream_rows.lock().unwrap());
-        let previous_first = self.stream_first.swap(first as u16, Ordering::Relaxed) as usize;
+        // One lock for the pair. The index says how far the window slid and the rows say what
+        // is on them, so taking them separately could pair this frame's index with the last
+        // frame's rows -- and a slide reported that never happened moves a whole block of
+        // cells in the terminal, not one.
+        let (previous, previous_first) = {
+            let mut strip = self.strip.lock().unwrap();
+            (
+                std::mem::take(&mut strip.rows),
+                std::mem::replace(&mut strip.first, first as u16) as usize,
+            )
+        };
 
         let previous_drawn = previous.len();
         // A row the previous frame drew starts where its slice started, which is the top
@@ -1333,7 +1352,7 @@ impl Term {
                 //
                 // Nothing else writes inside the strip between frames: `insert_history`
                 // scrolls only the region above it, and `clear_viewport` clears
-                // `stream_rows` along with the rows it erases.
+                // `strip.rows` along with the rows it erases.
                 Some(previous_row) if previous_row == line => {}
                 Some(previous_row) => {
                     // The common case by far: the row kept its head and grew at the end.
@@ -1383,7 +1402,7 @@ impl Term {
         let _ = write!(out, "\x1b[?25l");
         let _ = out.flush();
         // Remember this frame, so the next one knows what it has to shorten.
-        *self.stream_rows.lock().unwrap() = visible.iter().map(|s| s.to_string()).collect();
+        self.strip.lock().unwrap().rows = visible.iter().map(|s| s.to_string()).collect();
         self.redraw();
     }
 
@@ -1488,7 +1507,7 @@ impl Term {
     /// `── 0s read ──` on its way past.
     ///
     /// Emptying the painter's memory of those rows is part of the erasing rather than a
-    /// separate chore for each caller. `stream_rows` describes what is *on* the strip, so
+    /// separate chore for each caller. `strip.rows` describes what is *on* the strip, so
     /// rows that have just been cleared are rows it can no longer speak for: a frame that
     /// believed them still there would write only the differences and leave blank whatever
     /// the caller erased. It used to be cleared by hand in `begin_answer` and at a segment
@@ -1503,7 +1522,7 @@ impl Term {
             let _ = write!(out, "\x1b[{};1H\x1b[2K", row);
         }
         let _ = out.flush();
-        self.stream_rows.lock().unwrap().clear();
+        self.strip.lock().unwrap().rows.clear();
     }
 
     /// Put the prompt and the current input back on the reserved row.
