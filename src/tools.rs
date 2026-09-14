@@ -1624,7 +1624,10 @@ impl Tool for PwshTool {
          is a real file that can be read and run again. Use this for Windows management \
          (services, registry, WMI/CIM, Hyper-V, event logs) where the equivalent command \
          line would be unreadable; use `exec` when one program with arguments is enough. \
-         Refused in readonly mode: a script is arbitrary code and flint cannot judge one."
+         Refused in readonly mode: a script is arbitrary code and flint cannot judge one. \
+         On Windows PowerShell 5.1 (the version is stated in your instructions) `>` and \
+         `Out-File` write UTF-16LE, which the `read` tool will show as a file of NUL bytes: \
+         write files with `Set-Content -Encoding utf8` instead."
     }
 
     fn schema(&self) -> Value {
