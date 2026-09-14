@@ -149,7 +149,12 @@
   #sessions li.current .label { color: var(--user); }
   #sessions .none, #sessions .waiting { color: var(--dim); cursor: default; padding: 7px 14px; }
   .pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-  main { padding: 14px 18px 40px; max-width: 110ch; flex: 1; overflow-y: auto; }
+  /* The scroll container is the whole pane, and the *reading* width is capped inside it. The cap
+     used to be on this element, which left the transcript's scrollbar sitting in the middle of a
+     wide window with a dead strip of background to its right: a scrollbar belongs at the edge of
+     what you are scrolling, and what you are scrolling is the window. */
+  main { padding: 14px 18px 40px; flex: 1; overflow-y: auto; }
+  #doc { max-width: 110ch; }
   /* The composer is a row rather than a fixed element: it sits under the transcript, so a
      scrollbar belongs to the transcript and not to the whole window. */
   #composer {
@@ -247,7 +252,7 @@
   <input type="file" id="file" accept=".jsonl,.json,application/jsonl,text/plain" hidden>
 </div>
 
-    <main id="transcript"><p class="empty">Nothing loaded yet.</p></main>
+    <main id="transcript"><div id="doc"><p class="empty">Nothing loaded yet.</p></div></main>
     <!-- Typing goes through the same channel the keyboard does, so a slash command works from
          here too -- `/resume 3` below is that and nothing more. Enter sends, Shift+Enter is a
          newline, because a pasted block is a message the same way it is in the terminal. -->
@@ -819,7 +824,7 @@ function paint(doc) {
     }
   }
 
-  const root = document.getElementById("transcript");
+  const root = document.getElementById("doc");
   // Read before anything is touched. "Was the reader at the bottom" is the question the page
   // has to answer for itself, and it is answered here because this is the last moment the old
   // layout exists. Measured: with no such handling the transcript stayed pinned at the top
@@ -1005,7 +1010,9 @@ function load(whole) {
   // paint would compare revisions across two different documents and keep stale nodes --
   // which is the one way this optimisation can be *wrong* rather than merely slow.
   painted = [];
-  document.getElementById("transcript").textContent = "";
+  // The transcript's *content*, not the scroll container: the container spans the pane so that
+  // its scrollbar sits at the window's edge, and the reading width is capped inside it.
+  document.getElementById("doc").textContent = "";
   doc.rev = fresh.rev;
   paint(doc);
   document.getElementById("drop").hidden = true;
