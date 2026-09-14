@@ -109,11 +109,11 @@ chcp
 `936` (or anything that is not `65001`) means the console is not in UTF-8 mode, which is
 section 3 below.
 
-### What was measured — `MEASURED`, and the effect is still unobserved
+### What was measured — `MEASURED`, and the prediction is wrong
 
-The premise is now measured rather than reasoned about, on the console flint inherits
-(10.0.26200, the session that finished `docs/windows-tooling.md`). `GetConsoleMode` on
-`CONOUT$`, through the same handle chain a console application gets:
+The premise, on the console flint inherits (10.0.26200, the session that finished
+`docs/windows-tooling.md`). `GetConsoleMode` on `CONOUT$`, through the same handle chain a
+console application gets:
 
 ```
 mode = 0x0007
@@ -124,7 +124,8 @@ mode = 0x0007
 ```
 
 So the bit this section is about is **clear**, which is the Windows default, and crossterm
-never sets it (the `VERIFIED` grep above). The risk is live on this machine.
+never sets it (the `VERIFIED` grep above). A fresh console is the same: `0x0007`, the bit
+clear, VT already on.
 
 Two corrections for anyone repeating the measurement, both of which cost time here:
 
@@ -137,13 +138,33 @@ Two corrections for anyone repeating the measurement, both of which cost time he
   buffer. crossterm's `ansi_support.rs` sets it, so an earlier interactive run is the likely
   cause — the mode is shared state, like the code page in §3.
 
-**What is still not observed is the effect**: a row that ends at the last column advancing
-*two* rows. Observing it needs a real terminal to look at, or a headless pseudoconsole
-(`CreatePseudoConsole`) to read a screen buffer from. Both were out of reach in that
-session: the console inherited by a tool call is the user's own visible PowerShell window,
-and writing test bytes into somebody's window is not a measurement anybody asked for. The
-prediction stands, the fix below is unchanged, and the honest label for the *effect* is
-still `UNVERIFIED` even though the bit that causes it is measured.
+**And then the effect was measured too, in a private console** — `FreeConsole`, `AllocConsole`,
+`ShowWindow(SW_HIDE)` — so that no test bytes went into anybody's window. Position the cursor at
+the last column of a 120-wide row, write, and read the cursor back, with the bit cleared and
+then set, through both `WriteConsoleW` and `WriteConsoleA` (flint writes bytes, so the byte path
+is the one that matters; both agree):
+
+```
+bit clear | width   then LF    | before=119,0  after=0,1
+bit clear | width   then CRLF  | before=119,0  after=0,1
+bit SET   | width   then LF    | before=119,0  after=119,1
+bit SET   | width   then CRLF  | before=119,0  after=0,1
+```
+
+**There is no double advance.** With the bit clear — the default, and what flint gets — a
+linefeed at the last column lands on the next row *and at column 0*: the newline already
+includes the carriage return, exactly as this section says. What it does **not** do is advance
+two rows, so `insert_history`'s `\r\n` is one row, and the same one row the bare `\n` would
+have given. The accounting this section worried about is not broken by the default.
+
+The interesting case turns out to be the opposite one. With the bit **set**, a bare `\n` at the
+last column stays in the last column (119,1) and only wraps when the *next* character is
+written — Unix behaviour — while `\r\n` still lands at (0,1). So flint's `\r\n` is correct under
+both settings, and the thing that would break is code relying on `\n` alone. There is some of
+that in flint's rendering, but nobody has to touch it because the default is the safe setting.
+
+So: **the premise is real, the consequence is not**, and option 2 below is not needed for this
+reason. That is worth stating plainly because the section above argued for it at length.
 
 ### The two ways to fix it
 
@@ -193,13 +214,15 @@ The surprise is the screen buffer:
 screen buffer = 126x29, window 126x29, cursor 0,0
 ```
 
-**The buffer is exactly the window size, so there is no scrollback.** That is not the conhost
-default (120x9001, with scrollbars); it is this window's own configuration, or a newer
-default. It matters because `insert_history` is built around a scroll region and Windows'
-scrollback: on a buffer with no history rows, the arithmetic that decides how much can be
-scrolled has nothing to work with, and the region behaves differently from the machine the
-layout was designed on. Not a defect on its own — flint reads the size rather than assuming
-one — but the next person measuring a layout problem should know that on this machine
+**The buffer is exactly the window size, so there is no scrollback** — and that is not a
+quirk of this one window: a *fresh* console allocated for the experiment in §1 came up
+`120x30` with a `120x30` window, the same shape. So on this build the default is a buffer with
+no history rows, not the `120x9001` the classic conhost documentation describes; the values
+live in the console's stored defaults. It matters because `insert_history` is built around a
+scroll region and Windows' scrollback: with no history rows, the arithmetic that decides how
+much can be scrolled has nothing to work with, and the region behaves differently from the
+machine the layout was designed on. Not a defect on its own — flint reads the size rather than
+assuming one — but the next person measuring a layout problem should know that on this machine
 "scrolled out of the window" means "gone", and that a capture which looks correct can coexist
 with a window that cannot scroll back.
 
@@ -283,29 +306,34 @@ mutating commands are refused` among the lines. So **flint's output is UTF-8 and
 inside flint mangles it** — the same conclusion `tests/term_capture.rs` reaches, now from a
 real interactive start on Windows rather than from the test fixtures.
 
-The other half is the console's decode, and it is a one-line model rather than a render,
-because rendering needs the user's window to be written into:
+The other half — what the console does with those bytes — was measured too, in the same
+private console, by writing flint's exact three bytes and reading the characters back out of
+the screen buffer. Not a model this time: the console's own buffer.
 
 ```
-UTF-8 bytes e2 80 94 -> UTF-8 decode: '—'   CP936 decode: U+9225 then '?'  (0x9225 0x003F)
+CP=936   : wrote 3 bytes e2 80 94 -> console holds: U+9225 ...
+CP=65001 : wrote 3 bytes e2 80 94 -> console holds: U+2014 ...
 ```
 
-That damaged form — U+9225 followed by `?` — is exactly what this session's own PowerShell
-file reads produced for `—` all session long, from a different direction (a UTF-8 file read
-through the CP936 console). It is described by code point rather than reproduced, which is
-the same convention the section below keeps and for the same reason: the scan in
-`tests/cli_output.rs` would find it. So the mechanism is observed, twice, and the remaining
-unknown is only whether a fresh console at 936 still does it — which it will, unless
-something sets the code page.
+And a **fresh** console comes up at `GetConsoleOutputCP=936` on this machine (measured, not
+assumed: `GetACP`, `GetOEMCP` and a new console's output code page all read 936), so this is
+what a person sees today — the em dash's three UTF-8 bytes decoded as one GBK character, U+9225,
+which is the same damage this session's own PowerShell file reads produced all session long
+from the other direction. It is described by code point rather than reproduced, which is the
+convention the section below keeps and for the same reason: the scan in `tests/cli_output.rs`
+would find it.
 
-**The fix, and why it is not applied blind.** `SetConsoleOutputCP(65001)` at startup, restored
-on exit, is small, needs no dependency (the same hand-declared `extern` block `util.rs`
-already has for `GetACP`), and is what other full-screen console programs do. It is also a
-write to shared state — the thing §6.2 of the other document rejected for *reading* — so it
-deserves a decision rather than a reflex: what a person should check first is whether the
-banner is actually mangled in a fresh console at 936, which is a ten-second look at a real
-terminal and the one item in this file that still needs a human. Until somebody has looked,
-the mojibake is `MEASURED` as a mechanism and the fix is a proposal.
+With the code page set to 65001 the console holds `U+2014`, the em dash, correctly. **So both
+halves are now measured: the symptom is real on a fresh console, and the fix works.**
+
+**The fix, and why it is still not applied.** `SetConsoleOutputCP(65001)` at startup, restored
+on exit, is small, needs no dependency (the same hand-declared `extern` block `util.rs` already
+has for `GetACP`), and is now measured to do exactly what is wanted. What it is not is free of
+consequences: it writes shared console state, which is the thing the tooling document rejected
+for *reading*, and it changes the code page for every other program in that console window while
+flint runs. That is a product decision, not a measurement one, and it is written down here with
+the evidence so it can be made deliberately — the change is a handful of lines plus a test that
+skips itself where there is no console to ask.
 
 ### At development time: the source tree, silently
 
@@ -344,30 +372,33 @@ Treat Windows as the environment where this will happen again. Concretely:
 ## What to do first on the Windows machine
 
 **Worked through on 2026-09-14** (10.0.26200, rustc 1.98.1, the session that finished
-`docs/windows-tooling.md`). The list is kept, because it is the right order for the next
-machine, with what each item produced:
+`docs/windows-tooling.md`), and it is finished: the two items that looked like they needed a
+person at a terminal were settled in a private hidden console instead. The list is kept,
+because it is the right order for the next machine, with what each item produced:
 
-1. **Settle §1** — *the premise is settled, the effect is not.* `GetConsoleMode` says the
-   console has mode `0x0007`: `DISABLE_NEWLINE_AUTO_RETURN` (0x0008) **clear**, VT processing
-   on, and crossterm never sets the bit. The double-advance itself still has not been watched,
-   because watching it means a human at a real terminal or a headless pseudoconsole. See §1
-   for the two corrections that cost time here, starting with the bit's value.
-2. **Check §3 at runtime** — *half answered.* flint's own bytes are UTF-8 with no mojibake
-   (13 em dashes in a captured start screen, 0 damaged), and the console's CP936 decode of
-   those same bytes is U+9225 followed by `?`, reproduced in the same session from the other
-   direction. Whether a *fresh* console still starts at 936 — and so whether the banner is
-   mangled for a person — needs one look at a real terminal, because this session's own
-   `chcp` had already left the console at 65001. **This is the one item still open.**
+1. **Settle §1** — *settled, and the prediction was wrong.* `GetConsoleMode` says the console
+   has mode `0x0007`: `DISABLE_NEWLINE_AUTO_RETURN` (0x0008) clear, VT already on, crossterm
+   never sets the bit. And the effect was measured in a private console: with the bit clear, a
+   linefeed at the last column lands at column 0 of the next row — one row, the same place
+   `\r\n` lands. **No double advance**, so `insert_history` is not broken by the default and
+   option 2 is not needed. §1 has the table, the two constant corrections, and the case where
+   the bit *is* set.
+2. **Check §3 at runtime** — *answered.* A fresh console comes up at output CP 936, and flint's
+   three UTF-8 bytes for `—` land in that console's screen buffer as U+9225: the mojibake is
+   real, measured on a console rather than modelled, and at CP 65001 the same bytes land as
+   U+2014. flint's own bytes are clean (13 em dashes in a captured start screen, zero damaged).
+   The fix is measured to work and is deliberately left as a decision: it writes shared console
+   state. **No human needed; a product decision remains, written down with its evidence.**
 3. **Then run the suite** — *done.* `cargo test` is 345 passing on this machine, including
    `tests/term_capture.rs`, and `node scripts/term-layout-test.js` replays the byte capture
    this machine produced (`target/term-capture.bin`, written by that test run) and reports
    `全部通过`. The Chinese prose in the fixtures renders through the screen model, which is
    the canary §3 asks for.
-4. **Report the layout by reading the buffer, not by eye** — *done, and it is what the
-   numbers above come from*: a debug build with `FLINT_TERM_CAPTURE_FILE` wrote the real
-   start screen to a file, and `scripts/vtscreen.js` drew it back at `100x24`. Nothing was
-   read by eye, because there was no eye available — which is exactly why this mechanism
-   exists.
+4. **Report the layout by reading the buffer, not by eye** — *done, and it is what the numbers
+   above come from*: a debug build with `FLINT_TERM_CAPTURE_FILE` wrote the real start screen to
+   a file, and `scripts/vtscreen.js` drew it back at `100x24`. Nothing was read by eye, because
+   there was no eye available — which is exactly why this mechanism exists, and the private
+   console in §1 is the same idea taken one step further: a screen buffer nobody has to look at.
 
    The method, for next time: make the session write its own byte stream and read that
    instead of a picture — there is no `osascript` equivalent on Windows.
