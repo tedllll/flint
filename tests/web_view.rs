@@ -276,6 +276,61 @@ fn the_composer_can_stop_the_turn_it_is_watching() {
     );
 }
 
+/// The pickers are the run's own commands, with the choices laid out.
+///
+/// §8's first control, and the reason the read channel came first: a picker cannot be drawn
+/// without knowing the options, and the page may not read `config.toml` for them -- a second
+/// reader of the same state is a second thing that can disagree with the process, which is not
+/// hypothetical here (`/config` prints the file's `readonly` beside the value in force, and they
+/// differ for a whole class of runs). So the options arrive in the `state` frame, and what is
+/// checked here is the half that has an answer in the source rather than in a browser: where the
+/// controls are offered, and what each one sends.
+///
+/// Three things have to hold, and each is a way this can be wrong rather than merely absent:
+///
+/// * the markup starts hidden, because a page opened from a dropped file has no process behind it
+///   and a picker with no options is a promise the page cannot keep;
+/// * each picker sends exactly one line -- `/provider <name>`, `/model <name>` -- through
+///   `sendText`, so the terminal and the page cannot come to disagree about what those mean;
+/// * the `state` frame is applied where it arrives, and not left to fall through to `applyLine`,
+///   where a named frame's data would be read as a line of the run's vocabulary and skipped in
+///   silence. That failure would look exactly like the feature not being built.
+#[test]
+fn the_pickers_offer_the_runs_own_commands() {
+    let markup = from("<div class=\"controls\" id=\"controls\" hidden>", 5);
+    assert!(
+        markup.contains("id=\"pick-provider\"") && markup.contains("id=\"pick-model\""),
+        "the header has no pickers to draw into: {markup}"
+    );
+
+    for (id, command) in [("pick-provider", "/provider "), ("pick-model", "/model ")] {
+        // Three lines: the handler is one call and one statement, and a wider window would reach
+        // into the *other* picker's handler and count its `sendText` as this one's.
+        let handler = from(&format!("getElementById(\"{id}\").addEventListener"), 3);
+        let line = format!("sendText(\"{command}\" + e.target.value)");
+        assert!(
+            handler.contains(&line),
+            "the {id} picker must send `{command}<value>`: {handler}"
+        );
+        assert_eq!(
+            handler.matches("sendText(").count(),
+            1,
+            "the {id} picker sends exactly one thing: {handler}"
+        );
+    }
+
+    assert!(
+        from("if (frame.event === \"state\")", 5).contains("applyState(doc, frame.data)"),
+        "the state frame has to be applied where it arrives"
+    );
+    // And the page's only source for those options is the frame: no route of its own, and no
+    // reading of the file the process owns.
+    assert!(
+        !view().contains("fetch(\"/config\""),
+        "the page must be told the state, not read the config itself"
+    );
+}
+
 /// A conversation archived or deleted in the terminal has to leave the sidebar.
 ///
 /// Reported from a real session: history tidied in the terminal and the page still offering it.

@@ -7,9 +7,9 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 358 passing, 1 ignored (251 lib, 1 in
-the binary's own tests, 33 `agent_loop`, 35 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
-`term_capture` plus the ignored cost measurement, 10 `web_view`), `cargo clippy --all-targets` is
+As of the commit that carries this file, `cargo test` is 362 passing, 1 ignored (252 lib, 1 in
+the binary's own tests, 33 `agent_loop`, 37 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
+`term_capture` plus the ignored cost measurement, 11 `web_view`), `cargo clippy --all-targets` is
 silent, and both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
 
 **This round was on Windows** (10.0.26200, AMD64, rustc 1.98.1, PowerShell 5.1.26100.6584 as
@@ -31,11 +31,14 @@ The binary is held open by any running `flint`, so close those before replacing 
 ## What was just done
 
 **An interrupt no longer throws away the answer it was drawing, the commands that rebuild the agent
-no longer throw the conversation away, and a stopped turn now ends on the page as well as in the
-terminal.** That is this round: three fixes in one family — what the user has already read must not
-go missing, and a surface must not go on saying a turn is running after it has stopped — each with a
-test watched red first. The measurement that corrected last round's diagnosis is below, then the
-second bug, which the first one's measurement is what found, and then the third.
+no longer throw the conversation away, a stopped turn now ends on the page as well as in the
+terminal, `/readonly` sets the guard it says it sets, and the page can change the model or the
+provider from its own header.** That is this round and the one before it: five items in one family —
+what the user has already read must not go missing, a surface must not go on saying a turn is
+running after it has stopped, a switch must not report a state it did not set, and a page must have
+a *read channel* before it can offer a control at all. Each with a test watched red first. The
+measurement that corrected last round's diagnosis is below, then the second bug, which the first
+one's measurement is what found, then the third, then this round's two.
 
 **And the round before it, recorded here so it is not re-done — six commits on the page, all
 pushed:**
@@ -177,11 +180,65 @@ right: the status is the strip and the answer is a block, so clearing the status
 `a_page_opened_after_a_stop_is_not_told_the_stopped_answer_is_still_arriving`, and the page's Node
 check, which runs `paint` and reads the button back.
 
+### `/readonly` did not set anything — fixed, and it was found on the way into §8
+
+**The only guard this tool has was a print statement.** `/readonly on` said "no writes, no mutating
+commands", the `/config` line under it said `readonly = false`, and `config.toml` had no `readonly`
+key at all: the arm worked out the value it meant to set, printed it, and set nothing. So a session
+that believed it was guarded had full permissions, and the mistake was of the worst shape — not a
+command that fails, but one that reports a permission the session does not have. It was found by
+reading that arm while planning the `state` frame, and it is why the frame came second: a frame that
+*reports* `readonly` out of a command that does not set it is the same lie in a new place.
+
+The value is now written to the file first, and then the tool set is rebuilt — the flag is baked
+into the tools as they are constructed (`ToolBox::new` hands `readonly` to `write`, `edit`,
+`apply_patch`, `bash`, `exec` and `pwsh`), so the guard is in force from the next tool call rather
+than from the next process. The rebuild is deliberately *not* `continue_conversation`: that writes a
+new session file, which is right for a switch of model and wrong for a change of permission, so the
+agent is rebuilt around the same file (`SessionWriter::resume`), history and model, and goes back to
+the REPL as `Flow::NewAgent` so the page is re-pointed at the file it was already following. What it
+costs is what every rebuild here costs and what §9 already accepts for `/model`: a fresh tool box has
+read nothing, so the model may be asked to re-read a file. `readonly_guards_the_run_it_is_typed_into`
+asserts the three promises — the file, the value in force in the run that typed it, and the value a
+second process starts with — and failed before the fix on the first, with the file printed in full
+and no `readonly` key in it.
+
+### The read channel, and the first two controls — this round's §8 work
+
+`ROADMAP.md` §8 says the page sends the command *line* and needs a read channel first. It has one:
+a `state` frame carrying the provider and model in force, the configured providers and the models
+each offers (through the same `ProviderConfig::choices` that `/model` lists from), and the
+enumerable toggles. Named rather than a line of the run's vocabulary, because it is not an event but
+where things *are*, like `status` — and re-derived from the live configuration at the top of the
+REPL's loop, the one place every command returns to, which is what keeps it from drifting without
+being derived state. `Live::state` drops it when it has not changed, and sends it once on connect
+because a client with no cursor is never replayed the ring.
+
+Drawn from it, in the header: a provider picker and a model picker, each sending `/provider <name>`
+or `/model <name>` through `sendText` — the composer's route, so no command has a second
+implementation — hidden until a frame arrives, and put back to the value in force when a send is
+refused. The header stops printing the model and provider itself once a state is present: the
+pickers say it and offer the alternatives, and the same fact twice, one copy unchangeable, reads as
+two facts. A dropped file still gets it from the session's `meta`.
+
+**Not in the frame yet, deliberately: the command list.** It belongs with the buttons and panels
+that read it, and that round also has to carry an action's *output* to the transcript — `printer.term()`
+is drawn in the terminal and exists nowhere else. The frame grows one consumer at a time.
+
+**Not measured yet: the pickers in a browser.** They are pinned as behaviour (`applyState` over the
+stub DOM in `scripts/web-view-test.js`) and as bytes (`the_pickers_offer_the_runs_own_commands`), and
+the frame end to end (`the_page_is_told_the_state_its_controls_would_show`, which reads `/events` on
+connect, sends `/model stub-other` to `POST /message`, and then opens a *second* stream, which can
+only have been handed the snapshot). Nobody has looked at the header with a real font or used a
+picker from the keyboard; `docs/web-mode.md` §11 says so in the same words.
+
 ### Still owed on the page
 
-- **`ROADMAP.md` §8** — commands and config from the page — is the next feature after these: the
-  `state` frame, then buttons, selectors, forms and confirmations, all of them composing the
-  terminal's own command lines.
+- **`ROADMAP.md` §8's remaining controls**, in the order it gives: the read channel is built, so what
+  is left is buttons for the no-argument actions, the toggles as switches that show their value,
+  forms (`/name`, `/provider key`, `/provider add`, `/config edit`), and a confirmation step for the
+  destructive ones. The command list joins the `state` frame with the buttons that read it, and
+  command *output* reaching the transcript is the other half of the same item.
 - The small queued-line hole above still wants its two structural lines before a test can hold it.
 
 **The Windows plan is finished, and the measurements are the useful part.**
@@ -662,13 +719,15 @@ section into it, so the two do not drift. The shape of it now:
 3. **Web mode** — `--web` as a window onto the running process rather than a mode. The first
    three steps need no decision, and the one open question (§7 of that document: a hand-rolled
    HTTP server or `hyper`, which is already in the tree via `reqwest`) blocks only step 4.
-   The next web work is §8's **commands and config from the page**, which is now decided rather
-   than parked: the page sends the command *line* over the channel the composer already uses; a
-   `state` frame is added to the event stream so pickers have options without the page reading
-   `config.toml`; controls are buttons, selectors, forms and confirmations, four classes and not
-   one feature; action output goes to the transcript while panel output is page-only; and
-   `config.toml` writes are allowed because the per-run loopback token already covers them.
-   `/exit` stays off the page.
+   The next web work is §8's **commands and config from the page**: the page sends the command
+   *line* over the channel the composer already uses; the `state` frame it needs for options
+   **is built** (provider, model, what each provider offers, the toggles — see above), and the
+   provider and model pickers are the first two controls drawn from it; what is left is buttons
+   for the no-argument actions, switches for the toggles, forms, and a confirmation step for the
+   destructive ones, with the command list joining the frame as the buttons that read it arrive
+   and action output going to the transcript (`printer.term()` is drawn in the terminal and
+   exists nowhere else). `config.toml` writes are allowed because the per-run loopback token
+   already covers them, and `/exit` stays off the page.
 
 Both of the last two are platform-independent and can be done on either machine.
 

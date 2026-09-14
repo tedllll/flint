@@ -77,6 +77,18 @@
     padding: 10px 18px 8px;
   }
   h1 { font-size: 15px; margin: 0 0 4px; font-weight: 600; }
+  /* The run's own settings, as controls. Quiet by default and hidden until a `state` frame
+     arrives: a page opened from a dropped file has no process behind it, and a picker with no
+     options is a promise the page cannot keep. A picker with *one* option is disabled rather
+     than hidden -- it still says what is in force, which is the half that matters. */
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 5px; }
+  .controls[hidden] { display: none; }
+  .controls select {
+    font: inherit; font-size: 12.5px; color: var(--fg); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 5px; padding: 2px 6px; max-width: 26ch;
+  }
+  .controls select:hover:enabled { border-color: var(--user); }
+  .controls select:disabled { color: var(--dim); cursor: default; }
   .meta { color: var(--dim); font-size: 12.5px; word-break: break-all; }
   .meta span { margin-right: 14px; white-space: nowrap; }
   /* Two columns: the conversations on the left, this one on the right. A grid rather than
@@ -273,6 +285,14 @@
   <div class="pane">
     <header>
       <h1 id="title">flint</h1>
+      <!-- The run's configuration, as the controls that change it. Drawn from the `state` frame,
+           which is the only read channel the page has: it may not read `config.toml` itself --
+           a second reader of the same state can disagree with the process, and the file says one
+           thing while a run does another whenever `--readonly` or `/readonly` is involved. -->
+      <div class="controls" id="controls" hidden>
+        <select id="pick-provider" title="the provider this run is using"></select>
+        <select id="pick-model" title="the model this run is using"></select>
+      </div>
       <div class="meta" id="meta"></div>
     </header>
 
@@ -335,7 +355,14 @@ const KNOWN = new Set([
 ]);
 
 function newDoc() {
-  return { meta: {}, title: "", usage: null, status: "", running: false, blocks: [], rev: 0 };
+  return {
+    meta: {}, title: "", usage: null, status: "", running: false, blocks: [], rev: 0,
+    // The run's own configuration, as the last `state` frame described it (`null` until one
+    // arrives, which is also how a page opened from a file knows it has no process behind it).
+    // Kept on the document rather than in the DOM so that `load` -- a whole new document from
+    // the session file -- carries it over: the conversation changed, the configuration did not.
+    state: null,
+  };
 }
 
 /// Note that a block changed, so the next paint redraws it and only it.
@@ -697,6 +724,74 @@ function sessionsFrom(text) {
     }));
 }
 
+/// One `<select>`: the options a setting can take, and the one it is on.
+///
+/// The value is set *after* the options, and the current one is added to the list when the frame
+/// does not mention it -- a provider's `model` field is offered by `/model` whether or not it is
+/// repeated in `models`, so a picker built from `models` alone would sit on whichever option came
+/// first and then *send* it the moment anything else on the page was touched. A select whose value
+/// is not among its options keeps the first one, silently: that is a control that lies about the
+/// run, which is the whole class of bug this page's controls exist to avoid.
+function fillSelect(select, options, current) {
+  if (!select) return;
+  const wanted = current === undefined || current === null ? "" : String(current);
+  const named = options.map(String).filter((name) => name !== "");
+  if (wanted && !named.includes(wanted)) named.unshift(wanted);
+  // Options are removed one by one rather than with `textContent = ""`: the one-liner is what a
+  // browser wants, and this also has to work under the stub DOM in `scripts/web-view-test.js`,
+  // where it would leave the old options in place and make every assertion here meaningless.
+  while (select.firstChild) select.removeChild(select.firstChild);
+  for (const name of named) {
+    const option = el("option", "", name);
+    option.value = name;
+    option.selected = name === wanted;
+    select.appendChild(option);
+  }
+  select.value = wanted;
+  // A control with one choice is not a choice. Disabled rather than hidden, because it still has
+  // something to say: which one is in force.
+  select.disabled = named.length < 2;
+}
+
+/// Draw the header's controls from `doc.state`, or hide them when there is no state to draw.
+///
+/// Separate from applying a frame so that a refused send can put the controls back to what is in
+/// force without inventing a frame: `applyState` stores what the process said, and this is the
+/// only thing that reads it.
+function showState(doc) {
+  const controls = document.getElementById("controls");
+  if (!controls) return;
+  const state = doc.state;
+  controls.hidden = !state;
+  if (!state) return;
+  const providers = Array.isArray(state.providers) ? state.providers : [];
+  const named = providers.filter((p) => p && typeof p.name === "string");
+  const current = named.find((p) => p.name === state.provider) || {};
+  fillSelect(document.getElementById("pick-provider"), named.map((p) => p.name), state.provider);
+  fillSelect(document.getElementById("pick-model"), current.models || [], state.model);
+}
+
+/// The run's configuration, as the frame named `state` describes it.
+///
+/// Applied where the frame arrives rather than inside `paint`. A `<select>` is a control with
+/// state of its own -- an open dropdown, the focus, the option under the pointer -- and a paint
+/// happens many times a second while an answer streams; rebuilding the options in it would close
+/// the list under whoever is choosing from it. The frame is only sent when the state has actually
+/// changed, which is the same guarantee one level down.
+function applyState(doc, text) {
+  let parsed = null;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e) {
+    // Not worth a damage block, and not worth hiding the controls either: the state is re-sent
+    // whenever it changes, so the next one is a fresh chance to draw it right.
+    return;
+  }
+  if (!parsed || parsed.type !== "state") return;
+  doc.state = parsed;
+  showState(doc);
+}
+
 /// The body `POST /message` wants.
 ///
 /// One place, so the request shape is stated once: a JSON object with the text under `text`,
@@ -871,7 +966,12 @@ function paint(doc) {
   meta.textContent = "";
   const m = doc.meta || {};
   for (const [label, value] of [
-    ["model", m.model], ["cwd", m.cwd], ["provider", m.provider],
+    // The state frame carries both of these, with the alternatives beside them in the header's
+    // controls -- so with a state, printing them here as well would be the same fact twice, one
+    // of the copies unable to be changed. A dropped file has no state frame, and this line is
+    // then its only account of which model wrote it.
+    ["model", doc.state ? "" : m.model], ["cwd", m.cwd],
+    ["provider", doc.state ? "" : m.provider],
     ["id", m.id], ["created", m.created],
   ]) {
     if (value) meta.appendChild(el("span", "", label + " " + value));
@@ -1216,6 +1316,18 @@ async function follow() {
             schedulePaint();
             continue;
           }
+          // A named event like the others, and the other kind of state: not what the turn is
+          // doing but what the run *is* -- the provider and model in force, what each provider
+          // offers, and the toggles. Named rather than a line of the run's vocabulary because it
+          // is not an event, and applied without a cursor for the same reason as `status`.
+          if (frame.event === "state") {
+            applyState(doc, frame.data);
+            // The header prints the model and provider only when there is no state: with one,
+            // the pickers say it and offer the alternatives, and the same fact twice -- once of
+            // them unchangeable -- reads as two different facts.
+            schedulePaint();
+            continue;
+          }
           const seq = Number(frame.id);
           if (!(seq > applied)) continue;
           applied = seq;
@@ -1451,6 +1563,20 @@ if (typeof document !== "undefined" && document.getElementById) {
       await sendText("/stop");
     });
 
+    // The pickers send the terminal's own commands, like everything else the page says: `/provider
+    // <name>` and `/model <name>` are what a person would type, and the REPL is what decides what
+    // they mean. `change` rather than `input`, because `input` fires on some browsers while the
+    // list is merely being browsed -- which would switch the model on the way past an option.
+    //
+    // A send that is refused puts the control back to what is in force, from the state it was
+    // drawn from: nothing else would, since the next frame only arrives if something changed.
+    document.getElementById("pick-provider").addEventListener("change", async (e) => {
+      if (!(await sendText("/provider " + e.target.value))) showState(doc);
+    });
+    document.getElementById("pick-model").addEventListener("change", async (e) => {
+      if (!(await sendText("/model " + e.target.value))) showState(doc);
+    });
+
     // With `?debug=1`, the page reports itself to `<FLINT_HOME>/web.log` every few seconds: how many
     // frames arrived, how many became blocks, and what the last one was. The hint line shows the
     // same thing, but the hint belongs to whoever is looking at the screen -- and this question was
@@ -1502,7 +1628,7 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     newDoc, applyLine, applyText, applyEvent, tokenFromSearch, servedByFlint, sseFrames,
     sessionsFrom, messageBody, resumeLine, streamingAnswer, carryStreaming, setStreamingAnswer,
-    paint, feedTrouble, tokenRefused, feedTrace, debugFeed,
+    paint, feedTrouble, tokenRefused, feedTrace, debugFeed, applyState, showState, fillSelect,
   };
 }
 </script>

@@ -469,6 +469,47 @@ honestly by `/config` (this run's value, and the file's) and can be unguarded fr
 explicit `/readonly off`, which writes the file too. `readonly_guards_the_run_it_is_typed_into` is
 red without the fix on the first of its two halves (the file) and green on both after it.
 
+**First: the read channel — built, 2026-09-14, which is the piece every control below waits
+for.** The event stream grew the `state` frame: the provider and model in force, the configured
+providers and the models each offers (through `ProviderConfig::choices`, the same function
+`/model` lists from, so the terminal and the page cannot come to disagree about which names are
+valid), and the enumerable toggles. It is a *named* frame and not a line of the run's vocabulary,
+because it is not an event — it is where things are, like `status` — and it is re-derived from the
+live configuration at the top of the REPL's loop, which is the one place every command returns to.
+That is what keeps it honest without being derived state: the process is the only writer of its own
+configuration, and the frame is a view of it, sent only when it differs from the last one. Sent
+once on connect as well, because a client with no cursor is not replayed the ring — a page opened
+after the state was announced would otherwise be told nothing for the rest of the session.
+
+The first two controls are drawn from it: a provider picker and a model picker in the header, each
+sending the line it names (`/provider <name>`, `/model <name>`) through the composer's own
+`sendText`, so no command has a second implementation. Both are hidden until a state frame
+arrives — a page opened from a dropped file has no process behind it — and a refused send puts the
+control back to what is in force, because nothing else would: the next frame only arrives if
+something actually changed. The header stops printing the model and provider itself when a state
+is present, since the pickers say it and offer the alternatives; a dropped file still gets them
+from the session's `meta`.
+
+**The command list is deliberately not in the frame yet.** It belongs with the buttons and panels
+that read it — the design above wants an action's *output* carried too, which is the other half of
+this — and a field nothing renders is a field that drifts. The frame grew its consumers one at a
+time, which is also how it stays small: the toggles are in it because a picker needs their values,
+and nothing else is.
+
+Four gates. `the_page_is_told_the_state_its_controls_would_show` is the one that needs a real
+process: `--web`, `/events` read as it arrives, the state frame read on connect, then `/model
+stub-other` sent to `POST /message` — the route the page's own picker uses — and the changed state
+read back, and finally a *second* subscriber, which can only be handed the snapshot. In-crate,
+`the_state_frame_is_sent_when_it_changes_and_kept_for_a_later_page` pins the two behaviours
+directly (the same state twice is one frame in the ring; a client that connects late is sent
+exactly one, and it is the current one). `the_pickers_offer_the_runs_own_commands` is the page's
+policy: the markup starts hidden, each picker sends exactly one line, and the `state` frame is
+applied where it arrives rather than falling through to `applyLine`, where a named frame's data
+would be read as a line of the run's vocabulary and skipped in silence. The page's Node check runs
+the real `applyState` over the stub DOM and reads the options back — including the case that made
+`fillSelect` more than three lines, a current value the frame does not list among the
+alternatives, where a `<select>` silently keeps its first option and would then *send* it.
+
 **Renaming a conversation from the sidebar.** Not tried by the person who asked, and the mechanism
 is already there: `/name <text>` appends a `title` line, the page already *renders* titles (its
 header shows one), and typing `/name x` in the composer works today. What is missing is an

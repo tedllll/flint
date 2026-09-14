@@ -282,6 +282,83 @@ check("a tool result with no matching call is kept, not dropped", () => {
   eq(d.blocks[0].output, "orphan", "output");
 });
 
+// The header's controls are drawn from the `state` frame, which is the page's only read channel:
+// it may not read `config.toml` itself, because a second reader of the same state can disagree
+// with the process -- the file says one thing while a run does another as soon as `--readonly` or
+// `/readonly` is involved. What is pinned here is the half with an answer in it: options in, the
+// option in force selected, and the states in which a picker should not be offered at all.
+check("a state frame becomes the header's two pickers, set to what is in force", () => {
+  const d = viewer.newDoc();
+  eq(d.state, null, "a page with no frame has no state");
+  viewer.showState(d);
+  eq(viewer.__node("controls").hidden, true, "a document with no state offers no controls");
+
+  viewer.applyState(d, JSON.stringify({
+    type: "state",
+    provider: "stub",
+    model: "stub-other",
+    readonly: false,
+    verbose: "on",
+    detail: false,
+    providers: [
+      { name: "stub", models: ["stub-model", "stub-other"] },
+      { name: "other", models: [] },
+    ],
+  }));
+
+  const providers = viewer.__node("pick-provider");
+  const models = viewer.__node("pick-model");
+  eq(providers.children.map((o) => o.value), ["stub", "other"], "the providers on offer");
+  eq(providers.value, "stub", "the provider in force");
+  eq(models.children.map((o) => o.value), ["stub-model", "stub-other"], "the models on offer");
+  eq(models.value, "stub-other", "the model in force");
+  eq(viewer.__node("controls").hidden, false, "the controls are offered once there is a state");
+  eq(providers.disabled, false, "two providers is a choice");
+});
+
+// The case that made `fillSelect` more than three lines: `/model` offers a provider's own `model`
+// whether or not it is repeated in `models`, so a frame can name a current value that is not among
+// the alternatives. A `<select>` whose value is not one of its options keeps the *first* option
+// instead, silently -- and then sends it as soon as anything else on the page is touched.
+check("a value the frame does not list is still the one shown", () => {
+  const d = viewer.newDoc();
+  viewer.applyState(d, JSON.stringify({
+    type: "state", provider: "stub", model: "hand-written",
+    providers: [{ name: "stub", models: ["stub-a", "stub-b"] }],
+  }));
+  const models = viewer.__node("pick-model");
+  eq(models.children.map((o) => o.value), ["hand-written", "stub-a", "stub-b"], "options");
+  eq(models.value, "hand-written", "the value in force");
+});
+
+check("a picker with one choice says so by being unusable", () => {
+  const d = viewer.newDoc();
+  viewer.applyState(d, JSON.stringify({
+    type: "state", provider: "solo", model: "only",
+    providers: [{ name: "solo", models: ["only"] }],
+  }));
+  eq(viewer.__node("pick-provider").disabled, true, "one provider is not a choice");
+  eq(viewer.__node("pick-model").disabled, true, "one model is not a choice");
+});
+
+check("the header says which model wrote this only when there is no state to say it", () => {
+  const d = viewer.newDoc();
+  d.meta = { model: "deepseek-chat", provider: "deepseek", cwd: "C:\\work" };
+  // The stub keeps children across paints (`textContent = ""` is not a real element's), so the
+  // span list is emptied here rather than read across two paints.
+  const meta = viewer.__node("meta");
+  meta.children.length = 0;
+  viewer.paint(d);
+  eq(meta.children.map((s) => s.textContent), ["model deepseek-chat", "cwd C:\\work", "provider deepseek"], "with no state");
+
+  viewer.applyState(d, JSON.stringify({
+    type: "state", provider: "stub", model: "stub-model", providers: [{ name: "stub", models: [] }],
+  }));
+  meta.children.length = 0;
+  viewer.paint(d);
+  eq(meta.children.map((s) => s.textContent), ["cwd C:\\work"], "with a state, the pickers say it");
+});
+
 check("a warning and an error read differently", () => {
   const d = doc(`{"message":"careful","type":"warning"}\n{"message":"broke","type":"error"}`);
   eq(d.blocks.map((b) => b.level), ["warning", "error"], "levels");
