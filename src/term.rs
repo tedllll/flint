@@ -1001,10 +1001,10 @@ impl Term {
             return;
         }
         // Anything still streaming is real output, so it is committed before the record
-        // it contributed to is thrown away.
+        // it contributed to is thrown away. Committing blanks the strip, and the blanking
+        // is what empties the painter's memory of it; only the text record is left to clear.
         self.close_stream();
         self.committed.store(0, Ordering::Relaxed);
-        self.stream_rows.lock().unwrap().clear();
         self.last_segment_text.lock().unwrap().clear();
     }
 
@@ -1159,10 +1159,13 @@ impl Term {
             let after_something = !held.is_empty();
 
             if fresh_segment && after_something {
+                // `close_stream` blanks the strip when there is text to commit, and it may
+                // have nothing left to commit -- a line printed mid-answer takes it -- so the
+                // clearing is asked for rather than assumed. It is also what empties the
+                // painter's memory of those rows; see `clear_viewport`.
                 self.close_stream();
                 self.clear_viewport();
                 self.committed.store(0, Ordering::Relaxed);
-                self.stream_rows.lock().unwrap().clear();
             }
             // What is recorded is the text being *drawn*, not the text as it arrived.
             //
@@ -1483,6 +1486,14 @@ impl Term {
     /// clock rather than to the answer. Erasing it here wiped a clock that was still
     /// counting, and the repaint that followed is what made a fast tool flicker through
     /// `── 0s read ──` on its way past.
+    ///
+    /// Emptying the painter's memory of those rows is part of the erasing rather than a
+    /// separate chore for each caller. `stream_rows` describes what is *on* the strip, so
+    /// rows that have just been cleared are rows it can no longer speak for: a frame that
+    /// believed them still there would write only the differences and leave blank whatever
+    /// the caller erased. It used to be cleared by hand in `begin_answer` and at a segment
+    /// boundary -- two places that had to remember, and neither of them the place that
+    /// erased the rows.
     fn clear_viewport(&self) {
         let top = self.viewport_top.load(Ordering::Relaxed);
         // The status row is `input_row - 1`, so the strip ends one row above it.
@@ -1492,6 +1503,7 @@ impl Term {
             let _ = write!(out, "\x1b[{};1H\x1b[2K", row);
         }
         let _ = out.flush();
+        self.stream_rows.lock().unwrap().clear();
     }
 
     /// Put the prompt and the current input back on the reserved row.

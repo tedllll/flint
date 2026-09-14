@@ -245,6 +245,21 @@ What step 3 still owes, and the shape of it:
   paragraph above is one of the things that goes with it: `committed` counts *rows*, which is
   why a width change has to end the segment rather than continue it.
 
+**One piece of it did come out**, 2026-09-14: `stream_rows` — the painter's memory of what is
+on the strip — used to be cleared by hand in `begin_answer` and again at a segment boundary,
+two places that had to remember, and neither of them the place that erased the rows. Clearing
+it is now part of `clear_viewport`, which is what actually blanks the strip: the cache describes
+what is on those rows, so rows that have just been cleared are rows it cannot speak for.
+
+This was found while hunting a bug that turned out not to exist. A tool line printed mid-answer
+commits the answer and blanks the strip, and the answer then continues with a restatement that
+is *stripped* of the committed head — so the continuation is all that is left to draw and the
+strip legitimately shows one row. That is the design working, not a fault; the test written for
+it asserted the opposite and was dropped. The mutation that removes every clear (the two deleted
+here *and* the new one) also leaves all twenty terminal tests passing, which says the diff's
+erase pass already covers these paths — so this is a simplification and an invariant made local,
+not a fix, and it is recorded that way.
+
 One trap worth remembering, because it cost an afternoon: the `\r\n` that carries the cursor
 from one strip row to the next belongs to the row that was *written*. Emitted after a row that
 was skipped, it moves the cursor from wherever it was parked — the input row — and a line feed
