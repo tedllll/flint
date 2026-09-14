@@ -2578,6 +2578,17 @@ async fn run_turn(
             (result, steering, hand_back)
         };
 
+        // Whatever this turn drew and never committed belongs to the conversation.
+        //
+        // An interrupt is a dropped future -- `/stop`, Ctrl-C, or the line that steers the
+        // next prompt -- so the agent loop never reaches the code that turns a step's text
+        // into a message, and the answer stays on screen with no record of it anywhere. That
+        // is the reported fault, and it is the expensive kind: nothing fails, the user reads
+        // half an answer and asks about it, and the model answers as if it had never been
+        // written. Committed here, by the code that did the dropping, because the agent
+        // cannot do it for itself after its future is gone.
+        agent.commit_drawn_answer();
+
         // The line was not for the model, so the turn stops here rather than answering it. The
         // request in flight is dropped, which is what `Interrupt` does too -- a command is not a
         // reason to keep paying for an answer nobody is waiting for any more.

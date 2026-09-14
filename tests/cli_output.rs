@@ -177,9 +177,9 @@ fn is_marker_definition(line: &str) -> bool {
 /// The source tree must not contain mojibake.
 ///
 /// Not hypothetical: this happened twice, to user-visible text and to a test fixture.
-/// A UTF-8 em dash (`e2 80 94`) read as CP936 and written back out became `鈥?`, which
+/// A UTF-8 em dash (`e2 80 94`) read as CP936 and written back out became `閳?`, which
 /// shipped in fifteen user-visible strings -- including the line a user sees the moment
-/// they start a session read-only. Later, `" 用户"` in a test became `" 鐢ㄦ埛"`.
+/// they start a session read-only. Later, `" 鐢ㄦ埛"` in a test became `" 閻劍鍩?`.
 ///
 /// The build notices nothing, because the damage is valid UTF-8 either way: the file
 /// compiles and the tests pass, and the corruption is only visible on screen. So this
@@ -189,19 +189,18 @@ fn is_marker_definition(line: &str) -> bool {
 /// points are real Chinese characters, but they are vanishingly rare in ordinary prose,
 /// so finding one inside a string or comment means something was mis-decoded. Matching
 /// on a fixed list of complete corrupted strings is not enough -- that was the first
-/// version of this test, and it missed `鐢ㄦ埛` entirely.
+/// version of this test, and it missed `閻劍鍩沗 entirely.
 #[test]
 fn the_source_tree_contains_no_mojibake() {
     // Characters CP936 produces when it swallows a UTF-8 multi-byte sequence. Any of
     // these in this repository is an artifact, not prose.
     const MARKERS: &[char] = &[
-        '\u{9225}', // 鈥  -- half of the em dash above
-        '\u{9429}', '\u{951b}', '\u{9422}', // 锟 锛 鐢
-        '\u{3126}', '\u{57db}', // ㄦ 埛 -- pieces of 用户
-        '\u{8def}', // 路 -- a middle dot (U+00B7) mis-read as CP936. Ordinary-looking
+        '\u{9225}', // 閳? -- half of the em dash above
+        '\u{9429}', '\u{951b}', '\u{9422}', // 閿?閿?閻?        '\u{3126}', '\u{57db}', // 銊?鍩?-- pieces of 鐢ㄦ埛
+        '\u{8def}', // 璺?-- a middle dot (U+00B7) mis-read as CP936. Ordinary-looking
                      // Chinese, which is exactly why it survived a scan for obvious
                      // garbage; it is listed because this repository has no prose that
-                     // would use it. 败/失/项 are NOT listed for that reason: "项失败"
+                     // would use it. 璐?澶?椤?are NOT listed for that reason: "椤瑰け璐?
                      // is ordinary Chinese in the layout script's own output.
         '\u{9428}', '\u{93b4}', '\u{93c1}', '\u{93c8}', '\u{93c5}',
         '\u{fffd}', // the replacement character: data already lost
@@ -708,7 +707,7 @@ fn the_repl_lists_skills_and_prints_one_the_way_the_model_gets_it() {
 
 /// The clock has to be running for the wait *after* a tool round, and not for the tools.
 /// Two things were wrong with it. A tool fast enough that the hold-back never expired
-/// still painted `── 0s <tool> ──`, because committing a transcript line repainted the
+/// still painted `鈹€鈹€ 0s <tool> 鈹€鈹€`, because committing a transcript line repainted the
 /// status row without waiting; and the first tool result stopped the clock outright, so a
 /// round of several calls ran mostly untimed and the model call that followed it showed
 /// no clock at all -- the pause a user is actually staring at.
@@ -1125,8 +1124,7 @@ fn a_port_without_web_is_refused() {
 /// Switching provider must actually run the engine's start command.
 ///
 /// This is the test for a bug that shipped and was found by hand: `/provider <name>` built
-/// its agent inline instead of going through `switch_provider`, so the engine handling —
-/// which lives there — was skipped on the one path everybody uses. `/provider key` and
+/// its agent inline instead of going through `switch_provider`, so the engine handling 鈥?/// which lives there 鈥?was skipped on the one path everybody uses. `/provider key` and
 /// `/provider rm` did start engines, which is exactly the kind of inconsistency a second
 /// copy of four lines produces.
 ///
@@ -1539,4 +1537,266 @@ async fn a_command_typed_during_a_turn_is_run_and_not_sent_to_the_model() {
         !text.contains("> /name from mid-turn"),
         "the command was echoed as a prompt to the model: {text:?}"
     );
+}
+
+/// A provider that draws an answer and then holds the connection open.
+///
+/// `wiremock` cannot express this: a stub body is delivered whole, so the turn ends the
+/// moment the answer does and there is no window in which to interrupt it. This writes the
+/// deltas, flushes them, and keeps the response open -- which is what an interrupted turn
+/// looks like from the server's side, and what makes "the answer has been drawn" a fact the
+/// test waits for instead of a race it hopes to win. Every request body is kept, so the
+/// test can read what the model was actually sent.
+struct HangingProvider {
+    base_url: String,
+    bodies: std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+}
+
+impl HangingProvider {
+    fn start(drawn: &'static str) -> Self {
+        use std::io::Write;
+
+        let listener =
+            std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind a stub provider");
+        let base_url = format!("http://{}", listener.local_addr().expect("addr"));
+        let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = bodies.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut sock) = stream else { continue };
+                let seen = seen.clone();
+                // One thread per connection: the first one is held open on purpose, and a
+                // sequential loop would hold the second request behind it.
+                std::thread::spawn(move || {
+                    let body = read_http_body(&mut sock);
+                    let first = {
+                        let mut seen = seen.lock().expect("bodies");
+                        seen.push(body);
+                        seen.len() == 1
+                    };
+                    // `connection: close` puts the two requests on two sockets, so the
+                    // first can be abandoned without the second landing on a half-read one.
+                    let _ = sock.write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
+                    );
+                    if first {
+                        // `{:?}` on a Rust string is a JSON string for anything ASCII.
+                        let _ = sock.write_all(
+                            format!(
+                                "data: {{\"choices\":[{{\"delta\":{{\"content\":{drawn:?}}}}}]}}\n\n"
+                            )
+                            .as_bytes(),
+                        );
+                        let _ = sock.flush();
+                        // Held open: the turn stays in flight until the client gives up.
+                        std::thread::sleep(std::time::Duration::from_secs(20));
+                    } else {
+                        let _ = sock.write_all(concat!(
+                            "data: {\"choices\":[{\"delta\":{\"content\":\"SECOND ANSWER\"}}]}\n\n",
+                            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                            "data: [DONE]\n\n"
+                        ).as_bytes());
+                        let _ = sock.flush();
+                    }
+                });
+            }
+        });
+        HangingProvider { base_url, bodies }
+    }
+
+    fn bodies(&self) -> Vec<String> {
+        self.bodies
+            .lock()
+            .expect("bodies")
+            .iter()
+            .map(|b| String::from_utf8_lossy(b).to_string())
+            .collect()
+    }
+}
+
+/// Read one HTTP request, and return only its body.
+fn read_http_body(sock: &mut std::net::TcpStream) -> Vec<u8> {
+    use std::io::Read;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let (head_end, want) = loop {
+        let n = match sock.read(&mut chunk) {
+            Ok(0) | Err(_) => return Vec::new(),
+            Ok(n) => n,
+        };
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&buf[..end]).to_lowercase();
+            let len = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            break (end + 4, len);
+        }
+    };
+    while buf.len() < head_end + want {
+        let n = match sock.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        buf.extend_from_slice(&chunk[..n]);
+    }
+    buf[head_end..].to_vec()
+}
+
+/// Start flint against the hanging provider and ask for an article, returning once the
+/// answer is *on screen*.
+///
+/// Waiting for the drawn text rather than for a duration is what makes the interrupt land at
+/// a known point instead of a hoped-for one: the fact under test is "the answer has been
+/// drawn", and until it has been, there is nothing for an interrupt to lose.
+fn mid_answer(home: &std::path::Path) -> (std::process::Child, std::process::ChildStdin, std::path::PathBuf) {
+    use std::io::Write;
+
+    let out_path = home.join("stdout.txt");
+    let file = std::fs::File::create(&out_path).expect("stdout file");
+    let mut child = binary()
+        .env("FLINT_HOME", home)
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::from(file))
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to run flint");
+    let mut stdin = child.stdin.take().expect("no stdin handle");
+    stdin
+        .write_all(b"write me an article\n")
+        .expect("failed to write stdin");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let seen = std::fs::read_to_string(&out_path).unwrap_or_default();
+        if seen.contains("A HALF-WRITTEN ARTICLE") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the answer was never drawn, so nothing was interrupted: {seen:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    (child, stdin, out_path)
+}
+
+/// The messages of the `n`th request the stub was sent, as one string.
+fn sent_to_the_model(bodies: &[String], n: usize) -> String {
+    let body: serde_json::Value =
+        serde_json::from_str(&bodies[n]).expect("a request body is JSON");
+    serde_json::to_string(&body["messages"]).expect("messages")
+}
+
+/// An interrupted turn keeps the answer it had already drawn.
+///
+/// Reported from a real session, and the report was exact: a model was streaming an article,
+/// `/stop` was typed, and the next thing said was "finish writing it" -- answered by a model
+/// that had no record of a word of it. The answer is drawn while the step is in flight and
+/// only becomes a message when that step *completes*, so an interrupt -- which is a dropped
+/// future -- drops the answer with it. What is on screen and not in the history is a
+/// conversation the user and the model disagree about, and the user is the one who is right.
+#[tokio::test]
+async fn a_stopped_turn_keeps_the_answer_it_drew() {
+    use std::io::Write;
+
+    let provider = HangingProvider::start("A HALF-WRITTEN ARTICLE\n");
+    let home = test_home("stop-keeps-drawn", &provider.base_url);
+    let (mut child, mut stdin, out_path) = mid_answer(&home);
+
+    // The stop, and then the line that refers to what was on screen.
+    stdin
+        .write_all(b"/stop\nfinish writing it\n")
+        .expect("failed to write stdin");
+    drop(stdin);
+
+    let exited = wait_for_exit(&mut child, 20);
+    let text = std::fs::read_to_string(&out_path).unwrap_or_default();
+    let bodies = provider.bodies();
+    // The session file too: a message that only ever existed in memory is one a restart
+    // loses, and `/resume` is how a conversation is picked up later.
+    let written: String = std::fs::read_dir(home.join("sessions"))
+        .expect("the sessions directory")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| std::fs::read_to_string(entry.path()).unwrap_or_default())
+        .collect();
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit: {text:?}");
+    assert_eq!(
+        bodies.len(),
+        2,
+        "expected the stopped turn and the one after it: {bodies:?}"
+    );
+    let sent = sent_to_the_model(&bodies, 1);
+    assert!(
+        sent.contains("A HALF-WRITTEN ARTICLE"),
+        "the answer that was on screen is missing from what the model is sent: {sent}"
+    );
+    assert!(
+        sent.contains("finish writing it"),
+        "the line that referred to it is missing: {sent}"
+    );
+    assert!(
+        written.contains("A HALF-WRITTEN ARTICLE"),
+        "the answer was drawn but never written to the session file: {written}"
+    );
+}
+
+/// The same guarantee through the other door: a line typed mid-turn *is* the interrupt.
+///
+/// This is the ordinary way to stop a turn -- the help text says "type while it works to
+/// interrupt it" -- and it reaches the same commit by the same route: the line ends the turn
+/// the same way `/stop` does, and the answer already drawn is still an answer.
+#[tokio::test]
+async fn a_steered_turn_keeps_the_answer_it_drew() {
+    use std::io::Write;
+
+    let provider = HangingProvider::start("A HALF-WRITTEN ARTICLE\n");
+    let home = test_home("steer-keeps-drawn", &provider.base_url);
+    let (mut child, mut stdin, _out_path) = mid_answer(&home);
+
+    // No `/stop`: the line itself interrupts the turn and becomes the next prompt.
+    stdin
+        .write_all(b"finish writing it\n")
+        .expect("failed to write stdin");
+    drop(stdin);
+
+    let exited = wait_for_exit(&mut child, 20);
+    let bodies = provider.bodies();
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit");
+    assert_eq!(
+        bodies.len(),
+        2,
+        "expected the interrupted turn and the steered one: {bodies:?}"
+    );
+    let sent = sent_to_the_model(&bodies, 1);
+    assert!(
+        sent.contains("A HALF-WRITTEN ARTICLE"),
+        "the answer that was on screen is missing from the steered turn: {sent}"
+    );
+    assert!(
+        sent.contains("finish writing it"),
+        "the steering line is missing: {sent}"
+    );
+}
+
+/// Wait for a spawned child to exit, killing it rather than hanging the suite.
+fn wait_for_exit(child: &mut std::process::Child, secs: u64) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        match child.try_wait().expect("try_wait") {
+            Some(_) => break true,
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                break false;
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    }
 }

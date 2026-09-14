@@ -142,6 +142,17 @@ pub struct Agent {
     /// Per turn rather than per session: an identical call in a later turn follows a new
     /// question, and a file the last turn read may legitimately have changed since.
     repeats: std::collections::HashMap<String, usize>,
+    /// The answer drawn in the step now in flight, kept where dropping the turn cannot
+    /// reach it.
+    ///
+    /// A turn is interrupted by *dropping its future*, so every local of that future goes
+    /// with it -- including the step's own accumulator, which is why this is a field. What
+    /// the user has already read must not go with it: reported from a real session, half an
+    /// article was on screen, `/stop` was typed, and "finish writing it" was answered by a
+    /// model with no record of a word of it. Deltas land here as they are drawn;
+    /// [`Agent::commit_drawn_answer`] turns whatever is left into a message when a turn ends
+    /// without finishing its step.
+    drawn: String,
 }
 
 impl Agent {
@@ -180,6 +191,7 @@ impl Agent {
             writer,
             last_usage: None,
             repeats: std::collections::HashMap::new(),
+            drawn: String::new(),
         }
     }
 
@@ -297,6 +309,9 @@ impl Agent {
                     self.history.push(answer.clone());
                     self.record(SessionEvent::Chat { message: answer });
                 }
+                // Committed, so nothing is left over for an interrupt to keep: what is in
+                // the history now is what was drawn.
+                self.drawn.clear();
                 sink(Event::Done);
                 return Ok(());
             }
@@ -309,6 +324,9 @@ impl Agent {
             };
             self.history.push(assistant.clone());
             self.record(SessionEvent::Chat { message: assistant });
+            // The text of this step went into the history with the calls it asked for, so an
+            // interrupt from here on has nothing of its own left to keep.
+            self.drawn.clear();
 
             for call in &outcome.tool_calls {
                 let args: serde_json::Value = match serde_json::from_str(&call.arguments) {
@@ -477,6 +495,34 @@ impl Agent {
         }
     }
 
+    /// Make the answer that was drawn in an unfinished step part of the conversation.
+    ///
+    /// Called by whoever dropped the turn, because the loop's own cleanup cannot run: an
+    /// interrupt is a dropped future, which is the same shape [`Self::close_dangling_tool_calls`]
+    /// exists for one layer down. There the cost of not repairing is a request the provider
+    /// rejects; here it is worse, because nothing fails -- the model simply has no record of
+    /// something the user has just read, and the next thing said about it is answered as if
+    /// it had never been written.
+    ///
+    /// A no-op on a turn that finished, or one that was interrupted before anything was
+    /// drawn: both leave `drawn` empty.
+    pub fn commit_drawn_answer(&mut self) {
+        let text = std::mem::take(&mut self.drawn);
+        if text.trim().is_empty() {
+            return;
+        }
+        // Verbatim, with nothing added to say it was cut off. The words are the model's,
+        // and a marker inside them would be flint putting words in its mouth; an answer
+        // that stopped mid-sentence says what happened better than a note would.
+        let message = Message::Assistant {
+            content: Some(text),
+            reasoning: None,
+            tool_calls: Vec::new(),
+        };
+        self.history.push(message.clone());
+        self.record(SessionEvent::Chat { message });
+    }
+
     /// A single provider round-trip. Returns the accumulated deltas.
     async fn step(&mut self, sink: &mut impl FnMut(Event)) -> Result<StepOutcome> {
         let specs = self.tools.specs();
@@ -494,6 +540,10 @@ impl Agent {
         // ones from the *request* costs nothing and keeps the session file whole.
         let sent = prune_tool_output(&self.history);
 
+        // Its own borrow of one field, so the closure can write to it while `self.provider`
+        // is borrowed for the call. See `Agent::drawn`.
+        let drawn = &mut self.drawn;
+
         {
             let history = &sent;
             let result = self
@@ -505,6 +555,7 @@ impl Agent {
                     }
                     Event::Text(t) => {
                         outcome.text.push_str(&t);
+                        drawn.push_str(&t);
                         sink(Event::Text(t));
                     }
                     Event::Reasoning(t) => {
