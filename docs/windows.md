@@ -325,9 +325,13 @@ non-ASCII code points in the buffer: U+2014     (one em dash, zero damaged)
 **The em dash arrives intact at code page 936.** The same three bytes through the byte API
 become U+9225 — measured in §1's private console, and that is what made this section's advice
 look right. The binary and the byte API disagree at the same code page, so the difference
-cannot be the console. It is the *writer*: Rust's standard library converts text written to a
-console handle to UTF-16 and calls `WriteConsoleW`, so the console's code page never applies.
-Each path flint could use, measured in the same 936 console:
+cannot be the console. It is the *writer*: the standard library's Windows stdout/stderr path
+writes to a console handle as UTF-16 (`WriteConsoleW`) and keeps the byte path for text that is
+not valid UTF-8, so the console's code page never applies to text. That behaviour is Rust's, not
+this repository's, and the upstream change that shaped it — including what it does with an
+*incomplete* sequence, which is the `0x94` row below — is
+[rust-lang/rust#83342](https://github.com/rust-lang/rust/pull/83342). Each path flint could use,
+measured in the same 936 console:
 
 | written as | what the console held |
 |---|---|
