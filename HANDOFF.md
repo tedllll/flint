@@ -487,6 +487,18 @@ section into it, so the two do not drift. The shape of it now:
    store. Also worth knowing: `clear_viewport` now owns clearing the painter's memory of the rows
    it erases — that came out of `stream_rows` in the last session, and a mutation removing every
    such clear still passes all twenty terminal tests, so it is a simplification, not a fix.
+
+   **Where every one of those fields is touched** (checked while mapping the merge, so nobody has
+   to map it again; line numbers drift, the functions do not):
+   `stream_text` — written in `stream` (the pair of stores that record what is being drawn) and
+   taken in `close_stream` with `mem::take`; `segment_text` — read and written in `stream` only
+   (the segment-boundary origin); `last_segment_text` — cleared in `begin_answer`, borrowed as a
+   guard across the head-strip in `stream`, appended to in `close_stream`; `stream_rows` — swapped
+   in `stream`, cleared in `clear_viewport`; `stream_first` and `committed` — read and written in
+   `stream`, reset in `begin_answer`, read in `close_stream`. Two of those sites hold a guard
+   across a region rather than a statement: the head-strip borrow in `stream` (it ends before the
+   `close_stream` call below it, which is why there is no deadlock today) and the `push_str` in
+   `close_stream`. Those are the two to scope tightly when the lock becomes one.
 3. **Web mode** — `--web` as a window onto the running process rather than a mode. The first
    three steps need no decision, and the one open question (§7 of that document: a hand-rolled
    HTTP server or `hyper`, which is already in the tree via `reqwest`) blocks only step 4.
