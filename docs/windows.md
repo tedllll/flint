@@ -75,7 +75,9 @@ It is counting on `\r\n` advancing **one** row. If `\n` already carries the CR, 
 that ends at the last column advances **two**, and every count that follows is wrong:
 the commit accounting, the strip capacity, the scroll region. The visible result is
 stray blank rows and transcript that drifts out of position — which is consistent with
-"layout looks broken on Windows", but **`UNVERIFIED`**: nobody has watched it happen.
+"layout looks broken on Windows", and which read as the explanation for it for as long as
+nobody had measured. **It is the prediction the measurement below refutes**; read that
+before acting on this paragraph.
 
 ### What would settle it
 
@@ -252,10 +254,12 @@ A Windows console has an output code page; on a Chinese-locale machine that is C
 are interpreted as GBK and every non-ASCII character is mangled.
 
 The switch is `SetConsoleOutputCP(CP_UTF8)` (65001). **crossterm does not do this** —
-`ansi_support.rs`, quoted above, touches only the VT bit. So on Windows flint very
-likely prints mojibake for any non-ASCII text, and the same applies to anything the
-model writes in Chinese. `UNVERIFIED`, but the mechanism is not speculative: it is the
-same one that produced the corruption below.
+`ansi_support.rs`, quoted above, touches only the VT bit. So on Windows flint prints
+mojibake for any non-ASCII text, and the same applies to anything the model writes in
+Chinese. That was `UNVERIFIED` when it was written and is **measured below**: a fresh console
+starts at code page 936, and the em dash's bytes land in its screen buffer as U+9225. The
+mechanism was not speculative — it is the same one that produced the corruption at the end of
+this section.
 
 Cheap to fix at startup, and cheap to test: run flint on the Windows machine and see
 whether the banner's `—` survives.
@@ -267,10 +271,11 @@ console everything else attached to it is writing to, and a child that keeps its
 CPython uses the locale's ANSI code page and ignores the console entirely — still emits
 CP936. The same terminal was observed reporting 936 and then 65001 inside one session. For
 *reading children's output*, what worked was decoding by `GetACP` rather than by the console
-code page. For flint's own output the switch above is still the proposal and still
-`UNVERIFIED`: the two directions have different answers, because flint controls one side of
-each and not the other. This paragraph measured the input side, and only reasons about the
-output side.
+code page. For flint's own output the measurement below settles it — a fresh console is at 936,
+flint's bytes land there as U+9225, and the switch above turns the same bytes into U+2014 — so
+what is left is a decision about shared state, not a measurement. The two directions have
+different answers because flint controls one side of each and not the other, but only one of
+them needed a console to be believed.
 
 ### The numbers, and what flint's own bytes actually are — `MEASURED`
 
