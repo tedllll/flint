@@ -168,7 +168,10 @@
   /* `position: relative` and `--pad-x` are for the reading-width hand below: the hand is placed
      against the pane's own edge, and the padding is a variable because three things need the same
      number -- the transcript's padding, the hand's position, and the arithmetic in the drag. */
-  .pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; position: relative; --pad-x: 18px; }
+  .pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; --pad-x: 18px; }
+  /* The transcript's own box: `main` scrolls inside it, and the reading hand is as tall as this
+     rather than as tall as the pane. The wrapper is what the hand is positioned against. */
+  .reading { position: relative; flex: 1; min-height: 0; display: flex; }
   /* The scroll container is the whole pane, and the *reading* width is capped inside it. The cap
      used to be on this element, which left the transcript's scrollbar sitting in the middle of a
      wide window with a dead strip of background to its right: a scrollbar belongs at the edge of
@@ -272,13 +275,18 @@
   <input type="file" id="file" accept=".jsonl,.json,application/jsonl,text/plain" hidden>
 </div>
 
-    <main id="transcript"><div id="doc"><p class="empty">Nothing loaded yet.</p></div></main>
-    <!-- The hand for the reading width. Positioned rather than a grid column, because it follows a
-         variable inside the pane instead of a column of the layout, and it spans the pane so it can
-         be grabbed anywhere down the text's right edge. -->
-    <div id="read-grip" role="separator" aria-orientation="vertical" tabindex="0"
-         title="drag to change the reading width" aria-label="reading width"
-         aria-valuemin="320" aria-valuemax="1200"></div>
+    <!-- The transcript and its reading hand share a box, so the hand is as tall as the text rather
+         than as tall as the pane: spanning the pane ran the hairline down through the composer,
+         which is a different thing at the bottom of the screen with its own edges. -->
+    <div class="reading">
+      <main id="transcript"><div id="doc"><p class="empty">Nothing loaded yet.</p></div></main>
+      <!-- The hand for the reading width. Positioned rather than a grid column, because it follows
+           a variable inside this box instead of a column of the layout, and it spans the box so it
+           can be grabbed anywhere down the text's right edge. -->
+      <div id="read-grip" role="separator" aria-orientation="vertical" tabindex="0"
+           title="drag to change the reading width" aria-label="reading width"
+           aria-valuemin="320" aria-valuemax="1200"></div>
+    </div>
     <!-- Typing goes through the same channel the keyboard does, so a slash command works from
          here too -- `/resume 3` below is that and nothing more. Enter sends, Shift+Enter is a
          newline, because a pasted block is a message the same way it is in the terminal. -->
