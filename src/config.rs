@@ -201,12 +201,22 @@ pub struct Config {
     )]
     pub proxy: Option<String>,
 
-    /// How much of the agent's own activity to print.
+    /// How much of the agent's own activity to print: `"off"`, `"on"` (the default) or `"full"`.
     ///
-    /// `false` (the default) prints one compact line per tool call plus a short
-    /// result. `true` adds the tool's arguments, and the reasoning marker.
-    #[serde(default)]
-    pub verbose: bool,
+    /// A word rather than the `bool` this used to be, and the reason is that a bool could not say
+    /// it: `false` was both "off" and the default, so `/verbose off` wrote `false` and the next
+    /// run came back *on* -- the quietest setting could be chosen and never kept. It also made
+    /// `/config` print `verbose = false` while the run was printing a line per tool call.
+    ///
+    /// A bool in an existing file is still read, as what it has always meant: `false` is `"on"`
+    /// and `true` is `"full"`. The next save writes the word, so the file stops being able to
+    /// disagree with the run.
+    #[serde(
+        default,
+        serialize_with = "ser_verbosity",
+        deserialize_with = "de_verbosity"
+    )]
+    pub verbose: crate::display::Verbosity,
 
     /// Whether to print the output behind a tool result.
     ///
@@ -283,6 +293,40 @@ fn de_opt_string<'de, D: serde::Deserializer<'de>>(
     Ok(raw.filter(|s| !s.trim().is_empty()))
 }
 
+/// `verbose` as its word: `verbose = "on"`.
+fn ser_verbosity<S: serde::Serializer>(
+    value: &crate::display::Verbosity,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(value.word())
+}
+
+/// The word, or the bool the key used to hold.
+///
+/// The bool is not a kindness to old files so much as a statement of what it meant: `false` was
+/// the default and printed one line per tool call, which is `"on"` and not `"off"`. Reading it as
+/// `"off"` would turn every existing config into a silent one.
+fn de_verbosity<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<crate::display::Verbosity, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Written {
+        Word(String),
+        Flag(bool),
+    }
+
+    match Written::deserialize(deserializer)? {
+        Written::Word(word) => crate::display::Verbosity::from_word(word.trim()).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "expected one of off, on, full for `verbose`, got {word:?}"
+            ))
+        }),
+        Written::Flag(true) => Ok(crate::display::Verbosity::Full),
+        Written::Flag(false) => Ok(crate::display::Verbosity::On),
+    }
+}
+
 impl ProviderConfig {
     /// Resolve the effective API key, preferring the environment variable.
     pub fn resolved_key(&self) -> String {
@@ -337,7 +381,7 @@ impl Default for Config {
             max_steps: default_max_steps(),
             readonly: false,
             proxy: None,
-            verbose: false,
+            verbose: crate::display::Verbosity::On,
             tool_detail: false,
             instructions: default_instructions(),
             skill_dirs: Vec::new(),

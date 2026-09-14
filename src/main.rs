@@ -471,11 +471,7 @@ async fn real_main() -> Result<i32> {
         InputReader::from_stdin()
     };
 
-    let printer = Printer::new(
-        color,
-        if cfg.verbose { CHATTY } else { NORMAL },
-        &term,
-    );
+    let printer = Printer::new(color, cfg.verbose.level(), &term);
     // Tool output is opt-in, and separate from how much of the model's activity is
     // narrated -- printing a file the model read is not "more verbose", it is a
     // different thing.
@@ -1862,10 +1858,10 @@ async fn handle_command(
         }
 
         "/verbose" => {
+            // The words come from `display::Verbosity`, which is also what the config stores and
+            // what the page's switch is drawn from: one table, so a setting cannot be spellable
+            // in one place and unspellable in another.
             let next = match arg {
-                "on" | "normal" => NORMAL,
-                "off" | "quiet" => QUIET,
-                "full" | "all" => CHATTY,
                 "" => {
                     if printer.verbosity() == NORMAL {
                         CHATTY
@@ -1873,10 +1869,14 @@ async fn handle_command(
                         NORMAL
                     }
                 }
-                other => return Err(anyhow!("expected on|off|full, got '{other}'")),
+                other => display::Verbosity::from_word(other)
+                    .ok_or_else(|| anyhow!("expected on|off|full, got '{other}'"))?
+                    .level(),
             };
             printer.set_verbosity(next);
-            cfg.verbose = next >= CHATTY;
+            // The word, not `next >= CHATTY`: the file has to be able to say "off", which a bool
+            // could not -- this line is what made `/verbose off` come back as `on` next run.
+            cfg.verbose = display::Verbosity::from_level(next);
             cfg.save()?;
             let what = match next {
                 QUIET => "off — only the model's answers",
@@ -1923,7 +1923,7 @@ async fn handle_command(
                 "  proxy            = {}",
                 cfg.proxy.as_deref().unwrap_or("(none)")
             ));
-            printer.term().line(format_args!("  verbose          = {}", cfg.verbose));
+            printer.term().line(format_args!("  verbose          = {}", cfg.verbose.word()));
             printer.term().line(format_args!("  tool_detail      = {}", cfg.tool_detail));
             let workspace = context::Workspace::discover(agent.cwd(), &cfg.skill_dirs);
             printer.term().line(format_args!(
@@ -2386,7 +2386,7 @@ fn state_frame(
         "provider": provider.name,
         "model": provider.model,
         "readonly": agent.readonly(),
-        "verbose": display::verbosity_word(printer.verbosity()),
+        "verbose": display::Verbosity::from_level(printer.verbosity()).word(),
         "detail": printer.tool_detail(),
         "providers": providers,
     })

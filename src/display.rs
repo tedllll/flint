@@ -73,18 +73,69 @@ pub const QUIET: u8 = 0;
 pub const NORMAL: u8 = 1;
 pub const CHATTY: u8 = 2;
 
-/// The word `/verbose` takes for a level.
+/// How much of the agent's own activity to narrate, by name.
 ///
-/// Here, beside the levels, because there are two directions and they have to agree: the command
-/// in `main.rs` reads a word and sets a level, and the `state` frame a page draws its switch from
-/// writes a level back as a word. `/verbose off|on|full` is what it takes, and any change to one
-/// direction that is not made in the other leaves a switch that labels itself one way and sets
-/// the other -- which is the shape of bug this whole frame exists to end.
-pub fn verbosity_word(level: u8) -> &'static str {
-    match level {
-        QUIET => "off",
-        CHATTY => "full",
-        _ => "on",
+/// The named form of the three levels, because the level is what the printer compares and the
+/// *word* is what everything else speaks: `/verbose off|on|full` takes it, `config.toml` stores
+/// it, and the `state` frame a page draws its switch from carries it. All three of those used to
+/// be worked out separately, and the config's copy was a `bool` -- where `false` meant "on" as
+/// well as "off", so the quietest setting could be chosen and never kept.
+///
+/// It lives beside the levels so that the two directions cannot drift: a word that sets one level
+/// and a level that prints as another is a switch that labels itself one way and sets the other,
+/// which is the shape of bug the `state` frame exists to end.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Verbosity {
+    /// Only the model's words.
+    Off,
+    /// One line per tool call. The default, and what an old `verbose = false` means.
+    #[default]
+    On,
+    /// Tool arguments, the reasoning marker, and more of each result.
+    Full,
+}
+
+impl Verbosity {
+    /// The level the printer compares against.
+    pub fn level(self) -> u8 {
+        match self {
+            Verbosity::Off => QUIET,
+            Verbosity::On => NORMAL,
+            Verbosity::Full => CHATTY,
+        }
+    }
+
+    /// The name for a level. Anything above `NORMAL` is `Full`, so a level added later does not
+    /// silently become the default here.
+    pub fn from_level(level: u8) -> Self {
+        match level {
+            QUIET => Verbosity::Off,
+            CHATTY.. => Verbosity::Full,
+            _ => Verbosity::On,
+        }
+    }
+
+    /// What this is called -- in the command, in the config file, and on the page.
+    pub fn word(self) -> &'static str {
+        match self {
+            Verbosity::Off => "off",
+            Verbosity::On => "on",
+            Verbosity::Full => "full",
+        }
+    }
+
+    /// The setting a word names, or `None` for a word that names nothing.
+    ///
+    /// The long forms are accepted because `/verbose` has always taken them (`quiet`, `normal`,
+    /// `all`), and a word that worked yesterday must not stop working because a page grew a
+    /// picker.
+    pub fn from_word(word: &str) -> Option<Self> {
+        match word {
+            "off" | "quiet" => Some(Verbosity::Off),
+            "on" | "normal" => Some(Verbosity::On),
+            "full" | "all" => Some(Verbosity::Full),
+            _ => None,
+        }
     }
 }
 

@@ -56,7 +56,7 @@ fn test_config(base_url: &str) -> Config {
         max_steps: 10,
         readonly: false,
         proxy: None,
-        verbose: false,
+        verbose: flint::display::Verbosity::On,
         tool_detail: false,
         instructions: "hint".to_string(),
         skill_dirs: Vec::new(),

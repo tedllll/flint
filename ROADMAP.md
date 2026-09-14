@@ -469,6 +469,21 @@ honestly by `/config` (this run's value, and the file's) and can be unguarded fr
 explicit `/readonly off`, which writes the file too. `readonly_guards_the_run_it_is_typed_into` is
 red without the fix on the first of its two halves (the file) and green on both after it.
 
+**The second toggle a switch would have gone on could not be saved either — fixed in the same
+round.** `/verbose off` set the printer to QUIET and then saved `cfg.verbose = next >= CHATTY`,
+which is a `bool` that cannot say "off": `false` was both the quietest setting and the default, so
+the setting was chosen and then lost — the next run started *on*. `/config` was worse than
+unhelpful about it: it printed `verbose = false` while the run was printing a line per tool call,
+so the report agreed with the file and both disagreed with the run, which is the same lie
+`/readonly` was telling, one layer down. The key now holds the word
+(`verbose = "off" | "on" | "full"`), read and written through `display::Verbosity`, which sits
+beside the levels it names because three things speak it — the command, the file and the page's
+switch — and they have to agree. A `bool` in an existing file is still read as what it has always
+meant (`false` is `on`, `true` is `full`), and a word that names nothing is refused rather than
+defaulted, because that file is meant to be hand-edited. `verbose_off_is_what_the_file_records`
+(the file, the run that typed it, and a second process) and `the_old_bool_for_verbose_still_reads_as_it_did`
+(both spellings, and a typo) are each red without their half.
+
 **First: the read channel — built, 2026-09-14, which is the piece every control below waits
 for.** The event stream grew the `state` frame: the provider and model in force, the configured
 providers and the models each offers (through `ProviderConfig::choices`, the same function

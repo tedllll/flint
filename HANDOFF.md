@@ -7,8 +7,8 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 362 passing, 1 ignored (252 lib, 1 in
-the binary's own tests, 33 `agent_loop`, 37 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
+As of the commit that carries this file, `cargo test` is 364 passing, 1 ignored (252 lib, 1 in
+the binary's own tests, 33 `agent_loop`, 39 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
 `term_capture` plus the ignored cost measurement, 11 `web_view`), `cargo clippy --all-targets` is
 silent, and both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
 
@@ -32,13 +32,14 @@ The binary is held open by any running `flint`, so close those before replacing 
 
 **An interrupt no longer throws away the answer it was drawing, the commands that rebuild the agent
 no longer throw the conversation away, a stopped turn now ends on the page as well as in the
-terminal, `/readonly` sets the guard it says it sets, and the page can change the model or the
-provider from its own header.** That is this round and the one before it: five items in one family —
-what the user has already read must not go missing, a surface must not go on saying a turn is
-running after it has stopped, a switch must not report a state it did not set, and a page must have
+terminal, `/readonly` sets the guard it says it sets, `/verbose off` outlives the run, and the page
+can change the model or the provider from its own header.** That is this round and the one before
+it: six items in one family — what the user has already read must not go missing, a surface must not
+go on saying a turn is running after it has stopped, a switch must not report a state it did not
+set, a setting must not be forgotten by the file that is supposed to hold it, and a page must have
 a *read channel* before it can offer a control at all. Each with a test watched red first. The
 measurement that corrected last round's diagnosis is below, then the second bug, which the first
-one's measurement is what found, then the third, then this round's two.
+one's measurement is what found, then the third, then this round's three.
 
 **And the round before it, recorded here so it is not re-done — six commits on the page, all
 pushed:**
@@ -202,6 +203,27 @@ read nothing, so the model may be asked to re-read a file. `readonly_guards_the_
 asserts the three promises — the file, the value in force in the run that typed it, and the value a
 second process starts with — and failed before the fix on the first, with the file printed in full
 and no `readonly` key in it.
+
+### `/verbose off` did not outlive the run — the second toggle a switch would have gone on
+
+**A setting that can be chosen and not kept is not a setting.** `/verbose off` set the printer to
+QUIET and then saved `cfg.verbose = next >= CHATTY` — a `bool`, where `false` was both "off" and
+the default — so the next run came back *on*. `/config` printed `verbose = false` while the run was
+printing a line per tool call: the report agreed with the file and both disagreed with the run,
+which is the same shape as the `/readonly` lie one layer down. Found the same way, by looking at
+what a switch would have to be drawn from.
+
+The key now holds the word — `verbose = "off" | "on" | "full"` — read and written through
+`display::Verbosity`, which sits beside the three levels because that is the one place all of them
+meet: `/verbose` takes the word, `config.toml` stores it, the printer compares the level, and the
+page's switch will be drawn from the same name. A bool in an existing file is still read as what it
+has always meant (`false` is `on`, `true` is `full` — reading `false` as `off` would turn every
+existing config silent), and a word that names nothing is refused with the value in the message
+rather than defaulted, because that file is meant to be hand-edited. `verbose_off_is_what_the_file_records`
+(the file, the run that typed it, and a second process) and `the_old_bool_for_verbose_still_reads_as_it_did`
+(both spellings, and the typo) were each watched red by reverting the line they pin — and the first
+version of the second test passed for the wrong reason, having appended `verbose = false` *after*
+`[[providers]]`, where a bare key belongs to the provider table and is not a setting at all.
 
 ### The read channel, and the first two controls — this round's §8 work
 

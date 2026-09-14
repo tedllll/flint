@@ -2409,6 +2409,81 @@ fn readonly_guards_the_run_it_is_typed_into() {
     );
 }
 
+/// `/verbose off` is a setting, and a setting has to survive the file.
+///
+/// It did not. The arm saved `cfg.verbose = next >= CHATTY`, which is a `bool` that cannot say
+/// "off": `false` was both the quietest setting and the default, so `/verbose off` wrote `false`
+/// and the next run started *on*. `/config` was worse than unhelpful about it -- it printed
+/// `verbose = false` while the run was printing a line per tool call, so the report agreed with
+/// the file and both disagreed with the run.
+///
+/// Three promises here, and they are the three ways a setting can fail to be one: the file holds
+/// the word, the run that typed it is quiet, and a second process starts quiet. The page's switch
+/// is drawn from the same three-valued name, which is why it cannot be built on a bool.
+#[test]
+fn verbose_off_is_what_the_file_records() {
+    let home = test_home("verbose-off", "http://127.0.0.1:9/v1");
+    let text = repl(&home, &["/verbose off", "/config"]);
+    let file = std::fs::read_to_string(home.join("config.toml")).expect("the config file");
+    // A second process, because what has to survive is the file: nothing else carries across.
+    let next_run = repl(&home, &["/config"]);
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(
+        file.contains("verbose = \"off\""),
+        "the file does not record the setting, so it does not outlive the run: {file}"
+    );
+    assert!(
+        text.contains("verbose          = off"),
+        "the run that typed it does not report itself quiet: {text}"
+    );
+    assert!(
+        next_run.contains("verbose          = off"),
+        "the next run does not start quiet: {next_run}"
+    );
+}
+
+/// A `verbose = true`/`false` in an existing file still means what it always meant.
+///
+/// `false` printed one line per tool call, which is `on` and not `off`; reading it as `off` would
+/// turn every existing config into a silent one. `true` was the level above it, which is `full`.
+/// The file is rewritten with the word on the next save, so the two spellings cannot drift apart
+/// again -- but they do have to agree for as long as both exist.
+#[test]
+fn the_old_bool_for_verbose_still_reads_as_it_did() {
+    let home = test_home("verbose-legacy", "http://127.0.0.1:9/v1");
+    let config = home.join("config.toml");
+    let written = std::fs::read_to_string(&config).expect("the test config");
+
+    for (old, word) in [("false", "on"), ("true", "full")] {
+        // Prepended, not appended: a bare key after `[[providers]]` belongs to the *provider*
+        // table, where it is not a setting at all -- and the first version of this test passed
+        // for that reason rather than because the old bool had been read.
+        std::fs::write(&config, format!("verbose = {old}\n{written}")).expect("write the old form");
+        let shown = repl(&home, &["/config"]);
+        assert!(
+            shown.contains(&format!("verbose          = {word}")),
+            "`verbose = {old}` no longer reads as `{word}`: {shown}"
+        );
+    }
+
+    // And a word that names nothing is refused rather than silently defaulted: this file is meant
+    // to be hand-edited, so a typo has to be reported where it is read.
+    std::fs::write(&config, format!("verbose = \"loud\"\n{written}")).expect("write the typo");
+    let out = binary()
+        .arg("--list-sessions")
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .output()
+        .expect("failed to run flint");
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    let _ = std::fs::remove_dir_all(&home);
+    assert!(
+        said.contains("loud"),
+        "a misspelled setting was accepted in silence: {said:?}"
+    );
+}
+
 /// The page is told what its controls could offer, and told again when that changes.
 ///
 /// §8's read channel, and it comes before any control because a picker cannot be drawn without
