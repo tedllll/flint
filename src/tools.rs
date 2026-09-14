@@ -215,6 +215,82 @@ fn resolve_path(cwd: &Path, raw: &str) -> PathBuf {
     }
 }
 
+/// Why Win32 will not use this name literally, if it will not.
+///
+/// The *raw argument* rather than a resolved path, and that is deliberate: `Path::join` parses
+/// `a:b.txt` as "file `b.txt` on drive A", so the resolved path has already lost the colon by
+/// the time anything could notice it. What matters here is what the model wrote.
+///
+/// Measured through `std::fs` on this machine, because what happens is not what the
+/// documentation implies. Every one of these returned `Ok` from `fs::write`:
+///
+///   * `NUL` -- and reading it back gave nothing. The data went to the null device, and
+///     nothing in either return value says so.
+///   * `trailing.` and `trailing ` -- and the file that appeared was `trailing`: a different
+///     name, created without a word.
+///   * `colon:stream.txt` -- and what appeared was an empty `colon`, with the data in an
+///     alternate data stream that `dir` does not show and a read of the same path does.
+///   * `q?`, `a|b`, `a<b`, `a>b` and `star*` are refused by the OS with error 123
+///     (`InvalidFilename`), which is honest and needs nothing here.
+///   * A 1619-character path worked (long paths are enabled on this machine), and a single
+///     300-character *name* did not: 255 per component, and reported honestly.
+///
+/// The device names are refused as a family, even though this build created real files for
+/// `CON`, `COM1`, `AUX`, `LPT1`, `PRN` and `NUL.txt`. Which of those is a device depends on
+/// the Windows version and on how the path is opened, and a name that silently means "the
+/// console" on one machine is not something to find out per machine. What is refused is the
+/// exact bare name, because that is what was measured to be silent here.
+///
+/// A refusal rather than a rewrite: a `write` that reports success at a different path is
+/// worse than one that fails, because the model has no way to notice.
+#[cfg(windows)]
+fn windows_name_problem(raw: &str) -> Option<String> {
+    const DEVICES: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+        "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    // Both separators, because a model writes `a/b` and `a\b` and both reach Win32 the same way.
+    let name = raw.rsplit(['/', '\\']).next().unwrap_or(raw);
+    // `.` and `..` are not file names, and the OS refuses them honestly as directories. The
+    // trailing-dot rule below would otherwise catch them and explain itself wrongly.
+    if name == "." || name == ".." {
+        return None;
+    }
+    if DEVICES.contains(&name.to_ascii_uppercase().as_str()) {
+        return Some(format!(
+            "`{name}` is a reserved device name on Windows: the write would go to the device \
+             and still report success"
+        ));
+    }
+    if name.ends_with('.') || name.ends_with(' ') {
+        let shortened = name.trim_end_matches(['.', ' ']);
+        return Some(format!(
+            "`{name}` ends with a dot or a space, which Windows drops: this would write \
+             `{shortened}` instead"
+        ));
+    }
+    if name.contains(':') {
+        return Some(format!(
+            "`{name}` contains `:`, which Windows reads as an alternate data stream: the \
+             data would not be in the file this names"
+        ));
+    }
+    None
+}
+
+#[cfg(not(windows))]
+fn windows_name_problem(_raw: &str) -> Option<String> {
+    None
+}
+
+/// Refuse a path whose name Windows would silently rewrite, before anything is written.
+fn refuse_unwritable_name(raw: &str) -> Result<()> {
+    match windows_name_problem(raw) {
+        Some(why) => Err(anyhow!("cannot write \"{raw}\": {why}")),
+        None => Ok(()),
+    }
+}
+
 /// The JSON name of a value's type, for an error that says what was actually sent.
 ///
 /// "missing required string argument 'path'" is a lie when `path` was sent as a number,
@@ -2000,7 +2076,12 @@ impl Tool for WriteTool {
                 "readonly mode is ON: refusing to write files. Turn it off with /readonly."
             ));
         }
-        let path = resolve_path(&self.cwd, require_str(args, "path")?);
+        let raw = require_str(args, "path")?;
+        // A name Windows would rewrite is refused before the read gate, because the gate
+        // cannot see the file this would really write to. Checked on what was written, not on
+        // the resolved path: `Path::join` turns `a:b.txt` into a path on drive A.
+        refuse_unwritable_name(raw)?;
+        let path = resolve_path(&self.cwd, raw);
         let content = require_str(args, "content")?;
         // A write replaces the whole file, so whatever was there is gone. Refusing until
         // it has been read is the difference between "the model meant to replace this" and
@@ -2069,7 +2150,9 @@ impl Tool for EditTool {
                 "readonly mode is ON: refusing to edit files. Turn it off with /readonly."
             ));
         }
-        let path = resolve_path(&self.cwd, require_str(args, "path")?);
+        let raw = require_str(args, "path")?;
+        refuse_unwritable_name(raw)?;
+        let path = resolve_path(&self.cwd, raw);
         let old = require_str(args, "old_string")?;
         let new = require_str(args, "new_string")?;
         let replace_all = optional_bool(args, "replace_all")?;
@@ -2176,6 +2259,7 @@ impl Tool for PatchTool {
         let mut planned: Vec<(PathBuf, Option<String>, &patch::Change)> = Vec::new();
         let mut touched: Vec<PathBuf> = Vec::new();
         for change in &changes {
+            refuse_unwritable_name(change.path())?;
             let path = resolve_path(&self.cwd, change.path());
             // Two sections for one file would both be planned from the contents on disk,
             // so the second would undo the first rather than build on it.
@@ -3137,6 +3221,94 @@ mod invocation_tests {
         let run = shell_invocation(&config, "dir");
         assert_eq!(run.args, vec!["/S".to_string(), "/C".to_string()]);
         assert_eq!(run.raw.as_deref(), Some("\"dir\""));
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::test_support::TempDir;
+    use super::*;
+    use crate::config::Config;
+
+    /// The names Win32 silently rewrites are refused, and the ones it writes literally are not.
+    ///
+    /// Both halves matter. `NUL.txt`, `con.txt` and `trailing .txt` were measured creating real
+    /// files on this machine, and refusing those would be a tool that cannot write a file it can
+    /// write -- the same class of mistake in the other direction.
+    #[cfg(windows)]
+    #[test]
+    fn a_name_windows_would_rewrite_is_refused() {
+        for name in [
+            "NUL",
+            "nul",
+            "CON",
+            "com1",
+            "LPT9",
+            "trailing.",
+            "trailing ",
+            "a:b.txt",
+            "dir\\NUL",
+            "dir/sub/trailing.",
+        ] {
+            assert!(
+                windows_name_problem(name).is_some(),
+                "`{name}` must be refused rather than silently rewritten"
+            );
+        }
+        for name in [
+            "NUL.txt",
+            "con.txt",
+            "trailing .txt",
+            "normal.txt",
+            "a-b.txt",
+            "..",
+            "dir/sub/normal.txt",
+        ] {
+            assert!(
+                windows_name_problem(name).is_none(),
+                "`{name}` is a file Windows writes literally"
+            );
+        }
+    }
+
+    /// And the gate is on the writing tools, not only on the helper.
+    ///
+    /// Measured before the fix: `write` to `NUL` answered "wrote 5 bytes" and the bytes went to
+    /// the null device; `trailing.` answered the same and the file that appeared was
+    /// `trailing`. A success message at a path that was not written is the failure this
+    /// prevents, so the assertion is on the refusal and on the ordinary name still working.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn write_refuses_a_name_windows_would_rewrite() {
+        let dir = TempDir::new("names");
+        let config = Config {
+            max_tool_output: 10_000,
+            ..Config::default()
+        };
+        let tools = ToolBox::new(&config, false, dir.path().to_path_buf());
+        // The reason is asserted, not merely that something failed: for `a:b.txt` the OS would
+        // also fail, by resolving the name to a file on drive A, and a test that accepts any
+        // error would pass without the check existing at all.
+        for (name, reason) in [
+            ("NUL", "reserved device name"),
+            ("trailing.", "ends with a dot"),
+            ("a:b.txt", "alternate data stream"),
+        ] {
+            let error = tools
+                .invoke("write", &json!({ "path": name, "content": "hello" }))
+                .await
+                .expect_err("a rewritten name must be refused");
+            let message = error.to_string();
+            assert!(
+                message.contains("cannot write") && message.contains(reason),
+                "the refusal for `{name}` must say why ({reason}): {message}"
+            );
+        }
+        let ok = tools
+            .invoke("write", &json!({ "path": "fine.txt", "content": "hello" }))
+            .await
+            .expect("an ordinary name still writes");
+        assert!(ok.contains("fine.txt"), "{ok}");
     }
 }
 
