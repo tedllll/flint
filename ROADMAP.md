@@ -453,6 +453,45 @@ affordance and any feedback — and the feedback is the previous item. So this o
 is built, and it is not worth doing first.
 
 
+### 9. The page, and the interrupt that loses the conversation
+
+The browser view was worked on hard in one round (six commits, all pushed). What belongs here is
+what is *not* done, because the page is further along than §7 and §8 say.
+
+**First, and before anything else: an interrupted turn loses the conversation.** Reported after
+`/stop` was added — the stop succeeds, and the next thing said has no memory of what came before.
+The history lives **in memory** in the agent (`agent.rs:186 history_mut`), handed to `run_turn` as
+`&mut agent`; an interrupt drops the in-flight future, which can leave that copy holding the user's
+line and not the answer. **The session file is intact** (append-only, written before the request
+goes out) and `/resume` on the same session restores the context, which is the proof of where the
+fault is — not the remedy, because a user should not have to know a session number to keep talking.
+
+The fix is to re-derive from the file automatically, on the spot. `/resume` already contains the
+work (`main.rs:2004–2027`: `session::load`, then `splice_loaded_history` — and that method is not
+optional, because a session file holds the conversation and *not* the system prompt, so assigning
+the messages directly sends the model no instructions at all). The open decision is where to call
+it: `run_turn` has no `cfg` handle, so either thread one through, or have `run_turn` report the
+interrupt and let the REPL rebuild the agent through the existing `Flow::NewAgent` route that
+`/resume` returns — better, because that path is already exercised. **Test first**: interrupt a
+turn, then assert the next *request body* still carries the earlier conversation (the
+`debug prompt-input` machinery; the request is not the transcript). Until it lands, `/stop` and
+Ctrl-C are unsafe for a conversation that matters.
+
+**Second: a stop button in the composer**, shown only while a turn is in flight, sending
+`sendText("/stop")` — no new route and no new verb, because the composer's route already carries
+lines and `/stop` is a line. The server should follow a stop with a status frame so the page
+settles rather than staying half-streamed; codex's tracker has that lesson twice
+(`openai/codex#28104`, `#28813`).
+
+**Done in the same round, recorded so it is not re-done**: themed scrollbars (the default grey ones
+were the complaint); a draggable sidebar and a draggable reading width, with a hairline hint at
+rest on the right hand because there is no seam at the text's edge to be discovered by; the
+transcript moved into its own scroll box so its scrollbar sits at the window edge and the hand's
+line no longer crosses the composer; **the page's own log, written by default** to
+`$FLINT_HOME/web.log` (`POST /log`) — which is what found the bug in one line: a shadowed `doc` in
+the hand's code made the boot's first paint throw, taking the sidebar, the sessions and the feed
+with it; and `/stop`, the interrupt as a short word, reachable from the composer today.
+
 ## Small, agreed, unscheduled
 
 - `read`/`write`/`edit` taking `file_path`, with `path` kept as an alias so nothing breaks.

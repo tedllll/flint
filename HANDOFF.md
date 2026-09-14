@@ -30,6 +30,74 @@ The binary is held open by any running `flint`, so close those before replacing 
 
 ## What was just done
 
+**The browser view, the page's own log, and an interrupt that loses the conversation.**
+
+Six commits on the page, all pushed, and one bug that is *not* fixed — written down here rather
+than left to be rediscovered:
+
+- **The scrollbars are themed, and both boundaries drag.** `scrollbar-width`/`scrollbar-color`
+  plus the `-webkit-` longhands with the thumb inset by `background-clip`, so the default grey
+  bars are gone; the left hand resizes the sidebar (`--side`) and the right one the reading
+  column (`--read`), both with pointer capture, arrow keys and a double-click reset. The reading
+  hand carries a hairline at rest: at the right edge of the text there is no seam to notice,
+  unlike the seam between the two panes, so it had nothing to be discovered by.
+- **The transcript scrolls in its own box.** Content (`#doc`) and scroll container
+  (`#transcript`) were one element, so the scrollbar sat inboard of the window edge and the
+  reading hand's line ran through the composer. Both fixed, and the follow-the-tail test that
+  caught the first regression is in `scripts/web-view-test.js` (shown red by reverting the line).
+- **The page writes its own log, by default, to `$FLINT_HOME/web.log`** (`POST /log`, one
+  whitespace-collapsed line per entry, capped). It exists because a diagnostic behind `?debug=1`
+  is a diagnostic nobody has: four reports of "the page does not change" arrived with no evidence
+  in any of them. `?debug=1` now only decides whether the same numbers appear in the hint line.
+- **And that log found the bug in one line**: `boot failed: TypeError: Cannot read properties of
+  undefined (reading 'length') at paint (…:862:19)`. The reading hand declared `const doc =
+  document.getElementById("doc")`, shadowing the conversation document for the rest of its block
+  — including the boot's `paint(doc)`. The throw took the sidebar, the session list and the feed
+  with it and left the served markup on screen: exactly the report, four times. Renamed to
+  `reading`. The boot now has an error surface, `readSessions` has a catch, and the events fetch
+  has a deadline on *connecting* only — armed for the whole response it aborted a healthy silent
+  stream every ten seconds, which the log showed as twenty-two identical `AbortError` lines.
+- **`/stop` is the interrupt as a short word** — in the mid-turn input match and not in the
+  command table: a key is not always available (ssh, a pipe, the browser's composer), and it is
+  deliberately *not* handed back to the REPL, so a stopped turn does not then print "nothing is
+  running", which reads as the stop having failed.
+
+### The bug to fix first: an interrupted turn loses the conversation
+
+Reported once `/stop` worked: *the stop succeeds, and the next thing said does not know what was
+said before.* The fault is structural and is not in `/stop`, which only reaches it.
+
+- The history lives **in memory**, in the agent (`agent.rs:186 history_mut`), handed to `run_turn`
+  as `&mut agent`. An interrupt drops the in-flight future (`interrupted = true; break;`), which
+  can leave that copy holding the user's line and not the answer — and everything after it
+  continues from a conversation that never happened. **The file is intact** (append-only, written
+  before the request goes out), and `/resume` on the same session restores the context: that is
+  the proof of where the fault is, not the remedy.
+- **The fix is to re-derive from the file automatically, on the spot** — no command and no
+  session number, which the report rightly insisted on. `/resume` already does the work
+  (`main.rs:2004–2027`): `session::load(&path)`, then `new_agent.splice_loaded_history(cfg, &cwd,
+  loaded.messages)`. That method is not optional: a session file holds the conversation and
+  **not** the system prompt, so assigning the messages directly sends the model no instructions
+  at all. (`/resume` had exactly that bug once; see "The round before".)
+- **Where to put it is the open decision.** `run_turn` has no `cfg` handle, so either `cfg` is
+  threaded into it, or — better, because it reuses an exercised path — `run_turn` reports the
+  interrupt to the REPL and the REPL rebuilds the agent through the existing `Flow::NewAgent`
+  route that `/resume` returns.
+- **Test first**: interrupt a turn, then assert the *next* request body still carries the
+  conversation from before it — the `debug prompt-input` machinery, because the request is not
+  the transcript. Red before green.
+- **Until it is in, do not `/stop` or Ctrl-C a turn** whose conversation matters.
+
+### Still owed on the page
+
+- **A stop button in the composer**, shown only while a turn is in flight (the page already knows
+  — a `status` frame is current), sending `sendText("/stop")` down the route the composer uses.
+  That is why it needs no new route and no new verb. A stop should also leave the page settled
+  rather than half-streaming, so the server follows it with a status frame; codex's tracker has
+  the same lesson twice (`openai/codex#28104`, `#28813`: Esc interrupted the turn and left `/goal`
+  reading as active).
+- **`ROADMAP.md` §8** — commands and config from the page — is the next feature after these.
+
 **The Windows plan is finished, and the measurements are the useful part.**
 `docs/windows-tooling.md` had been "settled and unimplemented" for several sessions: a
 labelled design waiting for a Windows machine. This round was on one, so the five ordered
