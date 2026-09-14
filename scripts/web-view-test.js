@@ -114,6 +114,12 @@ function loadViewer() {
   if (!api || typeof api.applyText !== "function") {
     throw new Error("the viewer did not export its renderer for testing");
   }
+  // The stub's nodes on demand, so a test can give them the one thing a stub cannot have by
+  // itself: a scroll geometry. The page's *view* is otherwise out of reach here -- this harness
+  // was built for the model -- and that gap is where a real regression lived: the reading column
+  // and the scroll container became two elements and the follow-the-tail code went on reading the
+  // one that does not scroll.
+  api.__node = (id) => sandbox.document.getElementById(id);
   return api;
 }
 
@@ -452,6 +458,26 @@ check("a delta with nothing in it does not open an answer", () => {
   viewer.applyEvent(d, { type: "message.delta", text: "" });
   eq(d.blocks.length, 1, "still one block");
   eq(d.blocks[0].text, "hello", "unchanged");
+});
+
+check("the page follows an answer only when the reader was at the bottom", () => {
+  // Two elements, and the follow-the-tail code has to use the right one: `#doc` is the reading
+  // column and does not scroll, so a `scrollTop` read on it is a constant and a write to it moves
+  // nothing. Shipped that way once -- the answer arrived below the fold and the page looked
+  // frozen while the terminal had it.
+  const scroller = viewer.__node("transcript");
+  const doc = viewer.applyText(viewer.newDoc(), SESSION);
+  eq(doc.blocks.length > 0, true, "the session renders blocks");
+
+  scroller.scrollHeight = 5000;
+  scroller.clientHeight = 600;
+  scroller.scrollTop = 4400;
+  viewer.paint(doc);
+  eq(scroller.scrollTop, 5000, "a reader at the bottom is carried to the new bottom");
+
+  scroller.scrollTop = 100;
+  viewer.paint(doc);
+  eq(scroller.scrollTop, 100, "a reader further up is left where they were");
 });
 
 if (failures) {

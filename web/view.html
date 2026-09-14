@@ -843,14 +843,21 @@ function paint(doc) {
   }
 
   const root = document.getElementById("doc");
+  // Content and scrolling are two different elements now: `#doc` is the reading column, and the
+  // scroll container is the pane it sits in. Reading the scroll state off the content was a real
+  // bug for one build -- `#doc` does not scroll, so `scrollTop` was always 0, `scrollHeight` and
+  // `clientHeight` were equal, `wasAtBottom` came out true, and writing `scrollTop` on it moved
+  // nothing: an answer arriving below the fold left the page looking frozen while the terminal
+  // had it. The two names are kept apart on purpose below, because they are not the same node.
+  const scroller = document.getElementById("transcript");
   // Read before anything is touched. "Was the reader at the bottom" is the question the page
   // has to answer for itself, and it is answered here because this is the last moment the old
   // layout exists. Measured: with no such handling the transcript stayed pinned at the top
   // while an answer streamed past 55,000 pixels below the fold -- you ask something, and watch
   // the question while the answer arrives out of sight.
   const slack = 40;
-  const wasAtBottom = root.scrollTop + root.clientHeight >= root.scrollHeight - slack;
-  const wasAt = root.scrollTop;
+  const wasAtBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - slack;
+  const wasAt = scroller.scrollTop;
 
   if (!doc.blocks.length) {
     root.textContent = "";
@@ -881,7 +888,7 @@ function paint(doc) {
   // An answer that is arriving follows the bottom of the page only if the reader was already
   // there: scrolling somebody back down while they are reading further up is the other half of
   // this behaviour, and the half that is easy to forget.
-  root.scrollTop = wasAtBottom ? root.scrollHeight : wasAt;
+  scroller.scrollTop = wasAtBottom ? scroller.scrollHeight : wasAt;
 
   const status = document.getElementById("status");
   if (doc.status) {
@@ -1308,6 +1315,7 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     newDoc, applyLine, applyText, applyEvent, tokenFromSearch, servedByFlint, sseFrames,
     sessionsFrom, messageBody, resumeLine, streamingAnswer, carryStreaming, setStreamingAnswer,
+    paint,
   };
 }
 </script>
