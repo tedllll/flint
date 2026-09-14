@@ -302,6 +302,99 @@ async fn a_quoted_command_reaches_the_shell_verbatim() {
     );
 }
 
+/// The `pwsh` tool: the script a model wrote is what runs, and what it wrote survives.
+///
+/// Every part of this is a measured requirement rather than a preference. The script's own
+/// non-ASCII text is the byte-order-mark check: without the mark, `你好` in a script file was
+/// measured coming back as `浣犲ソ` with exit code 0, which is the worst kind of wrong --
+/// silent. `$args` is checked because an argument list is where a second parser usually gets
+/// its chance to lose something. The path and the version are checked because the result has
+/// to be enough to debug what ran: PowerShell 5.1 and 7 do not parse the same language.
+#[cfg(windows)]
+#[tokio::test]
+async fn a_powershell_script_runs_from_the_file_it_was_written_to() {
+    let dir = std::env::temp_dir().join(format!("flint-pwsh-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let spill = dir.join("spill");
+
+    let config = test_config("http://unused");
+    let tools =
+        flint::tools::ToolBox::new(&config, false, dir.clone()).with_spill_dir(spill.clone());
+    let out = tools
+        .invoke(
+            "pwsh",
+            &serde_json::json!({
+                "script": "$name = \"你好\"\nWrite-Output \"$name $($args -join '|') $((1 + 1))\"\n",
+                "args": ["one", "two words"],
+            }),
+        )
+        .await
+        .expect("the script should run");
+
+    // The script's own text survived the trip: this is the byte-order mark.
+    assert!(
+        out.contains("你好"),
+        "the script's non-ASCII text was misread: {out}"
+    );
+    assert!(
+        !out.contains('\u{fffd}') && !out.contains("浣犲ソ"),
+        "the script was read as the machine's code page: {out}"
+    );
+    // Multi-line, quoting, arguments and arithmetic all behaved as they do in a file.
+    assert!(
+        out.contains("one|two words 2"),
+        "the script did not run as written: {out}"
+    );
+    // And the result says which PowerShell ran it, and where the script now is.
+    assert!(
+        out.contains("script-1.ps1"),
+        "the result must name the script: {out}"
+    );
+    assert!(
+        out.contains("(powershell)") || out.contains("(pwsh)"),
+        "the result must name the PowerShell: {out}"
+    );
+
+    // The script is on disk, byte for byte, behind a BOM -- the artifact the tool exists for.
+    let script = std::fs::read(spill.join("script-1.ps1")).expect("the script must be on disk");
+    assert_eq!(
+        &script[..3],
+        &[0xef, 0xbb, 0xbf],
+        "a script without a byte-order mark is read as the machine's code page"
+    );
+    assert!(
+        std::str::from_utf8(&script[3..]).unwrap().contains("你好"),
+        "the script on disk is not the script that was asked for"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A script is arbitrary code, and flint says so rather than guessing.
+///
+/// `is_readonly_command` reads a cmd or POSIX command line; a PowerShell script is a different
+/// language, and answering about it in the wrong vocabulary would be a refusal that is wrong
+/// in both directions -- `Get-Process | Stop-Process` is not obviously a mutation to a
+/// classifier looking for `rm`.
+#[cfg(windows)]
+#[tokio::test]
+async fn pwsh_refuses_a_script_in_readonly_mode() {
+    let dir = std::env::temp_dir().join(format!("flint-pwsh-ro-{}", std::process::id()));
+    let config = test_config("http://unused");
+    let tools = flint::tools::ToolBox::new(&config, true, dir.clone());
+
+    let error = tools
+        .invoke("pwsh", &serde_json::json!({ "script": "Get-Date" }))
+        .await
+        .expect_err("readonly must refuse a script");
+    assert!(
+        error.to_string().contains("readonly"),
+        "the refusal must say why: {error}"
+    );
+}
+
+/// A Windows console program writes the machine's code page, and that is not UTF-8.
 ///
 /// On a machine with a Chinese locale the page is 936, so every non-ASCII character in a
 /// child's output used to arrive at the model as U+FFFD: it was shown an unreadable error

@@ -21,6 +21,14 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &str;
     fn schema(&self) -> Value;
     async fn call(&self, args: &Value) -> Result<String>;
+
+    /// Where this session keeps the files it writes, for a tool that writes one of its own.
+    ///
+    /// Most tools write nothing: their answer is text. `pwsh` writes the script it is about to
+    /// run, and that script belongs beside the output it produced -- in the session's own
+    /// directory, where a person can find it after reading the transcript. Told rather than
+    /// asked for, because a tool is built before the session it belongs to names itself.
+    fn use_spill_dir(&mut self, _dir: &Path) {}
 }
 
 pub struct ToolBox {
@@ -38,6 +46,10 @@ impl ToolBox {
         // Skills are looked up in the same directories the prompt's catalog was built
         // from, so the tool can never offer something the catalog did not name.
         let skill_dirs = context::Workspace::discover(&cwd, &config.skill_dirs);
+        // The session's own directory, until `with_spill_dir` names the real one. A tool
+        // that writes a file of its own is built with it now rather than told later, so
+        // that a `ToolBox` used without `with_spill_dir` still writes somewhere sane.
+        let spill_dir = crate::config::spill_dir().join("unattached");
         // One record for the whole tool set: it is the run's memory of what it has looked
         // at, so every tool that reads has to write into the same one that the writers
         // consult.
@@ -81,6 +93,15 @@ impl ToolBox {
         // markup against the output budget and shows the model `<head>`. It is a boundary
         // around *this tool* and not around flint: `bash` reaches whatever the machine can.
         tools.push(Box::new(crate::fetch::FetchTool::new(config.proxy.clone())));
+        // Windows only, where `cmd` is the default shell and a serious management task wants
+        // a script rather than a command line. See `PwshTool`.
+        #[cfg(windows)]
+        tools.push(Box::new(PwshTool::new(
+            config,
+            readonly,
+            cwd.clone(),
+            spill_dir.clone(),
+        )));
         // Offered only when it can actually search. A tool that always fails costs a schema
         // on every request and teaches the model that this tool is broken; the reason it is
         // missing is said once at startup instead (`search::Availability::Unavailable`).
@@ -103,13 +124,18 @@ impl ToolBox {
             tools,
             by_name,
             max_output: config.max_tool_output,
-            spill_dir: crate::config::spill_dir().join("unattached"),
+            spill_dir,
             spilled: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
     /// File this session's spill files under a name of their own.
     pub fn with_spill_dir(mut self, dir: PathBuf) -> Self {
+        // Told to the tools as well as kept here: a tool that writes files of its own has to
+        // write them where the transcript says they are.
+        for tool in &mut self.tools {
+            tool.use_spill_dir(&dir);
+        }
         self.spill_dir = dir;
         self
     }
@@ -1322,6 +1348,248 @@ impl Tool for BashTool {
         let outcome =
             run_command_streaming(&self.config, command, &self.cwd, timeout, download).await?;
         Ok(util::truncate(&outcome.report, self.config.max_tool_output))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// pwsh
+// ---------------------------------------------------------------------------
+
+/// The `pwsh` tool: a PowerShell script handed over as a file.
+///
+/// **Why a file**, since `-Command` was measured working: the script becomes an artifact. It
+/// is a plain `.ps1` in flint's spill directory, so a person can read what ran, edit it and run
+/// it again without flint, and the transcript can name the path. A command line is a string
+/// that only exists inside a request; a file is state, and this repository's rule is that state
+/// is hand-editable. `pwsh -Command` also has to fit in one command line (32k characters, and
+/// less in practice), while a file does not.
+///
+/// What the *file* needs was measured on this machine, Windows PowerShell 5.1, and both
+/// findings are requirements rather than hygiene:
+///
+///   * **A byte-order mark.** Without one, a script containing non-ASCII is read as the
+///     machine's code page, silently: `Write-Output "你好"` printed `浣犲ソ` and exited 0. With
+///     one it printed `你好`.
+///   * **`-ExecutionPolicy Bypass`.** The effective policy here is `Restricted`, and `-File`
+///     is then refused outright: "cannot be loaded because running scripts is disabled on this
+///     system", exit 1. With `Bypass` the same script runs. It is passed on the command line
+///     rather than left to the machine's configuration, because a tool that works only where
+///     somebody has already loosened the policy is a tool that fails on the machine that needs
+///     it.
+///
+/// `pwsh` is preferred and Windows PowerShell is the fallback, because both are PowerShell and
+/// only one of them may be installed. Which one ran is named in the result: 5.1 and 7 differ in
+/// their parsing and their output encoding, and a model debugging a script needs to know which
+/// one produced what it is reading.
+///
+/// Registered on Windows only. Elsewhere `bash` is a better PowerShell than a PowerShell tool
+/// would be, and `docs/windows-tooling.md` §2 argues that a tool should remove layers rather
+/// than add them.
+#[cfg(windows)]
+pub struct PwshTool {
+    config: Config,
+    readonly: bool,
+    cwd: PathBuf,
+    /// Where the `.ps1` files go: this session's spill directory, told by `use_spill_dir`.
+    script_dir: PathBuf,
+    /// How many scripts this session has written, so each one gets its own name.
+    scripts: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(windows)]
+impl PwshTool {
+    pub fn new(config: &Config, readonly: bool, cwd: PathBuf, script_dir: PathBuf) -> Self {
+        PwshTool {
+            config: config.clone(),
+            readonly,
+            cwd,
+            script_dir,
+            scripts: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// The PowerShell to run, and the version it says it is.
+    ///
+    /// Probed once for the process, because it costs a process to ask and the answer cannot
+    /// change while flint runs. The probe is the same decider as the tool itself: if the
+    /// version cannot be asked for, that PowerShell is not usable, and the next candidate is
+    /// tried -- so `pwsh` installed but broken falls back rather than failing every call.
+    async fn shell(&self) -> Option<Shell> {
+        static FOUND: std::sync::OnceLock<Option<Shell>> = std::sync::OnceLock::new();
+        if let Some(found) = FOUND.get() {
+            return found.clone();
+        }
+        let found = self.find_shell().await;
+        let _ = FOUND.set(found.clone());
+        found
+    }
+
+    async fn find_shell(&self) -> Option<Shell> {
+        for program in ["pwsh", "powershell"] {
+            if !command_exists(program) {
+                continue;
+            }
+            let run = Invocation::plain(
+                program,
+                vec![
+                    "-NoProfile".to_string(),
+                    "-NonInteractive".to_string(),
+                    "-Command".to_string(),
+                    "$PSVersionTable.PSVersion.ToString()".to_string(),
+                ],
+            );
+            let Ok(outcome) =
+                run_program_streaming(&self.config, &run, None, &self.cwd, 30, false).await
+            else {
+                continue;
+            };
+            let version = outcome.report.trim().lines().next().unwrap_or("").trim();
+            if outcome.code == 0 && !version.is_empty() {
+                return Some(Shell {
+                    program: program.to_string(),
+                    version: version.to_string(),
+                });
+            }
+        }
+        None
+    }
+
+    /// Write the script where a person can find it, with the mark that makes it read as UTF-8.
+    fn write_script(&self, script: &str) -> Result<PathBuf> {
+        std::fs::create_dir_all(&self.script_dir)
+            .with_context(|| format!("cannot create {}", self.script_dir.display()))?;
+        let n = self
+            .scripts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        let path = self.script_dir.join(format!("script-{n}.ps1"));
+        // The mark first, and the script byte for byte after it: a model's script is not
+        // reformatted here, or the line numbers in an error message would not be its own.
+        let mut bytes = Vec::with_capacity(script.len() + 3);
+        bytes.extend_from_slice(&[0xef, 0xbb, 0xbf]);
+        bytes.extend_from_slice(script.as_bytes());
+        std::fs::write(&path, bytes)
+            .with_context(|| format!("cannot write {}", path.display()))?;
+        Ok(path)
+    }
+}
+
+/// The PowerShell that was found, and what it calls itself.
+#[cfg(windows)]
+#[derive(Clone)]
+struct Shell {
+    program: String,
+    version: String,
+}
+
+#[cfg(windows)]
+#[async_trait::async_trait]
+impl Tool for PwshTool {
+    fn name(&self) -> &str {
+        "pwsh"
+    }
+
+    /// The scripts go where the spilled output goes, so a session's directory holds the
+    /// scripts it ran next to the output they produced.
+    fn use_spill_dir(&mut self, dir: &Path) {
+        self.script_dir = dir.to_path_buf();
+    }
+
+    fn description(&self) -> &str {
+        "Run a PowerShell script on Windows and return its combined output. The script is \
+         written to a `.ps1` file and run with `-File`, so multi-line scripts, `$args`, \
+         functions and comments all behave as they do in a file, and the path in the result \
+         is a real file that can be read and run again. Use this for Windows management \
+         (services, registry, WMI/CIM, Hyper-V, event logs) where the equivalent command \
+         line would be unreadable; use `exec` when one program with arguments is enough. \
+         Refused in readonly mode: a script is arbitrary code and flint cannot judge one."
+    }
+
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "script": {
+                    "type": "string",
+                    "description": "The PowerShell script, exactly as it should run. It is \
+                         written to a file and passed to `-File`, so it is parsed once and \
+                         needs no escaping for any outer shell."
+                },
+                "args": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Arguments for the script, available in it as `$args`."
+                },
+                "stdin": {
+                    "type": "string",
+                    "description": "Text to write to the script's standard input, for a script \
+                         that reads a pipeline."
+                },
+                "timeout_secs": {
+                    "type": "integer",
+                    "description": format!(
+                        "Kill the script after this many seconds (default {DEFAULT_BASH_TIMEOUT}). \
+                         Raise it for anything known to be slow."
+                    )
+                }
+            },
+            "required": ["script"]
+        })
+    }
+
+    async fn call(&self, args: &Value) -> Result<String> {
+        let script = require_str(args, "script")?;
+        if script.trim().is_empty() {
+            return Err(anyhow!("argument 'script' must not be empty"));
+        }
+        // Not judged, and not guessed at with the wrong vocabulary: `is_readonly_command` reads
+        // a cmd or POSIX command line, and `Get-Process | Stop-Process` is not one. A refusal
+        // that says so is honest; a classifier that answers about a language it does not know
+        // would be worse than no answer.
+        if self.readonly {
+            return Err(anyhow!(
+                "readonly mode is ON: refusing to run a PowerShell script. A script is \
+                 arbitrary code and flint cannot judge one; use a read-only `bash` or `exec` \
+                 command, or turn readonly off with /readonly."
+            ));
+        }
+        let extra = optional_str_list(args, "args")?;
+        let stdin = optional_str(args, "stdin")?;
+        let timeout = optional_u64(args, "timeout_secs")?
+            .unwrap_or(DEFAULT_BASH_TIMEOUT)
+            .clamp(1, 24 * 3600);
+
+        let shell = self.shell().await.ok_or_else(|| {
+            anyhow!("no PowerShell on this machine: neither `pwsh` nor `powershell` could be run")
+        })?;
+        let script_path = self.write_script(script)?;
+
+        let mut argv: Vec<String> = [
+            "-NoProfile",
+            "-NonInteractive",
+            // See the type's comment: the policy on this machine refuses `-File` without it.
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        argv.push(script_path.display().to_string());
+        argv.extend(extra);
+
+        let run = Invocation::plain(&shell.program, argv);
+        let outcome =
+            run_program_streaming(&self.config, &run, stdin, &self.cwd, timeout, false).await?;
+
+        // The version and the path first, so that a reader knows which PowerShell produced
+        // this and where the script it ran still is. Both are needed to make sense of output
+        // that looks wrong: 5.1 and 7 do not parse the same language.
+        let report = format!(
+            "{} ({}) -- script: {}\n{}",
+            shell.version, shell.program, script_path.display(), outcome.report
+        );
+        Ok(util::truncate(&report, self.config.max_tool_output))
     }
 }
 
