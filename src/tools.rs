@@ -2095,6 +2095,10 @@ impl Tool for WriteTool {
                     .with_context(|| format!("cannot create {}", parent.display()))?;
             }
         }
+        // Written in place, not to a temporary file renamed over the target. On Windows a
+        // rename cannot replace a file another process holds open, so the usual atomic-write
+        // trick fails for exactly the files somebody is most likely to have open. This is a
+        // decision rather than an oversight; see `docs/windows-tooling.md` §6.5.
         tokio::fs::write(&path, content)
             .await
             .with_context(|| format!("cannot write {}", path.display()))?;
@@ -2172,8 +2176,21 @@ impl Tool for EditTool {
 
         let count = text.matches(old).count();
         if count == 0 {
+            // `read` shows the bytes as they are, so the model has seen the `\r` -- but the
+            // text it writes back is written with `\n` out of habit, and a `\r` is invisible
+            // in a transcript. Naming the line endings costs one sentence here and saves the
+            // turn the model would otherwise spend guessing. Deliberately not normalised:
+            // matching loosely would let an edit silently rewrite every line of the file,
+            // which is a diff nobody asked for and the worst kind to review.
+            let hint = if text.contains("\r\n") && old.contains('\n') && !old.contains("\r\n") {
+                " This file uses CRLF line endings: put \r\n between lines in old_string."
+            } else if !text.contains("\r\n") && old.contains("\r\n") {
+                " This file uses LF line endings: old_string has \r\n in it, which is not there."
+            } else {
+                ""
+            };
             return Err(anyhow!(
-                "old_string not found in {}. Read the file first to get the exact text.",
+                "old_string not found in {}. Read the file first to get the exact text.{hint}",
                 path.display()
             ));
         }
@@ -3309,6 +3326,73 @@ mod name_tests {
             .await
             .expect("an ordinary name still writes");
         assert!(ok.contains("fine.txt"), "{ok}");
+    }
+    /// A `\n` `old_string` in a `\r\n` file must say why it did not match.
+    ///
+    /// `read` hands the bytes over as they are, so the model sees the `\r` -- but a model that
+    /// then writes the replacement text the way it writes all text, with `\n`, gets "old_string
+    /// not found" and no idea that a character it cannot see is the reason. It costs a turn, and
+    /// the turn is spent guessing. Naming the line endings is the whole fix: flint must not
+    /// normalise them, because silently rewriting every line of a file is a diff nobody asked
+    /// for and the worst kind to review.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn an_edit_against_crlf_says_so_when_the_text_does_not_match() {
+        let dir = TempDir::new("crlf");
+        let config = Config {
+            max_tool_output: 10_000,
+            ..Config::default()
+        };
+        let tools = ToolBox::new(&config, false, dir.path().to_path_buf());
+        std::fs::write(dir.path().join("dos.txt"), "one\r\ntwo\r\n").unwrap();
+        tools
+            .invoke("read", &json!({ "path": "dos.txt" }))
+            .await
+            .expect("read first");
+
+        let error = tools
+            .invoke(
+                "edit",
+                &json!({ "path": "dos.txt", "old_string": "two\n", "new_string": "three\n" }),
+            )
+            .await
+            .expect_err("a \\n old_string cannot match a \\r\\n file");
+        let message = error.to_string();
+        assert!(
+            message.contains("CRLF"),
+            "the refusal must name the line endings: {message}"
+        );
+
+        // The same edit with the `\r` in it works, and the file keeps its endings.
+        tools
+            .invoke(
+                "edit",
+                &json!({ "path": "dos.txt", "old_string": "two\r\n", "new_string": "three\r\n" }),
+            )
+            .await
+            .expect("an exact match still edits");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("dos.txt")).unwrap(),
+            "one\r\nthree\r\n"
+        );
+
+        // A `\n` file gets no line-ending lecture.
+        std::fs::write(dir.path().join("unix.txt"), "one\ntwo\n").unwrap();
+        tools
+            .invoke("read", &json!({ "path": "unix.txt" }))
+            .await
+            .expect("read first");
+        let error = tools
+            .invoke(
+                "edit",
+                &json!({ "path": "unix.txt", "old_string": "nope", "new_string": "x" }),
+            )
+            .await
+            .expect_err("no match is still an error");
+        assert!(
+            !error.to_string().contains("CRLF"),
+            "an LF file must not be blamed for line endings: {error}"
+        );
     }
 }
 
