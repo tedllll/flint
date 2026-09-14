@@ -568,6 +568,33 @@ were mutation-checked rather than watched red, because the code came first: neut
 push fails the e2e on "the page was never told what the command answered", and neutering the
 colour-stripping fails the unit test on the escape it should have removed.
 
+**Next: the command list, and the first panels — not started, and here is what is already decided.**
+Written down because both halves have a trap that is cheaper to avoid than to find:
+
+- **The frame grows `commands`**, one entry per command the page may offer: `{name, args, help,
+  class}`. `class` is this section's own four — `panel`, `action`, `form`, `danger` — and the frame
+  carries all of them even though the page renders one at a time: a control that offers a command
+  the terminal refuses is the failure the toggle round was built to prevent, and a class the page
+  silently drops is a control nobody can account for. `/exit` is not in it: the page is a window
+  onto a process, and a misclick must not end a session.
+- **The table has to be written once.** `/help` prints a hand-written block today (the
+  `"/help" | "/?"` arm) and dispatch is a `match`; a third copy for the frame would be the drift
+  this repository spends its comments preventing. The table drives `/help` and the frame, and the
+  `match` is checked against it by a test — one that runs each name through the REPL and asserts it
+  is not answered with "unknown command", which is the behavioural check that catches a rename.
+- **A panel's text comes from the process.** What `/config`, `/tools`, `/skills` and `/help` print
+  *is* the panel, so the process builds those lines and puts them in the frame; formatting them in
+  the page would be a second implementation of the terminal's own report. The trap: those lines are
+  styled (dim/bold) for the terminal and the frame must carry plain text, so either they are built
+  once as data and rendered twice, or the terminal gives up its styling — and the `term_capture`
+  tests assert exact bytes, so that choice has to be made deliberately. `Term::plain` (built in the
+  round above) is what strips colour on the way to the page.
+- **A button sends `/<name>` through `sendText`**, exactly as a picker or a switch does, and its
+  answer arrives on the `command` line built above. A refused send puts the control back to what is
+  in force.
+- **The destructive class gets the page's own confirmation** — a second click, not a `/yes` command
+  — because there is no undo anywhere in flint.
+
 Four gates. `the_page_is_told_the_state_its_controls_would_show` is the one that needs a real
 process: `--web`, `/events` read as it arrives, the state frame read on connect, then `/model
 stub-other` sent to `POST /message` — the route the page's own picker uses — and the changed state

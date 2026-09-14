@@ -12,12 +12,13 @@ the binary's own tests, 33 `agent_loop`, 41 `cli_output`, 4 `json_output`, 4 `se
 `term_capture` plus the ignored cost measurement, 13 `web_view`), `cargo clippy --all-targets` is
 silent, and both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
 
-**This round was on Windows** (10.0.26200, AMD64, rustc 1.98.1, PowerShell 5.1.26100.6584 as
-the only PowerShell on `PATH`, locale ANSI code page 936). That is the whole point of the
-round: every item left in the queue was waiting for exactly this machine, and
-`docs/windows-tooling.md` now records what the machine said rather than what the
-documentation implied. Five of its predictions were wrong, and the corrections are more
-useful than the fixes.
+**The last sessions were on Windows** (10.0.26200, AMD64, rustc 1.98.1, PowerShell 5.1.26100.6584
+as the only PowerShell on `PATH`, locale ANSI code page 936), and the work is now being moved to
+another machine — hence the checklist below. Nothing in the tree is Windows-specific except where
+the tooling documents say so: the Windows command-line work is finished, `docs/windows.md` is the
+field notes for the terminal, and `docs/windows-tooling.md` records what the machine said rather
+than what the documentation implied (five of its predictions were wrong, and the corrections are
+more useful than the fixes).
 
 Build with:
 
@@ -26,7 +27,74 @@ cargo build --release
 ```
 
 The binary is held open by any running `flint`, so close those before replacing it.
-`docs/windows.md` is the field notes for the Windows terminal.
+
+## Picking this up on another machine
+
+Written for a cold start: a different machine, and possibly a session with no memory of the last
+one. The repository is the whole state — there is no index, no cache and no database anywhere in
+flint, on purpose — so cloning it and running the gate below is all that "catching up" means.
+
+**Where it was left.** `main` at `59e68d6` (`feat: a command's answer reaches the page, failures
+included`), working tree clean, `origin/main` level with it. The counts are in the section above and
+were re-run to write this paragraph, not remembered.
+
+**What the other machine needs.**
+
+1. `rustup` with the stable toolchain (`rustc 1.98.1` here; nothing needs nightly), plus `node` for
+   the two replay scripts — `cargo test` does not run them, so a machine without Node passes
+   `cargo test` while the page's own renderer is untested.
+2. No API key, and no network, for the gate below: every test that talks to a model uses a
+   `wiremock` stub, and the ones that need a real process point a scratch `FLINT_HOME` at
+   `http://127.0.0.1:9/v1` (a port nothing listens on) precisely so that no test can reach out.
+3. A terminal to *use* it, which is not needed to verify it: `FLINT_TERM_CAPTURE=1` with
+   `FLINT_TERM_CAPTURE_FILE` and `FLINT_TERM_SIZE=100x24` forces the interactive path into a file
+   for `scripts/vtscreen.js` (debug builds only), which is how the layout tests see real bytes.
+
+```bash
+git clone git@github.com:tedllll/flint.git && cd flint
+cargo test                                        # 370 passing, 1 ignored
+cargo clippy --all-targets                        # silent, and worth keeping that way
+node scripts/term-layout-test.js                  # 全部通过
+node scripts/web-view-test.js                     # all passed
+cargo test --test term_capture -- --ignored --nocapture measured_cost_of_streaming   # the cost number
+```
+
+The rest of this file is the reference for the parts that are easy to get wrong:
+`## Verification without a terminal` has the capture variables (`FLINT_TERM_CAPTURE*`) and the two
+traps that cost time when writing a new REPL test, `## Pushing from this machine` has the deploy key
+(a fresh checkout needs `core.sshCommand` only if the default key is not authorised on the
+repository), and `AGENTS.md` has the rules a change is expected to follow — the one worth repeating
+here is that a regression test has to be *seen* red, or mutation-checked when the code came first.
+
+**Trying it without touching a real setup.** Point `FLINT_HOME` at a scratch directory; the tests
+do exactly that. Two commands are worth knowing before changing anything:
+
+```bash
+FLINT_HOME=/tmp/flint-try flint                       # a session in a throwaway home
+FLINT_HOME=/tmp/flint-try flint --web                 # prints the token URL to open
+FLINT_HOME=/tmp/flint-try flint debug prompt-input    # the request body that would be sent, no key needed
+```
+
+That is the bash spelling; in PowerShell it is `$env:FLINT_HOME='C:\temp\flint-try'; flint` for the
+length of the session, or one command at a time with `$env:FLINT_HOME='C:\temp\flint-try'; flint --web`.
+
+The page is reachable only at the printed URL: loopback plus a per-run token in the header
+(`docs/web-mode.md` §4). A page opened from a *dropped file* has no process behind it and therefore
+no header controls — that is the level-1 view, not a fault.
+
+**Two traps, both cost time before.** A test run after restoring a file by copy may test the *old*
+binary, because Windows `CopyFile` preserves the source's modification time and cargo then decides
+nothing changed — watch for the `Compiling` line. And CI runs nothing on push:
+`.github/workflows/release.yml` triggers on `v*` tags and `workflow_dispatch` only, so a green push
+means the local gate was green and nothing more.
+
+**What is not verified anywhere yet.** The page's controls have never been looked at in a browser:
+the pickers, the switches and the new command-answer block are pinned as behaviour (Node over the
+stub DOM) and as bytes (`tests/web_view.rs`), and measured end to end against a real process
+(`tests/cli_output.rs`), but nobody has used them with a real font, a real keyboard or a real
+scroll position. `docs/web-mode.md` §11 says so in the same words, and the first thing worth doing
+on the new machine is `cargo run -- --web`, type `/config` into the composer, and see whether the
+answer lands in the transcript the way the block is drawn.
 
 ## What was just done
 
@@ -38,7 +106,8 @@ composer answers there — because a command that failed no longer ends the run.
 and the two before it: eight items in one family — what the user has already read must not go
 missing, a surface must not go on saying a turn is running after it has stopped, a switch must not
 report a state it did not set, a setting must not be forgotten by the file that is supposed to hold
-it, a page must have a *read channel* and an *output channel* before it can offer a control at all. Each with a test watched red first. The
+it, a page must have a *read channel* and an *output channel* before it can offer a control at all.
+Each with a test watched red first, or mutation-checked where the code came first. The
 measurement that corrected last round's diagnosis is below, then the second bug, which the first
 one's measurement is what found, then the third, then this round's three.
 
@@ -325,12 +394,36 @@ transcript; `docs/web-mode.md` §11 says so in the same words.
 
 ### Still owed on the page
 
-- **`ROADMAP.md` §8's remaining controls**, in the order it gives: the read channel, the pickers, the
-  toggles and the command *output* channel are built, so what is left is buttons for the no-argument
-  actions, forms (`/name`, `/provider key`, `/provider add`, `/config edit`), a confirmation step for
-  the destructive ones, and the selector-shaped commands that are not settings (`/resume`, `/skills`,
-  `/archive`, `/delete` from the sidebar rows). The command list and the panels (`/config`, `/tools`,
-  `/skills`, `/help`) join the `state` frame with the buttons that read them.
+**The next unit, and the decisions already taken for it** (so a cold session does not re-derive
+them; the reasoning is in `ROADMAP.md` §8):
+
+1. **The command list is the read half that is missing.** The frame grows `commands`, one entry per
+   command the page may offer: `{name, args, help, class}`. The `class` is §8's own four —
+   `panel` (a report: `/config`, `/provider`, `/model`, `/usage`, `/tools`, `/skills`, `/sessions`,
+   `/help`), `action` (`/new`, `/reload`), `form` (`/name`, `/provider key`, `/provider add`,
+   `/provider edit`, `/config edit`), `danger` (`/delete`, `/archive`, `/provider rm`). The page
+   renders only the classes it has been taught, and the frame carries all of them: a control that
+   offers a command the terminal refuses is the failure mode the toggle round was built to avoid.
+2. **The table has to exist once, not three times.** `/help` prints a hand-written block today
+   (`src/main.rs`, the `"/help" | "/?"` arm) and the command dispatch is a `match` — a third copy
+   for the frame would drift. The table should drive `/help`'s output *and* the frame, and the
+   `handle_command` match should be checked against it by a test rather than by eye. `/exit` stays
+   off the page (§8: a window onto a process, and a misclick must not end a session).
+3. **A panel's text comes from the process, not from the page.** What `/config`, `/tools`,
+   `/skills` and `/help` print is the panel's content, so the process builds it and puts it in the
+   frame; the page only renders it. Formatting it in the page would be a second implementation of
+   the terminal's own report, which is what "one fact, one place" forbids. The open question to
+   settle first: those arms print *styled* text (dim/bold) and the frame must carry plain text, so
+   either the lines are built once as data and rendered twice (styled in the terminal, plainly in
+   the frame) or the terminal loses its styling — decide it deliberately rather than by accident,
+   and note that the `term_capture` tests assert exact bytes.
+4. **A button sends `/<name>` through `sendText`, and its answer arrives on the channel built this
+   round.** No second implementation of any command; the composer's own channel is the write half.
+   A refused send must put the control back to what is in force, the way a switch does.
+5. **The destructive class needs a confirmation step** (`/delete`, `/archive`, `/provider rm`),
+   because there is no undo anywhere in flint, and the confirmation has to be the *page's*
+   (a second click) rather than a `/yes` command in the terminal.
+
 - The small queued-line hole above still wants its two structural lines before a test can hold it.
 
 **The Windows plan is finished, and the measurements are the useful part.**
@@ -813,13 +906,14 @@ section into it, so the two do not drift. The shape of it now:
    HTTP server or `hyper`, which is already in the tree via `reqwest`) blocks only step 4.
    The next web work is §8's **commands and config from the page**: the page sends the command
    *line* over the channel the composer already uses; the `state` frame it needs for options
-   **is built** (provider, model, what each provider offers, the toggles — see above), and the
-   provider and model pickers are the first two controls drawn from it; what is left is buttons
-   for the no-argument actions, switches for the toggles, forms, and a confirmation step for the
-   destructive ones, with the command list joining the frame as the buttons that read it arrive
-   and action output going to the transcript (`printer.term()` is drawn in the terminal and
-   exists nowhere else). `config.toml` writes are allowed because the per-run loopback token
-   already covers them, and `/exit` stays off the page.
+   **is built** (provider, model, what each provider offers, the toggles — see above); the
+   provider and model pickers and the toggles are the first controls drawn from it; and a
+   command's *output* now reaches the page too (the `command` line built in the last round), so
+   nothing structural is left between here and the buttons. What is left is the command list in
+   the frame with the panels it names, buttons for the no-argument actions, forms, and a
+   confirmation step for the destructive ones — the decisions taken for that unit are listed
+   under "Still owed on the page" above. `config.toml` writes are allowed because the per-run
+   loopback token already covers them, and `/exit` stays off the page.
 
 Both of the last two are platform-independent and can be done on either machine.
 
