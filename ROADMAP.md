@@ -543,11 +543,47 @@ no request at all. The fix is a turn polled once before the input channel is rea
 would be a race with the reader thread rather than an assertion, so it wants the two lines that make
 it structural rather than a gate over a 2ms window.
 
-**Third: a stop button in the composer**, shown only while a turn is in flight, sending
-`sendText("/stop")` — no new route and no new verb, because the composer's route already carries
-lines and `/stop` is a line. The server should follow a stop with a status frame so the page
-settles rather than staying half-streamed; codex's tracker has that lesson twice
-(`openai/codex#28104`, `#28813`).
+**Third: a stop button in the composer — fixed, 2026-09-14.** Shown only while a turn is in
+flight, sending `sendText("/stop")` — no new route and no new verb, because the composer's route
+already carries lines and `/stop` is a line. **The button was the easy half.** What the round
+actually found is that *a stopped turn was over in the terminal and not on the page*, and that the
+frame the page needed did not exist anywhere in the interactive path: `turn.completed` is written by
+the one-shot `-p --json` path, and the page's own handler for it (`doc.status = ""`, close every open
+answer) had never once run under `--web`. `message.completed` is what normally closes an answer, and
+an interrupted turn never reaches it — the future is dropped — so the page kept the half answer open,
+kept offering the stop, and kept saying what the turn had been doing. Measured against a stub that
+draws half an answer and then holds the connection open, with `--web`, its stdout in a file and
+`/events` read as it arrives:
+
+- **Every turn ends with `turn.completed`**, from `ndjson::turn_completed` — the same line `--json`
+  ends a turn with, from the same function, because a second spelling of "the turn is over" is a
+  second thing to keep in step. `run_turn` says it in `turn_over`, which is also where the status row
+  is cleared: both of the turn's exits (a command handed back to the REPL, and the end of the turn)
+  need both, and they are one fact.
+- **`Term::activity_done` clears the activity without a terminal to draw it on.** It returned early
+  when `!interactive`, so a `--web` run whose stdout was a pipe or a file announced every wait it
+  began and never the end of one: the last frame after `/stop` was
+  `{"text":"writing the answer","type":"status"}`. `activity_started` already answers "even when
+  there is no terminal, because a browser watching a piped run still needs to be told"; this is the
+  other half of that sentence, and only the drawing needs a terminal (`paint_activity` checks).
+- **`Live::answer_committed` drops the answer in flight when the drawn text becomes a message.**
+  `Event::Done` is what normally drains that accumulator and an interrupted turn never reaches it, so
+  the next page to open was handed the stopped half as an answer still being written — and the
+  accumulator would have carried the stopped text into the following turn's `message.completed`.
+
+The button reads `doc.running` (set by `turn.started`, cleared by `turn.completed`) and not
+`doc.status`: the status line also carries feed trouble, and a stop button that appears because the
+connection dropped is a button that stops nothing. It sits to the *left* of `send` on purpose — a
+control that appears under the pointer that was reaching for another one turns a steer into a stop.
+**The note here said a status frame, and that was half right**: the status is the strip and the answer
+is a block, so clearing the status closes nothing; `turn.completed` is what the page already had a
+handler for. Codex's tracker has the lesson twice (`openai/codex#28104`, `#28813`), and the shape of
+it is the same: the turn ends in the process and the surface keeps saying it has not. Gated by
+`a_stopped_turn_tells_the_page_it_is_over` (a real process, `/events` read as it arrives: red before
+the fix, with no `turn.completed` in the frames and the status frame still naming the stopped turn),
+`the_composer_can_stop_the_turn_it_is_watching` (the page's bytes: the word, the route, and the state
+it is offered in), `a_page_opened_after_a_stop_is_not_told_the_stopped_answer_is_still_arriving`, and
+the page's own Node check, which runs `paint` and reads the button back.
 
 **Done in the same round, recorded so it is not re-done**: themed scrollbars (the default grey ones
 were the complaint); a draggable sidebar and a draggable reading width, with a hairline hint at

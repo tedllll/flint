@@ -525,3 +525,32 @@ answer.** `parser.done` was only ever used to leave the read loop early and neve
 afterwards — so a dropped connection, which usually shows up as a body simply ending, produced
 a half answer that read as a complete one. It is now a transport failure, which is what puts a
 mid-answer drop back on the retry ladder when nothing has been drawn.
+
+### Stopping a turn from the page — measured, and it found the frame that was missing
+
+The stop button was the last of the three complaints in `ROADMAP.md` §9, and the button is the
+small part of it. Driven against a stub provider that draws half an answer and then holds the
+connection open, with `--web`, its stdout in a file, and `/events` read as it arrives on a socket
+with a read timeout — the shape every "the page does not change" report needs, and the reason all
+three of these were invisible in the source:
+
+| Claim | How | Result |
+|---|---|---|
+| The composer can stop a turn | the button, from `turn.started` to `turn.completed` | offered only while a turn is in flight; one click sends one `/stop` down the composer's own route |
+| A stopped turn is over *on the page* | `/stop` typed mid-answer, `/events` read live | **a defect.** No `turn.completed` frame is sent by an interactive run at all — the one-shot `-p --json` path writes it, so the page's own handler for it had never run under `--web`. `message.completed` is what closes an answer, and an interrupted turn never reaches it: the half answer stayed open and the button stayed on screen |
+| The status line ends with it | the frames after `/stop` | **a defect.** The last frame was `{"restarted":false,"text":"writing the answer","type":"status"}`. `Term::activity_done` returned early when the terminal was not interactive, so a run with a pipe or a file for stdout announced every wait it began and never the end of one |
+| A page opened after a stop is not told the half is still arriving | `Live::answer_committed`, then a fresh `/events` connection | **a defect.** `Event::Done` is what drains the accumulator the `answer` snapshot reads, and an interrupted turn never gets one — so the stopped half would have been replayed as an answer still being written, and carried into the next turn's `message.completed` |
+
+The three fixes are in `run_turn` (`turn_over`), `term.rs` and `web.rs` respectively, and the
+button reads `doc.running` — the turn's own boundaries — rather than `doc.status`, which also
+carries feed trouble. The lesson worth keeping is the one `ROADMAP.md` had written down wrongly:
+what settles a page is **the end of the turn**, not a cleared status line. The status is the strip
+and the answer is a block, and only the first of those was ever being told.
+
+Four gates, and every one was watched red first: `a_stopped_turn_tells_the_page_it_is_over` (a real
+process, a live `/events` read, both frames asserted), `the_composer_can_stop_the_turn_it_is_watching`
+(the page's bytes: the word, the route, the state), the in-crate
+`a_page_opened_after_a_stop_is_not_told_the_stopped_answer_is_still_arriving`, and the page's own
+Node check, which runs the real `paint` over a stub DOM and reads the button back — the first
+assertion that failed there was `doc.running` being `undefined`, which is what a page that has never
+heard of a turn's end looks like from the inside.

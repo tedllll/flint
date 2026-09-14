@@ -249,6 +249,32 @@ check("a status event becomes the status line, and a finished turn clears it", (
   eq(done.status, "", "status after the turn");
 });
 
+// The stop button is the only way to interrupt a turn from here, and it is offered for exactly
+// as long as there is something to interrupt. The two halves are one test because they are one
+// fact: the turn's own boundaries are what the button reads, so a turn that ends -- by finishing
+// or by being stopped, which is the case the button exists for -- takes the button with it.
+check("the stop button is offered while a turn runs, and gone when it ends", () => {
+  const d = viewer.newDoc();
+  viewer.applyLine(d, `{"type":"turn.started","prompt":"write me an article"}`);
+  eq(d.running, true, "the turn is in flight");
+  viewer.paint(d);
+  eq(viewer.__node("stop").hidden, false, "the stop button is offered while it runs");
+
+  // An interrupted turn never reaches `message.completed`. `turn.completed` is what the server
+  // sends for it (and for every other turn end), and without it the page was left holding an
+  // answer that still looked like it was arriving.
+  viewer.applyLine(d, `{"text":"half an article","type":"message.delta"}`);
+  viewer.applyLine(d, `{"prompt_tokens":1,"completion_tokens":1,"type":"turn.completed"}`);
+  eq(d.running, false, "the turn is over");
+  viewer.paint(d);
+  eq(viewer.__node("stop").hidden, true, "and the button goes with it");
+  eq(
+    d.blocks.filter((b) => b.kind === "assistant").map((b) => b.open),
+    [false],
+    "no half answer is left looking like it is still arriving"
+  );
+});
+
 check("a tool result with no matching call is kept, not dropped", () => {
   // A hand-trimmed session file does this, and the format explicitly allows trimming.
   const d = doc(`{"type":"chat","message":{"role":"tool","tool_call_id":"gone","content":"orphan"}}`);

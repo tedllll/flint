@@ -7,9 +7,9 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 355 passing, 1 ignored (250 lib, 1 in
-the binary's own tests, 33 `agent_loop`, 34 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
-`term_capture` plus the ignored cost measurement, 9 `web_view`), `cargo clippy --all-targets` is
+As of the commit that carries this file, `cargo test` is 358 passing, 1 ignored (251 lib, 1 in
+the binary's own tests, 33 `agent_loop`, 35 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
+`term_capture` plus the ignored cost measurement, 10 `web_view`), `cargo clippy --all-targets` is
 silent, and both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
 
 **This round was on Windows** (10.0.26200, AMD64, rustc 1.98.1, PowerShell 5.1.26100.6584 as
@@ -30,11 +30,12 @@ The binary is held open by any running `flint`, so close those before replacing 
 
 ## What was just done
 
-**An interrupt no longer throws away the answer it was drawing, and neither do the commands that
-rebuild the agent.** That is this round: two fixes in the same family — what the user has already
-read must not go missing — each with a test watched red first. The measurement that corrected last
-round's diagnosis is below, and after it the second bug, which the first one's measurement is what
-found.
+**An interrupt no longer throws away the answer it was drawing, the commands that rebuild the agent
+no longer throw the conversation away, and a stopped turn now ends on the page as well as in the
+terminal.** That is this round: three fixes in one family — what the user has already read must not
+go missing, and a surface must not go on saying a turn is running after it has stopped — each with a
+test watched red first. The measurement that corrected last round's diagnosis is below, then the
+second bug, which the first one's measurement is what found, and then the third.
 
 **And the round before it, recorded here so it is not re-done — six commits on the page, all
 pushed:**
@@ -138,15 +139,50 @@ above produce no request at all. The fix is a poll before the channel is read; a
 be a race with the reader thread rather than an assertion, which is why §9 asks for the two lines
 that make it structural first.
 
+### The stop button, and the page that would not settle — fixed in the same round
+
+**The button was the easy half.** It is offered from `turn.started` to `turn.completed`, sends
+`sendText("/stop")` — the composer's own route, no new verb — disables itself on the first click so
+one click cannot send two stops, and sits to the *left* of `send`, because a control that appears
+under the pointer that was reaching for another one turns a steer into a stop. It reads
+`doc.running`, the turn's own boundaries, and not `doc.status`: the status line also carries feed
+trouble, and a stop button that appears because the connection dropped stops nothing.
+
+**What the round found is that a stopped turn was over in the terminal and not on the page** — and
+that the frame the page needed did not exist anywhere in the interactive path. `turn.completed` is
+written by the one-shot `-p --json` path, so the page's handler for it (`doc.status = ""`, close
+every open answer) had never run under `--web`. What normally closes an answer is
+`message.completed`, and an interrupted turn never reaches it — the future is dropped — so the half
+answer stayed open, the stop button stayed on screen, and the status line went on saying what the
+turn had been doing. Measured with a stub that draws half an answer and then holds the connection
+open, `--web` with its stdout in a file, and `/events` read as it arrives:
+
+- **Every turn ends with `turn.completed`** — `turn_over` in `run_turn`, the same line `--json` ends
+  a turn with from the same function, sent at both of the turn's exits together with clearing the
+  status row.
+- **`Term::activity_done` clears the activity without a terminal to draw on.** It returned early when
+  `!interactive`, so the last frame after `/stop` was `{"text":"writing the answer","type":"status"}`:
+  a `--web` run with piped output announced every wait it began and never the end of one.
+  `activity_started` already answers "even when there is no terminal, because a browser watching a
+  piped run still needs to be told" — this is the other half of that sentence.
+- **`Live::answer_committed` drops the answer in flight once the drawn text is a message**, because
+  `Event::Done` is what normally drains it and an interrupted turn never gets one. Otherwise the next
+  page to open is handed the stopped half as an answer still being written.
+
+The note that was here said the server should follow a stop with a **status** frame. That was half
+right: the status is the strip and the answer is a block, so clearing the status closes nothing —
+`turn.completed` is what the page already had a handler for. Four gates, all watched red first:
+`a_stopped_turn_tells_the_page_it_is_over` (a real process and a live `/events` read),
+`the_composer_can_stop_the_turn_it_is_watching` (the page's bytes), the in-crate
+`a_page_opened_after_a_stop_is_not_told_the_stopped_answer_is_still_arriving`, and the page's Node
+check, which runs `paint` and reads the button back.
+
 ### Still owed on the page
 
-- **A stop button in the composer**, shown only while a turn is in flight (the page already knows
-  — a `status` frame is current), sending `sendText("/stop")` down the route the composer uses.
-  That is why it needs no new route and no new verb. A stop should also leave the page settled
-  rather than half-streaming, so the server follows it with a status frame; codex's tracker has
-  the same lesson twice (`openai/codex#28104`, `#28813`: Esc interrupted the turn and left `/goal`
-  reading as active).
-- **`ROADMAP.md` §8** — commands and config from the page — is the next feature after these.
+- **`ROADMAP.md` §8** — commands and config from the page — is the next feature after these: the
+  `state` frame, then buttons, selectors, forms and confirmations, all of them composing the
+  terminal's own command lines.
+- The small queued-line hole above still wants its two structural lines before a test can hold it.
 
 **The Windows plan is finished, and the measurements are the useful part.**
 `docs/windows-tooling.md` had been "settled and unimplemented" for several sessions: a

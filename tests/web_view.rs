@@ -43,6 +43,18 @@ fn forbidden(needle: &str, why: &str) {
     );
 }
 
+/// One occurrence of the page, and the few lines that follow it.
+///
+/// Lines rather than a byte window: this file is UTF-8, and a slice taken at a byte offset can
+/// land in the middle of a character -- which panics instead of failing the test it is in.
+fn from(needle: &str, lines: usize) -> String {
+    let rest = view()
+        .split(needle)
+        .nth(1)
+        .unwrap_or_else(|| panic!("the page does not mention {needle:?}"));
+    rest.lines().take(lines).collect::<Vec<_>>().join("\n")
+}
+
 /// The test is worthless if the page is empty, so say what it must contain before the
 /// negative assertions, which would all pass over an empty string.
 #[test]
@@ -203,6 +215,64 @@ fn the_sidebar_can_start_a_conversation() {
     assert!(
         html.contains("/help lists the commands"),
         "the composer must say that commands work here"
+    );
+}
+
+/// The composer can stop the turn it is watching.
+///
+/// Everything else the page sends, a person types. `/new` has a button because the sidebar has
+/// one, and the interrupt had nothing: the only way to stop a turn from the browser was to type a
+/// slash command into a box that looks like it is for talking to the model -- which is the one
+/// thing the hint line says *steers* instead. Three things have to hold, and each is a way this
+/// can be wrong rather than merely absent:
+///
+/// * the word is `/stop`, sent through `sendText` like every other line, because a second verb for
+///   stopping would be a second thing to keep in step with the REPL;
+/// * it is a `type="button"`: an untyped `<button>` inside a form *submits* it, so a click would
+///   send whatever is in the textarea instead of stopping anything;
+/// * it is offered only while a turn is in flight, read from the turn's own boundaries
+///   (`doc.running`) and not from the status line, which also carries feed trouble. A stop button
+///   that appears because the connection dropped is a button that stops nothing.
+#[test]
+fn the_composer_can_stop_the_turn_it_is_watching() {
+    let html = view();
+    let button = html
+        .lines()
+        .find(|line| line.contains("<button id=\"stop\""))
+        .expect("the composer has no stop button, so a turn can only be typed to a stop");
+    assert!(
+        button.contains("type=\"button\""),
+        "a button in a form submits it unless it says otherwise: {button:?}"
+    );
+    assert!(
+        button.contains("hidden"),
+        "the button must start out hidden, or it is offered before there is anything to stop: {button:?}"
+    );
+
+    // The click handler, not the first mention of the button: the page also re-enables it when a
+    // turn starts, and a window that began there would not reach the handler at all.
+    let handler = from("getElementById(\"stop\").addEventListener", 12);
+    assert!(
+        handler.contains("sendText(\"/stop\")"),
+        "the stop button must send /stop: {handler}"
+    );
+    assert_eq!(
+        handler.matches("sendText(").count(),
+        1,
+        "the stop button sends exactly one thing, and it is /stop: {handler}"
+    );
+
+    assert!(
+        from("stop.hidden =", 1).contains("doc.running"),
+        "the button is shown for a turn in flight and for nothing else"
+    );
+    assert!(
+        from("case \"turn.started\"", 5).contains("doc.running = true"),
+        "a turn starting is what puts the button there"
+    );
+    assert!(
+        from("case \"turn.completed\"", 8).contains("doc.running = false"),
+        "and the end of the turn is what takes it away"
     );
 }
 
