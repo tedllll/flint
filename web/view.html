@@ -1150,12 +1150,29 @@ async function follow() {
     } catch (e) {
       // Reconnecting is the normal case, not an error worth shouting about: the usual
       // reasons are a flint that is being restarted and a laptop that was asleep.
-      doc.status = "live feed: " + e.message + " — reconnecting";
+      doc.status = feedTrouble(e.message);
       paint(doc);
+      // ...but a refused token is not a case retrying can fix, so the page stops here and says
+      // where the right address is, instead of saying "reconnecting" until somebody gives up.
+      if (/\b401\b/.test(e.message)) return;
     }
     await new Promise((resolve) => setTimeout(resolve, delay));
     delay = Math.min(delay * 2, 10000);
   }
+}
+
+/// What the page says when it cannot read the run at all, and the two cases are different in
+/// kind. A refused token never heals by itself: the token is in the URL this page was opened
+/// with, and restarting flint changes both the port and the token, so a tab left open across a
+/// restart is refused for good. A stream that ended is the ordinary case -- flint restarting, a
+/// laptop waking -- and is retried without ceremony. Reported as "the page is not connected to
+/// the conversation, and nothing on it changes": the second case's line was being shown for the
+/// first, and "reconnecting" forever is indistinguishable from a broken flint.
+function feedTrouble(message) {
+  if (/\b401\b/.test(message)) {
+    return "this page's token is not this flint's — open the address flint printed (a restart changes the port and the token)";
+  }
+  return "live feed: " + message + " — reconnecting";
 }
 
 function readFile(file) {
@@ -1315,7 +1332,7 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     newDoc, applyLine, applyText, applyEvent, tokenFromSearch, servedByFlint, sseFrames,
     sessionsFrom, messageBody, resumeLine, streamingAnswer, carryStreaming, setStreamingAnswer,
-    paint,
+    paint, feedTrouble,
   };
 }
 </script>

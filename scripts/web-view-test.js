@@ -480,6 +480,18 @@ check("the page follows an answer only when the reader was at the bottom", () =>
   eq(scroller.scrollTop, 100, "a reader further up is left where they were");
 });
 
+check("a page that cannot read says which kind of failure it is", () => {
+  // The two lines are not interchangeable: a refused token is permanent (it is in the URL the page
+  // was opened with, and a restart changes it) while an ended stream is retried. Showing the
+  // retrying line for a refused token is what made a dead page look like a broken flint.
+  const refused = viewer.feedTrouble("HTTP 401");
+  eq(/token/.test(refused), true, "a refused token says so");
+  eq(/reconnecting/.test(refused), false, "and does not promise to reconnect");
+  const ended = viewer.feedTrouble("the stream ended");
+  eq(/reconnecting/.test(ended), true, "an ended stream is retried");
+  eq(ended.includes("the stream ended"), true, "and says what ended");
+});
+
 if (failures) {
   console.log(`\n${failures} failed`);
   process.exit(1);
