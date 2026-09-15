@@ -6,7 +6,7 @@ name: release
 on:
   # Every push builds, so a target that breaks is found by the push that broke
   # it rather than by whoever next goes to cut a release. A tag push builds
-  # too; cutting a release is still the manual dispatch below.
+  # the same way and then publishes; a branch push leaves artifacts behind.
   push:
   workflow_dispatch:
 
@@ -92,9 +92,8 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    # Publishing is a deliberate act: a tag push builds and uploads artifacts,
-    # and only a manual dispatch on that tag cuts a release.
-    if: github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/')
+    # The tag is what publishes. A branch build stops at the artifacts.
+    if: startsWith(github.ref, 'refs/tags/')
     permissions:
       # Required by softprops/action-gh-release to attach files to the release.
       contents: write
