@@ -7,9 +7,14 @@ Second request: the model "answers". Everything is served as SSE, the same shape
 
 import json
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 CALLS = {"n": 0}
+# Set by the `stall` argument: write one fragment and then say nothing, for ever. That is the shape a
+# stop has to be tested against -- an answer drawn but unfinished -- and it cannot be produced by a
+# response with a fixed body, which is what the rest of this file serves.
+STALL = False
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -22,6 +27,17 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         body = json.loads(self.rfile.read(length) or b"{}")
         CALLS["n"] += 1
+        if STALL:
+            # No Content-Length and no chunking: the body ends when the connection does, and this one
+            # does not end on its own. The client is left waiting, which is the state `/stop` exists
+            # for -- and the fragment already written is what the caller has read when it stops.
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.write('data: {"choices":[{"delta":{"content":"半句答案"}}]}\n\n'.encode("utf-8"))
+            self.wfile.flush()
+            time.sleep(120)
+            return
         if CALLS["n"] == 1:
             chunks = [
                 {"choices": [{"delta": {"content": "我先看一下。"}}]},
@@ -52,6 +68,7 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8791
+    STALL = len(sys.argv) > 2 and sys.argv[2] == "stall"
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     print(f"stub listening on http://127.0.0.1:{port}/v1", flush=True)
     server.serve_forever()

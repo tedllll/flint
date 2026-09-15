@@ -333,6 +333,250 @@ async fn json_without_a_prompt_is_refused_without_writing_a_stream() {
     );
 }
 
+/// A caller that has changed its mind can stop the run without killing the process.
+///
+/// A one-shot run has no keyboard, so `/stop` arrives on stdin -- the same word the REPL takes, for
+/// the same reason: it is the interrupt that works when there is no key to press, which is exactly
+/// the situation a caller is in. What has to be true: the run ends *promptly* rather than when the
+/// model gets around to answering, it ends as a turn rather than as a crash, and the process is still
+/// there to be read afterwards -- killing it would take the session file's last writes with it.
+#[tokio::test]
+async fn a_run_can_be_stopped_from_stdin() {
+    struct Slow {
+        body: String,
+        delay: std::time::Duration,
+    }
+
+    impl Respond for Slow {
+        fn respond(&self, _req: &Request) -> ResponseTemplate {
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_delay(self.delay)
+                .set_body_string(self.body.clone())
+        }
+    }
+
+    let server = MockServer::start().await;
+    let cwd = cwd_for("stop");
+    let home = home_for("stop", &server.uri(), &cwd);
+    // Ten seconds of nothing, which is the wait `/stop` exists to cut short. The bound below is
+    // eight, so a run that ends at ten ended because the model answered, not because it was stopped.
+    Mock::given(method("POST"))
+        .respond_with(Slow {
+            body: answers_in_two_fragments(),
+            delay: std::time::Duration::from_secs(10),
+        })
+        .mount(&server)
+        .await;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_flint"))
+        .args(["-p", "say hello", "--json"])
+        .arg("--cwd")
+        .arg(&cwd)
+        .env("FLINT_HOME", &home)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to start flint");
+
+    // Drained while the run is going: a caller reads a pipe as it arrives, and a process nobody is
+    // reading would block on a full pipe buffer instead of on the model.
+    let mut stdout = child.stdout.take().expect("a pipe");
+    let reader = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut text = String::new();
+        let _ = stdout.read_to_string(&mut text);
+        text
+    });
+
+    let started = std::time::Instant::now();
+    // Long enough that the turn is genuinely in flight -- the heartbeat is the proof of that, and the
+    // assertion below checks it arrived.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    {
+        use std::io::Write;
+        let mut stdin = child.stdin.take().expect("a pipe");
+        stdin.write_all(b"/stop\n").expect("writing to flint");
+        stdin.flush().expect("flushing");
+    }
+
+    let mut ended = None;
+    while started.elapsed() < std::time::Duration::from_secs(8) {
+        if let Some(status) = child.try_wait().expect("asking after flint") {
+            ended = Some(status);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if ended.is_none() {
+        let _ = child.kill();
+    }
+    // Reaped on every path, including the ones that already have the status: a killed child that is
+    // never waited on is a zombie, and clippy is right to say so.
+    let _ = child.wait();
+    let text = reader.join().expect("the reader thread");
+    let lines: Vec<Value> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("a line of the stream is JSON"))
+        .collect();
+    let stopped_after = started.elapsed();
+    let _ = std::fs::remove_dir_all(&home);
+
+    let status = ended.unwrap_or_else(|| {
+        panic!(
+            "/stop did not end the run: still going after {stopped_after:?}, and the stub answers at \
+             ten seconds. Stream: {lines:?}"
+        )
+    });
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "a stopped run is a turn that ended, not a failure: {:?}",
+        kinds(&lines)
+    );
+    assert!(
+        kinds(&lines).iter().all(|k| k != "message.delta"),
+        "the stub's answer arrived after all, so the run was not cut short mid-request: {lines:?}"
+    );
+    assert!(
+        stopped_after < std::time::Duration::from_secs(8),
+        "the run outlived the stub's ten-second delay, so something other than /stop ended it"
+    );
+    assert!(
+        kinds(&lines).iter().any(|k| k == "turn.completed"),
+        "the stream does not say the turn ended: {lines:?}"
+    );
+    let said = lines
+        .iter()
+        .filter(|line| line["type"] == "warning")
+        .map(|line| line["message"].as_str().unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        said.contains("stopped"),
+        "nothing on the stream says the run was stopped, so a caller cannot tell this from an answer \
+         that happened to be empty: {lines:?}"
+    );
+}
+
+/// What the answer committed by a stop is worth: the words the caller already read.
+///
+/// `/stop` drops the turn's future, so the agent loop never reaches the code that turns a step's text
+/// into a message. Without the commit, the half-answer exists on the caller's screen and nowhere
+/// else -- nothing fails, and the next question about what it just read is answered as if it had
+/// never been written. The REPL has committed it since the day that was reported; what a one-shot run
+/// does with it was never tested, because the stub could not produce the shape this needs: text
+/// arriving and *then* a stall. It can now, from a socket: the fixture below writes one delta and
+/// then says nothing for ever, which is the cheapest way to have a drawn answer in hand at a stop.
+#[tokio::test]
+async fn a_stopped_run_keeps_what_it_had_drawn() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
+    let base = format!("http://{}", listener.local_addr().expect("the address"));
+    let _talker = std::thread::spawn(move || {
+        let Ok((mut socket, _)) = listener.accept() else {
+            return;
+        };
+        // The request has to be read before the answer is written: the client is still sending it, and
+        // a server that replies to a half-written request is a fixture that would misbehave on a slow
+        // machine rather than fail.
+        let mut request = Vec::new();
+        let mut byte = [0u8; 1];
+        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+            match socket.read(&mut byte) {
+                Ok(0) | Err(_) => return,
+                Ok(_) => request.push(byte[0]),
+            }
+        }
+        // No content-length and no chunking: the body ends when the connection does, and this one
+        // never ends on its own -- which is the whole point.
+        let _ = socket.write_all(
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
+        );
+        let _ = socket.write_all(
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"half an \"}}]}\n\n",
+        );
+        let _ = socket.flush();
+        // Held open, saying nothing. Long enough that the run below is stopped in the middle of it by
+        // a test that takes two seconds, short enough not to hold the test process open.
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    });
+
+    let cwd = cwd_for("drawn");
+    let home = home_for("drawn", &base, &cwd);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_flint"))
+        .args(["-p", "say hello", "--json"])
+        .arg("--cwd")
+        .arg(&cwd)
+        .env("FLINT_HOME", &home)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to start flint");
+    let mut stdout = child.stdout.take().expect("a pipe");
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stdout.read_to_string(&mut text);
+        text
+    });
+
+    // Give the delta time to arrive and be reported before stopping: the stop has to catch a drawn
+    // answer, not an empty one, or this test proves nothing.
+    std::thread::sleep(std::time::Duration::from_millis(2000));
+    {
+        let mut stdin = child.stdin.take().expect("a pipe");
+        stdin.write_all(b"/stop\n").expect("writing to flint");
+        stdin.flush().expect("flushing");
+    }
+    let started = std::time::Instant::now();
+    let mut ended = None;
+    while started.elapsed() < std::time::Duration::from_secs(8) {
+        if let Some(status) = child.try_wait().expect("asking after flint") {
+            ended = Some(status);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if ended.is_none() {
+        let _ = child.kill();
+    }
+    // Reaped on every path, including the ones that already have the status: a killed child that is
+    // never waited on is a zombie, and clippy is right to say so.
+    let _ = child.wait();
+    let text = reader.join().expect("the reader thread");
+    let events = session_events(&home);
+    let _ = std::fs::remove_dir_all(&home);
+
+    let status = ended.unwrap_or_else(|| {
+        panic!("/stop did not end the run: the stub stalls for ever and the process was still going. Stream: {text}")
+    });
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "the stopped run did not end cleanly. Stream: {text}"
+    );
+    assert!(
+        text.contains("half an"),
+        "the delta never reached the caller, so there was nothing drawn to keep: {text}"
+    );
+    let kept = events
+        .iter()
+        .filter(|event| event["type"] == "chat" && event["message"]["role"] == "assistant")
+        .map(|event| event["message"]["content"].as_str().unwrap_or_default().to_string())
+        .collect::<Vec<_>>()
+        .join("|");
+    assert!(
+        kept.contains("half an"),
+        "what the caller read is not in the session file, so asking about it later answers as if it \
+         had never been written. Events: {events:?}"
+    );
+}
+
 /// A run that is working but not talking has to say so, or a caller cannot tell it from a dead one.
 ///
 /// This is the one gap the streaming interface had. `--json` flushes every line as it happens, so

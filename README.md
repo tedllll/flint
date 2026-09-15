@@ -207,6 +207,13 @@ The vocabulary is closed and small: `session.started`, `turn.started`, `message.
   `{"elapsed_secs":42,"restarted":false,"text":"running bash","type":"status"}`. `restarted` is true
   on the first line about a wait — a renderer starts its clock there — and `elapsed_secs` is for a
   reader that cannot run one, such as one reading a log later.
+- **A run can be stopped without killing it.** Write `/stop` to its stdin — the same word the
+  interactive session takes, which exists precisely because a key is not always available. flint
+  drops the turn, commits the answer it had already drawn to the session file, says so in a `warning`
+  and exits 0, so the half-answer you read is the one the next call is answered with in view. Killing
+  the process instead loses exactly that. A line that is not `/stop` is reported as a `warning`
+  rather than dropped in silence: a one-shot run has no next prompt to steer, and guessing whether a
+  line arrived is not something a caller should have to do.
 
 `--json` needs a prompt: an interactive session has no stream to write, and `flint exec`
 is plain by contract because its output is the child's own bytes. Ctrl-C during a `--json`

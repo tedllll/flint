@@ -1134,6 +1134,19 @@ already reads it — and `restarted` keeps its existing meaning, so a renderer t
 is unaffected while a reader that joined late, or that is reading somebody else's log, gets a number
 instead. Deliberately not a config key: the rate is not a preference anybody has.
 
+**Twelfth: a one-shot run can be stopped without being killed.** `/stop` was the interactive
+session's word for the interrupt that works when there is no key to press — and a caller reading the
+stream from a pipe is exactly the case it was written for, so a `-p --json` run now takes it on
+stdin. The turn is dropped, the answer it had drawn is committed to the session file, a `warning` says
+so and the run exits 0; a line that is not `/stop` gets a warning of its own rather than being
+dropped in silence, because a one-shot run has no next prompt to steer and guessing whether a line
+arrived is not a caller's job. `examples/python/flint_call.py` now sends that word when `timeout=`
+runs out instead of using `subprocess.run`, which kills: a killed flint loses the half-answer the
+caller has just read, so the next question about it is answered as if it had never been written. Both
+halves are pinned by tests, including the one that watches a stalled stub's fragment appear in the
+session file after the stop — with the commit removed the test fails with only the user's message in
+the record, which is how it was checked that the assertion tests anything.
+
 **Done in the same round, recorded so it is not re-done**: themed scrollbars (the default grey ones
 were the complaint); a draggable sidebar and a draggable reading width, with a hairline hint at
 rest on the right hand because there is no seam at the text's edge to be discovered by; the

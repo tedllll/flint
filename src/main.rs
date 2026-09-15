@@ -3204,8 +3204,30 @@ async fn run_json_turn(
         // line of the stream is never a heartbeat.
         let progress = std::sync::Arc::new(std::sync::Mutex::new(Progress::new()));
         let beat = tokio::spawn(beat_while_working(std::sync::Arc::clone(&progress)));
-        let result = agent
-            .run(&asked, |event| {
+
+        // What the caller can still say while the run is going. A one-shot run has no keyboard, so
+        // `/stop` arrives on stdin -- the same word the REPL takes, and for the same reason: it is
+        // the interrupt that works when there is no key to press, which is exactly the situation a
+        // caller is in. Reading stdin here costs one blocked thread and changes nothing for a caller
+        // that never writes to it, which is every caller that does not know this exists.
+        let (steering_tx, mut steering) = tokio::sync::mpsc::unbounded_channel::<String>();
+        tokio::task::spawn_blocking(move || {
+            use std::io::BufRead;
+            for line in std::io::stdin().lock().lines() {
+                let Ok(line) = line else { return };
+                if steering_tx.send(line).is_err() {
+                    return;
+                }
+            }
+        });
+        // A line that is not `/stop` is reported rather than dropped. Dropping it in silence is the
+        // worst of the three options: the caller would have to guess whether its line arrived, and
+        // this is a run it cannot type into again. A one-shot run has no *next* prompt to steer, so
+        // the honest answer is that the line did nothing.
+        let mut ignored: Vec<String> = Vec::new();
+        let mut listening = true;
+        let outcome = {
+            let mut run = std::pin::pin!(agent.run(&asked, |event| {
                 if matches!(event, event::Event::Done) {
                     answer = sink.answer_so_far().to_string();
                 }
@@ -3218,8 +3240,20 @@ async fn run_json_turn(
                 if let Some(line) = sink.line(&event) {
                     emit(line);
                 }
-            })
-            .await;
+            }));
+            loop {
+                tokio::select! {
+                    result = &mut run => break Some(result),
+                    // `if listening` because a closed channel is ready for ever: without it, a
+                    // caller that closed stdin (or that never had one) would spin this loop.
+                    line = steering.recv(), if listening => match line {
+                        Some(line) if line.trim() == "/stop" => break None,
+                        Some(line) => ignored.push(line.trim().to_string()),
+                        None => listening = false,
+                    },
+                }
+            }
+        };
         {
             progress
                 .lock()
@@ -3227,6 +3261,33 @@ async fn run_json_turn(
                 .running = false;
         }
         beat.abort();
+
+        for line in ignored {
+            emit(ndjson::warning(&format!(
+                "ignored {line:?}: a one-shot run has no next prompt to steer, and the only line it \
+                 acts on is /stop"
+            )));
+        }
+
+        let Some(result) = outcome else {
+            // The turn was dropped, so the agent loop never reached the code that turns a step's text
+            // into a message -- and the answer stays on the caller's screen with no record of it
+            // anywhere. Committed here, by the code that did the dropping, because the agent cannot
+            // do it for itself after its future is gone. Same fault and same fix as the REPL's.
+            agent.commit_drawn_answer();
+            // Said out loud, and before the turn's end: a caller that asked for the stop knows it
+            // asked, but a log read afterwards has to be able to tell this from a turn that finished
+            // with nothing to say.
+            emit(ndjson::warning(
+                "stopped at your request -- the model is not running any more, and the answer above \
+                 is what had been written",
+            ));
+            emit(ndjson::turn_completed(agent.last_usage()));
+            // No repair attempt and no validation: a caller that stopped the run is not waiting for
+            // another one, and a half-written answer failing a schema is the expected outcome rather
+            // than a problem to fix.
+            return Ok(0);
+        };
 
         match result {
             Ok(()) => emit(ndjson::turn_completed(agent.last_usage())),

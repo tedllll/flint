@@ -26,8 +26,8 @@ behaviour, there is a script under `examples/python/` that shows it.
 
 **A call blocks, and it finishes.** `ask()` runs `flint -p ... --json` to completion and returns when
 the process exits, so the answer is complete when you have it. There is no callback to register and
-nothing to poll. A long turn is a long function call: `timeout=` is the only bound, and it is on the
-subprocess.
+nothing to poll. A long turn is a long function call: `timeout=` is the only bound, and what it does
+when it runs out is the next section.
 
 **A failure does not raise.** This is the trap, and it is the reason `ask_json` exists. A run whose
 provider has no key, or whose endpoint is unreachable, still exits with a `Turn` in hand: `turn.ok`
@@ -46,6 +46,31 @@ directory would make the answer depend on where the caller happened to be runnin
 their appends; there is one writer per file by design. Parallel work belongs in threads with
 `cwd=`-separated sessions, separate `home=` values, or a fork (`extra=["--fork"]`).
 
+## Asking a run to stop
+
+`timeout=` is not "how long before this is killed". When it runs out, `ask()` writes `/stop` to
+flint's stdin — the same word the interactive session takes, for the same reason: it is the interrupt
+that works when there is no key to press, which is precisely the situation a program is in. flint then
+drops the turn, **commits the answer it had already drawn to the session file**, says so on the stream
+and exits 0. You get a `Turn` with `stopped=True`, the partial `answer`, and a `warning` explaining
+what happened. Only if the process ignores its own interrupt for another ten seconds is it killed.
+
+The difference is not cosmetic. `subprocess.run(timeout=...)` kills, and a killed flint loses whatever
+it had drawn: the words you just read exist on your screen and nowhere else, so the next call about
+them is answered as if they had never been written. That is the fault this avoids, and
+`test_call.py`'s last section pins it — a stub writes one fragment and then stalls, and the check
+asserts the fragment is in the session file afterwards.
+
+```python
+turn = ask("仔细研究一下这个仓库", cwd="/path/to/project", timeout=120)
+if turn.stopped:
+    print("ran out of time; it had got this far:", turn.answer)
+```
+
+While a run is going, flint also says so every five seconds — `{"elapsed_secs":42,"restarted":
+false,"text":"running bash","type":"status"}` — which is what makes a long run distinguishable from
+a hung one if you are reading the stream yourself rather than waiting for `ask()`.
+
 ## What a `Turn` holds
 
 | Field | What it is |
@@ -57,6 +82,7 @@ their appends; there is one writer per file by design. Parallel work belongs in 
 | `session`, `cwd`, `model` | from `session.started`, the first line of every run |
 | `usage` | token counts from the provider |
 | `result`, `attempts` | a schema run's checked object, and how many answers it took |
+| `stopped` | true when `timeout` ran out and the run was asked to stop rather than killed |
 | `turns` | how many turns the run asked for (one, unless a schema needed repairs) |
 | `ok` | `returncode == 0 and error is None` |
 | `events` | every line, untouched, for anything this dataclass does not name |
@@ -86,7 +112,7 @@ cannot be mangled by anything.
 
 ```console
 $ cargo build
-$ python examples/python/test_call.py       # 21 checks against a local stub, no key, no cost
+$ python examples/python/test_call.py       # 32 checks against a local stub, no key, no cost
 $ python examples/python/timing_demo.py     # what blocking and failure actually look like
 $ python examples/python/ask_schema.py      # needs DEEPSEEK_API_KEY; spends real tokens
 ```

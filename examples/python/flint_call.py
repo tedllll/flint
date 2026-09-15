@@ -61,8 +61,11 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import subprocess
 import tempfile
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -89,6 +92,12 @@ def _binary() -> str:
 
 FLINT = _binary()
 
+# How long a run is given to finish after it has been asked to stop. Not a setting: a process that
+# cannot end within a few seconds of its own interrupt is broken, and waiting for ever is not a
+# kindness to the caller.
+STOP_GRACE = 10.0
+
+
 @dataclass
 class Turn:
     """One `flint -p ... --json` run, and everything it said."""
@@ -105,6 +114,10 @@ class Turn:
     usage: dict | None = None
     tools: list[dict] = field(default_factory=list)    # started/args/completed, in order
     stderr: str = ""
+    # True when the run outlived `timeout` and was asked to stop rather than killed. The answer is
+    # then what had been written when the stop arrived -- partial, and still worth keeping: flint
+    # commits it to the session, so the next call about it is answered with it in view.
+    stopped: bool = False
     # The checked answer, when the run was given a schema: the `result` line's object. `None` for a
     # run with no schema, and `None` for a schema run whose answer never matched -- flint emits no
     # `result` line at all in that case, which is the point: see `ask_json`, which raises instead.
@@ -202,22 +215,74 @@ def ask(
         argv += ["--schema", schema_file]
 
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             argv,
             env=env,
-            capture_output=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             # This machine's ANSI code page is CP936: the default would mangle the answer.
             encoding="utf-8",
             errors="replace",
-            timeout=timeout,
+            bufsize=1,
         )
+        out: "queue.Queue[str | None]" = queue.Queue()
+
+        def pump(stream, sink):
+            # Both pipes have to be drained while the run is going. A child whose stderr has filled
+            # blocks on the write, and the run then looks hung for a reason that has nothing to do
+            # with the model -- the classic way a wrapper invents a timeout.
+            for line in stream:
+                sink(line)
+            sink(None)
+
+        lines: list[str] = []
+        errors: list[str] = []
+        threading.Thread(target=pump, args=(proc.stdout, out.put), daemon=True).start()
+        threading.Thread(target=pump, args=(proc.stderr, errors.append), daemon=True).start()
+
+        # `timeout` is when the run is *asked to stop*, not when it is killed. flint takes `/stop` on
+        # stdin -- the interrupt that works when there is no key to press -- and keeps what it had
+        # already drawn: the words the caller has read are committed to the session and the process
+        # exits cleanly. Killing it instead would lose exactly that, which is why `subprocess.run` was
+        # the wrong tool here even though it is the shorter one.
+        deadline = time.monotonic() + timeout
+        stopped = False
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                if stopped:
+                    # It was asked and did not go: a process that ignores its own interrupt is broken,
+                    # and waiting for ever is not a kindness to the caller.
+                    proc.kill()
+                    break
+                try:
+                    proc.stdin.write("/stop\n")
+                    proc.stdin.flush()
+                except (BrokenPipeError, ValueError):
+                    # Already gone; whatever it said is on its way through the queue.
+                    pass
+                stopped = True
+                deadline = time.monotonic() + STOP_GRACE
+                continue
+            try:
+                line = out.get(timeout=min(left, 0.5))
+            except queue.Empty:
+                continue
+            if line is None:
+                break
+            lines.append(line)
+        proc.wait()
+        returncode = proc.returncode
+        # The end marker the pump sends is not stderr: the same pump feeds both pipes.
+        stderr = "".join(e for e in errors if e)
     finally:
         if schema_file:
             os.unlink(schema_file)
 
-    turn = Turn(returncode=proc.returncode, stderr=proc.stderr)
-    for line in proc.stdout.splitlines():
+    turn = Turn(returncode=returncode, stderr=stderr, stopped=stopped)
+    for line in lines:
         line = line.strip()
         if not line:
             continue

@@ -166,6 +166,51 @@ def main():
         finally:
             shutil.rmtree(one, ignore_errors=True)
             shutil.rmtree(two, ignore_errors=True)
+
+        print("\n8. a run that is asked to stop keeps the half-answer")
+        # A stub that writes one fragment and then says nothing, which is the only shape in which
+        # this can be tested: there has to be something drawn for the stop to keep.
+        stall_port = free_port()
+        stall = subprocess.Popen(
+            [sys.executable, str(HERE / "stub_provider.py"), str(stall_port), "stall"],
+            stdout=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+        )
+        stall.stdout.readline()
+        try:
+            with open(scratch / "config.toml", "a", encoding="utf-8") as f:
+                f.write(
+                    "\n[[providers]]\n"
+                    'name = "stall"\n'
+                    f'base_url = "http://127.0.0.1:{stall_port}/v1"\n'
+                    'model = "stub-model"\n'
+                    'api_key = "not-a-real-key"\n'
+                )
+            began = time.monotonic()
+            stopped = ask("慢慢想", provider="stall", home=str(scratch), cwd=str(HERE), timeout=2.0)
+            took = time.monotonic() - began
+            # The point of `timeout` asking rather than killing: the run ends in about the time the
+            # caller asked for, instead of being torn down with its writes half done.
+            check("a run past its timeout is stopped, not left running", stopped.stopped, str(stopped.stopped))
+            check("and it ended when it was asked, not minutes later", took < 15, f"{took:.1f}s")
+            # No exception: a stopped run is a turn that ended. `ok` is about the process, and the
+            # process exited 0 -- which is exactly why `stopped` has to be there to look at.
+            check("a stopped run is not reported as a failure", stopped.ok, str(stopped.error))
+            check("what had been drawn is still in the answer",
+                  "半句答案" in stopped.answer, repr(stopped.answer))
+            check("the stream says it was stopped",
+                  any("stopped" in w for w in stopped.warnings), str(stopped.warnings))
+            # The promise behind all of it: the half-answer the caller read is in the record, so the
+            # next call about it is not answered as if nothing had been written.
+            recorded = "\n".join(p.read_text(encoding="utf-8") for p in session_files(scratch))
+            check("and what the caller read is in the session file", "半句答案" in recorded)
+        finally:
+            stall.terminate()
+            try:
+                stall.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                stall.kill()
     finally:
         stub.terminate()
         try:

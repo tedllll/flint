@@ -7,9 +7,9 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 430 passing, 1 ignored (279 lib, 2 in
-the binary's own tests, 33 `agent_loop`, 58 `cli_output`, 11 `json_output` (7 of them structured
-output), 4 `search_tool`, 20
+As of the commit that carries this file, `cargo test` is 433 passing, 1 ignored (279 lib, 2 in
+the binary's own tests, 33 `agent_loop`, 58 `cli_output`, 14 `json_output` (7 structured
+output, 1 the heartbeat, 2 the stop channel), 4 `search_tool`, 20
 `term_capture` plus the ignored cost measurement, 22 `web_view`), `cargo clippy --all-targets` is
 silent, and both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
 
@@ -20,6 +20,16 @@ under, so the last line of a stream is never a heartbeat — the test asserts th
 `message.completed`, because a beat that arrives with the answer fills no silence. Verified live
 against a dead endpoint (`{"elapsed_secs":5,"restarted":true,"text":"thinking","type":"status"}`) and
 in `tests/json_output.rs` with a six-second stub.
+
+**`/stop` works on the `-p` channel.** A `--json` run reads its stdin for the one line it acts on:
+`/stop` drops the turn, calls `agent.commit_drawn_answer()` (the same fix the REPL has had since the
+half-answer fault was reported), emits a `warning`, ends the turn and exits 0. Any other line becomes
+a `warning` saying it did nothing, rather than being dropped in silence. The Python caller sends
+`/stop` when `timeout=` runs out instead of killing the process, so the half-answer survives in the
+session: `test_call.py`'s last section checks a stalled stub's fragment lands in the file, and
+`tests/json_output.rs` has the Rust half (`a_run_can_be_stopped_from_stdin`,
+`a_stopped_run_keeps_what_it_had_drawn` — the latter watched failing with only the user's message in
+the record when the commit is removed).
 
 **The Python caller lives in the repository**: `examples/python/flint_call.py` (`ask`, `ask_json`,
 `Turn`, no dependencies), `test_call.py` (21 checks against a local stub, `cargo build` first),
@@ -111,7 +121,7 @@ open, so the copy needs every flint window closed first — measured twice.
 
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
-cargo test                                        # 430 passing, 1 ignored
+cargo test                                        # 433 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed
