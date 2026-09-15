@@ -10,7 +10,7 @@ else identifies a session, so `cp` is how you fork one and `mv` is how you renam
 
 ## One event per line
 
-Every line is a JSON object with a `type`. This build understands four:
+Every line is a JSON object with a `type`. This build understands five:
 
 | `type` | Written when | Fields |
 |---|---|---|
@@ -18,6 +18,7 @@ Every line is a JSON object with a `type`. This build understands four:
 | `chat` | a message is added to the conversation | `message` |
 | `usage` | the provider reports token counts | `usage` |
 | `title` | the conversation is named | `name` |
+| `switch` | the provider or model in force changes | `provider`, `model` |
 
 A whole conversation, then — a real one is longer, this is the shape:
 
@@ -28,6 +29,8 @@ A whole conversation, then — a real one is longer, this is the shape:
 {"type":"chat","message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"bash","arguments":"{\"command\":\"dsh --version\"}"}}]}}
 {"type":"chat","message":{"role":"tool","tool_call_id":"call_1","content":"1.2.3\n"}}
 {"type":"chat","message":{"role":"assistant","content":"It starts fine; 1.2.3 is the current release."}}
+{"type":"switch","provider":"deepseek","model":"deepseek-reasoner"}
+{"type":"chat","message":{"role":"user","content":"and what changed in it?"}}
 {"type":"usage","usage":{"prompt_tokens":1204,"completion_tokens":88}}
 {"type":"title","name":"dsh start failure"}
 ```
@@ -49,7 +52,11 @@ tell a person when one was written, with no date library behind it.
 
 `id` is the same string as the file name. `cwd`, `provider` and `model` record the
 environment the conversation started in, which is what makes an old session answerable
-later: "which model said that, and from where?"
+later: "which model said that, and from where?" — **where it started**, not where it is
+now: `/model`, `/provider` and `/reload` append a `switch` when they move a conversation
+to another model, and the last `switch` in the file is the one in force (`--resume` reads
+it). Editing the first line to change a session's model would be a lie about where it
+began; appending a `switch` is how you say it moved.
 
 ### `chat`
 
@@ -74,11 +81,12 @@ form of the conversation:
 - `arguments` inside a tool call is a **string**, not an object: that is exactly how
   providers stream it, in fragments, and flint parses it once the fragments are complete.
 
-### `usage` and `title`
+### `usage`, `title` and `switch`
 
 ```json
 {"type":"usage","usage":{"prompt_tokens":1204,"completion_tokens":88}}
 {"type":"title","name":"dsh start failure"}
+{"type":"switch","provider":"deepseek","model":"deepseek-reasoner"}
 ```
 
 `usage` is whatever the provider last reported, written as it arrives; it is an event rather
@@ -89,6 +97,14 @@ renaming appends one line. **The last `title` in the file is the one in force**,
 why `/name` costs nothing and rewrites nothing. `/name` on a conversation that was already
 named appends a second `title`; the first is still there, and still true of the moment it
 was written.
+
+`switch` is the same shape of fact about the model: `/model`, `/provider` and `/reload`
+replace the agent around a conversation that stays in this file, so the file says when it
+moved and what it moved to. **The last `switch` is the provider and model in force**, and
+`--resume` acts on it. It exists because the alternative was worse: a switch used to seed a
+whole new session with the conversation copied into it, which left one conversation in two
+files — two rows in the page's sidebar, two numbers in `/sessions`, and half a conversation
+behind either of them.
 
 ## The rules a reader must keep
 

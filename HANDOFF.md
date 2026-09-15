@@ -7,8 +7,8 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 391 passing, 1 ignored (257 lib, 2 in
-the binary's own tests, 33 `agent_loop`, 50 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
+As of the commit that carries this file, `cargo test` is 393 passing, 1 ignored (258 lib, 2 in
+the binary's own tests, 33 `agent_loop`, 51 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
 `term_capture` plus the ignored cost measurement, 21 `web_view`), `cargo clippy --all-targets` is
 silent, and both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
 
@@ -34,16 +34,16 @@ Written for a cold start: a different machine, and possibly a session with no me
 one. The repository is the whole state — there is no index, no cache and no database anywhere in
 flint, on purpose — so cloning it and running the gate below is all that "catching up" means.
 
-**Where it was left.** `main` at the commit that makes the provider and model switches pressable
-(`feat: the switches are offered the values they may take`), plus the documentation commit that carries
-this file, working tree clean, `origin/main` level with it. **§8 is finished** — all five controls are
-on the page, the destructive rows have a second home on the sidebar, and the two switches are offered
-the names the run already knows — §9's last open hole is closed, and of the roadmap's small list one
-item is left: `examples/live_turn.rs` still keeps its own copy of `run_turn`'s event handling and has
-drifted twice. The counts are in the section above and were re-run to write this paragraph, not
-remembered. The one design question the round leaves behind is written down in both `ROADMAP.md` and
-`docs/web-mode.md` §11: a page form that could add a provider needs a non-interactive `/provider add`
-and multi-field rows, and the panel's groups are still §8's classes rather than a task.
+**Where it was left.** `main` at the commit that keeps a conversation in its file when the run switches
+provider (`fix: a switch is a line in the session file, not a second file`), plus the documentation
+commit that carries this file, working tree clean, `origin/main` level with it. **§8 is finished** — all
+five controls are on the page, the destructive rows have a second home on the sidebar, and the two
+switches are offered the names the run already knows — and §9 has five entries, all closed. Of the
+roadmap's small list one item is left: `examples/live_turn.rs` still keeps its own copy of `run_turn`'s
+event handling and has drifted twice. The counts are in the section above and were re-run to write this
+paragraph, not remembered. The one design question the round leaves behind is written down in both
+`ROADMAP.md` and `docs/web-mode.md` §11: a page form that could add a provider needs a non-interactive
+`/provider add` and multi-field rows, and the panel's groups are still §8's classes rather than a task.
 
 **The installed binary is older than the tree, and that matters for looking at the page.** `flint` on
 this machine's PATH resolves to `C:\Users\zhangzhuo\bin\flint.exe`, which is a copy of
@@ -67,7 +67,7 @@ open, so the copy needs every flint window closed first — measured twice.
 
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
-cargo test                                        # 391 passing, 1 ignored
+cargo test                                        # 393 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed
@@ -614,6 +614,36 @@ free-form, so a page form would send several settings at once, and the terminal'
 them one at a time — it would need a `/config set <key> <value>` that the terminal does not have.
 Inventing a command for the page's benefit is the thing §8's design exists to prevent. The page
 therefore writes nothing into the config file in this round.
+
+### A switch is a line in the session file, not a second file
+
+Reported from the page: picking another provider in the header "automatically creates a new session",
+and it did. `continue_conversation` — the path `/model`, `/provider` and `/reload` all take — seeded a
+**new** session with the whole conversation copied into it, because `Meta` names the provider and model
+and `--resume` believes it. One conversation became two files with the same messages: the sidebar grew
+a row nobody asked for, `/sessions` numbered the same conversation twice, `/delete` on one of them left
+a twin behind, and resuming either half resumed half a conversation.
+
+**The fix is the argument `usage` already makes for its own numbers**: the file is append-only, so what
+changed is a line in it. `{"type":"switch","provider":…,"model":…}` is appended to the file the
+conversation is already in, `load` reports the last one, and `--resume` still believes the file.
+`SessionWriter::seed` is now only for `--fork`, which really is a copy. `/new` and `/resume` still move
+to another file, because that is what they are for. The `viewer.follow` call stays and is now a no-op
+for the three commands that do not move — which is exactly what the page wants, since it is what fixed
+the view tailing a file nobody was writing.
+
+**Measured**: a lib test (`a_switch_is_a_line_and_the_last_one_is_believed`) that two switches leave the
+file with one extra line each and that `load` reports the last; and an e2e test
+(`switching_provider_keeps_the_conversation_in_its_file`) that a real `--web` run over a two-provider
+home has exactly one `.jsonl` before and after a `/provider`, that it is the *same* file and still
+starts with the bytes it had, and that the `switch` line names the new provider and model. Both were
+watched red first — the e2e one failed with "switching provider started a second conversation: 2 files
+with the same messages in them". The three older `*_keeps_the_conversation` tests were updated: they
+asserted the conversation had been carried into a *new* file, which is the behaviour that was wrong.
+
+`docs/session-format.md` documents the new event and says what `meta` means now (where the session
+*started*), including how to change a session's model by hand — append a `switch`, do not edit the first
+line.
 
 ### The switches are pressable, and a plain row says why it is plain
 

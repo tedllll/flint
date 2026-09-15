@@ -968,6 +968,21 @@ first, with the history holding the system prompt and nothing else. The one cons
 a queued `/stop` now lets the request go out before it stops the turn. A question that was asked is
 worth one wasted request, and that is the whole point of the fix.
 
+**Fifth: switching provider or model split one conversation into two files — fixed, 2026-09-15, found
+by using the page.** The second half of the second item above, and the quieter half. The history came
+back after a switch, and the *file* did not: the replacement agent seeded a brand new session with the
+whole conversation copied into it, because `Meta` names the provider and model and `--resume` believes
+it. So picking another provider in the header -- which is one press now -- grew a row in the sidebar,
+numbered the same conversation twice in `/sessions`, left a twin behind when `/delete` removed one of
+them, and made resuming either half resume half a conversation. The fix is not a new file but an event:
+`{"type":"switch","provider":…,"model":…}` is appended to the file the conversation is already in, and
+`load` reports the last one, so `--resume` still believes the file. That is the argument `usage` has
+made for its own numbers since the format was written -- the file is append-only, so what changed is a
+line in it -- and it means `SessionWriter::seed` is now only for `--fork`, which really is a copy. Two
+tests, both watched red: a lib test that a switch is a line and the last one is believed, and an e2e
+test that a `/provider` on a served run leaves exactly one session file, appended to rather than
+rewritten.
+
 **Done in the same round, recorded so it is not re-done**: themed scrollbars (the default grey ones
 were the complaint); a draggable sidebar and a draggable reading width, with a hairline hint at
 rest on the right hand because there is no seam at the text's edge to be discovered by; the

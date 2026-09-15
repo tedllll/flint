@@ -1989,6 +1989,19 @@ async fn through_a_switch(
     (text, files, bodies)
 }
 
+/// The `.jsonl` files in a sessions directory, sorted by name so a comparison is about the files
+/// rather than about the order the filesystem happened to hand them over in.
+fn jsonl_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .expect("the sessions directory")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().map(|e| e == "jsonl").unwrap_or(false))
+        .collect();
+    out.sort();
+    out
+}
+
 /// Wait until the stub has received `n` requests, without blocking the runtime it runs on.
 async fn wait_for_requests(server: &MockServer, n: usize) {
     for _ in 0..200 {
@@ -2013,7 +2026,10 @@ async fn wait_for_requests(server: &MockServer, n: usize) {
 ///
 /// The conversation has to survive in two places, and they are not the same place. What the
 /// model is sent is the context; the file is what survives the process. A fix that kept one and
-/// not the other would look complete from either end alone.
+/// not the other would look complete from either end alone -- and the file's half has two ways to
+/// be wrong, which is why it is asserted as a *count*: the conversation must be in a file, and in
+/// exactly one of them. The run used to seed a second file with the whole conversation copied into
+/// it, so both halves of this were "true" while one conversation was two conversations.
 fn the_switch_kept_the_conversation(
     text: &str,
     says: &str,
@@ -2045,13 +2061,26 @@ fn the_switch_kept_the_conversation(
 
     // The conversation has to be *in a file*, and in one that holds all of it: a switch that
     // only fixed the request would leave a conversation that a restart cannot recover, and
-    // `/resume` is the only way back to one.
-    let (name, written) = files
+    // `/resume` is the only way back to one. The file is the one the run was already writing --
+    // `/resume 111-1` put it there -- because a switch replaces the agent and not the
+    // conversation. `switching_provider_keeps_the_conversation_in_its_file` is the same claim from
+    // the page's side, where the symptom was a second row appearing in the sidebar.
+    let holders: Vec<&str> = files
         .iter()
-        .find(|(name, text)| name != "111-1.jsonl" && text.contains("the earlier question"))
-        .unwrap_or_else(|| {
-            panic!("`{command}` carried the conversation into no new session file: {files:?}")
-        });
+        .filter(|(_, text)| text.contains("the earlier question"))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert_eq!(
+        holders,
+        vec!["111-1.jsonl"],
+        "`{command}` left the conversation in {} file(s) rather than the one it was in: {files:?}",
+        holders.len()
+    );
+    let written = &files
+        .iter()
+        .find(|(name, _)| name == "111-1.jsonl")
+        .expect("the resumed session")
+        .1;
     for needle in [
         "the earlier question",
         "the earlier answer",
@@ -2060,7 +2089,7 @@ fn the_switch_kept_the_conversation(
     ] {
         assert!(
             written.contains(needle),
-            "the file `{command}` started is missing {needle:?}: {name}"
+            "the file `{command}` carried the conversation into is missing {needle:?}: 111-1.jsonl"
         );
     }
 }
@@ -2737,6 +2766,99 @@ async fn the_page_is_told_the_state_its_controls_would_show() {
     assert!(
         late.contains("\"type\":\"state\"") && late.contains("\"model\":\"stub-other\""),
         "a page opening after the change is not handed where things are: {late:?}"
+    );
+}
+
+/// Switching provider keeps the conversation in the file it is already in.
+///
+/// Reported from the page: picking another provider in the header "automatically creates a new
+/// session", and it did. `continue_conversation` seeded a **new** file with the whole conversation in
+/// it, because `Meta` names the provider and model and `--resume` believes it. The result was one
+/// conversation in two files with the same messages: the sidebar grew a row nobody asked for, the
+/// list numbered the same conversation twice, `/delete` on one of them left the other, and resuming
+/// either half resumed half a conversation.
+///
+/// The fix is an event rather than a file, which is the argument `Usage` already makes for its own
+/// numbers: the file is append-only, so what changed is a line in it. `/new` and `/resume` still move
+/// to another file, because that is what they are *for*; `/model`, `/provider` and `/reload` replace
+/// the agent around a conversation that stays put.
+#[tokio::test]
+async fn switching_provider_keeps_the_conversation_in_its_file() {
+    let home = test_home("switch-file", "http://127.0.0.1:9/v1");
+    std::fs::write(
+        home.join("config.toml"),
+        "default_provider = \"stub\"\n\n\
+         [[providers]]\n\
+         name = \"stub\"\n\
+         base_url = \"http://127.0.0.1:9/v1\"\n\
+         model = \"stub-model\"\n\
+         api_key = \"not-a-real-key\"\n\n\
+         [[providers]]\n\
+         name = \"other\"\n\
+         base_url = \"http://127.0.0.1:9/v1\"\n\
+         model = \"other-model\"\n\
+         api_key = \"not-a-real-key\"\n",
+    )
+    .expect("a config with two providers");
+    let sessions = home.join("sessions");
+    let log = home.join("transcript.txt");
+    let mut child = binary()
+        .arg("--web")
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::fs::File::create(&log).expect("transcript file"))
+        .stderr(std::fs::File::create(home.join("stderr.txt")).expect("stderr file"))
+        .spawn()
+        .expect("failed to run flint");
+
+    let (port, token) = port_and_token(&wait_for_url(&log));
+    let mut watching = http_stream(port, "/events", &token);
+    let _opening = read_until(&mut watching, "\"type\":\"state\"}\n\n", 20);
+
+    let before = jsonl_files(&sessions);
+    assert_eq!(before.len(), 1, "a fresh run is not writing exactly one session: {before:?}");
+    let was = std::fs::read_to_string(&before[0]).expect("the session file");
+
+    // The provider switch, exactly as the header's picker sends it.
+    let switched = post_message(port, &token, "/provider other");
+    assert!(switched.starts_with("HTTP/1.1 202"), "the switch was refused: {switched:?}");
+    let told = read_until(&mut watching, "\"provider\":\"other\"", 20);
+
+    let after = jsonl_files(&sessions);
+    // Read before the scratch home is removed below: the point of the two assertions on this text is
+    // that it is the *same* file, appended to rather than rewritten.
+    let text = after
+        .first()
+        .map(|path| std::fs::read_to_string(path).unwrap_or_default())
+        .unwrap_or_default();
+    drop(watching);
+    drop(child.stdin.take());
+    let exited = wait_for_exit(&mut child, 20);
+    let transcript = std::fs::read_to_string(&log).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit");
+    assert!(
+        told.contains("\"provider\":\"other\"") && told.contains("\"model\":\"other-model\""),
+        "the page was not told the run moved to the other provider: {told:?} Terminal: {transcript:?}"
+    );
+    assert_eq!(
+        after.len(),
+        1,
+        "switching provider started a second conversation: {} files with the same messages in \
+         them. Terminal: {transcript:?}",
+        after.len()
+    );
+    assert_eq!(after[0], before[0], "the conversation moved to another file");
+    assert!(
+        text.starts_with(&was),
+        "the file was rewritten rather than appended to, so it is no longer hand-editable history"
+    );
+    assert!(
+        text.contains("\"type\":\"switch\",\"provider\":\"other\",\"model\":\"other-model\""),
+        "the file does not record which provider it moved to, so `--resume` would believe the \
+         model it started with: {text}"
     );
 }
 

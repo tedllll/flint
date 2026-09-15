@@ -1043,11 +1043,12 @@ async fn interactive(
                 Flow::Continue => continue,
                 Flow::Exit => break,
                 Flow::NewAgent(new_agent, new_provider) => {
-                    // The page follows whichever file the run is writing, and it is told here
-                    // rather than in each command because every one of them that replaces the
-                    // agent also gives it a session file of its own. `/new` and `/resume` said
-                    // so themselves; `/model` and `/provider` -- the two the page's own pickers
-                    // reach -- did not, so the view went on tailing the file nobody was writing.
+                    // The page follows whichever file the run is writing, and it is told here rather
+                    // than in each command because `/new` and `/resume` do move the run to another
+                    // file. `/model`, `/provider` and `/reload` no longer do -- they replace the
+                    // agent around the conversation it is already in -- so this is a no-op for them,
+                    // which is exactly what the page wants: it went on tailing the file nobody was
+                    // writing when they *did* move, and the fix for that is this call.
                     // The session changes first and the readers are told second, so a page that
                     // re-reads on the `reset` reads the file the run is now writing rather than
                     // the one it just left. A no-op when the file is the same one.
@@ -1502,7 +1503,7 @@ async fn provider_wizard(
     Ok(Flow::Continue)
 }
 
-/// Hand a conversation to a new agent, in a new session file that already holds it.
+/// Hand a conversation to a new agent, in the file it is already in.
 ///
 /// `/model`, `/provider` and `/reload` all replace the agent -- a different model, a different
 /// endpoint, or a config that was just edited -- and all three used to build the replacement
@@ -1513,8 +1514,17 @@ async fn provider_wizard(
 /// simply answers as a stranger, which is the same complaint as a stopped turn losing the answer
 /// it had drawn, through a different door.
 ///
-/// The file is seeded rather than reused -- [`session::SessionWriter::seed`] has why -- and the
-/// messages go back through `splice_loaded_history` rather than being assigned, which is the
+/// The history came back then and the file did not, which was the second half of the same mistake
+/// in a quieter form: the replacement agent seeded a **new** session with the whole conversation
+/// copied into it, so switching provider split one conversation into two files with the same
+/// messages. The page grew a sidebar row nobody asked for, `/sessions` numbered the same
+/// conversation twice, `/delete` on one of them left the other behind, and resuming either half
+/// resumed half a conversation. The file is append-only and the run keeps writing where it was:
+/// the agent is replaced, the conversation is not, and a `switch` event records the model it moved
+/// to so `--resume` still believes the file. `/new` and `/resume` are the two that really do move,
+/// and neither comes through here.
+///
+/// The messages go back through `splice_loaded_history` rather than being assigned, which is the
 /// route `/resume` takes and for the same reason: a session file holds the conversation and not
 /// the system prompt, and the prompt is rebuilt for the machine flint is on now.
 fn continue_conversation(
@@ -1524,20 +1534,21 @@ fn continue_conversation(
     old: &agent::Agent,
 ) -> Result<agent::Agent> {
     let cwd = old.cwd().clone();
-    // The name is a line in the file the conversation was in, and the file it is moving to is a
-    // new one: without this, switching model would quietly rename the conversation.
-    let title = old
-        .session_path()
-        .and_then(|path| session::scan(&path).ok())
-        .and_then(|summary| summary.title);
-    let writer = session::SessionWriter::seed(
-        &config::sessions_dir(),
-        &cwd,
-        &target.name,
-        &target.model,
-        old.history(),
-        title.as_deref(),
-    )?;
+    let writer = match old.session_path() {
+        Some(path) => {
+            let writer = session::SessionWriter::resume(&path)?;
+            writer.switched(&target.name, &target.model)?;
+            writer
+        }
+        // A run with no file to write (a bare `exec`, say): there is nothing to keep, so this is
+        // where a session begins rather than where one is continued.
+        None => session::SessionWriter::create(
+            &config::sessions_dir(),
+            &cwd,
+            &target.name,
+            &target.model,
+        )?,
+    };
     let mut next = agent::Agent::new(cfg, provider, old.readonly(), cwd.clone(), Some(writer));
     next.splice_loaded_history(cfg, &cwd, old.history().to_vec());
     Ok(next)

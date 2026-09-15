@@ -64,13 +64,21 @@ pub enum SessionEvent {
     /// last `title` in the file is the one in force, so renaming costs one line and needs
     /// no rewrite of anything already written.
     Title { name: String },
+    /// The provider or model in force changed.
+    ///
+    /// `/model`, `/provider` and `/reload` each replace the agent around a conversation that stays
+    /// where it is, so this is written to the file that conversation is in. `Meta` records where the
+    /// session *started* -- "which model said that, and from where?" -- and the last `switch` is
+    /// where it is now, which is what `load` reports and `--resume` acts on. Before this event
+    /// existed a switch seeded a whole second file, and one conversation became two.
+    Switch { provider: String, model: String },
 }
 
 /// The event names this build understands.
 ///
 /// Used for one decision only: a line that failed to parse but names a type in here is
 /// damage, and a line that names anything else is somebody else's event.
-const KNOWN_TYPES: [&str; 4] = ["meta", "chat", "usage", "title"];
+const KNOWN_TYPES: [&str; 5] = ["meta", "chat", "usage", "title", "switch"];
 
 /// Whether a line names an event type this build knows.
 fn names_a_known_event(line: &str) -> bool {
@@ -106,14 +114,13 @@ impl SessionWriter {
 
     /// Start a new file that already holds a conversation.
     ///
-    /// For a conversation that is moving to another model rather than beginning: `/model`,
-    /// `/provider` and `/reload` each replace the agent, and a new agent wants a file of its
-    /// own. A *new* file rather than the old one because `Meta` names the provider and model
-    /// the session is held with, and `resume` believes it -- continuing to append to the old
-    /// file would leave it claiming a model that nothing has been sent to since.
-    ///
-    /// Nothing is added to the format for this: the result is an ordinary session that happens
-    /// to begin with a conversation already in it.
+    /// For a conversation that is being **copied** rather than continued: `--fork` asks for a second
+    /// conversation that begins where the first one is, and a copy has to be a file of its own.
+    /// Switching model or provider used to come through here as well, and no longer does -- it
+    /// appends a `Switch` to the file the conversation is already in, which is why one conversation
+    /// stays one conversation when the run moves to another model. The old reason for seeding (a new
+    /// agent "wants a file of its own", because `Meta` names the model and `resume` believes it) is
+    /// gone with it: `load` reports the last `Switch`, and that is the model in force.
     ///
     /// `title` travels with it, because a name is a line in the file it was given to and a
     /// switch that quietly renamed a conversation would be the same kind of loss this exists
@@ -177,6 +184,20 @@ impl SessionWriter {
     pub fn title(&self, name: &str) -> Result<()> {
         self.append(&SessionEvent::Title {
             name: name.to_string(),
+        })
+    }
+
+    /// Record that the run moved to another provider or model.
+    ///
+    /// An event rather than a new file, and the argument is the one `Usage` already makes for its own
+    /// numbers: the file is append-only, so what changed is a line in it, and the last line is what
+    /// is in force. Switching used to seed a second file holding the whole conversation, which made
+    /// one conversation into two files -- two rows in the page's sidebar, two numbers in `/sessions`,
+    /// and half a conversation behind either of them.
+    pub fn switched(&self, provider: &str, model: &str) -> Result<()> {
+        self.append(&SessionEvent::Switch {
+            provider: provider.to_string(),
+            model: model.to_string(),
         })
     }
 }
@@ -244,6 +265,12 @@ pub fn load(path: &Path) -> Result<LoadedSession> {
             Ok(SessionEvent::Chat { message }) => loaded.messages.push(message),
             Ok(SessionEvent::Usage { usage }) => loaded.last_usage = Some(usage),
             Ok(SessionEvent::Title { name }) => loaded.title = Some(name),
+            // Read in order, so the last one wins: a conversation that moved twice is held with the
+            // provider and model it moved to last, which is what `--resume` acts on.
+            Ok(SessionEvent::Switch { provider, model }) => {
+                loaded.provider = provider;
+                loaded.model = model;
+            }
             // Skipped in silence when the file claims a newer revision -- a type this
             // build knows may have changed shape in it, and that is not damage either.
             Err(_) if loaded.version > FORMAT_VERSION || !names_a_known_event(line) => {}
@@ -540,6 +567,54 @@ mod tests {
 
     fn user(text: &str) -> String {
         format!(r#"{{"type":"chat","message":{{"role":"user","content":"{text}"}}}}"#)
+    }
+
+    /// A switch is a line in the file, not a second file.
+    ///
+    /// Switching provider or model used to seed a **new** session with the whole conversation in it,
+    /// because `Meta` names the provider and model and `load` believes it. That made one conversation
+    /// into two files with the same messages in them: the sidebar grew a row nobody asked for, the
+    /// list numbered the same conversation twice, and a `--resume` of either half was half a
+    /// conversation. `Usage` had already made this argument for its own numbers -- a file that is
+    /// append-only records what changed *when* it changed -- so a switch is an event, the last one
+    /// wins, and `load` reports the model actually in force.
+    #[test]
+    fn a_switch_is_a_line_and_the_last_one_is_believed() {
+        use crate::event::Message;
+
+        let dir = TempDir::new("switch");
+        let writer = SessionWriter::create(&dir.0, Path::new("/tmp"), "p", "m").unwrap();
+        writer
+            .append(&SessionEvent::Chat {
+                message: Message::User {
+                    content: "before".to_string(),
+                },
+            })
+            .unwrap();
+        writer.switched("q", "m2").unwrap();
+        writer.switched("q", "m3").unwrap();
+        writer
+            .append(&SessionEvent::Chat {
+                message: Message::User {
+                    content: "after".to_string(),
+                },
+            })
+            .unwrap();
+
+        let text = std::fs::read_to_string(writer.path()).unwrap();
+        assert!(
+            text.contains(r#"{"type":"switch","provider":"q","model":"m3"}"#),
+            "the switch is not a line of its own in the file: {text}"
+        );
+        let loaded = load(writer.path()).unwrap();
+        assert_eq!(loaded.model, "m3", "the last switch is not the model in force");
+        assert_eq!(loaded.provider, "q", "the provider in force is the meta's, not the switch's");
+        assert_eq!(loaded.messages.len(), 2, "the conversation is still one conversation");
+        assert_eq!(
+            std::fs::read_dir(&dir.0).unwrap().count(),
+            1,
+            "a switch wrote a second file"
+        );
     }
 
     #[test]
