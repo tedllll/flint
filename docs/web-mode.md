@@ -219,8 +219,8 @@ Four routes. No cookies, no HTTP/2, no TLS, no keep-alive, no streaming request 
 | `POST /report` | one command *read* from the browser: same channel, and its answer is captured with the terminal quiet (§11) |
 | `GET /sessions` | the conversations `/resume` can reach, numbered the way `/resume` numbers them |
 | *`event: sessions`* | not a route but its counterpart: the list has changed, re-read it |
-| *`event: state`* | the run's own configuration: provider, model, what each provider offers, the toggles, and the command list with §8's class for each row — a row also carries `values` when the page may read that command with an argument the frame names (§11) |
-| `type: command` | what a command answered, on the same stream as the turn's events: `input` and `text` — which is also what a header button's answer arrives on. Carries `panel: true` when the page asked to read it rather than typing it |
+| *`event: state`* | the run's own configuration: provider, model, what each provider offers, the toggles, and the command list with §8's class for each row — a row also carries `values` when the page may read that command with an argument the frame names, and `field` when the page may fill its argument in (§11) |
+| `type: command` | what a command answered, on the same stream as the turn's events: `input` and `text` — which is also what a header button's answer arrives on. Carries `panel: true` when the page asked to read it rather than typing it, and `input` is the command's own `send` rather than the line in the one case the line carries a credential (§11) |
 
 **All six are implemented.** `/session` and `/events` read the session path and the event feed
 through a shared handle, which is what lets `/new` and `/resume` move an open window to the
@@ -719,4 +719,31 @@ bare `send`, or its `send` plus one of its own values, and nothing else.
 today — `/provider <name>` takes a value and its list comes from `providers`, deliberately, because
 running *that* quietly would start a local engine without printing a word — and `values` is where a
 second such row would go.
+
+### A form row gets a field, and a key never comes back — measured, 2026-09-15
+
+§8's form class, for the rows whose argument is a single value. A row may carry `field`, which is
+`text` or `password` and is passed straight to the input's `type`: the process says how to draw it,
+so the page is not deciding from a command's name that a key is a secret. The page composes the line
+as `send` plus what was typed — the same composition the toggles and the value rows use — and posts it
+to `/message`, because a form changes something and its answer belongs in the transcript. A form row
+with no `field` stays a row of reference, which is how `/provider add`, `/provider edit` and
+`/config edit` remain the terminal's.
+
+| Claim | How | Result |
+|---|---|---|
+| The frame says which rows take a field, and of which kind | a real `--web` process, the connect-time state frame | `/name [text]` arrives with `"field":"text"` and `/provider key <key>` with `"field":"password"`; `/config edit` and the two wizards carry no `field` at all |
+| A key typed into a field does not come back | the same run, `/provider key sk-not-a-real-key-0000` on `POST /message`, then the feed and the transcript | the answer says `key saved`, the `command` frame's `input` is `/provider key` and never the line, and the key is nowhere in the transcript — while `config.toml` *does* contain it, which is what stops the other three from passing on a command that never ran. Mutation-checked: echoing the raw line fails this, with the key visible in the frame |
+| A refused key-carrying line does not come back either | `POST /report` with the same line | refused, and the refusal quotes `/provider key` rather than the key. Mutation-checked: quoting the refused line fails this |
+| The page masks it, and keeps no copy | `tests/web_view.rs`, over the page's own bytes | `input.type = field`, the line composed as `send + " " + value`, a `password` field emptied on send, an empty field not submitted, and the send going through `sendText` — which is `/message` |
+| A form row without the mark is still a row | Node, over the stub DOM | two marked rows are `form` elements holding `input:text` and `input:password` with buttons reading `/name` and `/provider key`, the unmarked one is a `div`; mutation-checked — ignoring `command.field` fails it |
+
+**Not measured**: a browser, as ever — and the masked field has never been typed into by a person, so
+what is pinned is the markup and the route, not the browser's own password-manager behaviour.
+
+**Deliberately not built**: `/config edit` on the page. Its keys are enumerable and its values are
+free-form, so a page form would send several settings at once while the terminal prompts for them one
+at a time; it would need a `/config set <key> <value>` the terminal does not have, and a command
+invented for the page's benefit is what §8's design exists to prevent. The page writes nothing into the
+config file in this round.
 

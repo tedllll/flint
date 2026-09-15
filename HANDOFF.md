@@ -7,9 +7,9 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 379 passing, 1 ignored (256 lib, 1 in
-the binary's own tests, 33 `agent_loop`, 45 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
-`term_capture` plus the ignored cost measurement, 16 `web_view`), `cargo clippy --all-targets` is
+As of the commit that carries this file, `cargo test` is 381 passing, 1 ignored (256 lib, 1 in
+the binary's own tests, 33 `agent_loop`, 46 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
+`term_capture` plus the ignored cost measurement, 17 `web_view`), `cargo clippy --all-targets` is
 silent, and both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
 
 **The last sessions were on Windows** (10.0.26200, AMD64, rustc 1.98.1, PowerShell 5.1.26100.6584
@@ -34,10 +34,10 @@ Written for a cold start: a different machine, and possibly a session with no me
 one. The repository is the whole state — there is no index, no cache and no database anywhere in
 flint, on purpose — so cloning it and running the gate below is all that "catching up" means.
 
-**Where it was left.** `main` at the commit that makes `/skills <name>` readable from the page
-(`feat: the page can read a skill, and only a skill the menu offers`), plus the documentation commit
-that carries this file, working tree clean, `origin/main` level with it. The counts are in the
-section above and were re-run to write this paragraph, not remembered.
+**Where it was left.** `main` at the commit that gives a form row a field
+(`feat: a form row gets a field, and a key never comes back`), plus the documentation commit that
+carries this file, working tree clean, `origin/main` level with it. The counts are in the section
+above and were re-run to write this paragraph, not remembered.
 
 **What the other machine needs.**
 
@@ -53,7 +53,7 @@ section above and were re-run to write this paragraph, not remembered.
 
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
-cargo test                                        # 379 passing, 1 ignored
+cargo test                                        # 381 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed
@@ -571,23 +571,48 @@ fails the second.
 **Not measured**: whether a page should *also* offer the values of a command whose values the frame
 does not carry; nothing does today, and the field is where that would go.
 
+### A form row gets a field, and a credential never comes back
+
+`/name [text]` and `/provider key <key>` are filled in on the page now. A command row may carry
+`field` (`text` or `password`), which is both "the page may draw a field for this" and the input's
+`type`; the page composes the line as `send` plus what was typed and posts it to `/message`, because a
+form changes something and its answer belongs in the transcript. A form row *without* the mark is a
+row of reference, which is how `/provider add`, `/provider edit <name>` and `/config edit` stay in the
+terminal: they ask for several values, one at a time.
+
+**The redaction is the part with a promise in it, and it is not the page's to keep.** The `command`
+frame carries the line that asked for the answer — right for every other command, wrong for this one,
+because the frame goes to *every* page connected to the run and stays in the event ring. So
+`echoed_input` replaces that line with the row's own `send` (`/provider key`) whenever the row takes a
+credential, and it is used in both places a line is repeated: the answer, and `report_refused`, since a
+key posted to the read route is refused and the refusal quotes what it refused. The page's half is
+smaller: it masks the input because the frame said `password`, and empties it the moment it sends.
+
+**Measured.** `a_key_typed_into_a_field_is_not_echoed_anywhere` runs a real `--web` process, checks the
+frame marks the row `password`, posts a fixture key on `/message`, and asserts four things separately:
+the answer says `key saved`, the frame does not contain the key, the transcript does not either, and
+`config.toml` does. The fourth is what keeps the first three from being satisfied by a command that
+never ran. Mutation-checked: echoing the raw line fails the frame assertion with the key visible in
+the frame text, and quoting the refused line fails the refusal assertion.
+
+**Not built, deliberately:** `/config edit` as a page form. Its keys are enumerable and its values are
+free-form, so a page form would send several settings at once, and the terminal's command prompts for
+them one at a time — it would need a `/config set <key> <value>` that the terminal does not have.
+Inventing a command for the page's benefit is the thing §8's design exists to prevent. The page
+therefore writes nothing into the config file in this round.
+
 ### Still owed on the page
 
-**The next units, and the decisions already taken for them** (so a cold session does not re-derive
-them; the reasoning is in `ROADMAP.md` §8). The command list, its panel, the buttons, the reports and
-the selectors are built — what is left is the two classes that need a value the reader types or
-confirms:
+**The next unit, and the decisions already taken for it** (so a cold session does not re-derive them;
+the reasoning is in `ROADMAP.md` §8). The command list, its panel, the buttons, the reports, the
+selectors and the forms are built — what is left is the class that destroys things:
 
-1. **A form is the composer's problem.** `/name <text>`, `/provider key <key>`, `/provider add` and
-   `/config edit` are interactive in the terminal, and `add`/`edit` are wizards on top of that, so
-   the page gets a field only where the argument is a single value — the wizards stay where they
-   are, and that is a decision to revisit rather than to assume. `/provider key` needs the redaction
-   decision taken first: the `command` frame echoes the line that asked, and a key must never be in
-   a frame, in the transcript, or in a session file.
-2. **The destructive class needs a confirmation step** (`/delete`, `/archive`, `/provider rm`),
+1. **The destructive class needs a confirmation step** (`/delete`, `/archive`, `/provider rm`),
    because there is no undo anywhere in flint, and the confirmation has to be the *page's*
    (a second click) rather than a `/yes` command in the terminal. The report route's refusal of
-   `/delete <n>` is what stands in for it meanwhile.
+   `/delete <n>` is what stands in for it meanwhile, and the numbers themselves already reach the
+   page: the sidebar carries them, and the row a reader clicked is where `/archive <n>` and
+   `/delete <n>` should take their argument from.
 
 - The small queued-line hole above still wants its two structural lines before a test can hold it.
   The report path now leans on the same machinery and does *not* have the hole: a report arriving

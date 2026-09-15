@@ -434,7 +434,9 @@ The design, in the order the pieces depend on each other:
      field that is never echoed back, never in a `state` frame and never in the transcript;
      `/provider add` and `/provider edit <name>`, which are the terminal's interactive wizard as
      a form; and `/config edit`, whose keys are enumerable and whose values are not (a shell
-     path, `max_steps`, a proxy URL), with the file it writes named on the form.
+     path, `max_steps`, a proxy URL), with the file it writes named on the form. (Built as a field
+     per single-value row: `/name` is text, `/provider key` is a password. The wizards and
+     `/config edit` are still the terminal's — see the built paragraph for §8.)
   4. **Destructive** — `/delete`, `/archive`, `/provider rm`: a confirmation step, because there
      is no undo anywhere in flint.
 
@@ -680,8 +682,33 @@ makes a new one appear. That is asserted with a skill written *after* the run st
 would read it, and the menu must not. `Agent::skills` is where the names live, because the frame is
 built after every line and a directory walk per line is not the comparison its own comment claims.
 
-**Next: the forms, and the confirmation — and here is what is already decided.** Written down
-because each half has a trap that is cheaper to avoid than to find:
+**The forms are in, and the one that takes a credential is the reason the table grew a column — built,
+2026-09-15.** A row may now carry `field`: the kind of input the page may draw for its argument
+(`text` or `password`, which is also the input's `type`). Two rows have one — `/name [text]` and
+`/provider key <key>` — and the page composes the line as `send` plus what was typed, exactly as a
+toggle and a value row do, and posts it to `/message`, because a form changes something and its answer
+belongs in the transcript where the change is. A form row without a `field` is a row of reference,
+which is how `/provider add`, `/provider edit <name>` and `/config edit` stay where they are: they ask
+for several values, one at a time, and a page with a single field would be guessing at the rest.
+Two things were decided rather than discovered:
+
+- **`/config edit` on the page needs a command the terminal does not have.** Its keys are enumerable
+  and only its values are free-form, so a page form would send several settings at once; the terminal's
+  command prompts for them one at a time. A page form would therefore need something like `/config set
+  <key> <value>` — a command invented for the page's benefit, which is what §8's whole design exists to
+  avoid (the page is offered what the terminal takes, not a private vocabulary of its own). So the page
+  writes nothing into the config file in this round, and that is the remaining half of the class.
+- **A credential must not be echoed, and the echo is not the page's to control.** The `command` frame
+  carries the line that asked for the answer, which is right for every other command and wrong for
+  this one: it goes to *every* page connected to the run and stays in the event ring, so a key typed
+  into a masked field would be handed straight back. The table says which rows take a credential
+  (`Field::Password`), and the echo becomes the row's own `send` — `/provider key` — in both places a
+  line is repeated: the answer, and the refusal a read route produces for a line it will not run. The
+  page is told the input's `type` by the frame rather than deciding from the command's name that a key
+  is a secret, and it empties the field the moment it sends it.
+
+**Next: the confirmation for the destructive class — and here is what is already decided.** Written
+down because the trap is cheaper to avoid than to find:
 
 - **A selector's options come from somewhere the frame already describes** — built: `/model`'s and
   `/provider`'s from `providers` (both controls exist), `/resume`'s and `/archive`'s from the
@@ -690,10 +717,10 @@ because each half has a trap that is cheaper to avoid than to find:
   be read with*; it does not say where a picker's values come from, and it should not, because that
   is what the control is for. The two kinds are deliberately different fields: `values` on a row is
   the permission to read that argument, which is a smaller thing than the list of models on offer.
-- **A form is the composer's problem.** `/name <text>`, `/provider key <key>`, `/provider add` and
-  `/config edit` are interactive in the terminal, and `add`/`edit` are wizards on top of that,
-  so the page gets a field only where the argument is a single value; the wizards stay where they
-  are, which is a decision worth revisiting rather than assuming.
+- **A form is the composer's problem** — built for the single-value rows: the page draws a field for a
+  row the frame marks with one, and `/provider add`, `/provider edit` and `/config edit` stay in the
+  terminal. `/provider key`'s redaction is in the table rather than in the page (see the built
+  paragraph); `/config edit` as a page form is the piece that needs a command the terminal lacks.
 - **The destructive class gets the page's own confirmation** — a second click, not a `/yes` command
   — because there is no undo anywhere in flint.
 
