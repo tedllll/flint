@@ -50,8 +50,15 @@ function ok(cond, what) {
 ///
 /// It grew when `paint` stopped rebuilding the whole transcript: an incremental paint needs the
 /// relationships between nodes -- who is whose parent, and how to swap one out -- so the stub
-/// has to have them. Keeping a real parent pointer is the whole of it; there is still no layout,
-/// no styling and no events.
+/// has to have them. Keeping a real parent pointer is the whole of it; there is still no layout
+/// and no styling.
+///
+/// It grew again when a *form* was drawn rather than a button: a row that takes several answers is
+/// only drawn if the page's submit handler joins them, and the interesting half of that -- that a
+/// required field left empty sends nothing at all -- happens *inside* the handler. So listeners are
+/// kept now instead of being thrown away, and a check delivers one itself with `fire`. Nothing
+/// delivers them on its own: the page still runs only because a check asks it to, which keeps every
+/// failure in a check's own line rather than in whatever ran first.
 function fakeNode() {
   const node = {
     children: [],
@@ -64,6 +71,7 @@ function fakeNode() {
     scrollTop: 0,
     scrollHeight: 0,
     clientHeight: 0,
+    handlers: {},
     classList: { add() {}, remove() {} },
     get firstChild() { return node.children[0] || null; },
     appendChild(child) { child.parentNode = node; node.children.push(child); return child; },
@@ -81,7 +89,9 @@ function fakeNode() {
       return old;
     },
     remove() { if (node.parentNode) node.parentNode.removeChild(node); },
-    addEventListener() {},
+    addEventListener(type, fn) {
+      (node.handlers[type] = node.handlers[type] || []).push(fn);
+    },
     click() {},
   };
   return node;
@@ -93,10 +103,26 @@ function loadViewer() {
   if (start < 0 || end < 0) throw new Error("web/view.html has no inline script");
 
   const nodes = new Map();
+  // What the page sent, in order. The page's whole job is a POST to one of two routes, and which
+  // route -- a report read quietly in the panel, or a line typed into the transcript -- is the
+  // difference between reading and doing. Nothing outside the browser could see that until this
+  // existed: the e2e tests see the *process* answer, which is the same answer either way.
+  const sent = [];
   const sandbox = {
     module: { exports: {} },
     console,
     FileReader: function FileReader() {},
+    // Answers everything with an empty 200, so a check is about what the page decided to send
+    // rather than about a server. `text`/`json` are there because the page calls them on the way
+    // through, and a stub that threw where the real thing answers would fail checks for a reason
+    // that has nothing to do with what they assert.
+    fetch: async (url, init) => {
+      sent.push({
+        route: String(url),
+        body: init && init.body ? String(init.body) : "",
+      });
+      return { ok: true, status: 200, text: async () => "", json: async () => ({}) };
+    },
     document: {
       getElementById(id) {
         if (!nodes.has(id)) nodes.set(id, fakeNode());
@@ -104,7 +130,7 @@ function loadViewer() {
       },
       // The tag is kept because a check sometimes has to ask what kind of node was drawn -- a report
       // row is a button and a selector row is not -- and there is no other way to tell two stubs
-      // apart. The listeners are still not delivered: see the note on `addEventListener` below.
+      // apart.
       createElement: (tag) => {
         const node = fakeNode();
         node.tag = tag;
@@ -127,6 +153,15 @@ function loadViewer() {
   // and the scroll container became two elements and the follow-the-tail code went on reading the
   // one that does not scroll.
   api.__node = (id) => sandbox.document.getElementById(id);
+  // What the page sent, and the way to deliver one listener. `fire` is not the browser: it calls
+  // the handlers the page registered, synchronously, and hands them the event object a check makes
+  // up. That is enough for the one thing worth reaching into -- a submit handler that refuses to
+  // send -- without a DOM to lie about everything else.
+  api.sent = sent;
+  api.fire = (node, type, event) => {
+    const handlers = (node && node.handlers && node.handlers[type]) || [];
+    for (const handler of handlers) handler(event || { preventDefault() {} });
+  };
   return api;
 }
 
@@ -565,39 +600,98 @@ check("a row that takes a field gets one, and only the rows the frame marks", ()
   page.applyState(d, JSON.stringify({
     type: "state", provider: "stub", model: "m", providers: [{ name: "stub", models: ["m"] }],
     commands: [
-      { label: "/name [text]", send: "/name", help: "name this conversation", class: "form", field: "text" },
-      { label: "/provider key <key>", send: "/provider key", help: "set the API key", class: "form", field: "password" },
-      { label: "/config edit", send: "/config edit", help: "change shell", class: "form", field: "text" },
+      { label: "/name [text]", send: "/name", help: "name this conversation", class: "form",
+        fields: [{ field: "text", name: "text", optional: false }] },
+      { label: "/provider key <key>", send: "/provider key", help: "set the API key", class: "form",
+        fields: [{ field: "password", name: "key", optional: false }] },
+      { label: "/config edit", send: "/config edit", help: "change shell", class: "form" },
     ],
   }));
   const forms = page.__node("command-list").children[0].children.slice(1);
   eq(
     forms.map((n) => n.tag),
-    ["form", "form", "form"],
-    "every row the frame marks gets a field, whatever its label looks like"
+    ["form", "form", "div"],
+    "a row with answers gets a form; `/config edit` has none and stays a row of reference"
   );
   eq(
-    forms.map((f) => f.children[0].tag + ":" + f.children[0].type),
-    ["input:text", "input:password", "input:text"],
+    forms.slice(0, 2).map((f) => f.children[0].tag + ":" + f.children[0].type),
+    ["input:text", "input:password"],
     "the frame's word is the input's type, so a credential is masked because the process said so"
   );
   eq(
-    forms.map((f) => f.children[1].textContent),
-    ["/name", "/provider key", "/config edit"],
+    forms.slice(0, 2).map((f) => f.children[1].textContent),
+    ["/name", "/provider key"],
     "the button sends the row's own `send`, which is also what it says"
   );
-  eq(forms[0].children[0].placeholder, "name this conversation", "the help is what the field suggests");
+  eq(forms[0].children[0].placeholder, "name this conversation", "one answer, so the help is what the field suggests");
   // A form row the frame does *not* mark is still a row of reference, which is the half that says
   // the field comes from the frame rather than from the class.
   page.applyState(d, JSON.stringify({
     type: "state", provider: "stub", model: "m", providers: [{ name: "stub", models: ["m"] }],
     commands: [
-      { label: "/name [text]", send: "/name", help: "name this conversation", class: "form", field: "text" },
+      { label: "/name [text]", send: "/name", help: "name this conversation", class: "form",
+        fields: [{ field: "text", name: "text", optional: false }] },
       { label: "/config edit", send: "/config edit", help: "change shell", class: "form" },
     ],
   }));
   const mixed = page.__node("command-list").children[0].children.slice(1);
   eq(mixed.map((n) => n.tag), ["form", "div"], "the wizard stays a row of reference");
+});
+
+check("a row that takes several answers asks for each of them", () => {
+  const page = loadViewer();
+  const d = page.newDoc();
+  // The frame's own list, kept here as well so the check can ask what the answers become without
+  // reaching into the page for something it does not publish.
+  const keyFields = [{ field: "password", name: "key", optional: false }];
+  const addFields = [
+    { field: "text", name: "name", optional: false },
+    { field: "text", name: "base_url", optional: false },
+    { field: "text", name: "model", optional: true },
+  ];
+  page.applyState(d, JSON.stringify({
+    type: "state", provider: "stub", model: "m",
+    commands: [
+      { label: "/provider key <key>", send: "/provider key", help: "set the API key for stub", class: "form",
+        fields: keyFields },
+      { label: "/provider add <name> <base_url> [model]", send: "/provider add", help: "set up a new provider", class: "form",
+        fields: addFields },
+    ],
+  }));
+  const forms = page.__node("command-list").children[0].children.slice(1);
+  eq(forms.length, 2, "both rows are drawn");
+  const [key, add] = forms;
+  eq(
+    add.children.map((n) => n.tag),
+    ["input", "input", "input", "button"],
+    "one input per answer the frame names, and the button last"
+  );
+  eq(
+    add.children.slice(0, 3).map((n) => n.placeholder),
+    ["name", "base_url", "model (optional)"],
+    "each input says which answer it wants, and which one may be left empty"
+  );
+  eq(add.children[3].textContent, "/provider add", "the button says the row's own `send`");
+
+  // What the answers become. The optional one missing is not a hole: the line simply ends.
+  eq(
+    page.formLine("/provider add", addFields, ["claw", "http://127.0.0.1:8080/v1", ""]),
+    "/provider add claw http://127.0.0.1:8080/v1",
+    "an empty optional answer is left off"
+  );
+  eq(
+    page.formLine("/provider add", addFields, ["claw", "http://127.0.0.1:8080/v1", "claw-3"]),
+    "/provider add claw http://127.0.0.1:8080/v1 claw-3",
+    "and a filled one is the last word"
+  );
+  // The refusal, which is the half a drawing cannot show: the bare command is the wizard in the
+  // terminal, and a run being served to a page has nobody there to answer it.
+  eq(
+    page.formLine("/provider add", addFields, ["claw", "  ", ""]),
+    null,
+    "a required answer left empty makes no line at all"
+  );
+  eq(page.formLine("/provider key", keyFields, [""]), null, "and the same for a row with one answer");
 });
 
 check("a destructive row opens its choices rather than sending", () => {

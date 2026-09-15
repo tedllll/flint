@@ -573,21 +573,61 @@ fn the_panel_reads_a_report_rather_than_sending_it() {
 /// hand the key back to every page watching -- is measured in `tests/cli_output.rs`.
 #[test]
 fn a_form_row_gets_a_field_and_sends_what_was_typed_into_it() {
-    let drawn = from("function showCommands(doc)", 110);
+    let drawn = from("function showCommands(doc)", 130);
     for (needed, why) in [
-        ("command.field", "the frame saying this row takes a field, and of which kind"),
-        ("input.type = field", "drawing it as the frame said rather than by guessing from the name"),
-        ("sendText(send + \" \" + value)", "sending the row's own `send` plus what was typed"),
-        ("if (field === \"password\") input.value = \"\"", "keeping no copy of a credential"),
+        ("command.fields", "the frame saying this row takes answers, and of which kinds"),
+        ("input.type = spec && spec.field === \"password\" ? \"password\" : \"text\"", "drawing each as the frame said rather than by guessing from the name"),
+        ("formLine(send, fields, inputs.map((input) => input.value))", "the line being built by the one function that knows what the answers become"),
+        ("if (!line) return;", "nothing being sent while an answer the frame did not mark optional is missing"),
+        ("fields[at].field === \"password\"", "keeping no copy of a credential"),
     ] {
         assert!(
             drawn.contains(needed),
             "a form row is not drawn from `{needed}` ({why}): {drawn}"
         );
     }
+}
+
+/// The answers of a form become one line, and a missing one stops it.
+///
+/// The half a drawing cannot show. `send` with no answers is the command's *interactive* form --
+/// `/provider add` bare is a wizard that asks a person for five things one at a time -- so a page that
+/// sent a partly-filled form would hand the run to a wizard whose only reader is a terminal nobody is
+/// sitting at. Which answers are required is the frame's word (`optional`), not the page's guess from
+/// the label, for the same reason the field's kind is: a page that decided would be re-deriving this
+/// program's grammar.
+#[test]
+fn the_answers_of_a_form_become_one_line_and_a_missing_one_stops_it() {
+    let answers = from("function formLine(send, fields, values)", 20);
     assert!(
-        drawn.contains("if (!value) return;"),
-        "an empty field is submitted, which sends the bare command instead of nothing: {drawn}"
+        answers.contains("if (spec.optional) break;"),
+        "an empty optional answer does not end the line, so the answer after it is promoted into its \
+         place: {answers}"
+    );
+    assert!(
+        answers.contains("if (!answer) {\n      if (spec.optional) break;\n      return null;\n    }"),
+        "a required answer that is empty does not stop the line, so the bare command is sent: \
+         {answers}"
+    );
+    assert!(
+        answers.contains("[send].concat(answers).join(\" \")"),
+        "the line is not the row's own `send` followed by the answers in the frame's order: {answers}"
+    );
+    // And the page uses it: this is the wiring, and the refusal above is decoration without it. Both
+    // halves are asserted here rather than in the drawing test because this is the test whose subject
+    // is the refusal -- a mutation that deletes the `if (!line) return;` line leaves the drawing
+    // intact and the promise broken.
+    let page = view();
+    assert_eq!(
+        page.matches("formLine(send, fields, inputs.map((input) => input.value))").count(),
+        1,
+        "the form's submit handler does not go through `formLine`, so the answers are joined twice \
+         and the refusal above is about a line nobody sends"
+    );
+    assert!(
+        page.contains("if (!line) return;"),
+        "the handler sends what `formLine` refused, so an incomplete form is submitted as the bare \
+         command -- which is the wizard, waiting for a person who is not at the terminal"
     );
 }
 

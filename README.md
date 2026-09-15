@@ -137,6 +137,7 @@ Inside the REPL:
 |---|---|
 | `/help` | command list |
 | `/provider [name]` | list, switch, add, edit or remove providers |
+| `/provider add <name> <base_url> [model]` | add one; bare, it asks for each part |
 | `/provider key <key>` | set the API key for the active provider |
 | `/model` | show the model in force |
 | `/model <name>` | switch to one of that provider's models |

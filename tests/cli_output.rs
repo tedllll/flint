@@ -3073,16 +3073,22 @@ async fn the_page_is_told_which_commands_it_may_offer() {
     // which means nothing to somebody looking at a browser, so the frame substitutes the name. Every
     // other row must match word for word -- this loop is what keeps the page from growing a second
     // description of a command that drifts from `/help`.
+    //
+    // `/help` wraps a description that is longer than its column, so a long sentence arrives in two
+    // pieces; joining them back up with the column it wraps into is what makes the comparison about
+    // the *words*. The alternative -- keeping every description short enough to fit -- would mean
+    // choosing the help text to suit the test.
+    let flat = transcript.replace("\n                        ", " ");
     for (label, _, help, _) in &commands {
         assert!(
-            transcript.contains(label.as_str()),
+            flat.contains(label.as_str()),
             "the page is offered `{label}` and `/help` does not print it, so the two lists have \
              drifted apart: {transcript:?}"
         );
         // `test_home` names the provider `stub`, which is the name that would have been substituted.
         let unsubstituted = help.replace("stub", "the active provider");
         assert!(
-            transcript.contains(help.as_str()) || transcript.contains(unsubstituted.as_str()),
+            flat.contains(help.as_str()) || flat.contains(unsubstituted.as_str()),
             "`{label}` is described one way to the page and another in `/help`: {transcript:?}"
         );
     }
@@ -3342,7 +3348,8 @@ async fn a_switch_is_offered_the_values_it_may_take() {
     // belongs to is the one thing that reader needs before pasting a credential into a box.
     assert!(
         opening.contains(
-            "\"class\":\"form\",\"field\":\"password\",\"help\":\"set the API key for stub\",\
+            "\"class\":\"form\",\"fields\":[{\"field\":\"password\",\"name\":\"key\",\
+             \"optional\":false}],\"help\":\"set the API key for stub\",\
              \"label\":\"/provider key <key>\",\"send\":\"/provider key\""
         ),
         "the key row does not name the provider it is for, so a masked box appears with no way to \
@@ -3366,6 +3373,111 @@ async fn a_switch_is_offered_the_values_it_may_take() {
     let _ = std::fs::remove_dir_all(&home);
 
     assert!(exited, "flint did not exit");
+}
+
+/// Adding a provider is something a page can do, and what it writes is a provider.
+///
+/// `/provider add` used to be the interactive wizard and nothing else, so the page could only point at
+/// the terminal and say "it asks questions". One line's worth of the same five answers is the whole
+/// difference: `add <name> <base_url> [model]` writes the provider the wizard would have written, and
+/// the frame carries the three answers as `fields` so the page can ask for each of them. The key is
+/// not one of them -- a credential does not go in a transcript, and `/provider key` is the masked row
+/// that already exists -- which is why adding *switches* to the new provider: `/provider key` sets the
+/// key of the provider in force, so without the switch the very next press would set somebody else's.
+///
+/// The line posted below is the one the page composes from its three inputs, in the frame's order,
+/// with the optional answer left off; the second post is the same command typed by hand, to show the
+/// two forms are one command. The last assertion is the one that ties this to the fix before it: a
+/// provider added mid-conversation is a `switch` in the file the conversation is already in.
+#[tokio::test]
+async fn a_provider_can_be_added_from_the_page() {
+    let home = test_home("provider-add", "http://127.0.0.1:9/v1");
+    let log = home.join("transcript.txt");
+    let mut child = binary()
+        .arg("--web")
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::fs::File::create(&log).expect("transcript file"))
+        .stderr(std::fs::File::create(home.join("stderr.txt")).expect("stderr file"))
+        .spawn()
+        .expect("failed to run flint");
+
+    let (port, token) = port_and_token(&wait_for_url(&log));
+    let mut watching = http_stream(port, "/events", &token);
+    let opening = read_until(&mut watching, "\"type\":\"state\"}\n\n", 20);
+
+    // The frame's half: three answers, named, in the order the line wants them, and only the last one
+    // optional -- the page has to know which ones it may leave empty, because the empty form is the
+    // wizard, and a wizard in a served run is a question nobody can answer.
+    assert!(
+        opening.contains(
+            "\"fields\":[{\"field\":\"text\",\"name\":\"name\",\"optional\":false},\
+             {\"field\":\"text\",\"name\":\"base_url\",\"optional\":false},\
+             {\"field\":\"text\",\"name\":\"model\",\"optional\":true}]"
+        ),
+        "the page is not told what `/provider add` takes, so it can only offer it as a line to type: \
+         {opening:?}"
+    );
+
+    let sessions = home.join("sessions");
+    let before = jsonl_files(&sessions);
+    assert_eq!(before.len(), 1, "a fresh run is not writing one session: {before:?}");
+
+    // The line the page composes: the row's own `send`, then the answers, with the empty optional one
+    // left off. Nineteen is a base address; nothing is ever sent to it.
+    let posted = post_message(port, &token, "/provider add claw http://127.0.0.1:9/v1");
+    assert!(posted.starts_with("HTTP/1.1 202"), "the add was refused: {posted:?}");
+    let told = read_until(&mut watching, "\"provider\":\"claw\"", 20);
+
+    let after = jsonl_files(&sessions);
+    let text = after
+        .first()
+        .map(|path| std::fs::read_to_string(path).unwrap_or_default())
+        .unwrap_or_default();
+
+    // A second add of the same name, typed by hand: one command, two ways to reach it, and the mistake
+    // a page makes by pressing twice is refused rather than quietly overwriting the entry.
+    post_message(port, &token, "/provider add claw http://127.0.0.1:9/v1");
+    // And the model, which the first line left off, is the wizard's own default rather than nothing.
+    post_message(port, &token, "/provider add second http://127.0.0.1:9/v1 second-model");
+
+    drop(watching);
+    drop(child.stdin.take());
+    let exited = wait_for_exit(&mut child, 20);
+    let transcript = std::fs::read_to_string(&log).unwrap_or_default();
+    let config = std::fs::read_to_string(home.join("config.toml")).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit");
+    assert!(
+        told.contains("\"provider\":\"claw\""),
+        "adding a provider did not switch to it, so the key row would go on naming the old one: \
+         {told:?} Terminal: {transcript:?}"
+    );
+    assert!(
+        config.contains("name = \"claw\"") && config.contains("model = \"deepseek-chat\""),
+        "the provider the page added is not in the config file with a usable model: {config:?}"
+    );
+    assert!(
+        config.contains("name = \"second\"") && config.contains("model = \"second-model\""),
+        "a provider added with its model did not keep it: {config:?}"
+    );
+    assert_eq!(
+        config.matches("name = \"claw\"").count(),
+        1,
+        "adding the same name twice wrote it twice: {config:?}"
+    );
+    assert!(
+        transcript.contains("already exists"),
+        "the second add was accepted in silence, so a page pressing twice cannot tell what happened: \
+         {transcript:?}"
+    );
+    assert_eq!(after.len(), 1, "adding a provider started a second conversation: {after:?}");
+    assert!(
+        text.contains("\"type\":\"switch\",\"provider\":\"claw\""),
+        "the file does not say the conversation moved to the provider that was just added: {text:?}"
+    );
 }
 
 /// A form the page fills in: `/provider key <key>`, and the key does not come back.

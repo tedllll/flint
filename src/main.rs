@@ -1406,7 +1406,6 @@ async fn provider_wizard(
     )
     .await?;
 
-    let is_local = is_local_endpoint(&base_url);
     let current_key = existing.as_ref().map(|p| p.api_key.as_str()).unwrap_or("");
     let current_env = existing
         .as_ref()
@@ -1476,16 +1475,41 @@ async fn provider_wizard(
         proxy: cfg.proxy.clone(),
     };
 
+    save_provider(cfg, &p, printer)?;
+
+    if confirm(reader, &format!("switch to '{name}' now?"), true).await? {
+        cfg.default_provider = name.clone();
+        cfg.save()?;
+        return switch_provider(cfg, from, &name, agent, printer.term(), printer.pal).await;
+    }
+    Ok(Flow::Continue)
+}
+
+/// Write a provider into the config file and say what happened to it.
+///
+/// Shared by the wizard and by `/provider add`'s one-line form, because the two differ only in how
+/// the answers arrive. What is left here is the half that can go wrong quietly: a name that replaces
+/// an existing provider, and an endpoint that needs a key and does not have one. Both are said out
+/// loud, and the second one names the command that fixes it.
+///
+/// The caller does the switching, because the wizard asks before it does and a line cannot ask.
+fn save_provider(
+    cfg: &mut config::Config,
+    p: &config::ProviderConfig,
+    printer: &Printer<'_>,
+) -> Result<()> {
+    let Palette { bold, reset, .. } = printer.pal;
     let had_key = !p.resolved_key().trim().is_empty();
-    let added = cfg.upsert_provider(p);
+    let added = cfg.upsert_provider(p.clone());
     cfg.save()?;
     printer.term().line(format_args!(
-        "{} {bold}{name}{reset} {} {}",
+        "{} {bold}{}{reset} {} {}",
         printer.style(GREEN, "saved"),
+        p.name,
         if added { "added to" } else { "updated in" },
         config::config_path().display()
     ));
-    if !had_key && !is_local {
+    if !had_key && !is_local_endpoint(&p.base_url) {
         printer.term().line(format_args!(
             "{}",
             printer.style(
@@ -1494,13 +1518,7 @@ async fn provider_wizard(
             )
         ));
     }
-
-    if confirm(reader, &format!("switch to '{name}' now?"), true).await? {
-        cfg.default_provider = name.clone();
-        cfg.save()?;
-        return switch_provider(cfg, from, &name, agent, printer.term(), printer.pal).await;
-    }
-    Ok(Flow::Continue)
+    Ok(())
 }
 
 /// Hand a conversation to a new agent, in the file it is already in.
@@ -1691,12 +1709,13 @@ impl ArgFrom {
 
 /// The kind of value a row's argument is, when the page draws a field for it.
 ///
-/// The page draws a field for a row that has one and no field for a row that does not, which is how
-/// `/provider add`, `/provider edit` and `/config edit` stay where they are: they ask for several
-/// values, one at a time, and a page with a single field would be guessing at the rest. `/config
-/// edit` is the one worth revisiting -- its keys are enumerable and only its values are free-form --
-/// and a page form for it would need a `/config set <key> <value>` the terminal does not have,
-/// which is a command invented for the page's benefit rather than one it was taught.
+/// A row with no arguments at all gets no field, which is how `/provider edit` and `/config edit`
+/// stay where they are: a page drawing a field for them would be guessing at the rest.
+/// `/provider add` used to be in that list and is not any more -- it takes its answers as the words
+/// of one line now, so a page can ask for each of them -- and `/config edit` is the one still worth
+/// revisiting: its keys are enumerable and only its values are free-form, and a page form for it
+/// would need a `/config set <key> <value>` the terminal does not have, which is a command invented
+/// for the page's benefit rather than one it was taught.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Field {
     /// One line of text, shown as it is typed.
@@ -1712,6 +1731,48 @@ impl Field {
         match self {
             Field::Text => "text",
             Field::Password => "password",
+        }
+    }
+}
+
+/// One answer a row's line is made of, as the page is told about it.
+///
+/// A row may take more than one answer -- `/provider add` takes a name, an address and a model --
+/// and the page's job with them is the one thing a single field could not do: ask for each, and
+/// refuse to send at all while one the frame did not mark optional is empty. That refusal is not
+/// politeness. `send` with no answers is the *interactive* form of the command, so a page that sent
+/// an empty one would hand the run to a wizard waiting for a person who is not in the room.
+#[derive(Clone, Copy)]
+struct PageArg {
+    /// What the answer is, which is the input's placeholder: `base_url`.
+    ///
+    /// Not a label: on a row with one answer the help is what the field suggests (it says what the
+    /// command is *for*), and on a row with several each field has to say which answer it wants,
+    /// because there is no room to explain three of them one at a time.
+    name: &'static str,
+    /// How to draw it.
+    field: Field,
+    /// True when the command works without this answer.
+    ///
+    /// A line cannot leave a hole in the middle -- the words are positions -- so an optional answer
+    /// has to be the last one, which is why `/provider add`'s model is the only one marked.
+    optional: bool,
+}
+
+impl PageArg {
+    const fn required(name: &'static str, field: Field) -> Self {
+        Self {
+            name,
+            field,
+            optional: false,
+        }
+    }
+
+    const fn optional(name: &'static str, field: Field) -> Self {
+        Self {
+            name,
+            field,
+            optional: true,
         }
     }
 }
@@ -1735,8 +1796,12 @@ struct CommandHelp {
     help: &'static str,
     section: HelpSection,
     on_page: OnPage,
-    /// Set when the page may fill this row's argument in with a field of its own.
-    field: Option<Field>,
+    /// The answers the page may fill in for this row, in the order the line wants them.
+    ///
+    /// Empty for every row whose argument the page may not type, which is how a row becomes a row of
+    /// reference: the page draws a control for what it is given, and a line to read for what it is
+    /// not.
+    args: &'static [PageArg],
     /// Set on a destructive row: which list the page offers the argument from. See [`ArgFrom`].
     from: Option<ArgFrom>,
 }
@@ -1756,22 +1821,25 @@ impl CommandHelp {
             help,
             section,
             on_page,
-            field: None,
+            args: &[],
             from: None,
         }
     }
 
     /// A row whose one argument the page may type into a field.
     ///
-    /// A separate constructor rather than a `row` with another argument, because the field is the
-    /// exception -- two rows have one, and every other row would be passing `None` to say so.
+    /// A separate constructor rather than a `row` with another argument, because a field is the
+    /// exception -- three rows have one, and every other row would be passing an empty list to say
+    /// so. The list is passed in rather than built here, because `&[PageArg { .. }]` inside a
+    /// `const fn` is a temporary: const promotion does not reach into a function body, so these are
+    /// named constants beside the table.
     const fn field_row(
         label: &'static str,
         send: &'static str,
         help: &'static str,
         section: HelpSection,
         on_page: OnPage,
-        field: Field,
+        args: &'static [PageArg],
     ) -> Self {
         Self {
             label,
@@ -1779,7 +1847,30 @@ impl CommandHelp {
             help,
             section,
             on_page,
-            field: Some(field),
+            args,
+            from: None,
+        }
+    }
+
+    /// A row the page asks several answers for, which it sends as the words of one line.
+    ///
+    /// The arguments are the table's, not the page's: `args[0]` is the first word after `send`, and
+    /// the page is told which of them may be left empty rather than deciding from the label. This is
+    /// `/provider add`, and the reason it needed one: the interactive form of it asks for five
+    /// answers one at a time, and a page cannot hold a conversation.
+    const fn form_row(
+        label: &'static str,
+        send: &'static str,
+        help: &'static str,
+        args: &'static [PageArg],
+    ) -> Self {
+        Self {
+            label,
+            send,
+            help,
+            section: HelpSection::Commands,
+            on_page: OnPage::Form,
+            args,
             from: None,
         }
     }
@@ -1800,7 +1891,7 @@ impl CommandHelp {
             help,
             section: HelpSection::Commands,
             on_page: OnPage::Danger,
-            field: None,
+            args: &[],
             from: Some(from),
         }
     }
@@ -1810,14 +1901,36 @@ impl CommandHelp {
 ///
 /// Aliases are not rows: `/q` and `/quit` are dispatched, but three spellings of one command is
 /// three lines of help for one thing, and the page has no use for them.
+/// The answers of the rows that take exactly one, as constants rather than expressions in the table.
+///
+/// A `&[PageArg]` built inside a `const fn` is a temporary that borrows from the frame, which the
+/// compiler refuses; naming them here is what makes the table one list instead of three.
+const NAME_ARG: [PageArg; 1] = [PageArg::required("text", Field::Text)];
+const KEY_ARG: [PageArg; 1] = [PageArg::required("key", Field::Password)];
+/// `/provider add`'s three: everything a provider needs that is not a secret.
+///
+/// The model is optional because a provider can be added without one -- the terminal's default is
+/// `deepseek-chat`, the same as the wizard's -- and it is the last one because a line cannot leave a
+/// hole in the middle.
+const ADD_ARGS: [PageArg; 3] = [
+    PageArg::required("name", Field::Text),
+    PageArg::required("base_url", Field::Text),
+    PageArg::optional("model", Field::Text),
+];
+
 const COMMANDS: &[CommandHelp] = &[
     CommandHelp::row("/help", "/help", "this message", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/exit", "/exit", "quit", HelpSection::Commands, OnPage::Terminal),
     CommandHelp::row("/provider", "/provider", "list providers", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/provider <name>", "/provider", "switch to one", HelpSection::Commands, OnPage::Selector),
-    CommandHelp::row("/provider add", "/provider add", "set up a new provider (interactive)", HelpSection::Commands, OnPage::Form),
+    CommandHelp::form_row(
+        "/provider add <name> <base_url> [model]",
+        "/provider add",
+        "set up a new provider; with no arguments it asks for each part",
+        &ADD_ARGS,
+    ),
     CommandHelp::row("/provider edit <name>", "/provider edit", "change one (interactive)", HelpSection::Commands, OnPage::Form),
-    CommandHelp::field_row("/provider key <key>", "/provider key", "set the API key for the active provider", HelpSection::Commands, OnPage::Form, Field::Password),
+    CommandHelp::field_row("/provider key <key>", "/provider key", "set the API key for the active provider", HelpSection::Commands, OnPage::Form, &KEY_ARG),
     CommandHelp::destroying("/provider rm <name>", "/provider rm", "delete one", ArgFrom::Providers),
     CommandHelp::row("/config", "/config", "show shell, steps, proxy", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/config edit", "/config edit", "change shell, steps, proxy", HelpSection::Commands, OnPage::Form),
@@ -1831,7 +1944,7 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp::row("/skills [name]", "/skills", "list skills, or print one as the model would see it", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/sessions", "/sessions", "list past sessions, numbered", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/resume <n|id>", "/resume", "switch to one of them", HelpSection::Commands, OnPage::Selector),
-    CommandHelp::field_row("/name [text]", "/name", "name this conversation", HelpSection::Commands, OnPage::Form, Field::Text),
+    CommandHelp::field_row("/name [text]", "/name", "name this conversation", HelpSection::Commands, OnPage::Form, &NAME_ARG),
     CommandHelp::destroying("/archive <n|id>", "/archive", "file one away, out of the list", ArgFrom::Sessions),
     CommandHelp::destroying("/delete <n|id>", "/delete", "delete one", ArgFrom::Sessions),
     CommandHelp::row("/new", "/new", "start a fresh conversation", HelpSection::Commands, OnPage::Button),
@@ -2134,8 +2247,50 @@ async fn handle_command(
                 }
 
                 "add" => {
-                    return provider_wizard(cfg, agent, Some(&provider_cfg.name), None, printer, reader)
-                        .await
+                    // Bare, the wizard asks for each answer in turn; with the answers already on the
+                    // line there is nothing to ask, and that form exists so a page can send one. Both
+                    // end in the same place -- `save_provider` -- because the half that can go wrong
+                    // is not how the five answers arrived.
+                    let parts: Vec<&str> = rest.split_whitespace().collect();
+                    if parts.is_empty() {
+                        return provider_wizard(cfg, agent, Some(&provider_cfg.name), None, printer, reader)
+                            .await;
+                    }
+                    if parts.len() < 2 {
+                        return Err(anyhow!(
+                            "usage: /provider add <name> <base_url> [model] — or bare, to be asked each part"
+                        ));
+                    }
+                    let (name, base_url) = (parts[0], parts[1]);
+                    if cfg.provider(name).is_some() {
+                        return Err(anyhow!(
+                            "provider '{name}' already exists — `/provider edit {name}` changes one"
+                        ));
+                    }
+                    let p = config::ProviderConfig {
+                        name: name.to_string(),
+                        base_url: base_url.to_string(),
+                        // The two a line cannot carry without putting them in a transcript: a key is
+                        // set afterwards with `/provider key`, which is masked and goes to whichever
+                        // provider is in force -- which is why this switches to the new one below.
+                        api_key: String::new(),
+                        api_key_env: None,
+                        models: Vec::new(),
+                        // The wizard's own default, so a provider added from a page is the same shape
+                        // as one added from the terminal.
+                        model: parts.get(2).copied().unwrap_or("deepseek-chat").to_string(),
+                        start: None,
+                        stop: None,
+                        start_timeout_secs: 0,
+                        proxy: cfg.proxy.clone(),
+                    };
+                    save_provider(cfg, &p, printer)?;
+                    // Switching is what the wizard offers as its default, and it is what makes the
+                    // key reachable: `/provider key` sets the key for the provider *in force*.
+                    cfg.default_provider = name.to_string();
+                    cfg.save()?;
+                    return switch_provider(cfg, Some(&provider_cfg.name), name, agent, printer.term(), printer.pal)
+                        .await;
                 }
 
                 "edit" => {
@@ -2923,11 +3078,21 @@ fn page_commands(
             if !row.values.is_empty() {
                 json["values"] = serde_json::json!(row.values);
             }
-            // And the same for the rows the page may fill in with a field of its own. The word is
-            // the input's `type`, so the page is told *how* to draw it rather than left to decide
-            // from the command's name that a key is a secret.
-            if let Some(field) = row.field {
-                json["field"] = serde_json::json!(field.word());
+            // And the same for the answers the page may ask for. Each is carried as its own object
+            // because the page needs three things about it -- what to call it, how to draw it, and
+            // whether the command works without it -- and the word for how to draw it is the input's
+            // `type`, so the page is told *how* to draw a credential rather than left to decide from
+            // the command's name that a key is a secret.
+            if !row.args.is_empty() {
+                json["fields"] = serde_json::json!(row
+                    .args
+                    .iter()
+                    .map(|arg| serde_json::json!({
+                        "field": arg.field.word(),
+                        "name": arg.name,
+                        "optional": arg.optional,
+                    }))
+                    .collect::<Vec<_>>());
             }
             // And for a destructive row, which list its argument comes from. The page has to draw
             // the choices before anything can be confirmed, and the two lists it has are different.
@@ -2962,8 +3127,12 @@ struct PageRow {
     /// may *type* for the reader, and the route refuses it, because running a provider switch with the
     /// terminal quiet would start a local engine without printing a word anywhere.
     values: Vec<String>,
-    /// The kind of field the page may draw for this row's argument, if it may draw one at all.
-    field: Option<Field>,
+    /// The answers this row's line is made of, when the page may ask for them.
+    ///
+    /// The table's own list, in the table's own order, because what the page sends is
+    /// `send` followed by the answers in that order: a page that reordered them, or dropped one and
+    /// closed the gap, would be writing a different command.
+    args: &'static [PageArg],
     /// On a destructive row: which list the page offers the argument from.
     from: Option<ArgFrom>,
 }
@@ -3002,9 +3171,8 @@ fn page_rows(
                     // the sidebar's, where the numbers are and where a press already resumes.
                     _ => Vec::new(),
                 },
-                field: row.field,
-                from: row.from,
-            })
+                args: row.args,
+                from: row.from,            })
         })
         .collect()
 }
@@ -3032,7 +3200,9 @@ fn page_help(row: &CommandHelp, provider_cfg: &config::ProviderConfig) -> String
 /// its own block then reads `/provider key`, which is what the reader did.
 fn echoed_input(line: &str) -> &str {
     for row in COMMANDS {
-        if row.field == Some(Field::Password) && takes_argument(row.send, line) {
+        // Any answer of the row, not just the first: a row that took a key as its second word would
+        // be redacted by its own table entry rather than by a list here that nobody would remember.
+        if row.args.iter().any(|arg| arg.field == Field::Password) && takes_argument(row.send, line) {
             return row.send;
         }
     }

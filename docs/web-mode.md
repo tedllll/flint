@@ -219,7 +219,7 @@ Four routes. No cookies, no HTTP/2, no TLS, no keep-alive, no streaming request 
 | `POST /report` | one command *read* from the browser: same channel, and its answer is captured with the terminal quiet (§11) |
 | `GET /sessions` | the conversations `/resume` can reach, numbered the way `/resume` numbers them |
 | *`event: sessions`* | not a route but its counterpart: the list has changed, re-read it |
-| *`event: state`* | the run's own configuration: provider, model, what each provider offers, the toggles, and the command list with §8's class for each row — a row also carries `values` when the page may send that command with an argument the frame names (a *read* on a `panel` row, a line the page types for you on a `selector`), `field` when the page may fill its argument in, and `from` when it destroys something and the argument is one of a list (§11) |
+| *`event: state`* | the run's own configuration: provider, model, what each provider offers, the toggles, and the command list with §8's class for each row — a row also carries `values` when the page may send that command with an argument the frame names (a *read* on a `panel` row, a line the page types for you on a `selector`), `fields` when the page may collect its answers (one entry per word the line wants, each with the input's kind, the argument's name, and whether the command works without it), and `from` when it destroys something and the argument is one of a list (§11) |
 | `type: command` | what a command answered, on the same stream as the turn's events: `input` and `text` — which is also what a header button's answer arrives on. Carries `panel: true` when the page asked to read it rather than typing it, and `input` is the command's own `send` rather than the line in the one case the line carries a credential (§11) |
 
 **All six are implemented.** `/session` and `/events` read the session path and the event feed
@@ -757,26 +757,45 @@ press and others do not, which is why the reference rows are now marked and expl
 hover. Whether that is enough, or whether the groups should be ordered around a *task* (add a provider,
 set a key) rather than around §8's classes, is the open question this round leaves behind.
 
-### A form row gets a field, and a key never comes back — measured, 2026-09-15
+### A form row asks for each answer the frame names — measured, 2026-09-15
 
-§8's form class, for the rows whose argument is a single value. A row may carry `field`, which is
-`text` or `password` and is passed straight to the input's `type`: the process says how to draw it,
-so the page is not deciding from a command's name that a key is a secret. The page composes the line
-as `send` plus what was typed — the same composition the toggles and the value rows use — and posts it
-to `/message`, because a form changes something and its answer belongs in the transcript. A form row
-with no `field` stays a row of reference, which is how `/provider add`, `/provider edit` and
-`/config edit` remain the terminal's.
+§8's form class, for the rows whose answers the page may collect. A row may carry `fields`: a list, one
+entry per word the line wants, each with the kind of input (`text` or `password`, passed straight to the
+input's `type`), the argument's name for the placeholder, and whether the command works without it. The
+process says all three, so the page is not deciding from a command's name that a key is a secret, nor
+from its label how many answers it takes. The page composes the line as `send` followed by the answers
+**in the frame's order** — a pure function, `formLine`, because the order is the command — and posts it
+to `/message`, where a form's answer belongs. A form row with no `fields` stays a row of reference,
+which is how `/provider edit` and `/config edit` remain the terminal's.
+
+A row that takes one answer says what the command is *for* in that one field's placeholder, which is
+what the help line is good for; a row that takes several has to say which answer each input wants
+(`name`, `base_url`, `model (optional)`), because there is no room to explain three of them one at a
+time.
+
+**The refusal is the point.** An answer the frame did not mark optional and the page did not get stops
+the line: nothing is sent at all. The bare form of a command is a *different* command — `/provider add`
+with no arguments is the wizard, which asks a person for five things one at a time — so a page that sent
+a partly-filled form would hand a served run to a wizard whose only reader is a terminal nobody is
+sitting at. That is a hang, not a wrong answer, which is why it is asserted rather than reasoned about.
 
 | Claim | How | Result |
 |---|---|---|
-| The frame says which rows take a field, and of which kind | a real `--web` process, the connect-time state frame | `/name [text]` arrives with `"field":"text"` and `/provider key <key>` with `"field":"password"`; `/config edit` and the two wizards carry no `field` at all |
+| The frame says which rows take answers, of which kinds, and which are optional | a real `--web` process, the connect-time state frame | `/name [text]` arrives with `"fields":[{"field":"text","name":"text","optional":false}]`, `/provider key <key>` with the same shape carrying `"password"`, and `/provider add <name> <base_url> [model]` with three entries whose last is `"optional":true`; `/config edit` and both wizards carry no `fields` at all |
+| Adding a provider from the page writes one | a real `--web` process, the line the page composes on `POST /message` | the config file gains `name = "claw"` with the wizard's default model, the run switches to it (the frame's `provider` becomes `claw`), and the conversation file gains `"type":"switch","provider":"claw"` rather than a second file |
+| Adding a name that exists is refused, not overwritten | the same run, the line posted twice | `provider 'claw' already exists — \`/provider edit claw\` changes one`, and the file holds one `name = "claw"` |
 | A key typed into a field does not come back | the same run, `/provider key sk-not-a-real-key-0000` on `POST /message`, then the feed and the transcript | the answer says `key saved`, the `command` frame's `input` is `/provider key` and never the line, and the key is nowhere in the transcript — while `config.toml` *does* contain it, which is what stops the other three from passing on a command that never ran. Mutation-checked: echoing the raw line fails this, with the key visible in the frame |
 | A refused key-carrying line does not come back either | `POST /report` with the same line | refused, and the refusal quotes `/provider key` rather than the key. Mutation-checked: quoting the refused line fails this |
-| The page masks it, and keeps no copy | `tests/web_view.rs`, over the page's own bytes | `input.type = field`, the line composed as `send + " " + value`, a `password` field emptied on send, an empty field not submitted, and the send going through `sendText` — which is `/message` |
-| A form row without the mark is still a row | Node, over the stub DOM | two marked rows are `form` elements holding `input:text` and `input:password` with buttons reading `/name` and `/provider key`, the unmarked one is a `div`; mutation-checked — ignoring `command.field` fails it |
+| The page masks a key and keeps no copy | `tests/web_view.rs`, over the page's own bytes | each input's `type` from the frame's word, the `password` ones emptied on send, and the send going through `sendText` — which is `/message` |
+| The answers become one line, and a missing one stops it | Node (`formLine` directly) and `tests/web_view.rs` (the wiring) | `["claw","http://…",""]` is `/provider add claw http://…` with the empty optional answer simply left off, and a required one that is empty is `null` — nothing sent. Mutation-checked both ways: deleting `if (!line) return;` from the page fails the policy test, and both Node and the policy test fail if the drawing stops reading `fields` |
+| A form row without the mark is still a row | Node, over the stub DOM | the marked rows are `form` elements holding `input:text` / `input:password` with buttons reading `/name` and `/provider key`, and `/config edit` is a `div` |
+| The page does not name a command to build the line | the frame, by construction | the button reads the row's own `send` and the answers are joined to it; the page has no list of commands and no table of which answers they take |
 
 **Not measured**: a browser, as ever — and the masked field has never been typed into by a person, so
-what is pinned is the markup and the route, not the browser's own password-manager behaviour.
+what is pinned is the markup and the route, not the browser's own password-manager behaviour. Nor has
+the *submit* path been seen in a browser: the Node harness delivers listeners to the handlers the page
+registered, which is enough to show that a refusal refuses, but a form's own Enter key and a
+`type="submit"` button exist only in the real thing.
 
 ### A conversation's own actions, one level down — measured, 2026-09-15
 

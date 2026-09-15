@@ -1019,30 +1019,41 @@ function showCommands(doc) {
       // cannot name one that was not offered; the process refuses the rest. The row's own line is
       // kept next to them because it is a command in its own right: `/skills` is the catalog, and
       // `/skills <name>` is one entry in it.
-      // A row the frame says takes a field gets one. It is a *form*, not a report: the value goes on
-      // `/message` with the rest of what a person sends, because a form changes something and its
-      // answer belongs in the transcript where the change is. `field` is the input's `type`, so the
-      // page is told how to draw it rather than deciding from the command's name that a key is a
-      // secret -- and a masked field is emptied the moment it is sent, so the value exists in the
-      // input, on the wire, and in the config file it was for, and nowhere else.
-      const field = command.field === "text" || command.field === "password" ? command.field : null;
-      if (field) {
+      // A row the frame says takes answers gets one input each. It is a *form*, not a report: the
+      // answers go on `/message` with the rest of what a person sends, because a form changes
+      // something and its answer belongs in the transcript where the change is. Each answer's
+      // `field` is the input's `type`, so the page is told how to draw it rather than deciding from
+      // the command's name that a key is a secret -- and a masked input is emptied the moment it is
+      // sent, so the value exists in the input, on the wire, and in the config file it was for, and
+      // nowhere else.
+      const fields = Array.isArray(command.fields) ? command.fields : [];
+      if (fields.length > 0) {
         const form = el("form", "field");
-        const input = el("input", "value");
-        input.type = field;
-        input.placeholder = help;
+        const inputs = fields.map((spec) => {
+          const input = el("input", "value");
+          input.type = spec && spec.field === "password" ? "password" : "text";
+          // One answer says what the command is for; several have to say which answer each wants,
+          // because there is no room to explain three of them one at a time.
+          input.placeholder =
+            fields.length === 1 ? help : ((spec && spec.name) || "") + (spec && spec.optional ? " (optional)" : "");
+          return input;
+        });
         const submit = el("button", "send", send);
         submit.type = "submit";
         form.addEventListener("submit", (event) => {
           if (event && typeof event.preventDefault === "function") event.preventDefault();
-          const value = typeof input.value === "string" ? input.value.trim() : "";
-          // An empty field is not a submission: the bare command is a different thing (`/name` with
-          // no text reads the name it has), and the page has no business sending it by accident.
-          if (!value) return;
-          if (field === "password") input.value = "";
-          sendText(send + " " + value);
+          const line = formLine(send, fields, inputs.map((input) => input.value));
+          // Nothing at all is sent when an answer the frame did not mark optional is missing. That is
+          // not politeness: the bare command is a different thing -- `/provider add` with no arguments
+          // is the wizard, which asks a person one question at a time, and a run being served to a
+          // page has nobody at the terminal to answer it.
+          if (!line) return;
+          inputs.forEach((input, at) => {
+            if (fields[at] && fields[at].field === "password") input.value = "";
+          });
+          sendText(line);
         });
-        form.appendChild(input);
+        for (const input of inputs) form.appendChild(input);
         form.appendChild(submit);
         group.appendChild(form);
         continue;
@@ -1556,6 +1567,31 @@ function destroyingRows(doc, from) {
       command.from === from &&
       typeof command.send === "string"
   );
+}
+
+/// The line a form's answers make, or null when one the frame did not mark optional is missing.
+///
+/// A pure function because both halves of it matter and neither is visible in a drawing: the order
+/// of the answers -- they are the words of the line, so a page that reordered them would send a
+/// different command -- and the refusal. The refusal is the one worth having: `send` with no answers
+/// is the command's *interactive* form, so a page that sent an empty one would hand the run to a
+/// wizard asking questions of a terminal nobody is sitting at.
+///
+/// An optional answer that is empty ends the line rather than being skipped. A space-separated line
+/// cannot leave a hole in the middle, which is why the frame puts the optional answers last; walking
+/// past an empty one would silently promote the answer after it into its place.
+function formLine(send, fields, values) {
+  const answers = [];
+  for (let at = 0; at < fields.length; at += 1) {
+    const spec = fields[at] || {};
+    const answer = String(values[at] == null ? "" : values[at]).trim();
+    if (!answer) {
+      if (spec.optional) break;
+      return null;
+    }
+    answers.push(answer);
+  }
+  return [send].concat(answers).join(" ");
 }
 
 /// One conversation, and the actions it has, which are its own row's business rather than the
@@ -2173,7 +2209,7 @@ if (typeof module !== "undefined" && module.exports) {
     newDoc, applyLine, applyText, applyEvent, tokenFromSearch, servedByFlint, sseFrames,
     sessionsFrom, messageBody, resumeLine, streamingAnswer, carryStreaming, setStreamingAnswer,
     paint, feedTrouble, tokenRefused, feedTrace, debugFeed, applyState, showState, fillSelect,
-    showToggles, showCommands, showActions, sessionRow,
+    showToggles, showCommands, showActions, sessionRow, formLine,
   };
 }
 </script>

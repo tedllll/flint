@@ -687,9 +687,10 @@ built after every line and a directory walk per line is not the comparison its o
 (`text` or `password`, which is also the input's `type`). Two rows have one — `/name [text]` and
 `/provider key <key>` — and the page composes the line as `send` plus what was typed, exactly as a
 toggle and a value row do, and posts it to `/message`, because a form changes something and its answer
-belongs in the transcript where the change is. A form row without a `field` is a row of reference,
-which is how `/provider add`, `/provider edit <name>` and `/config edit` stay where they are: they ask
-for several values, one at a time, and a page with a single field would be guessing at the rest.
+belongs in the transcript where the change is. A form row without an answer the page may collect is a row
+of reference, which is how `/provider edit <name>` and `/config edit` stay where they are. (This grew a
+list rather than a single kind later in the same day: see the built paragraph on `/provider add` below,
+where a row carries `fields`.)
 Two things were decided rather than discovered:
 
 - **`/config edit` on the page needs a command the terminal does not have.** Its keys are enumerable
@@ -774,13 +775,22 @@ merely convenient:
 reader cannot resolve, and `page_help` substitutes the name. The frame may do that and nothing else to
 a help line, and `tests/cli_output.rs` holds the line at exactly that substitution.
 
-**What this leaves open, and it is the honest residue of the round:** adding a provider is still a
-terminal-only command, because `/provider add` asks four questions one at a time and a page form can
-send exactly one value. Doing it from the page needs two things this round did not build — a
-non-interactive `/provider add <name> <base_url>` and a frame row that carries *several* fields — and
-the second is the same shape `docs/web-mode.md` §11 refused for `/config edit`. The panel's grouping is
-also still §8's classes rather than a task: "set a key" means switching provider in one group and
-filling a masked box in another. Both are the next round's question, not this one's oversight.
+**What this left open, now built: adding a provider from the page.** It was a terminal-only command when
+this was written, because `/provider add` asked four questions one at a time and a page form could send
+exactly one value. Both halves the note asked for are in: a non-interactive
+`/provider add <name> <base_url> [model]` — the same answers as the words of one line, ending in the same
+`save_provider`, and bare it still asks for each part — and a frame row that carries *several* answers,
+as `fields`. The page asks for each of them, and **sends nothing at all while an answer the frame did
+not mark optional is empty**, because the bare command is the wizard: a served run has nobody at the
+terminal to answer it, so an incomplete form is a hang rather than a wrong answer. The key is not one of
+the three answers — a credential does not go in a transcript — which is why `/provider add` switches to
+the provider it just wrote: `/provider key` sets the key of the provider *in force*, and the masked row
+names it.
+
+The second shape that note refused is still refused: `/config edit` is not on the page. Its keys are
+enumerable and its values free-form, so it would need a `/config set <key> <value>` the terminal does not
+have. The panel's grouping is also still §8's classes rather than a task: "set a key" means switching
+provider in one group and filling a masked box in another.
 
 **§8 is built.** All five controls are on the page — the buttons, the panels that read, the selectors,
 the forms and now the destructive ones — and what is left is not a class but three residues, each
@@ -796,10 +806,11 @@ a real click. The queue below is what comes next.
   be read with*; it does not say where a picker's values come from, and it should not, because that
   is what the control is for. The two kinds are deliberately different fields: `values` on a row is
   the permission to read that argument, which is a smaller thing than the list of models on offer.
-- **A form is the composer's problem** — built for the single-value rows: the page draws a field for a
-  row the frame marks with one, and `/provider add`, `/provider edit` and `/config edit` stay in the
-  terminal. `/provider key`'s redaction is in the table rather than in the page (see the built
-  paragraph); `/config edit` as a page form is the piece that needs a command the terminal lacks.
+- **A form is the composer's problem** — built, for both shapes: the page draws one input per answer the
+  frame names, sends them as the words of one line, and refuses to send while one the frame did not mark
+  optional is empty. `/provider add` is addable from the page now (see the built paragraph above);
+  `/provider edit` stays in the terminal, and `/config edit` stays there too, because it would need a
+  command the terminal lacks. `/provider key`'s redaction is in the table rather than in the page.
 - **The destructive class gets the page's own confirmation** — built: two presses, the second naming
   the line, because there is no undo anywhere in flint. The candidates come from the list the row's
   `from` names; the process-side command is unchanged, since a confirmation the terminal does not have

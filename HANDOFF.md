@@ -7,9 +7,9 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 393 passing, 1 ignored (258 lib, 2 in
-the binary's own tests, 33 `agent_loop`, 51 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
-`term_capture` plus the ignored cost measurement, 21 `web_view`), `cargo clippy --all-targets` is
+As of the commit that carries this file, `cargo test` is 395 passing, 1 ignored (258 lib, 2 in
+the binary's own tests, 33 `agent_loop`, 52 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
+`term_capture` plus the ignored cost measurement, 22 `web_view`), `cargo clippy --all-targets` is
 silent, and both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
 
 **The last sessions were on Windows** (10.0.26200, AMD64, rustc 1.98.1, PowerShell 5.1.26100.6584
@@ -34,16 +34,17 @@ Written for a cold start: a different machine, and possibly a session with no me
 one. The repository is the whole state — there is no index, no cache and no database anywhere in
 flint, on purpose — so cloning it and running the gate below is all that "catching up" means.
 
-**Where it was left.** `main` at the commit that keeps a conversation in its file when the run switches
-provider (`fix: a switch is a line in the session file, not a second file`), plus the documentation
-commit that carries this file, working tree clean, `origin/main` level with it. **§8 is finished** — all
-five controls are on the page, the destructive rows have a second home on the sidebar, and the two
-switches are offered the names the run already knows — and §9 has five entries, all closed. Of the
-roadmap's small list one item is left: `examples/live_turn.rs` still keeps its own copy of `run_turn`'s
-event handling and has drifted twice. The counts are in the section above and were re-run to write this
-paragraph, not remembered. The one design question the round leaves behind is written down in both
-`ROADMAP.md` and `docs/web-mode.md` §11: a page form that could add a provider needs a non-interactive
-`/provider add` and multi-field rows, and the panel's groups are still §8's classes rather than a task.
+**Where it was left.** `main` at the commit that lets a page add a provider
+(`feat: a provider can be added from the page`), plus the documentation commit that carries this file,
+working tree clean, `origin/main` level with it. **§8 is finished** — all five controls are on the page,
+the destructive rows have a second home on the sidebar, the two switches are offered the names the run
+already knows, and the one hole the round left open (adding a provider) is closed — and §9 has five
+entries, all closed. Of the roadmap's small list one item is left: `examples/live_turn.rs` still keeps
+its own copy of `run_turn`'s event handling and has drifted twice. The counts are in the section above
+and were re-run to write this paragraph, not remembered. What remains is written down where it belongs:
+`/config edit` as a page form would need a `/config set <key> <value>` the terminal does not have, the
+panel's groups are still §8's classes rather than a task, and the mid-turn report wait is unasserted
+(`docs/web-mode.md` §11).
 
 **The installed binary is older than the tree, and that matters for looking at the page.** `flint` on
 this machine's PATH resolves to `C:\Users\zhangzhuo\bin\flint.exe`, which is a copy of
@@ -67,7 +68,7 @@ open, so the copy needs every flint window closed first — measured twice.
 
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
-cargo test                                        # 393 passing, 1 ignored
+cargo test                                        # 395 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed
@@ -614,6 +615,53 @@ free-form, so a page form would send several settings at once, and the terminal'
 them one at a time — it would need a `/config set <key> <value>` that the terminal does not have.
 Inventing a command for the page's benefit is the thing §8's design exists to prevent. The page
 therefore writes nothing into the config file in this round.
+
+### A provider can be added from the page, which is the question §8 left open
+
+Asked straight after the two switches were made pressable: "现在添加provider要怎么在网页上操作呢" — and the
+answer was still "in the terminal". `/provider add` was the interactive wizard and nothing else, so the
+page could only mark it a row of reference and say so on hover.
+
+Two things had to exist, both named in `ROADMAP.md` when the gap was written down:
+
+- **`/provider add <name> <base_url> [model]`** — the wizard's five answers as the words of one line.
+  Bare, it still asks for each part, so the terminal loses nothing. Both ends go through the same
+  `save_provider`, because the half that can go wrong is not how the answers arrived: a name that
+  replaces an existing provider, and an endpoint that needs a key it does not have. Adding twice is
+  refused by name (`/provider edit <name>` is the way to change one).
+- **A frame row that carries several answers**, as `fields`: one entry per word the line wants, each
+  with the input's kind (`text`/`password`, which is the input's `type`), the argument's name for the
+  placeholder, and whether the command works without it. `PageRow` and `CommandHelp` carry `args` now
+  instead of a single `field`, so a row and its grammar are one list.
+
+**The refusal is the point**, and it is why this needed a test harness change rather than just markup.
+The bare form of a command is a *different* command — `/provider add` with no arguments is the wizard —
+so a page that sent a partly-filled form would hand a served run to a wizard whose only reader is a
+terminal nobody is sitting at. That is a hang, not a wrong answer. So `formLine(send, fields, values)` is
+a pure function that returns `null` when a required answer is missing and the joined line otherwise, and
+the submit handler sends only what it returns.
+
+That function lives *inside* the page's handler chain, which the old Node harness could not reach: it
+threw listeners away. The harness now keeps them (`addEventListener` records, and a check delivers one
+with `fire`) and has a `fetch` spy, so a drawn form's decision can be asserted instead of only its
+markup. Nothing in the page depends on any of it — the harness is the only thing that changed.
+
+**Measured**: an e2e test that reads the frame's `fields`, posts the exact line the page composes
+(`/provider add claw http://127.0.0.1:9/v1`), and checks that the config gained the provider with the
+wizard's default model, that the run switched to it, that a second add of the same name is refused with
+`already exists` in the transcript, and that the conversation file gained a `switch` line rather than a
+second file — the fix above, reached from the page this time. A Node check for the drawing and for
+`formLine` (empty optional left off, required empty means no line). A policy test pinning `command.fields`,
+the per-answer input type, the password clearing, the `formLine` call and `if (!line) return;`.
+
+**Both new tests were watched red by mutation, not by writing them first** — the code and the tests
+landed in the same round, so the honest substitute was deleting the behaviour: removing
+`if (!line) return;` from the page fails the policy test, and making the add not switch fails the e2e
+test on "adding a provider did not switch to it". Two traps worth remembering from that: `Copy-Item`
+preserves the source's modification time, so a restored file can leave cargo testing the *mutated*
+build — touch the file (`AGENTS.md` names this one) — and one policy test was not enough to cover a
+deletion, because the assertion about the wiring was in the drawing test and the deletion left the
+drawing intact.
 
 ### A switch is a line in the session file, not a second file
 
