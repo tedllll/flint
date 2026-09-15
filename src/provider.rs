@@ -27,6 +27,12 @@ use crate::event::{Event, Message, ToolCall, Usage};
 pub struct Provider {
     config: ProviderConfig,
     client: reqwest::Client,
+    /// Whether this run asked for a JSON object (`--schema`).
+    ///
+    /// On the client rather than in the body's arguments because it is a property of the *run*, not
+    /// of one request: every turn of a schema run is a schema turn, including the repair turns that
+    /// follow a bad answer, and threading it through each call would be one more place to forget it.
+    json_mode: bool,
 }
 
 /// Which proxy to reach this provider through -- an explicit one, or none.
@@ -164,6 +170,12 @@ fn status_is_transient(status: reqwest::StatusCode) -> bool {
 /// debug path would be a preview of something that is not going to be sent, and it would
 /// be wrong in the way that is hardest to notice: right on the day it was written.
 ///
+/// `json_mode` asks the server for a JSON object instead of prose, and is set from the schema the
+/// caller gave (`--schema`): the *shape* is not the server's to enforce, because the only JSON mode
+/// the OpenAI-compatible surface agrees on is `json_object` -- DeepSeek rejects `json_schema`
+/// outright -- so the shape goes into the prompt and flint checks the answer itself. This flag is
+/// what makes the provider refuse to hand back prose at all.
+///
 /// `ensure_tool_calls_are_answered` is part of the body rather than a caller's job for the
 /// same reason -- it changes what the model is shown, so a preview that skipped it would
 /// be showing a conversation the provider never receives.
@@ -171,6 +183,7 @@ pub fn request_body(
     model: &str,
     messages: &[Message],
     tools: &[(String, String, Value)],
+    json_mode: bool,
 ) -> Value {
     let tools_payload: Vec<Value> = tools
         .iter()
@@ -195,6 +208,9 @@ pub fn request_body(
     });
     if !tools_payload.is_empty() {
         body["tools"] = json!(tools_payload);
+    }
+    if json_mode {
+        body["response_format"] = json!({ "type": "json_object" });
     }
     body
 }
@@ -273,7 +289,19 @@ impl Provider {
         }
 
         let client = builder.build().context("cannot build HTTP client")?;
-        Ok(Provider { config, client })
+        Ok(Provider {
+            config,
+            client,
+            json_mode: false,
+        })
+    }
+
+    /// Ask for a JSON object instead of prose, or stop asking.
+    ///
+    /// Set once per change of shape, and not per request: a repair turn after a bad answer is still
+    /// a schema turn, so the flag belongs to the run rather than to one call.
+    pub fn expect_json(&mut self, on: bool) {
+        self.json_mode = on;
     }
 
     pub fn model(&self) -> &str {
@@ -293,7 +321,7 @@ impl Provider {
     ) -> Result<()> {
         // Built by the same function `flint debug prompt-input` prints, so the preview
         // cannot drift from the request that is actually sent.
-        let body = request_body(&self.config.model, messages, tools);
+        let body = request_body(&self.config.model, messages, tools, self.json_mode);
 
         let key = self.config.resolved_key();
 

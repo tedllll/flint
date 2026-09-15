@@ -27,7 +27,7 @@ not `meta` is a conversation with no model and no working directory attached to 
 
 ## One event per line
 
-Every line is a JSON object with a `type`. This build understands five:
+Every line is a JSON object with a `type`. This build understands six:
 
 | `type` | Written when | Fields |
 |---|---|---|
@@ -36,6 +36,7 @@ Every line is a JSON object with a `type`. This build understands five:
 | `usage` | the provider reports token counts | `usage` |
 | `title` | the conversation is named | `name` |
 | `switch` | the provider or model in force changes | `provider`, `model` |
+| `schema` | the answer shape in force changes | `schema` (absent or `null` when cleared) |
 
 A whole conversation, then — a real one is longer, this is the shape:
 
@@ -98,12 +99,14 @@ form of the conversation:
 - `arguments` inside a tool call is a **string**, not an object: that is exactly how
   providers stream it, in fragments, and flint parses it once the fragments are complete.
 
-### `usage`, `title` and `switch`
+### `usage`, `title`, `switch` and `schema`
 
 ```json
 {"type":"usage","usage":{"prompt_tokens":1204,"completion_tokens":88}}
 {"type":"title","name":"dsh start failure"}
 {"type":"switch","provider":"deepseek","model":"deepseek-reasoner"}
+{"type":"schema","schema":{"type":"object","properties":{"day":{"type":"string"}},"required":["day"]}}
+{"type":"schema"}
 ```
 
 `usage` is whatever the provider last reported, written as it arrives; it is an event rather
@@ -122,6 +125,18 @@ moved and what it moved to. **The last `switch` is the provider and model in for
 whole new session with the conversation copied into it, which left one conversation in two
 files — two rows in the page's sidebar, two numbers in `/sessions`, and half a conversation
 behind either of them.
+
+`schema` is the answer shape the conversation is being held to, written by a run that was
+*told* one (`--schema` or `--no-schema`) and not by a run that merely inherited it, so the
+file gains a line when somebody decides something and stays quiet otherwise. The whole
+schema is in the line rather than a path to the file it came from: a session pointing at
+somebody's disk would stop being readable the moment that file changed, and the promise of
+this format is that the file is the truth. **The last `schema` is the shape in force**, so
+`--resume` holds a conversation to the same contract without the caller passing anything
+again; a bare `{"type":"schema"}` is a *cleared* shape, which is what `--no-schema` writes.
+The schema in the line is checked when it is read: a keyword this build cannot validate is
+refused with the conversation named, rather than an answer being certified against a rule
+nobody checked.
 
 ## The rules a reader must keep
 

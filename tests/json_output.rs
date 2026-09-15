@@ -11,6 +11,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use flint::schema;
 use serde_json::Value;
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -329,5 +330,412 @@ async fn json_without_a_prompt_is_refused_without_writing_a_stream() {
     assert!(
         stderr.contains("--json needs a prompt"),
         "the refusal does not say what is missing: {stderr}"
+    );
+}
+
+/// Structured output: the answer shape a caller asked for, checked before it is handed over.
+///
+/// This is the rest of the machine interface. `--json` already made a run readable line by line;
+/// a caller that has to *act* on the answer wants the answer as data, and the only thing the
+/// OpenAI-compatible surface agrees on is `response_format: {"type": "json_object"}` -- which
+/// promises the reply parses, not that it has the fields that were asked for. Measured against
+/// DeepSeek: `json_schema` is rejected outright, so the shape goes into the prompt and flint
+/// checks the answer itself, asking again with the specific problems when it does not match.
+fn sse_text(content: &str) -> String {
+    let frame = serde_json::json!({ "choices": [{ "delta": { "content": content } }] });
+    sse(&[
+        &format!("data: {frame}"),
+        r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+        "data: [DONE]",
+    ])
+}
+
+fn schema_run() -> String {
+    serde_json::json!({
+        "type": "object",
+        "properties": { "trading_day": { "type": "string" } },
+        "required": ["trading_day"],
+        "additionalProperties": false,
+    })
+    .to_string()
+}
+
+/// Every session file under a home, one level of project directory included.
+fn session_files(home: &Path) -> Vec<PathBuf> {
+    let root = home.join("sessions");
+    let mut found: Vec<PathBuf> = Vec::new();
+    let mut dirs = vec![root.clone()];
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|e| e == "jsonl") {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// The events of the one session a run wrote.
+fn session_events(home: &Path) -> Vec<Value> {
+    let files = session_files(home);
+    assert_eq!(files.len(), 1, "expected one session, found {files:?}");
+    std::fs::read_to_string(&files[0])
+        .expect("session file")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("a session line is JSON"))
+        .collect()
+}
+
+/// A stub that replays one answer per request, in order, and remembers what it was sent.
+///
+/// Recording the request is the point: `response_format` and the schema section of the prompt are
+/// invisible in the stream, so the only honest way to assert they were sent is to read the body the
+/// server received. The last replay is repeated, which is how "the model never gets it right" is
+/// written.
+struct Scripted {
+    answers: Vec<String>,
+    seen: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+}
+
+impl Respond for Scripted {
+    fn respond(&self, req: &Request) -> ResponseTemplate {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+        let mut seen = self.seen.lock().expect("the recording is not poisoned");
+        let index = seen.len().min(self.answers.len().saturating_sub(1));
+        seen.push(body);
+        drop(seen);
+        ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(self.answers[index].clone())
+    }
+}
+
+fn recorded(seen: &std::sync::Arc<std::sync::Mutex<Vec<Value>>>) -> Vec<Value> {
+    seen.lock().expect("the recording is not poisoned").clone()
+}
+
+/// A schema run answers with a `result` the caller can act on, and the request says what shape.
+#[tokio::test]
+async fn a_schema_run_answers_with_a_checked_result() {
+    let server = MockServer::start().await;
+    let cwd = cwd_for("schema-ok");
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    Mock::given(method("POST"))
+        .respond_with(Scripted {
+            answers: vec![sse_text(r#"{"trading_day": "2026-10-21"}"#)],
+            seen: std::sync::Arc::clone(&seen),
+        })
+        .mount(&server)
+        .await;
+
+    let home = home_for("schema-ok", &server.uri(), &cwd);
+    let (code, lines, stderr) = run_json(
+        &home,
+        &cwd,
+        &[
+            "-p",
+            "when is the last trading day?",
+            "--json",
+            "--schema",
+            &schema_run(),
+        ],
+    );
+    assert_eq!(code, 0, "the run failed: {stderr} {lines:?}");
+
+    let result = line_of(&lines, "result");
+    assert_eq!(result["json"]["trading_day"], "2026-10-21");
+    assert_eq!(result["attempts"], 1, "a first-try answer is one attempt");
+
+    // The two halves of the promise, both on the wire: the server is asked for an object, and the
+    // prompt carries the shape it has to be.
+    let bodies = recorded(&seen);
+    assert_eq!(bodies.len(), 1, "one turn for one good answer");
+    assert_eq!(
+        bodies[0]["response_format"]["type"], "json_object",
+        "the request does not ask for JSON at all: {}",
+        bodies[0]
+    );
+    let prompt = bodies[0]["messages"][0]["content"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        prompt.contains("trading_day") && prompt.to_lowercase().contains("json"),
+        "the system prompt does not carry the schema and the word json: {prompt}"
+    );
+}
+
+/// An answer of the wrong shape is not accepted; it is quoted back with what was wrong.
+#[tokio::test]
+async fn an_answer_of_the_wrong_shape_is_asked_for_again() {
+    let server = MockServer::start().await;
+    let cwd = cwd_for("schema-repair");
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    Mock::given(method("POST"))
+        .respond_with(Scripted {
+            answers: vec![
+                sse_text(r#"{"day": 3}"#),
+                sse_text(r#"{"trading_day": "2026-10-21"}"#),
+            ],
+            seen: std::sync::Arc::clone(&seen),
+        })
+        .mount(&server)
+        .await;
+
+    let home = home_for("schema-repair", &server.uri(), &cwd);
+    let (code, lines, stderr) = run_json(
+        &home,
+        &cwd,
+        &["-p", "when?", "--json", "--schema", &schema_run()],
+    );
+    assert_eq!(code, 0, "the repair did not rescue the run: {stderr}");
+
+    let result = line_of(&lines, "result");
+    assert_eq!(result["attempts"], 2, "the second answer is what was accepted");
+    assert_eq!(
+        kinds(&lines)
+            .iter()
+            .filter(|k| *k == "turn.started")
+            .count(),
+        2,
+        "a repair is a turn and has to read as one: {lines:?}"
+    );
+
+    // The second request has to *contain* the mistake: `{"day": 3}` was missing the required field,
+    // and a repair turn that did not say so would be asking the same question again. Read from the
+    // decoded body rather than from the raw JSON of it, because the answer the model gave is a
+    // string *inside* the request, and a substring search on the escaped form tests the escaping.
+    let bodies = recorded(&seen);
+    let repair = bodies[1]["messages"]
+        .as_array()
+        .and_then(|messages| messages.last())
+        .and_then(|message| message["content"].as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        repair.contains("trading_day"),
+        "the repair prompt does not name the missing field: {repair}"
+    );
+    assert!(
+        repair.contains(r#"{"day": 3}"#),
+        "the repair prompt does not quote the answer back: {repair}"
+    );
+}
+
+/// A model that never gets it right ends the stream without a `result` at all.
+#[tokio::test]
+async fn a_schema_that_never_matches_ends_the_stream_with_an_error() {
+    let server = MockServer::start().await;
+    let cwd = cwd_for("schema-no");
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    Mock::given(method("POST"))
+        .respond_with(Scripted {
+            answers: vec![sse_text(r#"{"day": 3}"#)],
+            seen: std::sync::Arc::clone(&seen),
+        })
+        .mount(&server)
+        .await;
+
+    let home = home_for("schema-no", &server.uri(), &cwd);
+    let (code, lines, stderr) = run_json(
+        &home,
+        &cwd,
+        &["-p", "when?", "--json", "--schema", &schema_run()],
+    );
+
+    assert_eq!(code, 1, "an answer that never matched the schema must fail");
+    assert!(
+        !kinds(&lines).iter().any(|k| k == "result"),
+        "a `result` line was emitted for an answer the schema did not accept: {lines:?}"
+    );
+    let error = line_of(&lines, "error")["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        error.contains("$.trading_day") || error.contains("trading_day"),
+        "the error does not say which part of the shape failed: {error}"
+    );
+    assert!(
+        error.contains("3 attempts"),
+        "the error does not say how many times it was asked: {error}"
+    );
+    assert_eq!(
+        recorded(&seen).len(),
+        3,
+        "three attempts is what the limit promises"
+    );
+    assert_eq!(stderr, "", "the reason went to stderr instead of the stream");
+}
+
+/// The shape follows the session file: resuming is enough, and the flag is not passed again.
+#[tokio::test]
+async fn a_resumed_session_is_held_to_the_schema_its_file_records() {
+    let server = MockServer::start().await;
+    let cwd = cwd_for("schema-resume");
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    Mock::given(method("POST"))
+        .respond_with(Scripted {
+            answers: vec![sse_text(r#"{"trading_day": "2026-10-21"}"#)],
+            seen: std::sync::Arc::clone(&seen),
+        })
+        .mount(&server)
+        .await;
+
+    let home = home_for("schema-resume", &server.uri(), &cwd);
+    let (code, _, stderr) = run_json(
+        &home,
+        &cwd,
+        &["-p", "when?", "--json", "--schema", &schema_run()],
+    );
+    assert_eq!(code, 0, "the first run failed: {stderr}");
+
+    let written = session_events(&home);
+    let recorded_schema = written
+        .iter()
+        .find(|event| event["type"] == "schema")
+        .expect("the run did not record the shape it was held to");
+    assert_eq!(
+        recorded_schema["schema"]["required"][0], "trading_day",
+        "the file kept something other than the caller's schema: {recorded_schema}"
+    );
+
+    // No `--schema` this time: the file is the only place the shape can come from.
+    let (code, lines, stderr) = run_json(&home, &cwd, &["-p", "again?", "--json", "--continue"]);
+    assert_eq!(code, 0, "the resumed run failed: {stderr}");
+    assert_eq!(
+        line_of(&lines, "result")["json"]["trading_day"],
+        "2026-10-21",
+        "the resumed run was not held to the shape its file records: {lines:?}"
+    );
+    let bodies = recorded(&seen);
+    assert_eq!(bodies.len(), 2, "one request per run");
+    assert_eq!(
+        bodies[1]["response_format"]["type"], "json_object",
+        "the resumed request dropped the JSON mode: {}",
+        bodies[1]
+    );
+    assert!(
+        bodies[1]["messages"][0]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("trading_day"),
+        "the resumed prompt dropped the schema: {}",
+        bodies[1]["messages"][0]
+    );
+}
+
+/// `--no-schema` is how a caller says "not this time", and the file records that it was said.
+#[tokio::test]
+async fn no_schema_lets_a_resumed_session_answer_in_prose_again() {
+    let server = MockServer::start().await;
+    let cwd = cwd_for("schema-none");
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    Mock::given(method("POST"))
+        .respond_with(Scripted {
+            answers: vec![
+                sse_text(r#"{"trading_day": "2026-10-21"}"#),
+                sse_text("the last trading day is 2026-10-21"),
+            ],
+            seen: std::sync::Arc::clone(&seen),
+        })
+        .mount(&server)
+        .await;
+
+    let home = home_for("schema-none", &server.uri(), &cwd);
+    let (code, _, stderr) = run_json(
+        &home,
+        &cwd,
+        &["-p", "when?", "--json", "--schema", &schema_run()],
+    );
+    assert_eq!(code, 0, "the first run failed: {stderr}");
+
+    let (code, lines, stderr) = run_json(
+        &home,
+        &cwd,
+        &["-p", "say it plainly", "--json", "--continue", "--no-schema"],
+    );
+    assert_eq!(code, 0, "the prose run failed: {stderr}");
+    assert!(
+        !kinds(&lines).iter().any(|k| k == "result"),
+        "a prose run emitted a result line: {lines:?}"
+    );
+    assert_eq!(
+        line_of(&lines, "message.completed")["text"],
+        "the last trading day is 2026-10-21"
+    );
+
+    // Dropped on the wire as well as in the prompt: a server still asked for `json_object` would
+    // make prose impossible, and the caller would never learn why.
+    let bodies = recorded(&seen);
+    assert!(
+        bodies[1].get("response_format").is_none(),
+        "the prose run still asked for JSON: {}",
+        bodies[1]
+    );
+    assert!(
+        !bodies[1]["messages"][0]["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("trading_day"),
+        "the prose prompt still carries the schema: {}",
+        bodies[1]["messages"][0]
+    );
+
+    // And the file says so, rather than leaving the next reader to infer it from silence.
+    let written = session_events(&home);
+    let last_schema = written
+        .iter()
+        .rfind(|event| event["type"] == "schema")
+        .expect("the clearing was not recorded");
+    assert!(
+        last_schema.get("schema").is_none() || last_schema["schema"].is_null(),
+        "the last schema line still names a shape: {last_schema}"
+    );
+}
+
+/// A schema flint cannot check is refused before the run, not after an answer.
+#[tokio::test]
+async fn a_schema_this_build_cannot_check_is_refused_before_the_run() {
+    let server = MockServer::start().await;
+    let cwd = cwd_for("schema-refuse");
+    let home = home_for("schema-refuse", &server.uri(), &cwd);
+    let (code, lines, stderr) = run_json(
+        &home,
+        &cwd,
+        &[
+            "-p",
+            "when?",
+            "--json",
+            "--schema",
+            r#"{"oneOf":[{"type":"string"}]}"#,
+        ],
+    );
+
+    assert_ne!(code, 0, "a schema that cannot be checked must not run");
+    assert!(
+        lines.is_empty(),
+        "a refused run still wrote a stream: {lines:?}"
+    );
+    assert!(
+        stderr.contains("oneOf"),
+        "the refusal does not name the keyword flint cannot check: {stderr}"
+    );
+}
+
+/// The subset is checked as a unit here: the module's own tests cover the keyword walk.
+#[test]
+fn a_schema_refuses_what_it_cannot_check() {
+    let refused = schema::Schema::parse(r#"{"type":"object","properties":{"a":{"format":"date"}}}"#);
+    assert!(
+        refused.is_err(),
+        "`format` was accepted, so an answer could be certified against a rule flint does not check"
     );
 }

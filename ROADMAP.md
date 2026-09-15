@@ -1087,6 +1087,31 @@ both seen red: making the file eager ("a session file was written before anythin
 skipping `meta` (four tests, including the seeded fork, which is where a file with no `meta` would do
 the most damage).
 
+**Ninth: structured output — `--schema`, and flint checks the answer itself.** A caller that has to
+*act* on the answer cannot use prose, and the obvious answer is not available: measured against
+DeepSeek, `response_format: {"type": "json_schema"}` is rejected outright and only `json_object` is
+accepted, which promises the reply parses and says nothing about its shape. `{"day": 3}` is valid
+JSON and the wrong answer to a schema that asked for `trading_day`. So the shape goes into the system
+prompt and flint validates the answer locally, against a hand-written subset of JSON Schema in
+`src/schema.rs` (`type`, `properties`, `required`, `additionalProperties`, `items`, `enum`, and the
+length and bound keywords) — no crate, because the value here is agreement rather than coverage: a
+keyword flint implements badly is worse than one it refuses, and a keyword it cannot check is refused
+at startup rather than ignored, which would mean certifying answers against a rule nobody applied.
+
+A mismatch is not a failed run: the model is told which JSON path failed, in the words its own answer
+used, and asked again (`attempts` says how many answers it took; three is the limit). When none match
+there is no `result` line at all — a caller reading that type can trust it is what the schema
+describes — and the run ends with an `error` and exit 1. Deliberately *not* done: a `--tools`
+allow-list (asked for and then dropped — the tool set is not the caller's problem, the answer shape
+is), and `json_schema` negotiation, which DeepSeek does not have.
+
+**The schema is recorded in the session file, as asked for in the words "这些应该跟随会话记录文件做记录".**
+A `schema` line holds the whole schema, not a path to it, so a session stays readable when the file it
+came from changes, and the last line wins: `--resume` holds the conversation to the same contract
+without the caller passing anything again, `--schema` overrides it, and `--no-schema` writes a cleared
+line rather than leaving the next reader to infer it from silence. A run that merely inherited a shape
+writes nothing.
+
 **Done in the same round, recorded so it is not re-done**: themed scrollbars (the default grey ones
 were the complaint); a draggable sidebar and a draggable reading width, with a hairline hint at
 rest on the right hand because there is no seam at the text's edge to be discovered by; the

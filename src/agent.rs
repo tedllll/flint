@@ -181,6 +181,14 @@ pub struct Agent {
     /// rebuilds this agent) is what makes a new one appear. `/skills` typed by hand still discovers
     /// fresh, because that is a person asking what is on disk right now.
     skills: Vec<String>,
+    /// The system prompt without the answer shape, so the shape can be added or dropped later.
+    ///
+    /// See [`Agent::hold_to_schema`]: a resumed session's schema is read out of its file, which
+    /// happens after the agent may already exist, and appending to a prompt whose base nobody kept
+    /// would append to the previous append.
+    base_prompt: String,
+    /// The answer shape this conversation is held to, if the caller asked for one.
+    schema: Option<crate::schema::Schema>,
 }
 
 impl Agent {
@@ -212,10 +220,11 @@ impl Agent {
         // One walk, two answers: the prompt's note and the page's menu. See `Agent::skills`.
         let workspace = context::Workspace::discover(&cwd, &config.skill_dirs);
         let skills = workspace.skill_names();
+        let base_prompt = prompt_with_workspace(config, &cwd, &workspace);
         Agent {
             provider,
             tools,
-            history: vec![Message::system(prompt_with_workspace(config, &cwd, &workspace))],
+            history: vec![Message::system(base_prompt.clone())],
             max_steps: config.max_steps,
             readonly,
             cwd,
@@ -224,7 +233,68 @@ impl Agent {
             repeats: std::collections::HashMap::new(),
             drawn: String::new(),
             skills,
+            base_prompt,
+            // No shape until a caller says so: an agent built for the REPL answers in prose.
+            schema: None,
         }
+    }
+
+    /// The system prompt as it should read now: the run's facts, plus the answer shape if this
+    /// conversation is held to one.
+    fn system_prompt(&self) -> String {
+        match &self.schema {
+            Some(schema) => format!("{}\n\n{}", self.base_prompt, schema.prompt_section()),
+            None => self.base_prompt.clone(),
+        }
+    }
+
+    /// Hold this conversation's answers to a shape, or stop holding them to one.
+    ///
+    /// A setter rather than a sixth argument to [`Agent::new`] because the shape is not always known
+    /// when an agent is built, and the fact is not the caller's to keep: `--resume` reads the schema
+    /// out of the session *file*, and the three places that rebuild an agent (`/provider`, `/model`,
+    /// `/reload`) carry the conversation across -- so a shape living in a local would be dropped by
+    /// the first switch, silently, in a run that had promised a caller JSON. The prompt is rebuilt
+    /// here and by [`Agent::splice_loaded_history`], and nowhere else, so there is one answer to
+    /// "what does the model see".
+    pub fn hold_to_schema(&mut self, schema: Option<crate::schema::Schema>) {
+        // The request side of the same promise, and set here rather than by the caller so the two
+        // cannot come apart: a prompt that describes a shape, sent to a server allowed to answer in
+        // prose, is a promise flint would then have to make good on by itself.
+        self.provider.expect_json(schema.is_some());
+        self.schema = schema;
+        // Built before the borrow: the prompt reads the field just written.
+        let prompt = self.system_prompt();
+        if let Some(system) = self.history.first_mut() {
+            *system = Message::system(prompt);
+        }
+    }
+
+    /// Write the answer shape into this conversation's file.
+    ///
+    /// Called by the run that was *told* a shape -- `--schema` or `--no-schema` -- and not by a run
+    /// that merely inherited one, so a file gains a line when someone decides something and stays
+    /// quiet when nobody did. `None` records that the shape was dropped.
+    pub fn record_schema(&self, schema: Option<&serde_json::Value>) -> Result<()> {
+        match &self.writer {
+            Some(writer) => writer.schema(schema),
+            // No file to write to (a run with no session, a `--fork` before seeding): the schema is
+            // still in force for this run, it is just not being kept anywhere.
+            None => Ok(()),
+        }
+    }
+
+    /// The shape this conversation's answers are held to, if any.
+    pub fn schema(&self) -> Option<&crate::schema::Schema> {
+        self.schema.as_ref()
+    }
+
+    /// The answer shape this conversation is being held to, as it would be written to a session.
+    ///
+    /// The raw schema, not the parsed one: what the file records has to be what the caller wrote, so
+    /// that a reader can see the contract without flint's reading of it in the way.
+    pub fn schema_json(&self) -> Option<serde_json::Value> {
+        self.schema.as_ref().map(|s| s.raw().clone())
     }
 
     /// The conversation as it stands.
@@ -275,6 +345,10 @@ impl Agent {
             self.provider.model(),
             &prune_tool_output(&history),
             &self.tools.specs(),
+            // The preview has to carry it: `flint debug prompt-input` on a schema run is how you see
+            // that the shape went into the prompt *and* into `response_format`, and a preview that
+            // quietly left one out would be a preview of a different request.
+            self.schema.is_some(),
         )
     }
 
@@ -286,7 +360,10 @@ impl Agent {
     /// one is dropped rather than kept.
     pub fn splice_loaded_history(&mut self, cfg: &Config, cwd: &std::path::Path, loaded: Vec<Message>) {
         let workspace = context::Workspace::discover(cwd, &cfg.skill_dirs);
-        let mut merged = vec![Message::system(prompt_with_workspace(cfg, cwd, &workspace))];
+        // The base is kept as well as used: `hold_to_schema` rebuilds this same prompt, and a shape
+        // adopted from the loaded session has to be able to join it without the two appends stacking.
+        self.base_prompt = prompt_with_workspace(cfg, cwd, &workspace);
+        let mut merged = vec![Message::system(self.system_prompt())];
         merged.extend(
             loaded
                 .into_iter()

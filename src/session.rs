@@ -72,13 +72,27 @@ pub enum SessionEvent {
     /// where it is now, which is what `load` reports and `--resume` acts on. Before this event
     /// existed a switch seeded a whole second file, and one conversation became two.
     Switch { provider: String, model: String },
+    /// The answer shape this conversation is being held to.
+    ///
+    /// `None` means the shape was *cleared* -- a run resumed with `--no-schema` -- and is written
+    /// rather than left out, so "the last `schema` line wins" has an answer for going back to prose.
+    ///
+    /// The whole schema is written, not a path to the file it came from. A session that pointed at
+    /// a file on somebody's disk would stop being readable the moment that file changed, and this
+    /// format's promise is that the file is the truth: what the model was asked for, and under what
+    /// contract its answer was accepted, has to be *in* the file. `--schema` also overrides it on the
+    /// next run, so a changed schema is a new line rather than an edit to a written one.
+    Schema {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<serde_json::Value>,
+    },
 }
 
 /// The event names this build understands.
 ///
 /// Used for one decision only: a line that failed to parse but names a type in here is
 /// damage, and a line that names anything else is somebody else's event.
-const KNOWN_TYPES: [&str; 5] = ["meta", "chat", "usage", "title", "switch"];
+const KNOWN_TYPES: [&str; 6] = ["meta", "chat", "usage", "title", "switch", "schema"];
 
 /// Whether a line names an event type this build knows.
 fn names_a_known_event(line: &str) -> bool {
@@ -246,6 +260,17 @@ impl SessionWriter {
         })
     }
 
+    /// Record the answer shape this conversation is held to.
+    ///
+    /// `None` writes a cleared schema, for a run resumed with `--no-schema`. Append-only like
+    /// everything else, so the last line is the contract in force and the history of contracts is
+    /// still readable.
+    pub fn schema(&self, schema: Option<&serde_json::Value>) -> Result<()> {
+        self.append(&SessionEvent::Schema {
+            schema: schema.cloned(),
+        })
+    }
+
     /// Record that the run moved to another provider or model.
     ///
     /// An event rather than a new file, and the argument is the one `Usage` already makes for its own
@@ -273,6 +298,12 @@ pub struct LoadedSession {
     pub title: Option<String>,
     pub messages: Vec<Message>,
     pub last_usage: Option<Usage>,
+    /// The answer shape in force, from the last `schema` line in the file.
+    ///
+    /// `None` when there has never been one, or when the last one cleared it. A resumed run holds
+    /// the conversation to the same contract it was held to when it was written -- the file says
+    /// what that was, and nothing outside the file has to be passed again to continue it.
+    pub output_schema: Option<serde_json::Value>,
 }
 
 /// Read a session file, tolerating (and reporting) damaged lines.
@@ -299,6 +330,7 @@ pub fn load(path: &Path) -> Result<LoadedSession> {
         title: None,
         messages: Vec::new(),
         last_usage: None,
+        output_schema: None,
     };
 
     let mut damaged = 0usize;
@@ -329,6 +361,12 @@ pub fn load(path: &Path) -> Result<LoadedSession> {
             Ok(SessionEvent::Switch { provider, model }) => {
                 loaded.provider = provider;
                 loaded.model = model;
+            }
+            // Last one wins here too, and a `null` is a *cleared* schema rather than a missing field:
+            // serde hands `null` over as `Some(Value::Null)`, and treating that as "no schema" is
+            // what `--no-schema` means.
+            Ok(SessionEvent::Schema { schema }) => {
+                loaded.output_schema = schema.filter(|s| !s.is_null());
             }
             // Skipped in silence when the file claims a newer revision -- a type this
             // build knows may have changed shape in it, and that is not damage either.

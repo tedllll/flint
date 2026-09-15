@@ -11,8 +11,8 @@
 //! unreachable, flint still runs commands.
 
 use flint::{
-    agent, config, context, display, engine, event, ndjson, provider, search, session, sink, term,
-    tools, web,
+    agent, config, context, display, engine, event, ndjson, provider, schema, search, session, sink,
+    term, tools, web,
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -80,6 +80,18 @@ struct Args {
     debug: Option<Vec<String>>,
     help: bool,
     cwd: Option<String>,
+    /// A JSON Schema the answer must satisfy: a file path, or the schema itself when it starts with `{`.
+    ///
+    /// Kept as the text that was given, not as a parsed schema, because the run has to be able to
+    /// report a schema it could not use: `--schema broken.json` should say which keyword it choked
+    /// on rather than exit with an argument-parsing complaint. Parsing happens where the answer
+    /// shape becomes a fact about the run -- see `resolve_schema`.
+    schema: Option<String>,
+    /// Answer in prose even if this session's file says it was last held to a schema.
+    ///
+    /// The counterpart to a `schema` line following the session: a container of a resumed
+    /// conversation has to be able to say "not this time" without editing the file.
+    no_schema: bool,
 }
 
 /// Whether ANSI colour may be emitted.
@@ -525,6 +537,21 @@ async fn real_main() -> Result<i32> {
         agent.splice_loaded_history(&cfg, &cwd, history);
     }
 
+    // ---- what shape this run's answers must take ----
+    //
+    // Resolved after the agent exists and before the first turn, because the three inputs are only
+    // all known here: the flag, the schema the resumed file records, and whether the caller said
+    // "none". `hold_to_schema` puts it in the prompt *and* in the request, and `--no-schema` on a
+    // session that carried one is recorded as a decision rather than left as a silence the next
+    // reader would have to interpret.
+    let shaping = resolve_output_schema(&args, resumed_history.as_ref())?;
+    if let Some(schema) = &shaping.schema {
+        agent.hold_to_schema(Some(schema.clone()));
+    }
+    if shaping.stated {
+        agent.record_schema(shaping.schema_json.as_ref())?;
+    }
+
     // ---- a run whose output is a stream of JSON objects ----
     //
     // Dispatched here, before the terminal exists, because in this mode stdout *is* the
@@ -536,7 +563,14 @@ async fn real_main() -> Result<i32> {
         let prompt = args.prompt.as_deref().ok_or_else(|| {
             anyhow!("--json needs a prompt: `flint -p \"...\" --json`. Try --help.")
         })?;
-        return run_json_turn(&mut agent, &provider_cfg, provider_error.as_deref(), prompt).await;
+        return run_json_turn(
+            &mut agent,
+            &provider_cfg,
+            provider_error.as_deref(),
+            prompt,
+            &shaping,
+        )
+        .await;
     }
 
     // The terminal comes first: it decides whether there is an input row to keep
@@ -1290,7 +1324,7 @@ fn flag_at_the_prompt(input: &str) -> Option<(String, String)> {
         ),
         // No equivalent, because there is nothing to be equivalent to: these decide how the
         // process is set up, and a process that is already running cannot be set up again.
-        "--json" | "--no-color" | "--cwd" | "-p" => (
+        "--json" | "--no-color" | "--cwd" | "--schema" | "--no-schema" | "-p" => (
             String::new(),
             "that one is only read when flint starts, so it has to be on the command line",
         ),
@@ -2974,11 +3008,57 @@ fn ensure_usable(provider_cfg: &config::ProviderConfig) -> Result<()> {
 /// The one thing this mode does not carry over is the interrupt handling in `run_turn`:
 /// there is no keyboard to press and no strip to prompt on. Ctrl-C ends the process, and
 /// the session file keeps every event that was complete when it did.
+/// How many answers flint will ask for before giving up on a schema.
+///
+/// One, plus two repairs. Small on purpose: a model told twice, in its own words, what its answer got
+/// wrong is not usually going to be told a third time, and every attempt is a whole turn that a
+/// caller is waiting on. A caller who wants more can call again -- the failed answers are in the
+/// session file, and `--resume` continues from them.
+const SCHEMA_ATTEMPTS: usize = 3;
+
+/// The prompt for a repair turn: what was asked for, what came back, and what was wrong with it.
+///
+/// The model's own words are quoted back rather than summarised, because the fix is usually in the
+/// part a summary would drop -- a field name spelled two ways, a string where a number was wanted --
+/// and because a model that sees its actual answer does not have to reconstruct it.
+fn repair_prompt(previous: &str, errors: &[String]) -> String {
+    let listed = errors
+        .iter()
+        .map(|e| format!("- {e}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "That answer does not match the schema. Fix it and answer again with the corrected JSON \
+         object and nothing else.\n\n\
+         What was wrong:\n{listed}\n\n\
+         The answer you gave was:\n{previous}"
+    )
+}
+
+/// The JSON in an answer, tolerating a code fence around it.
+///
+/// JSON mode returns the object bare, in every case measured. A fence still appears often enough to
+/// be worth one line of forgiveness -- a fenced object is the right answer spelled with markdown, and
+/// refusing it would spend a whole repair turn on punctuation -- but nothing else is repaired here:
+/// the point of local validation is to ask for a real answer, not to guess at one.
+fn json_in(answer: &str) -> Option<serde_json::Value> {
+    let trimmed = answer.trim();
+    let body = match trimmed.strip_prefix("```") {
+        Some(rest) => {
+            let rest = rest.split_once('\n').map(|(_, body)| body).unwrap_or(rest);
+            rest.strip_suffix("```").unwrap_or(rest).trim()
+        }
+        None => trimmed,
+    };
+    serde_json::from_str(body).ok()
+}
+
 async fn run_json_turn(
     agent: &mut agent::Agent,
     provider_cfg: &config::ProviderConfig,
     provider_error: Option<&str>,
     prompt: &str,
+    shaping: &Shaping,
 ) -> Result<i32> {
     let mut out = std::io::stdout();
     // Flushed per line: a consumer may be reading the stream as it arrives, and a
@@ -3011,27 +3091,157 @@ async fn run_json_turn(
         return Ok(1);
     }
 
-    let mut sink = ndjson::Sink::new();
-    let result = agent
-        .run(prompt, |event| {
-            if let Some(line) = sink.line(&event) {
-                emit(line);
-            }
-        })
-        .await;
+    // One turn, or as many as it takes to get an answer the schema accepts. The loop is here rather
+    // than around the whole function so that everything before it -- the stream's opening lines, the
+    // check that the provider can be reached at all -- happens exactly once, and so that a repair
+    // reads on the stream as what it is: a second `turn.started`, with the corrected prompt in it.
+    let mut asked = prompt.to_string();
+    let mut attempt = 0usize;
+    loop {
+        attempt += 1;
+        if attempt > 1 {
+            emit(ndjson::turn_started(&asked));
+        }
 
-    match result {
-        Ok(()) => {
-            emit(ndjson::turn_completed(agent.last_usage()));
-            Ok(0)
+        let mut sink = ndjson::Sink::new();
+        // Taken from the sink *before* `message.completed` is built, not after the turn: `Done`
+        // drains the accumulator (a second `Done` must not repeat the message), so the turn's answer
+        // is gone the moment it has been reported -- which is the trap this line exists to miss.
+        let mut answer = String::new();
+        let result = agent
+            .run(&asked, |event| {
+                if matches!(event, event::Event::Done) {
+                    answer = sink.answer_so_far().to_string();
+                }
+                if let Some(line) = sink.line(&event) {
+                    emit(line);
+                }
+            })
+            .await;
+
+        match result {
+            Ok(()) => emit(ndjson::turn_completed(agent.last_usage())),
+            // The failure goes on the stream as well as the exit code: a caller that reads
+            // stdout should not have to also read stderr to find out what happened.
+            Err(e) => {
+                emit(ndjson::error(&format!("{e:#}")));
+                return Ok(1);
+            }
         }
-        // The failure goes on the stream as well as the exit code: a caller that reads
-        // stdout should not have to also read stderr to find out what happened.
-        Err(e) => {
-            emit(ndjson::error(&format!("{e:#}")));
-            Ok(1)
+
+        let Some(schema) = &shaping.schema else {
+            return Ok(0);
+        };
+        let errors = match json_in(&answer) {
+            Some(value) => match schema.validate(&value) {
+                problems if problems.is_empty() => {
+                    emit(ndjson::result(&value, attempt));
+                    return Ok(0);
+                }
+                problems => problems,
+            },
+            None => vec![format!(
+                "the answer is not JSON at all, so no part of the schema could be checked: {}",
+                first_line(&answer)
+            )],
+        };
+
+        if attempt >= SCHEMA_ATTEMPTS {
+            // No `result` line, ever, for an answer that did not pass: a caller reading that type
+            // must be able to trust that what it holds is what the schema describes. The errors go
+            // out as one `error`, last, so the exit code and the stream agree.
+            emit(ndjson::error(&format!(
+                "the answer did not match the schema after {attempt} attempts:\n{}",
+                errors
+                    .iter()
+                    .map(|e| format!("- {e}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )));
+            return Ok(1);
         }
+        asked = repair_prompt(&answer, &errors);
     }
+}
+
+/// The first line of an answer, for a message about an answer that could not be read at all.
+fn first_line(text: &str) -> String {
+    let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let mut short: String = line.chars().take(200).collect();
+    if line.chars().count() > 200 {
+        short.push('…');
+    }
+    short
+}
+
+/// The answer shape a run is held to, and whether the caller said anything about it.
+///
+/// Three inputs, in one place, because the rule has a case for each and getting it wrong is silent
+/// in the way that matters: a session which quietly stopped being held to its schema would go on
+/// answering JSON while nobody checked it, and a resumed run which quietly *adopted* a new shape
+/// from somewhere other than its file would have invented a contract.
+///
+/// `--schema` names a file or holds the schema itself when it starts with `{`. A path is read here,
+/// where the failure can still say which file, rather than at argument-parsing time where the only
+/// possible message is about the command line.
+struct Shaping {
+    schema: Option<schema::Schema>,
+    /// The raw schema as the caller wrote it, for the session file: what a reader should see is the
+    /// contract, not flint's parsed reading of it.
+    schema_json: Option<serde_json::Value>,
+    /// Whether the caller said something about the shape (`--schema` or `--no-schema`), which is
+    /// what decides whether this run writes a `schema` line.
+    stated: bool,
+}
+
+fn resolve_output_schema(
+    args: &Args,
+    session: Option<&session::LoadedSession>,
+) -> Result<Shaping> {
+    let stated = args.schema.is_some() || args.no_schema;
+    let raw = match (&args.schema, args.no_schema) {
+        // Both at once is a contradiction, and choosing an order for them would be inventing a rule
+        // nobody asked for. Refused, with the reason.
+        (Some(_), true) => {
+            return Err(anyhow!(
+                "--schema and --no-schema were both given: one says what shape the answer must \
+                 take and the other says there is no shape. Use one."
+            ))
+        }
+        (Some(value), false) => {
+            let text = if value.trim_start().starts_with('{') {
+                value.clone()
+            } else {
+                std::fs::read_to_string(value)
+                    .with_context(|| format!("cannot read the schema file '{value}'"))?
+            };
+            let parsed = schema::Schema::parse(&text)
+                .with_context(|| format!("cannot use the schema from '{value}'"))?;
+            return Ok(Shaping {
+                schema_json: serde_json::from_str(&text).ok(),
+                schema: Some(parsed),
+                stated: true,
+            });
+        }
+        // Inherited: what the conversation's own file says it was last held to, which is nothing at
+        // all for a session that never had one.
+        (None, false) => session.and_then(|loaded| loaded.output_schema.clone()),
+        (None, true) => None,
+    };
+    let schema = match &raw {
+        Some(value) => Some(schema::Schema::parse(&value.to_string()).with_context(|| {
+            // The schema in the file was accepted when it was written, so this is the file being
+            // edited by hand or written by a newer flint whose subset is larger. Either way the
+            // answer is the same: say which conversation and which keyword.
+            "the schema recorded in this session is not one this build can check"
+        })?),
+        None => None,
+    };
+    Ok(Shaping {
+        schema,
+        schema_json: raw,
+        stated,
+    })
 }
 
 /// What a page's controls can be drawn from, as the frame named `state`.
@@ -3763,6 +3973,13 @@ fn parse_args(argv: Vec<String>) -> Result<Args> {
                         .ok_or_else(|| anyhow!("--cwd requires a value"))?,
                 )
             }
+            "--schema" => {
+                args.schema = Some(
+                    iter.next()
+                        .ok_or_else(|| anyhow!("--schema requires a value"))?,
+                )
+            }
+            "--no-schema" => args.no_schema = true,
             "exec" => {
                 let rest: Vec<String> = iter.by_ref().collect();
                 if rest.is_empty() {
@@ -3845,6 +4062,11 @@ fn print_help(color: bool, term: &Term) {
                       (/web opens the same thing from inside a conversation)
   --port <n>          the port for --web (default 0: any free one)
   --cwd <dir>         working directory for tools
+  --schema <file|json>  with -p --json: require the answer to match this schema, and
+                      report it as a `result` line once it does. A path, or `{{...}}`
+                      for the schema itself. Recorded in the session, so --resume
+                      holds the conversation to the same shape without repeating it
+  --no-schema         answer in prose even if this session's file says otherwise
   --no-color          disable ANSI colour (also honours NO_COLOR)
   -h, --help          this message
 

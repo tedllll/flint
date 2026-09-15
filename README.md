@@ -190,7 +190,7 @@ done
 
 The vocabulary is closed and small: `session.started`, `turn.started`, `message.delta`,
 `reasoning.delta`, `message.completed`, `tool.started`, `tool.args`, `tool.completed`,
-`usage`, `warning`, `turn.completed`, `error`. Three things about it are worth knowing:
+`usage`, `warning`, `turn.completed`, `result`, `error`. Three things about it are worth knowing:
 
 - **A line is always a line.** Tool output containing newlines, quotes and escape codes is
   JSON-escaped, never printed raw, so splitting the stream on `\n` cannot cut an object in
@@ -211,6 +211,42 @@ path is resolved absolutely at startup and refused if it is not a directory, and
 resolved path is what goes into the session's `meta` line — the same value `--continue`
 matches on, so a program driving flint one process per question finds its own conversation
 again from any directory it happens to run in.
+
+### Asking for an answer with a shape
+
+Prose is the wrong interface for a caller that has to *act* on the answer. `--schema` gives the
+run a JSON Schema and makes the last line of the stream the answer as data:
+
+```console
+$ flint -p "when is the last trading day of 2026?" --json --schema trading-day.json
+{"cwd":"C:\\work","model":"deepseek-chat","session":"...","type":"session.started"}
+{"prompt":"when is the last trading day of 2026?","type":"turn.started"}
+{"text":"{\"trading_day\": \"2026-10-21\"}","type":"message.delta"}
+{"text":"{\"trading_day\": \"2026-10-21\"}","type":"message.completed"}
+{"json":{"trading_day":"2026-10-21"},"attempts":1,"type":"result"}
+{"prompt_tokens":1204,"completion_tokens":31,"type":"turn.completed"}
+```
+
+`--schema` takes a path, or the schema itself when the value starts with `{`. It needs
+`-p --json`: the schema is a promise to a program reading the stream.
+
+**flint checks the answer itself, because nobody else will.** The only JSON mode the
+OpenAI-compatible surface agrees on is `response_format: {"type":"json_object"}`, which promises
+the reply parses — not that it has the fields you asked for. (DeepSeek rejects `json_schema`
+outright; measured, `docs/decisions.md`.) So the schema goes into the system prompt, the request
+asks for an object, the answer is validated locally against a **subset of JSON Schema** —
+`type`, `properties`, `required`, `additionalProperties`, `items`, `enum`, and length/bound
+keywords — and a keyword outside that subset is refused before the run rather than ignored. If
+the answer does not match, the model is told which JSON path failed and asked again, up to three
+answers in all; `attempts` says how many it took. When none of them match there is no `result`
+line at all — a caller reading that type can trust it describes what the schema asked for — and
+the run ends with an `error` line and exit code 1.
+
+**The schema is recorded in the session file**, as a `schema` line holding the whole schema. A
+resumed conversation is therefore held to the same contract without the caller passing anything
+again, and `--no-schema` is how a caller says "prose this time" without editing the file. That is
+the same rule as everything else here: what a run agreed to is in the file, and the file is the
+truth.
 
 ### Watching a run in a browser
 

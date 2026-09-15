@@ -134,6 +134,18 @@ pub fn turn_started(prompt: &str) -> String {
 ///
 /// Zero when the provider never reported a count: a made-up number would be worse than an
 /// honest zero, and `/usage` in the session file has the real one when there is one.
+/// The structured answer of a run that was given a schema, once it has been checked.
+///
+/// Kept separate from `message.completed`, which is the answer as the model wrote it. This is the
+/// answer the *caller* asked for: parsed, validated locally against the schema, and only ever
+/// emitted when it passed. `attempts` is how many answers were asked for before one did -- 1 means
+/// the first was accepted -- so a caller can see that a repair happened without diffing the turn
+/// count. When the last attempt still fails, the stream gets an `error` and there is no `result`
+/// line at all: a caller reading this type never sees a shape the schema does not describe.
+pub fn result(json: &serde_json::Value, attempts: usize) -> String {
+    serde_json::json!({"type": "result", "json": json, "attempts": attempts}).to_string()
+}
+
 pub fn turn_completed(usage: Option<Usage>) -> String {
     frame(
         "turn.completed",

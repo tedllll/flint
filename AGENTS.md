@@ -36,6 +36,7 @@ whoever is changing the code — a person or a model driving it.
 | `src/term.rs` | the inline viewport: scroll region, answer strip, status clock |
 | `src/display.rs` | how a tool call and its result read in the transcript |
 | `src/session.rs` | reading and writing `sessions/*.jsonl`, listing, archiving |
+| `src/schema.rs` | the JSON Schema subset flint validates a `--schema` answer against, by hand |
 | `src/context.rs` | `AGENTS.md` discovery and the skill catalog |
 | `src/config.rs` | config load/save and the paths under `FLINT_HOME` |
 | `src/search.rs` | web search: where the credential comes from, and DeepSeek's search endpoint |

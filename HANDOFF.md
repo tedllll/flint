@@ -7,10 +7,22 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 405 passing, 1 ignored (262 lib, 2 in
-the binary's own tests, 33 `agent_loop`, 58 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
+As of the commit that carries this file, `cargo test` is 429 passing, 1 ignored (279 lib, 2 in
+the binary's own tests, 33 `agent_loop`, 58 `cli_output`, 11 `json_output` (7 of them structured
+output), 4 `search_tool`, 20
 `term_capture` plus the ignored cost measurement, 22 `web_view`), `cargo clippy --all-targets` is
 silent, and both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
+
+**Structured output is in**: `flint -p "..." --json --schema <file|{...}>` puts the schema in the
+system prompt, asks the provider for `response_format: {"type":"json_object"}` (the only JSON mode
+DeepSeek accepts — it rejects `json_schema`), validates the answer against a hand-written JSON Schema
+subset in `src/schema.rs`, asks again with the specific JSON paths that failed (three attempts), and
+emits `{"type":"result","json":...,"attempts":n}` once an answer passes. No `result` line is ever
+emitted for an answer that did not pass; that run ends with an `error` and exit 1. The schema is
+recorded in the session as a `schema` line holding the whole schema, so `--resume`/`--continue` keep
+the contract without repeating the flag, and `--no-schema` records that it was dropped. Verified
+against the real DeepSeek endpoint (one `result`, `attempts: 1`, the `schema` line in the file) and
+against the stub in `tests/json_output.rs`, which also asserts the request body carried both halves.
 
 **Sessions are now separated by working directory.** A conversation lives in
 `sessions/<dir>/<id>.jsonl`, where `<dir>` is the last path component of the working directory plus
@@ -84,7 +96,7 @@ open, so the copy needs every flint window closed first — measured twice.
 
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
-cargo test                                        # 405 passing, 1 ignored
+cargo test                                        # 429 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed
