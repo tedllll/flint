@@ -112,6 +112,22 @@
   .panel .row { display: flex; gap: 8px; align-items: baseline; }
   .panel .row code { color: var(--fg); white-space: nowrap; }
   .panel .row span { color: var(--dim); }
+  /* A row that can be read: the same shape as the rows above, made pressable. Reset to look like
+     them rather than like a control, because the panel is a list of what the terminal takes and a
+     row of chrome would make one command look different from the others. */
+  .panel button.row {
+    font: inherit; text-align: left; width: 100%; background: none; border: 0; padding: 0;
+    color: inherit; cursor: pointer;
+  }
+  .panel button.row:hover code, .panel button.row:hover span { color: var(--user); }
+  /* The reading itself: one listing, and the way back to the list. `pre-wrap` because these
+     listings are the terminal's own text, aligned with spaces. */
+  .panel .back {
+    font: inherit; font-size: 12px; color: var(--dim); background: none; border: 0; padding: 0;
+    cursor: pointer;
+  }
+  .panel .back:hover { color: var(--user); }
+  .panel .reading { white-space: pre-wrap; margin: 4px 0 0; }
   .meta { color: var(--dim); font-size: 12.5px; word-break: break-all; }
   .meta span { margin-right: 14px; white-space: nowrap; }
   /* Two columns: the conversations on the left, this one on the right. A grid rather than
@@ -402,6 +418,13 @@ function newDoc() {
     // Kept on the document rather than in the DOM so that `load` -- a whole new document from
     // the session file -- carries it over: the conversation changed, the configuration did not.
     state: null,
+    // Which listing the panel is showing, and what the process last said about it.
+    //
+    // Not carried over a `load`, unlike `state`, and the difference is the point: a *reading* is a
+    // window onto the run at a moment, and a new document is a different moment. The list comes
+    // back with the next state frame, which is one press away.
+    reading: null,
+    readingText: "",
   };
 }
 
@@ -680,6 +703,17 @@ function applyEvent(doc, ev) {
       return;
 
     case "command":
+      // A report the page asked for: it belongs in the panel, not in the transcript (ROADMAP §8).
+      // Taken only when it is the answer to what is *being* read, so a reader who moved on to
+      // another listing does not get the old one appearing under the new one's name.
+      if (ev.panel === true) {
+        const input = text(ev.input);
+        if (doc.reading === input) {
+          doc.readingText = text(ev.text);
+          showCommands(doc);
+        }
+        return;
+      }
       // What a command answered. A block rather than a notice because the answer can be a
       // listing -- `/config`, `/tools`, `/help` are a dozen lines each -- and because the input
       // is half of what a reader needs: a `/model` in the transcript with no answer under it is
@@ -850,6 +884,18 @@ const COMMAND_GROUPS = [
   ["danger", "destructive"],
 ];
 
+/// The panel, in one of its two modes: the commands, or one report being read.
+///
+/// The list is drawn from the frame and never assembled here, so a row cannot offer a command the
+/// terminal does not take. The report rows are pressable, and what a press does is ask the process
+/// for that listing on `/report` -- the route that keeps the answer off the terminal, where the
+/// reader did not ask for it (ROADMAP §8).
+///
+/// One surface rather than a `<details>` per row, and that is a decision rather than a shortcut: a
+/// panel here is a window onto the run, and what it shows is one thing at a time. Nothing is cached
+/// either. A listing kept from a moment ago would be a second copy of a fact the process owns, and
+/// asking again is both cheaper and *truer* -- `/config` after an edit, `/skills` after a change, and
+/// the reader sees what is in force now.
 function showCommands(doc) {
   const panel = document.getElementById("commands");
   const list = document.getElementById("command-list");
@@ -859,6 +905,21 @@ function showCommands(doc) {
   // Hidden when there is nothing to show, the way the switches are: a page opened from a dropped
   // file has no process behind it, and an empty panel is a promise this page cannot keep.
   panel.hidden = commands.length === 0;
+  if (doc.reading) {
+    // A listing being read, which replaces the list until the reader goes back. The name comes from
+    // what was asked for rather than from the answer's own first line, so the heading is the same
+    // whether the process has answered yet or not.
+    const back = el("button", "back", "\u2039 commands");
+    back.type = "button";
+    back.addEventListener("click", () => {
+      doc.reading = null;
+      showCommands(doc);
+    });
+    list.appendChild(back);
+    list.appendChild(el("div", "row", doc.reading));
+    list.appendChild(el("div", "reading", doc.readingText || "reading\u2026"));
+    return;
+  }
   for (const [className, heading] of COMMAND_GROUPS) {
     const rows = commands.filter(
       (command) => command && command.class === className && typeof command.label === "string"
@@ -867,12 +928,57 @@ function showCommands(doc) {
     const group = el("div", "group");
     group.appendChild(el("div", "group-name", heading));
     for (const command of rows) {
-      const row = el("div", "row");
+      // A report is read here rather than sent: `doc.reading` is the toggle between the two modes,
+      // and the row only has to name the line to ask for. Anything else is a row of reference --
+      // the class decides which, and it comes from the frame.
+      const readable = className === "panel" && typeof command.send === "string";
+      const row = readable ? el("button", "row") : el("div", "row");
+      if (readable) {
+        row.type = "button";
+        row.title = typeof command.help === "string" ? command.help : "";
+        const asked = command.send;
+        row.addEventListener("click", () => {
+          askReport(doc, asked);
+        });
+      }
       row.appendChild(el("code", "", command.label));
       row.appendChild(el("span", "", typeof command.help === "string" ? command.help : ""));
       group.appendChild(row);
     }
     list.appendChild(group);
+  }
+}
+
+/// Ask the process for a listing, and read it in the panel.
+///
+/// The third place this page sends a line -- after the composer and the switches -- and the rule is
+/// the same one: the `send` string is composed by the process and sent verbatim, so there is no
+/// command name in this file to go stale. What differs is the route. `/message` is a person typing
+/// and its answer belongs in the transcript; `/report` is a reader asking, and its answer comes back
+/// on the feed marked as a panel's.
+///
+/// A refusal puts the panel back to the list and says so, the way a refused switch puts the header
+/// back to what is in force: a panel left saying "reading..." for an answer that is not coming is
+/// the one way this could look like it worked.
+async function askReport(doc, input) {
+  if (!canSend || typeof input !== "string" || !input.trim()) return false;
+  doc.reading = input;
+  doc.readingText = "";
+  showCommands(doc);
+  try {
+    const response = await fetch("/report", {
+      method: "POST",
+      headers: Object.assign({ "Content-Type": "application/json" }, authHeader()),
+      body: messageBody(input),
+    });
+    if (!response.ok) throw new Error("HTTP " + response.status + " " + (await response.text()).trim());
+    setHint("");
+    return true;
+  } catch (e) {
+    doc.reading = null;
+    showCommands(doc);
+    setHint("not read: " + e.message, true);
+    return false;
   }
 }
 

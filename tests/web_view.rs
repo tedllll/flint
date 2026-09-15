@@ -392,8 +392,9 @@ fn a_command_answer_is_a_block_with_the_line_that_asked_for_it() {
         "the page does not know the event a command's answer arrives as: {known}"
     );
 
-    // The block, built from the frame's own two fields.
-    let handler = from("case \"command\":", 7);
+    // The block, built from the frame's own two fields. The window is wide enough to reach past the
+    // branch above it, which is the panel's copy of the same frame.
+    let handler = from("case \"command\":", 20);
     assert!(
         handler.contains("kind: \"command\"")
             && handler.contains("text(ev.input)")
@@ -487,6 +488,70 @@ fn the_action_buttons_send_the_frames_own_line() {
     assert!(
         drawn.contains("command.label") && drawn.contains("command.help"),
         "a button is not labelled from the frame's own row: {drawn}"
+    );
+}
+
+/// A report row reads in the panel rather than sending into the transcript.
+///
+/// §8's second class, and the one with a route of its own: `/report` runs a command with the
+/// terminal *quiet*, so a listing the page asked for does not also print where somebody typed
+/// `/help`. This test is the page's half of that -- the row is pressable, the line is the frame's
+/// `send`, the answer goes to the panel, and a report is never a transcript block. Which commands
+/// may be read at all is not this page's business: the frame says `class: "panel"` for the ones that
+/// may, and the process refuses the rest.
+#[test]
+fn the_panel_reads_a_report_rather_than_sending_it() {
+    // The row itself: only the class the frame marks, and the line comes from the frame.
+    let built = from("function showCommands(doc)", 80);
+    for (needed, why) in [
+        ("className === \"panel\"", "the class that makes a row readable"),
+        ("command.send", "the line to ask for, taken from the frame rather than rebuilt here"),
+        ("askReport(doc, asked)", "asking the process for it"),
+    ] {
+        assert!(
+            built.contains(needed),
+            "the panel does not read its rows through `{needed}` ({why}): {built}"
+        );
+    }
+
+    // The request: the route is what keeps the answer off the terminal, so a page that posted to
+    // `/message` here would be a panel that printed into the terminal -- the exact thing §8's class
+    // exists to prevent.
+    let asked = from("async function askReport(doc, input)", 30);
+    for (needed, why) in [
+        ("fetch(\"/report\"", "the route that answers without printing"),
+        ("messageBody(input)", "the line, in the same body shape the composer sends"),
+        ("doc.reading = input", "the panel showing what is being read"),
+        ("showCommands(doc)", "redrawing the panel rather than the transcript"),
+    ] {
+        assert!(
+            asked.contains(needed),
+            "asking for a report does not use `{needed}` ({why}): {asked}"
+        );
+    }
+    assert!(
+        !asked.contains("/message"),
+        "a report is sent to the composer's route, so the listing would print in the terminal: \
+         {asked}"
+    );
+
+    // And the answer: a `command` frame marked as a panel's fills the panel, and the unmarked shape
+    // -- what a typed command produces -- still becomes a transcript block.
+    let handled = from("case \"command\":", 20);
+    for (needed, why) in [
+        ("ev.panel === true", "the mark that says this answer belongs in the panel"),
+        ("doc.readingText", "filling the reading rather than appending to it"),
+        ("showCommands(doc)", "redrawing the panel"),
+    ] {
+        assert!(
+            handled.contains(needed),
+            "a panel's answer is not put in the panel through `{needed}` ({why}): {handled}"
+        );
+    }
+    assert!(
+        handled.contains("kind: \"command\"") && handled.contains("push(doc,"),
+        "a command's answer stopped being a transcript block, so a typed `/config` would show \
+         nothing: {handled}"
     );
 }
 

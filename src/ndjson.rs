@@ -165,6 +165,18 @@ pub fn command(input: &str, text: &str) -> String {
     frame("command", json!({ "input": input, "text": text }))
 }
 
+/// The same thing, asked for by the page rather than typed into the composer.
+///
+/// One line of vocabulary, not two: it *is* a command's answer, and the only difference is where the
+/// reader wanted it -- the page keeps a report in its own panel, so §8 does not print it on the
+/// terminal, and the page has to be told which of the two it is looking at. Hence a field on the
+/// frame the page already handles rather than a new type: a page that did not know `panel` would
+/// show the listing in the transcript, which is wrong but harmless, where a page that did not know a
+/// new *type* would drop it in silence.
+pub fn report(input: &str, text: &str) -> String {
+    frame("command", json!({ "input": input, "text": text, "panel": true }))
+}
+
 /// What a turn is waiting for, for a reader that cannot see a terminal.
 ///
 /// `restarted` is what makes this usable rather than merely present: a renderer showing

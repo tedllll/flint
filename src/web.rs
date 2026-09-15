@@ -83,7 +83,31 @@ pub struct State {
     ///
     /// `None` for a run with no prompt to type into -- a one-shot `-p` run -- and for those
     /// `POST /message` says so rather than accepting a message nobody will ever read.
-    input: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    input: Option<tokio::sync::mpsc::UnboundedSender<FromPage>>,
+}
+
+/// A line the page sent, and what the page expects to happen to it.
+///
+/// The text is a command line either way -- the page types `/<name>` and the REPL decides what that
+/// means, exactly as it does for the keyboard, and this file still does not know. What is *not* the
+/// same is what the terminal should do about the answer:
+///
+/// - [`FromPage::Line`] is a person typing in the composer. It becomes the same event a keystroke
+///   makes, so it steers a turn, prints here, and lands in the transcript, because that is what a
+///   typed line does.
+/// - [`FromPage::Report`] is the page reading: §8's panel class. It is answered to the page with the
+///   terminal quiet, since the terminal is where somebody typed `/help` and the page's reader did
+///   not ask for a listing here.
+///
+/// One channel rather than two, because they are the same queue of work for the same loop, and the
+/// distinction is a property of the *request* rather than of where it came from.
+///
+/// `Debug` and `PartialEq` are for the tests that watch this channel, which is the only way to see
+/// what a route did with a body: the value is the whole of the route's effect.
+#[derive(Debug, PartialEq, Eq)]
+pub enum FromPage {
+    Line(String),
+    Report(String),
 }
 
 /// How many recent frames are kept for a client that reconnects.
@@ -218,6 +242,20 @@ impl Live {
             return;
         }
         self.push(crate::ndjson::command(input, &lines.join("\n")));
+    }
+
+    /// The same, for a listing the page asked to read in its own panel.
+    ///
+    /// §8's report class, and the reason it is a separate call rather than a flag on
+    /// [`Live::command`]: the frame carries `panel`, the page puts it in the panel rather than in
+    /// the transcript, and a caller that had to remember to say which it was would eventually stop
+    /// saying it. An empty answer sends nothing here too -- a report that says nothing is a report
+    /// the page should not have asked for.
+    pub fn report(&self, input: &str, lines: &[String]) {
+        if lines.is_empty() {
+            return;
+        }
+        self.push(crate::ndjson::report(input, &lines.join("\n")));
     }
 
     /// What the turn in flight has written so far, or empty between turns.
@@ -726,7 +764,11 @@ pub fn respond(request: &Request, body: &str, state: &State) -> Answer {
             last: last_event_id(request),
         },
         // A line typed into the browser, into the same channel the keyboard feeds.
-        ("POST", "/message") => accept_message(body, state),
+        ("POST", "/message") => accept_line(body, state, true),
+        // The same channel, and a different intent: the page is asking for a listing to read in its
+        // own panel. `false` here is the whole difference -- what the line means is still the REPL's
+        // business, and whether the terminal should print the answer is not.
+        ("POST", "/report") => accept_line(body, state, false),
         // The page's own account of itself, written where it can be read afterwards. See
         // `accept_log` for why the browser's console was not good enough.
         ("POST", "/log") => accept_log(body.as_bytes()),
@@ -852,19 +894,25 @@ fn serve_sessions_in(dir: &std::path::Path, state: &State) -> Response {
     )
 }
 
-/// One message from the page, into the prompt.
+/// One line from the page, into the prompt: typed, or asked for as a report.
 ///
-/// This is the route that makes the page a composer, and it is the only route in this file that
-/// can cause something to *happen* -- the others read. What keeps that acceptable is unchanged
-/// from §4: loopback only, the `Host` and `Origin` checks, and a token that the page has and
-/// another origin's page does not. A cross-origin form post cannot set `X-Flint-Token`, and a
+/// This is the route that makes the page a composer, and it is the only kind of route in this
+/// file that can cause something to *happen* -- the others read. What keeps that acceptable is
+/// unchanged from §4: loopback only, the `Host` and `Origin` checks, and a token that the page has
+/// and another origin's page does not. A cross-origin form post cannot set `X-Flint-Token`, and a
 /// `fetch` that could would be refused by the `Origin` check before it got here.
 ///
 /// Note what it does *not* do: it does not interpret the text. A line beginning `/` is a slash
 /// command because the REPL says so, a line beginning `!` is a shell escape because the REPL
 /// says so, and neither fact is known in this file. That is the point -- there is one place
-/// that decides what a typed line means, and the browser is not a second one.
-fn accept_message(body: &str, state: &State) -> Response {
+/// that decides what a typed line means, and the browser is not a second one. It follows that this
+/// route does not check *which* command a report names: the table that says a command is a report
+/// lives beside the dispatch, and the REPL refuses anything else. A whitelist here would be a second
+/// copy of that table, in the one file that is proudest of not having one.
+///
+/// `typed` is the only difference between the two routes: a typed line is a keystroke and a report
+/// is a request to read, and the REPL is told which it is so that it knows whether to print.
+fn accept_line(body: &str, state: &State, typed: bool) -> Response {
     let Some(input) = &state.input else {
         return Response::text(
             409,
@@ -884,7 +932,12 @@ fn accept_message(body: &str, state: &State) -> Response {
     if text.trim().is_empty() {
         return Response::text(400, "Bad Request", "an empty message is not one\n");
     }
-    match input.send(text.to_string()) {
+    let sent = if typed {
+        input.send(FromPage::Line(text.to_string()))
+    } else {
+        input.send(FromPage::Report(text.to_string()))
+    };
+    match sent {
         Ok(()) => Response::json(202, "Accepted", "{\"queued\":true}".to_string()),
         // The receiver is gone, so the run is ending. Saying so is better than a 202 for a
         // message that will never be read: a page that shows what it sent would otherwise
@@ -1005,7 +1058,7 @@ impl Window {
         port: u16,
         session: Arc<Mutex<Option<std::path::PathBuf>>>,
         live: Option<Arc<Live>>,
-        input: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+        input: Option<tokio::sync::mpsc::UnboundedSender<FromPage>>,
     ) -> Result<Window> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
             .await
@@ -1062,8 +1115,8 @@ pub struct Viewer {
     port: u16,
     /// The prompt the page types into. Absent for a run with no prompt, which is what makes
     /// `POST /message` answer `409` rather than swallowing a message nobody will read. See
-    /// `State::input` for why this is text and not the REPL's own input event.
-    input: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    /// `State::input` for why this carries a [`FromPage`] rather than the REPL's own input event.
+    input: Option<tokio::sync::mpsc::UnboundedSender<FromPage>>,
 }
 
 impl Viewer {
@@ -1071,7 +1124,7 @@ impl Viewer {
     pub fn asked(
         port: u16,
         session: Option<std::path::PathBuf>,
-        input: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+        input: Option<tokio::sync::mpsc::UnboundedSender<FromPage>>,
     ) -> Viewer {
         Viewer {
             live: Live::new(),
@@ -1568,8 +1621,8 @@ mod tests {
     }
 
     /// A state with the prompt attached, and the receiving end of it.
-    fn with_input() -> (State, tokio::sync::mpsc::UnboundedReceiver<String>) {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    fn with_input() -> (State, tokio::sync::mpsc::UnboundedReceiver<FromPage>) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<FromPage>();
         (State { input: Some(tx), ..state() }, rx)
     }
 
@@ -1595,8 +1648,44 @@ mod tests {
         assert_eq!(response.status, 202, "{}", body(&response));
         assert_eq!(
             rx.try_recv().expect("the message must reach the prompt"),
-            "hello from the page"
+            FromPage::Line("hello from the page".to_string())
         );
+    }
+
+    /// The two routes carry the same text and different kinds, and the kind is the whole of the
+    /// difference: a typed line prints here, a report does not. Asserted at the route, because that
+    /// is where the kind is chosen, and a route that sent `Line` for both would be a page whose
+    /// panels printed into the terminal -- a failure that is invisible until somebody reads the
+    /// same listing twice.
+    #[test]
+    fn a_report_is_queued_as_a_report_and_a_message_as_a_line() {
+        let (state, mut rx) = with_input();
+        for (route, expected) in [
+            ("/message", FromPage::Line("/config".to_string())),
+            ("/report", FromPage::Report("/config".to_string())),
+        ] {
+            let json = r#"{"text":"/config"}"#;
+            let request = Request::parse(&post(route, json)).expect("fixture parses");
+            let response = respond(&request, json, &state).once();
+            assert_eq!(response.status, 202, "{route}: {}", body(&response));
+            assert_eq!(rx.try_recv().expect("queued"), expected, "{route}");
+        }
+    }
+
+    /// A report without the token is refused and never queued, like the message route.
+    ///
+    /// The report route only *reads*, and that is not a reason to leave the credential check off: a
+    /// page on another origin that could post here could make this process print a listing into a
+    /// file or a pipe, and the token is the only thing that says which page may ask.
+    #[test]
+    fn a_report_without_the_token_is_refused_and_never_queued() {
+        let (state, mut rx) = with_input();
+        let json = r#"{"text":"/config"}"#;
+        let head = "POST /report HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nContent-Length: 18\r\n\r\n";
+        let request = Request::parse(&format!("{head}{json}")).expect("fixture parses");
+        let response = respond(&request, json, &state).once();
+        assert_eq!(response.status, 403, "{}", body(&response));
+        assert!(rx.try_recv().is_err(), "a report must not be queued without the token");
     }
 
     /// The text is carried untouched, because meaning is decided in exactly one place.
@@ -1612,7 +1701,7 @@ mod tests {
             let request = Request::parse(&post("/message", &json)).expect("fixture parses");
             let response = respond(&request, &json, &state).once();
             assert_eq!(response.status, 202, "{text}: {}", body(&response));
-            assert_eq!(rx.try_recv().expect("queued"), text);
+            assert_eq!(rx.try_recv().expect("queued"), FromPage::Line(text.to_string()));
         }
     }
 
@@ -1915,7 +2004,7 @@ mod socket_tests {
     /// reading -- and the message must not be truncated to the first chunk.
     #[tokio::test]
     async fn a_message_body_is_assembled_across_reads() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<FromPage>();
         let window = Window::open_following(
             0,
             Arc::new(Mutex::new(None)),
@@ -1957,7 +2046,7 @@ mod socket_tests {
         assert!(response.starts_with("HTTP/1.1 202"), "{response}");
         assert_eq!(
             rx.recv().await.expect("a message must arrive"),
-            expected,
+            FromPage::Line(expected),
             "the body was not assembled whole"
         );
     }
@@ -1968,7 +2057,7 @@ mod socket_tests {
     /// there is no way for anything downstream to tell the difference.
     #[tokio::test]
     async fn a_message_that_stops_arriving_is_refused() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<FromPage>();
         let window = Window::open_following(0, Arc::new(Mutex::new(None)), None, Some(tx))
             .await
             .expect("bind");
@@ -1991,7 +2080,7 @@ mod socket_tests {
     /// A body over the ceiling is refused without being read.
     #[tokio::test]
     async fn a_message_over_the_ceiling_is_refused() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<FromPage>();
         let window = Window::open_following(0, Arc::new(Mutex::new(None)), None, Some(tx))
             .await
             .expect("bind");

@@ -506,6 +506,13 @@ pub struct Term {
     /// thing two writers race over.
     answering: AtomicBool,
     answered: Mutex<Vec<String>>,
+    /// Whether the lines being recorded are also being drawn.
+    ///
+    /// True only for a listing the *page* asked for -- §8's report class -- where printing it here
+    /// would put a second copy in front of somebody who asked for nothing. Set and cleared by
+    /// `quiet_start`/`quiet_take`, which are the only places that touch it, and false the rest of
+    /// the time so that every other line is drawn as it always was.
+    quiet: AtomicBool,
 }
 
 impl Term {
@@ -533,6 +540,7 @@ impl Term {
             capture: None,
             answering: AtomicBool::new(false),
             answered: Mutex::new(Vec::new()),
+            quiet: AtomicBool::new(false),
         }
     }
 
@@ -609,6 +617,7 @@ impl Term {
             last_ctrl_c: Mutex::new(None),
             answering: AtomicBool::new(false),
             answered: Mutex::new(Vec::new()),
+            quiet: AtomicBool::new(false),
         };
 
         // Raw mode and the panic hook need a real console; laying out the screen does
@@ -1017,6 +1026,11 @@ impl Term {
                 .unwrap_or_else(|e| e.into_inner())
                 .push(plain(&format!("{args}")));
         }
+        // Recorded, and deliberately not drawn: this is a listing the *page* asked for, and the
+        // terminal is where somebody typed `/help`. See `Term::quiet_start`.
+        if self.quiet.load(Ordering::Relaxed) {
+            return;
+        }
         if !self.interactive {
             println!("{args}");
             return;
@@ -1042,6 +1056,25 @@ impl Term {
     pub fn answer_take(&self) -> Vec<String> {
         self.answering.store(false, Ordering::Relaxed);
         std::mem::take(&mut *self.answered.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// Start recording a listing for the page *without* drawing it here.
+    ///
+    /// §8's report class, and the whole reason it needs its own mode: a page that showed `/config`
+    /// by sending it through the composer would print the listing into the terminal as well, to a
+    /// reader who did not ask for it there. Recording is the same machinery as a command's answer --
+    /// the page is told what the command said -- and the printing is what differs. Paired with
+    /// [`Term::quiet_take`], which puts the terminal back the way it was whatever the command did.
+    pub fn quiet_start(&self) {
+        self.answer_start();
+        self.quiet.store(true, Ordering::Relaxed);
+    }
+
+    /// Stop recording, and take the listing that was kept off the screen.
+    pub fn quiet_take(&self) -> Vec<String> {
+        let said = self.answer_take();
+        self.quiet.store(false, Ordering::Relaxed);
+        said
     }
 
     /// Say something that is not part of the conversation.

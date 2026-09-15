@@ -634,6 +634,13 @@ struct InputReader {
 enum InputMsg {
     /// A submitted line.
     Line(String),
+    /// A listing the page asked for in its own panel: a command line, run with the terminal quiet.
+    ///
+    /// Separately from `Line` because the two differ in what happens to the *answer*, and this is
+    /// the only place that can be said: a typed line prints here and lands in the transcript, and a
+    /// report is handed to the page instead (§8 keeps a listing off this terminal's screen when
+    /// nobody here asked for it).
+    Report(String),
     /// Stop the turn in flight, but keep the process: Ctrl-C once.
     Interrupt,
     /// The user asked to quit (Ctrl-D, EOF, or Ctrl-C twice).
@@ -851,8 +858,9 @@ async fn interactive(
     }
     printer.term().blank();
 
-    // A line a turn handed back rather than answering. See `for_the_repl`.
-    let mut hand_back: Option<String> = None;
+    // What a turn left for the REPL: a line it handed back, and the reports the page asked for while
+    // it was working. See `Handover`.
+    let mut pending = Handover::default();
 
     loop {
         // The prompt lives on the terminal's reserved row, so there is nothing to
@@ -870,11 +878,19 @@ async fn interactive(
             viewer.live().state(state_frame(cfg, provider_cfg, agent, printer));
         }
 
+        // What the page asked to read while the model was working. Flushed here, before the prompt
+        // is read again, and outside the `input` path below on purpose: a report is not input, it
+        // never reaches the model, and the only reason it is in this loop at all is that a command
+        // has to run where the configuration and the agent are.
+        for asked in std::mem::take(&mut pending.reports) {
+            run_report(&asked, cfg, agent, provider_cfg, printer, reader, viewer).await;
+        }
+
         // A line the turn could not use -- a command typed or clicked while the model was
         // working. It is handled here, next time round the loop, as if it had just been typed:
         // `run_turn` cannot run a command, and this is the only place that knows what a typed
         // line means.
-        let input = match hand_back.take() {
+        let input = match pending.line.take() {
             Some(line) => line.trim().to_string(),
             None => {
                 let Some(msg) = next_line(input_rx, reader).await else {
@@ -887,6 +903,13 @@ async fn interactive(
                     // and no reason to take the process with it.
                     InputMsg::Interrupt => continue,
                     InputMsg::Line(line) => line.trim().to_string(),
+                    // A report the page asked for with the prompt sitting idle. Same handling as the
+                    // flush above, and `continue` rather than falling through: there is no prompt
+                    // here for the model, and an empty string would `continue` anyway.
+                    InputMsg::Report(asked) => {
+                        run_report(&asked, cfg, agent, provider_cfg, printer, reader, viewer).await;
+                        continue;
+                    }
                 }
             }
         };
@@ -1008,9 +1031,9 @@ async fn interactive(
             viewer.as_ref().map(web::Viewer::live),
         )
         .await {
-            // A command that arrived mid-turn: run it, rather than asking the model about it.
-            Ok(Some(line)) => hand_back = Some(line),
-            Ok(None) => {}
+            // A command that arrived mid-turn, and any reports the page asked for: both are handled
+            // at the top of the loop, in that order -- see `Handover`.
+            Ok(handover) => pending = handover,
             Err(e) => {
                 printer.term().blank();
                 printer.term().line(format_args!("{} {e:#}", printer.style(RED, "error:")));
@@ -1207,15 +1230,21 @@ fn for_the_repl(line: &str) -> bool {
 fn browser_input(
     reader: &InputReader,
     has_prompt: bool,
-) -> Option<tokio::sync::mpsc::UnboundedSender<String>> {
+) -> Option<tokio::sync::mpsc::UnboundedSender<web::FromPage>> {
     if !has_prompt {
         return None;
     }
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<web::FromPage>();
     let line_tx = reader.line_tx.clone();
     tokio::spawn(async move {
-        while let Some(text) = rx.recv().await {
-            if line_tx.send(InputMsg::Line(text)).is_err() {
+        while let Some(what) = rx.recv().await {
+            // The kind is carried across, not flattened into a line: see `InputMsg::Report`, and
+            // note that this is the *only* place the browser's vocabulary meets the keyboard's.
+            let msg = match what {
+                web::FromPage::Line(text) => InputMsg::Line(text),
+                web::FromPage::Report(text) => InputMsg::Report(text),
+            };
+            if line_tx.send(msg).is_err() {
                 break;
             }
         }
@@ -1726,6 +1755,74 @@ fn wrap(text: &str, room: usize) -> Vec<String> {
     }
     out.push(line);
     out
+}
+
+/// Answer a report the page asked for: run the command with this terminal quiet, and send what it
+/// said to the page's panel instead.
+///
+/// §8's panel class. A page shows a listing in a panel of its own rather than sending it into the
+/// transcript, because this terminal is where somebody typed `/help` and the page's reader did not
+/// ask for it here. So the answer is recorded rather than drawn, which is the whole of the
+/// difference between this and a line typed into the composer -- the same channel, the same
+/// dispatch, and one flag.
+///
+/// The check that the command really is a report lives *here*, beside the table, rather than in the
+/// route: `web.rs` does not know what a slash command means, and keeping that true is worth more
+/// than a whitelist in the one file that is proudest of not having one. It is also the safety half.
+/// The page has no confirmation step yet, so a report route that ran whatever it was handed would be
+/// a way to delete a conversation with one click that never happened.
+async fn run_report(
+    asked: &str,
+    cfg: &mut config::Config,
+    agent: &mut agent::Agent,
+    provider_cfg: &mut config::ProviderConfig,
+    printer: &Printer<'_>,
+    reader: &InputReader,
+    viewer: &mut Option<web::Viewer>,
+) {
+    let asked = asked.trim();
+    // Matched on `send` rather than on the label, because a row whose label carries a placeholder
+    // (`/delete <n|id>`) would otherwise let a page compose an argument of its own and have this run
+    // it. Only rows that are a report *and* take no argument have a `send` equal to their label.
+    let is_report = COMMANDS
+        .iter()
+        .any(|row| row.on_page.class() == Some("panel") && row.send == asked);
+    if !is_report {
+        report_refused(asked, printer, viewer);
+        return;
+    }
+
+    printer.term().quiet_start();
+    let flow = handle_command(asked, cfg, agent, provider_cfg, printer, reader, viewer).await;
+    let said = printer.term().quiet_take();
+
+    // A report is a read, so it can only come back as "carry on". Anything else would mean the table
+    // calls a command a report that is not one, and the page is told rather than left waiting.
+    if !matches!(flow, Ok(Flow::Continue)) {
+        report_refused(asked, printer, viewer);
+        return;
+    }
+    if let Some(live) = viewer.as_ref().map(web::Viewer::live) {
+        live.report(asked, &said);
+    }
+}
+
+/// A page asked for something that is not a report: said on the terminal and sent back to the page.
+///
+/// Drawn here rather than through the quiet path, and that is the point of it: this line is about
+/// the *request*, not about a listing, and a page that asked for something it may not have should
+/// not be able to make this terminal print anything. The page is told too, in the panel it opened,
+/// or it would sit waiting for an answer that is never coming.
+fn report_refused(asked: &str, printer: &Printer<'_>, viewer: &Option<web::Viewer>) {
+    let said = format!("{asked} is not a report -- the page may read only the commands that take no argument and change nothing");
+    printer.term().line(format_args!(
+        "{} {}",
+        printer.style(RED, "refused:"),
+        printer.dim(&said)
+    ));
+    if let Some(live) = viewer.as_ref().map(web::Viewer::live) {
+        live.report(asked, &[said]);
+    }
 }
 
 async fn handle_command(
@@ -2726,7 +2823,7 @@ async fn run_turn(
     // The browser's feed, when `--web` is running. Everything the turn produces is copied
     // here as well as drawn on the terminal, so the two cannot describe different runs.
     live: Option<&web::Live>,
-) -> Result<Option<String>> {
+) -> Result<Handover> {
     #[allow(unused_variables)]
     let Palette { dim, bold, red, green, cyan, yellow, reset } = printer.pal;
     ensure_usable(provider_cfg)?;
@@ -2759,6 +2856,12 @@ async fn run_turn(
     // line carries the phase from here on; the escalation in the wait loop turns the
     // nameless wait into an explicit "no response yet".
     status_waiting(printer, live, "");
+
+    // Reports the page asked for while this turn is running. They wait for the turn: a listing
+    // printed into the middle of an answer would be read as part of the answer, and the model's own
+    // output is not something to interleave a reading with. Declared out here because a steered turn
+    // runs the loop again and has to carry them to the end either way.
+    let mut reports: Vec<String> = Vec::new();
 
     loop {
         let mut tool_names: HashMap<String, (String, String)> = HashMap::new();
@@ -2941,6 +3044,12 @@ async fn run_turn(
                         }
                         break;
                     }
+                    // A report is a read, not a person speaking, and that is why it falls through
+                    // instead of breaking: a line here interrupts the turn because somebody typed
+                    // it, and nobody typed this. It is kept for the REPL, which is the only place
+                    // that knows what a command means, and answered once the model is done -- an
+                    // answer that raced the turn would be a second writer in the transcript.
+                    Ok(InputMsg::Report(asked)) => reports.push(asked),
                     // A bare Ctrl-C stops the turn but keeps the process: the session is
                     // the record of what was being fixed, and losing it to a reflex is the
                     // expensive mistake. It has to be said out loud, or a cancelled turn
@@ -3005,7 +3114,7 @@ async fn run_turn(
         // reason to keep paying for an answer nobody is waiting for any more.
         if let Some(line) = hand_back {
             turn_over(printer, live, agent);
-            return Ok(Some(line));
+            return Ok(Handover { line: Some(line), reports });
         }
 
         // Whatever happened, nothing is running now: leaving a stale clock on the strip
@@ -3057,8 +3166,21 @@ async fn run_turn(
             )
         ));
     }
-    // `None`: everything the turn was given, it used.
-    Ok(None)
+    // Nothing handed back: everything the turn was given, it used. Reports can still be here -- the
+    // page can ask for one at any moment, including the last moment of a turn.
+    Ok(Handover { line: None, reports })
+}
+
+/// What a turn left for the REPL.
+///
+/// Two things, and neither is part of the conversation: a line the turn could not use, and the
+/// reports the page asked for while it was working. They are separate fields rather than one queue
+/// because they are handled differently and in this order -- the line is what a person typed and
+/// goes first, and a report is a read that waits until the person has been answered.
+#[derive(Default)]
+struct Handover {
+    line: Option<String>,
+    reports: Vec<String>,
 }
 
 /// `!cmd` escape inside the REPL and the `exec` subcommand.

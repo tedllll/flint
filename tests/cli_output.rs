@@ -2278,13 +2278,20 @@ fn read_until(sock: &mut std::net::TcpStream, needle: &str, secs: u64) -> String
 /// §8's whole shape -- the page composes the terminal's own command line and the REPL decides
 /// what it means.
 fn post_message(port: u16, token: &str, text: &str) -> String {
+    post_to(port, token, "/message", text)
+}
+
+/// The same body, to another route: `/report` is a page asking for a listing to read in its own
+/// panel. Kept as one function so the two routes cannot drift in how they are framed on the wire --
+/// the difference between them is what the *process* does with the line, not how it is sent.
+fn post_to(port: u16, token: &str, route: &str, text: &str) -> String {
     use std::io::{Read, Write};
 
     let body = format!("{{\"text\":{}}}", serde_json::Value::String(text.to_string()));
     let mut sock = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect to the view");
     write!(
         sock,
-        "POST /message HTTP/1.1\r\nhost: 127.0.0.1:{port}\r\nX-Flint-Token: {token}\r\n\
+        "POST {route} HTTP/1.1\r\nhost: 127.0.0.1:{port}\r\nX-Flint-Token: {token}\r\n\
          content-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
         body.len()
     )
@@ -2848,6 +2855,99 @@ async fn the_page_is_told_which_commands_it_may_offer() {
     }
 }
 
+/// A report the page asks for is answered to the page, and *not* printed here.
+///
+/// §8's panel class. The page shows a listing in a panel of its own rather than sending it into the
+/// terminal, because the terminal is where somebody typed `/help` and the page's reader did not ask
+/// for it there. So there are two routes to the same command and the difference is exactly that:
+/// `POST /message` is a person typing, and what it prints lands in the transcript here;
+/// `POST /report` is the page reading, and its answer goes to the feed only.
+///
+/// The assertion that matters is the count. `/config`'s answer is posted both ways in one run, and
+/// the transcript must carry it exactly *once* -- if the report route printed as well, a reader
+/// would see the listing twice and the page would be a second thing to keep in step rather than a
+/// window onto the run.
+///
+/// The refusal is checked in the same run because it is the safety property: the page has no
+/// confirmation step yet, so a report route that ran whatever it was given would be a way to delete
+/// a conversation with one click that never happened. Only the rows the table marks as reports are
+/// run; anything else is answered back, and the proof is that a button command asked for as a
+/// report does not do its work.
+#[tokio::test]
+async fn a_report_the_page_asks_for_is_not_printed_here() {
+    let home = test_home("report-route", "http://127.0.0.1:9/v1");
+    let log = home.join("transcript.txt");
+    let mut child = binary()
+        .arg("--web")
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::fs::File::create(&log).expect("transcript file"))
+        .stderr(std::fs::File::create(home.join("stderr.txt")).expect("stderr file"))
+        .spawn()
+        .expect("failed to run flint");
+
+    let (port, token) = port_and_token(&wait_for_url(&log));
+    let mut watching = http_stream(port, "/events", &token);
+    read_until(&mut watching, "\"type\":\"state\"}\n\n", 20);
+
+    // Read, not typed: the answer is marked as a panel's, so the page knows to put it in the panel
+    // rather than in the transcript.
+    let asked = post_to(port, &token, "/report", "/config");
+    assert!(
+        asked.starts_with("HTTP/1.1 202"),
+        "the report route refused a report: {asked:?}"
+    );
+    let read = read_until(&mut watching, "\"input\":\"/config\"", 20);
+    assert!(
+        read.contains("\"panel\":true") && read.contains("config.toml"),
+        "the page asked for a report and was not told it, or was not told where to put it: {read:?}"
+    );
+
+    // The same command, typed: this one belongs in the transcript, and it is the one that proves the
+    // report above was quiet rather than merely late.
+    let typed = post_message(port, &token, "/config");
+    assert!(typed.starts_with("HTTP/1.1 202"), "the composer refused: {typed:?}");
+    let echoed = read_until(&mut watching, "\"input\":\"/config\"", 20);
+    assert!(
+        !echoed.contains("\"panel\":true") && echoed.contains("config.toml"),
+        "a command typed into the composer was answered as a panel report: {echoed:?}"
+    );
+
+    // And the safety half: a command the table does *not* mark as a report is answered rather than
+    // run. `/new` is a button, and a button's work is visible -- it starts a session and says so.
+    let refused = post_to(port, &token, "/report", "/new");
+    assert!(
+        refused.starts_with("HTTP/1.1 202"),
+        "the report route refused the request itself rather than the command: {refused:?}"
+    );
+    let complaint = read_until(&mut watching, "\"input\":\"/new\"", 20);
+    assert!(
+        complaint.contains("not a report"),
+        "a command that is not a report was not refused, so the route would run anything: \
+         {complaint:?}"
+    );
+
+    drop(watching);
+    drop(child.stdin.take());
+    let exited = wait_for_exit(&mut child, 20);
+    let transcript = std::fs::read_to_string(&log).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit");
+    assert_eq!(
+        transcript.matches("config.toml").count(),
+        1,
+        "the report was printed on this terminal as well as sent to the page, so a listing nobody \
+         asked for here appeared here anyway: {transcript:?}"
+    );
+    assert!(
+        !transcript.contains("started a new session"),
+        "the refused report ran anyway: {transcript:?}"
+    );
+}
+
+///
 /// Every command the page may offer is one the terminal accepts.
 ///
 /// The drift this catches is the whole reason the list is a table: a page that offers a button for

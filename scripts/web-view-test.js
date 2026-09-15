@@ -102,7 +102,14 @@ function loadViewer() {
         if (!nodes.has(id)) nodes.set(id, fakeNode());
         return nodes.get(id);
       },
-      createElement: () => fakeNode(),
+      // The tag is kept because a check sometimes has to ask what kind of node was drawn -- a report
+      // row is a button and a selector row is not -- and there is no other way to tell two stubs
+      // apart. The listeners are still not delivered: see the note on `addEventListener` below.
+      createElement: (tag) => {
+        const node = fakeNode();
+        node.tag = tag;
+        return node;
+      },
       createTextNode: (t) => ({ text: t }),
       addEventListener() {},
     },
@@ -494,6 +501,89 @@ check("a state frame with no commands in it takes the panel away", () => {
   // A frame from a build that did not carry them, or one whose list is empty: either way the panel
   // goes rather than staying up with rows nothing is reporting any more.
   eq(page.__node("commands").hidden, true, "a frame without a command list offers no menu");
+});
+
+// §8's second class, and the one with a route of its own. A report is *read* here rather than sent
+// into the transcript, because the terminal is where somebody typed `/help` and this page's reader
+// did not ask for a listing there. What is pinned here is which rows can be read and what the panel
+// does while one is: the line to ask for comes from the frame, and the answer arrives on the feed
+// marked as a panel's. That a press posts to `/report` rather than `/message` -- the whole
+// difference between reading and printing -- is asserted over the page's bytes in tests/web_view.rs
+// with the other compositions, since the stub DOM delivers no events.
+check("a report row is pressable and the other rows are not", () => {
+  const page = loadViewer();
+  const d = page.newDoc();
+  page.applyState(d, JSON.stringify({
+    type: "state", provider: "stub", model: "m", providers: [{ name: "stub", models: ["m"] }],
+    commands: [
+      { label: "/config", send: "/config", help: "show shell, steps, proxy", class: "panel" },
+      { label: "/help", send: "/help", help: "this message", class: "panel" },
+      { label: "/resume <n|id>", send: "/resume", help: "switch to one of them", class: "selector" },
+    ],
+  }));
+  const groups = page.__node("command-list").children;
+  const reports = groups[0].children.slice(1);
+  eq(reports.map((r) => r.tag), ["button", "button"], "a report row is a control");
+  eq(reports[0].type, "button", "and not a submit button, which would reload the page");
+  eq(
+    reports[0].children.map((c) => c.textContent),
+    ["/config", "show shell, steps, proxy"],
+    "it still says what to type and what it does"
+  );
+  eq(
+    groups[1].children[1].tag,
+    "div",
+    "a selector is still only a row: this page has nothing to choose from yet"
+  );
+});
+
+check("a listing being read replaces the list, and the way back restores it", () => {
+  const page = loadViewer();
+  const d = page.newDoc();
+  page.applyState(d, JSON.stringify({
+    type: "state", provider: "stub", model: "m", providers: [{ name: "stub", models: ["m"] }],
+    commands: [{ label: "/config", send: "/config", help: "show shell", class: "panel" }],
+  }));
+  d.reading = "/config";
+  d.readingText = "config: /tmp/config.toml\n  verbose          = on";
+  page.showCommands(d);
+  const drawn = page.__node("command-list").children;
+  eq(drawn[0].tag, "button", "the way back is a control");
+  eq(drawn[1].textContent, "/config", "the heading is what was asked for");
+  eq(drawn[2].textContent.includes("config.toml"), true, "and the listing is the process's own text");
+  // The list is gone while a listing is on screen: one surface, one reading -- and the answer that
+  // arrives later is put there by the frame, not appended to a list nobody is looking at.
+  eq(drawn.length, 3, "the list is replaced rather than added to");
+  d.reading = null;
+  page.showCommands(d);
+  const back = page.__node("command-list").children;
+  eq(back.length, 1, "going back draws the groups again");
+  eq(back[0].children.length, 2, "with the report row in it");
+});
+
+check("a report frame fills the panel only for what is being read", () => {
+  const page = loadViewer();
+  const d = page.newDoc();
+  d.reading = "/tools";
+  d.readingText = "";
+  page.applyLine(d, JSON.stringify({ type: "command", input: "/config", text: "shell = bash", panel: true }));
+  eq(d.readingText, "", "an answer to a listing the reader moved on from is not shown");
+  eq(d.blocks.length, 0, "and a report is not a transcript block either");
+  page.applyLine(d, JSON.stringify({ type: "command", input: "/tools", text: "read, write", panel: true }));
+  eq(d.readingText, "read, write", "the answer to what is being read fills the panel");
+  eq(d.blocks.length, 0, "still nothing in the transcript: that is the whole point of the class");
+});
+
+check("a command answer without the panel mark is still a transcript block", () => {
+  const page = loadViewer();
+  const d = page.newDoc();
+  // The same frame shape, one field short: this is what a typed `/config` produces, and it belongs
+  // in the transcript even while a panel is showing something else.
+  d.reading = "/tools";
+  page.applyLine(d, JSON.stringify({ type: "command", input: "/config", text: "shell = bash" }));
+  eq(d.readingText, "", "a typed answer is not put in the panel");
+  eq(d.blocks.length, 1, "it is a block in the transcript");
+  eq(d.blocks[0].kind, "command", "of the kind the transcript already drew");
 });
 
 console.log("the buttons the frame marks as actions");
