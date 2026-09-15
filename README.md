@@ -621,17 +621,22 @@ reasoning — is in [`docs/decisions.md`](docs/decisions.md).
 
 ## Design notes
 
-Sessions are append-only JSONL at `~/.flint/sessions/<id>.jsonl`, one event per
-line. A damaged line is skipped and reported rather than taking the session
+Sessions are append-only JSONL at `~/.flint/sessions/<dir>/<id>.jsonl`, one event
+per line. A damaged line is skipped and reported rather than taking the session
 down. A resumed session is appended to, not rewritten, so nothing said after
 `--continue` is lost.
 
-A session records the directory it was held in, and `--continue` continues the most
-recent conversation *held in the directory you are in* — projects do not inherit each
-other's history, and `--resume` is the flag that names a session outright. Point
-`FLINT_HOME` at a project (`FLINT_HOME=/path/to/project/.flint`) to give it its own
-config, sessions and skills, which is how a program driving flint per project keeps them
-apart.
+`<dir>` is the working directory the conversation was held in — its last path component and
+a hash of the whole path, `flint-1f0a7c93` — so two projects sharing one home are separated
+on disk and not by a filter that has to read every file to decide whose it is. The session
+file's `meta` line records that directory too, and that is what `--continue` believes, so
+moving a file (or the project) does not change which conversation is "the one I was just
+in". Sessions written before this layout sit directly in `sessions/` and are still found.
+`--resume` names any session outright, anywhere.
+
+Point `FLINT_HOME` at a project (`FLINT_HOME=/path/to/project/.flint`) to give it its own
+config, sessions and skills as well; that is the belt to this layout's braces, and it is what
+a program driving flint per project, one process per question, usually wants.
 
 Nothing is ever rewritten, which is what makes the format repairable by hand:
 

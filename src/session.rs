@@ -96,7 +96,13 @@ pub struct SessionWriter {
 
 impl SessionWriter {
     pub fn create(dir: &Path, cwd: &Path, provider: &str, model: &str) -> Result<Self> {
-        std::fs::create_dir_all(dir).context("cannot create sessions directory")?;
+        // `dir` is the sessions root; the file goes in the subdirectory that belongs to this
+        // working directory. The *layout* is the separation: a caller never has to read `meta` to
+        // find its own conversations, and two projects sharing one home cannot be handed each
+        // other's history by anything that walks the listing. Sessions written before this live
+        // directly in the root and are still found -- see `latest_for`.
+        let dir = dir.join(dir_key(cwd));
+        std::fs::create_dir_all(&dir).context("cannot create sessions directory")?;
         let id = new_id();
         let path = dir.join(format!("{id}.jsonl"));
         let meta = SessionEvent::Meta {
@@ -291,6 +297,13 @@ pub fn load(path: &Path) -> Result<LoadedSession> {
 #[derive(Debug, Clone, Default)]
 pub struct SessionSummary {
     pub id: String,
+    /// The file this summary was read from.
+    ///
+    /// Carried rather than put together by a reader out of an id and the sessions root, because
+    /// there is no longer one place a session can be: it lives in the subdirectory belonging to the
+    /// working directory it was held in. A reader that rebuilt the path looked in the root and found
+    /// nothing -- which is how `/delete 1` came to name a file that was not there.
+    pub path: PathBuf,
     pub title: Option<String>,
     /// The first thing the user said, clipped.
     pub preview: String,
@@ -323,6 +336,7 @@ pub fn scan(path: &Path) -> Result<SessionSummary> {
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default(),
+        path: path.to_path_buf(),
         version: version_one(),
         ..Default::default()
     };
@@ -443,6 +457,55 @@ pub fn delete(path: &Path) -> Result<()> {
     std::fs::remove_file(path).with_context(|| format!("cannot delete {}", path.display()))
 }
 
+/// The name of the sessions subdirectory that belongs to a working directory.
+///
+/// A readable part, so that a person looking at `sessions/` can see whose conversations are whose,
+/// and a hash of the whole path, so that two projects whose last component matches -- `D:\work\api`
+/// and `E:\work\api` -- do not share one. The hash names a directory; it is not a security
+/// boundary and nothing is authenticated with it.
+///
+/// Hashed from the *canonical* path, because the key has to be the answer to "which directory is
+/// this" rather than "how was it spelled". Windows does not distinguish case or either separator,
+/// and the same directory arrives spelled differently depending on who asked: `--cwd ..\proj`, a
+/// symlink, a mapped drive, a trailing `.`. Two keys for one directory would put one project's
+/// conversations in two places, which is the failure this exists to prevent -- the same one
+/// `same_dir` handles for the old flat layout. When the directory cannot be canonicalised (it has
+/// been deleted) the path as written is hashed instead, which is the best available answer.
+pub fn dir_key(cwd: &Path) -> String {
+    let canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let name = canonical
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    let mut slug: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    // Long names are cut, not rejected: the hash still tells two of them apart, and a directory
+    // name near the path limit would start failing for the wrong reason.
+    slug.truncate(32);
+    let slug = slug.trim_matches(['-', '.']).to_ascii_lowercase();
+    let slug = if slug.is_empty() { "dir" } else { &slug };
+    format!("{slug}-{:08x}", fnv1a(canonical.to_string_lossy().as_bytes()))
+}
+
+/// FNV-1a, 64-bit, written out rather than pulled in: one small hash over a path does not justify
+/// a dependency, and this one is four lines of arithmetic that will not change.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 /// Most recent session in `dir` that was held in `cwd`, if any.
 ///
 /// The archive is not searched, deliberately: `--continue` means "the conversation I was
@@ -456,9 +519,21 @@ pub fn delete(path: &Path) -> Result<()> {
 /// program, one process per question, is exactly the case where two projects share a home and
 /// never notice until the answers start referring to the other project's files.
 ///
+/// Two places are searched, in this order: the subdirectory this working directory owns, then the
+/// root, where sessions written before the split still live and are told apart by the directory
+/// recorded in their `meta` line. The second is why `same_dir` is still here.
+///
 /// A session whose directory cannot be matched starts nothing: `--resume` names one outright,
 /// and a fallback to "some other project's conversation" is the bug this exists to remove.
 pub fn latest_for(dir: &Path, cwd: &Path) -> Result<Option<PathBuf>> {
+    if let Some(found) = newest_in(&dir.join(dir_key(cwd)), Some(cwd))? {
+        return Ok(Some(found));
+    }
+    newest_in(dir, Some(cwd))
+}
+
+/// The newest session file in one directory, counting only those held in `cwd` when one is given.
+fn newest_in(dir: &Path, cwd: Option<&Path>) -> Result<Option<PathBuf>> {
     if !dir.exists() {
         return Ok(None);
     }
@@ -472,8 +547,10 @@ pub fn latest_for(dir: &Path, cwd: &Path) -> Result<Option<PathBuf>> {
         // 400 KB conversation as for a 4 KB one, which is why choosing a session this way is
         // affordable at all.
         let Ok(summary) = scan(&path) else { continue };
-        if !same_dir(&summary.cwd, cwd) {
-            continue;
+        if let Some(cwd) = cwd {
+            if !same_dir(&summary.cwd, cwd) {
+                continue;
+            }
         }
         let Ok(meta) = entry.metadata() else { continue };
         let Ok(modified) = meta.modified() else {
@@ -522,11 +599,65 @@ pub fn list(dir: &Path) -> Result<Vec<(String, String)>> {
 }
 
 /// Like `list`, but with everything `scan` found, for the callers that print more.
+///
+/// Two levels are read: the root, which holds sessions written before conversations were separated
+/// by directory, and one level of subdirectories, which is where they go now. The listing is about
+/// all of them, inside and outside the program, so it cannot depend on which directory it was
+/// asked from.
 pub fn list_detailed(dir: &Path) -> Result<Vec<SessionSummary>> {
     let mut out: Vec<(std::time::SystemTime, SessionSummary)> = Vec::new();
     if !dir.exists() {
         return Ok(Vec::new());
     }
+    collect_sessions(dir, &mut out)?;
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        let path = entry.path();
+        // `archive` is skipped at both levels: a session filed away is out of the listing by
+        // definition, and skipping the directory here is what keeps that true without a flag on
+        // any file or a filter on any reader.
+        if !path.is_dir() || is_archive(&path) {
+            continue;
+        }
+        collect_sessions(&path, &mut out)?;
+    }
+    // Newest first. Sorting by the timestamp and then dropping it is simpler
+    // than reversing a keyed sort.
+    out.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    Ok(out.into_iter().map(|(_, summary)| summary).collect())
+}
+
+/// Every archived conversation under a sessions root.
+///
+/// Archived files are filed *beside* the conversations they came from, so a project's archive is in
+/// that project's directory and the root archive is beside the root's own files. Searching all of
+/// them is what keeps `--resume <id>` honest: an archived conversation is still one you may want to
+/// read, and filing it away -- or moving a file by hand -- must not make it unreachable.
+pub fn list_archived(root: &Path) -> Result<Vec<SessionSummary>> {
+    let mut out = list_detailed(&archive_dir(root))?;
+    for entry in std::fs::read_dir(root)?.flatten() {
+        let path = entry.path();
+        if !path.is_dir() || is_archive(&path) {
+            continue;
+        }
+        out.extend(list_detailed(&archive_dir(&path))?);
+    }
+    Ok(out)
+}
+
+/// Whether a path is the archive directory.
+fn is_archive(path: &Path) -> bool {
+    path.file_name().and_then(|n| n.to_str()) == Some("archive")
+}
+
+/// Add every session file directly in `dir` to `out`.
+///
+/// Directly in it: the walk one level out is the caller's, because the two levels mean different
+/// things -- the root holds the older layout and the project directories, and only one of those is
+/// walked into.
+fn collect_sessions(
+    dir: &Path,
+    out: &mut Vec<(std::time::SystemTime, SessionSummary)>,
+) -> Result<()> {
     for entry in std::fs::read_dir(dir)?.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
@@ -540,10 +671,7 @@ pub fn list_detailed(dir: &Path) -> Result<Vec<SessionSummary>> {
             .unwrap_or(std::time::UNIX_EPOCH);
         out.push((modified, summary));
     }
-    // Newest first. Sorting by the timestamp and then dropping it is simpler
-    // than reversing a keyed sort.
-    out.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
-    Ok(out.into_iter().map(|(_, summary)| summary).collect())
+    Ok(())
 }
 
 fn new_id() -> String {
@@ -627,15 +755,6 @@ mod tests {
         format!(r#"{{"type":"chat","message":{{"role":"user","content":"{text}"}}}}"#)
     }
 
-    /// A switch is a line in the file, not a second file.
-    ///
-    /// Switching provider or model used to seed a **new** session with the whole conversation in it,
-    /// because `Meta` names the provider and model and `load` believes it. That made one conversation
-    /// into two files with the same messages in them: the sidebar grew a row nobody asked for, the
-    /// list numbered the same conversation twice, and a `--resume` of either half was half a
-    /// conversation. `Usage` had already made this argument for its own numbers -- a file that is
-    /// append-only records what changed *when* it changed -- so a switch is an event, the last one
-    /// wins, and `load` reports the model actually in force.
     /// `--continue` means "the conversation I was just in *here*", not "the newest file anywhere".
     ///
     /// The old choice was by modification time over the whole home, so a second project's first
@@ -699,6 +818,79 @@ mod tests {
         );
     }
 
+    /// A working directory gets a name of its own: readable, and stable.
+    ///
+    /// Readable because `sessions/` is a directory people look at, and stable because this name is
+    /// what keeps two projects sharing one home apart. A key that changed with the spelling of the
+    /// path would put one project's conversations in two places -- the failure the separation exists
+    /// to prevent. The hash is what keeps two projects whose *last component* matches apart:
+    /// `D:\work\api` and `E:\work\api` are different projects, and a name made of the last component
+    /// alone would not say so.
+    #[test]
+    fn a_working_directory_gets_a_name_of_its_own() {
+        let root = TempDir::new("dir-key");
+        let one = root.0.join("api");
+        let two = root.0.join("work").join("api");
+        std::fs::create_dir_all(&one).expect("one");
+        std::fs::create_dir_all(&two).expect("two");
+
+        let key = dir_key(&one);
+        assert!(key.starts_with("api-"), "not readable: {key}");
+        assert!(
+            key.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_'),
+            "a key that is not a single path component: {key}"
+        );
+        // The same directory, spelled the way whichever process asked happened to spell it.
+        assert_eq!(key, dir_key(&one.join(".")), "one directory, two keys");
+        assert_eq!(
+            key,
+            dir_key(&one.join("..").join("api")),
+            "one directory, two keys"
+        );
+        // Two projects whose last component matches are still two projects.
+        assert_ne!(key, dir_key(&two), "two projects, one key: {key}");
+        // A directory with nothing usable in its name still gets one.
+        assert!(dir_key(&root.0).contains('-'), "no hash in the key");
+    }
+
+    /// A new session is written into the subdirectory of the run it belongs to.
+    ///
+    /// The layout *is* the separation, so it is worth asserting where the file lands rather than
+    /// only that it can be found: a file in the root is a file no project owns, and it is exactly
+    /// what `--continue` would then have to guess about.
+    #[test]
+    fn a_new_session_lives_with_the_directory_it_was_held_in() {
+        let root = TempDir::new("session-layout");
+        let project = TempDir::new("session-layout-project");
+        let other = TempDir::new("session-layout-other");
+        let writer = SessionWriter::create(&root.0, &project.0, "p", "m").expect("create");
+        let path = writer.path().to_path_buf();
+        writer.title("a name").expect("title");
+        assert_eq!(
+            path.parent(),
+            Some(root.0.join(dir_key(&project.0)).as_path()),
+            "the session did not land in its own directory: {}",
+            path.display()
+        );
+        // And it is found again from there, which is the point of putting it there.
+        assert_eq!(
+            latest_for(&root.0, &project.0).expect("latest"),
+            Some(path.clone())
+        );
+        // A directory with nothing of its own gets nothing, rather than somebody else's.
+        assert_eq!(latest_for(&root.0, &other.0).expect("latest"), None);
+    }
+
+    /// A switch is a line in the file, not a second file.
+    ///
+    /// Switching provider or model used to seed a **new** session with the whole conversation in it,
+    /// because `Meta` names the provider and model and `load` believes it. That made one conversation
+    /// into two files with the same messages in them: the sidebar grew a row nobody asked for, the
+    /// list numbered the same conversation twice, and a `--resume` of either half was half a
+    /// conversation. `Usage` had already made this argument for its own numbers -- a file that is
+    /// append-only records what changed *when* it changed -- so a switch is an event, the last one
+    /// wins, and `load` reports the model actually in force.
     #[test]
     fn a_switch_is_a_line_and_the_last_one_is_believed() {
         use crate::event::Message;

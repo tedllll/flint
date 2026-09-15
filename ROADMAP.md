@@ -1024,6 +1024,41 @@ run driven from one directory with `--cwd` naming another records that directory
 own conversation from a *third* process directory, and a `--cwd` that does not exist is refused with
 nothing created and no session left behind.
 
+**Seventh: conversations of two projects shared one directory — fixed, 2026-09-15, asked for after
+the `--continue` fix above.** That fix chose the right session *by reading every file's `meta` line
+and comparing directories*, which is a filter: it works, and it is the wrong shape. The directory a
+conversation belongs to is not something to be inferred from a line inside it when it can be the
+place the file lives. One home serving several projects — the normal shape for a program driving
+flint one process per question, and for anyone who keeps one `FLINT_HOME` across repositories — put
+every conversation in one directory, where the only thing keeping them apart was code. Sessions now
+live in `sessions/<dir>/<id>.jsonl`, where `<dir>` is the working directory's last path component
+lower-cased and cleaned up plus a hash of its whole **canonical** path (`flint-1f0a7c93`): readable
+so a person can see whose conversations are whose, hashed so that `D:\work\api` and `E:\work\api` do
+not share one, and canonical so that the same directory reached through `..`, a symlink or a
+different case does not grow a second home. The layout *is* the separation; nothing infers anything.
+
+Three things this turned up, all of them real. **`/delete 1` broke** -- and so would `/resume 2`,
+`--archive 3` and anything else that names a session by its number or id -- because the resolver put
+a path together as `sessions_dir().join("<id>.jsonl")`, which is a file that no longer exists; the
+listing now carries each session's path and the resolver uses it, because a reader cannot rebuild a
+path it does not know the shape of. **Archive had to follow**, since a file is now filed away beside
+the conversations it came from (`sessions/<dir>/archive/`), and `--resume <id>` searching only the
+root archive would have made a project's archived conversation unreachable: `session::list_archived`
+searches the root's and every project's, which is the promise that `mv` by hand cannot lose one. And
+the **listing had to learn two levels** (`session::list_detailed` walks the root and one level below
+it, skipping `archive` at both), because it is a listing of the home and not of the directory it was
+asked from. Sessions written before this keep working: they sit in the root, and `latest_for` looks
+in the directory this working directory owns *first*, then in the root filtered by the recorded
+`cwd` -- which is why `same_dir` is still there rather than deleted as obsolete.
+
+Five tests, all watched red by making the choice ignore the directory again or by undoing the
+nesting: `a_working_directory_gets_a_name_of_its_own` (one directory spelled three ways is one key;
+two projects with the same last component are two), `a_new_session_lives_with_the_directory_it_was_held_in`,
+`two_projects_in_one_home_keep_their_conversations_apart` (two runs, two directories, each holding
+its own question and not the other's, and `--list-sessions` seeing both from a directory that has no
+conversation of its own), plus the two `--cwd` end-to-end tests, which now assert the layout rather
+than assuming it.
+
 **Done in the same round, recorded so it is not re-done**: themed scrollbars (the default grey ones
 were the complaint); a draggable sidebar and a draggable reading width, with a hairline hint at
 rest on the right hand because there is no seam at the text's edge to be discovered by; the

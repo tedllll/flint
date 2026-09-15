@@ -129,32 +129,35 @@ fn main() {
 /// missing case is an error that says what the options were.
 fn resolve_session(target: &str) -> Result<PathBuf> {
     let dir = config::sessions_dir();
+    // The listing carries each session's *path*, and the resolver uses it. A session is not always
+    // directly in `sessions/`: it lives in the subdirectory belonging to the working directory it
+    // was held in, so joining an id onto the root names a file that is not there -- which is how
+    // `/delete 1` came to report a missing file instead of doing what it was asked.
+    let sessions = session::list_detailed(&dir)?;
 
     if let Ok(index) = target.parse::<usize>() {
-        let sessions = session::list(&dir)?;
         if index == 0 || index > sessions.len() {
             return Err(anyhow!(
                 "no session {index}: /sessions lists {} (1 is the most recent)",
                 sessions.len()
             ));
         }
-        return Ok(dir.join(format!("{}.jsonl", sessions[index - 1].0)));
+        return Ok(sessions[index - 1].path.clone());
     }
 
     let prefix = target.trim_end_matches(".jsonl");
-    // The archive is searched by id as well as the live directory: a conversation that
+    // The archive is searched by id as well as the live directories: a conversation that
     // was filed away is still something you may want to read, and `mv` by hand must not
     // make it unreachable. It is not offered by number, because the numbers are the ones
     // `/sessions` prints and that list does not include the archive.
-    let mut candidates: Vec<(String, PathBuf)> = session::list(&dir)?
+    let mut candidates: Vec<(String, PathBuf)> = sessions
         .into_iter()
-        .map(|(id, _)| (id.clone(), dir.join(format!("{id}.jsonl"))))
+        .map(|summary| (summary.id, summary.path))
         .collect();
-    let archived = session::archive_dir(&dir);
     candidates.extend(
-        session::list(&archived)?
+        session::list_archived(&dir)?
             .into_iter()
-            .map(|(id, _)| (id.clone(), archived.join(format!("{id}.jsonl")))),
+            .map(|summary| (summary.id, summary.path)),
     );
     let matches: Vec<(String, PathBuf)> = candidates
         .into_iter()

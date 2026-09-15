@@ -1,9 +1,19 @@
 # The session file format
 
-A conversation is one file, `~/.flint/sessions/<id>.jsonl`, and it is **append-only**: flint
+A conversation is one file, `~/.flint/sessions/<dir>/<id>.jsonl`, and it is **append-only**: flint
 adds lines and never rewrites one. That single rule is what makes everything else here
 possible — a rename costs one line, a killed process leaves a readable file, and a person
 with a text editor can repair a conversation without a tool that understands it.
+
+`<dir>` is the directory the conversation was held in: its last path component, lower-cased
+and cleaned up, then a hash of the whole canonical path — `flint-1f0a7c93`. The readable part
+is so that a person looking at `sessions/` can see whose conversations are whose; the hash is
+so that two projects whose last component matches (`D:\work\api` and `E:\work\api`) do not
+share one. The directory itself does not move when a project does: a session records the
+working directory it was held in on its `meta` line, and that recorded path — not the name of
+the directory it sits in — is what `--continue` believes. Sessions written before this
+subdirectory existed sit directly in `sessions/` and are still found, which is why the reader
+looks in both places.
 
 The id is the file name: a Unix timestamp and a counter, `1789290356-957.jsonl`. Nothing
 else identifies a session, so `cp` is how you fork one and `mv` is how you rename the file.
@@ -150,6 +160,9 @@ Two warnings about editing, both learned the hard way:
   environment; without it the file loads as a conversation with no model and no working
   directory attached to it.
 
-Archiving is `mv` into `sessions/archive/`, which is why `/archive` is instant and why
-undoing it by hand is the same command backwards. `/delete` removes the file, and nothing
+Archiving is `mv` beside the file it came from, into that directory's `archive/`
+(`sessions/archive/` for a root session, `sessions/<dir>/archive/` for a project's), which is
+why `/archive` is instant and why undoing it by hand is the same command backwards. `--resume`
+searches every archive as well as every live directory, so filing a conversation away — or
+moving it by hand — does not make it unreachable. `/delete` removes the file, and nothing
 else knows it existed.

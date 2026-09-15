@@ -448,12 +448,40 @@ async fn a_run_works_in_the_directory_it_was_given() {
     );
 
     let sessions = home.join("sessions");
-    let files: Vec<std::path::PathBuf> = std::fs::read_dir(&sessions)
+    // The session is not in the sessions root but in the subdirectory that belongs to the working
+    // directory, named after it with a hash of the whole path. That layout *is* the separation
+    // between projects, so it is asserted rather than assumed -- a file left in the root is a file
+    // no project owns, and it is what `--continue` would then have to guess about.
+    let owned: Vec<std::path::PathBuf> = std::fs::read_dir(&sessions)
         .expect("read sessions")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_dir())
+        .collect();
+    assert_eq!(owned.len(), 1, "one project, one directory: {owned:?}");
+    let name = owned[0]
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        name.starts_with("project-"),
+        "the directory is not named after the project: {name}"
+    );
+    let files: Vec<std::path::PathBuf> = std::fs::read_dir(&owned[0])
+        .expect("read the project's sessions")
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
         .collect();
     assert_eq!(files.len(), 1, "one run, one session: {files:?}");
+    assert_eq!(
+        std::fs::read_dir(&sessions)
+            .expect("read sessions")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
+            .count(),
+        0,
+        "a session was left in the root, where no project owns it"
+    );
     let text = std::fs::read_to_string(&files[0]).expect("read the session");
     let meta = text.lines().next().expect("a meta line");
     let recorded: serde_json::Value = serde_json::from_str(meta).expect("the meta line is JSON");
@@ -489,8 +517,8 @@ async fn a_run_works_in_the_directory_it_was_given() {
         "the conversation held in --cwd was not found from another process directory: {stderr}"
     );
     assert_eq!(
-        std::fs::read_dir(&sessions)
-            .expect("read sessions")
+        std::fs::read_dir(&owned[0])
+            .expect("read the project's sessions")
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
             .count(),
@@ -501,6 +529,112 @@ async fn a_run_works_in_the_directory_it_was_given() {
     assert!(
         after.contains("the second question"),
         "the second run did not append to the conversation in --cwd: {after}"
+    );
+}
+
+/// Two projects sharing one home keep their conversations apart -- in the layout, not in a filter.
+///
+/// This is the shape a program driving flint ends up in: one home, one process per question, one
+/// directory per project. Nothing here reads `meta.cwd` to decide which conversation is whose; each
+/// project has a directory of its own under `sessions/`, which is why the listing can still see all
+/// of them and `--continue` can mean something exact.
+#[tokio::test]
+async fn two_projects_in_one_home_keep_their_conversations_apart() {
+    let server = MockServer::start().await;
+    answer_once(&server).await;
+    let home = test_home("two-projects", &server.uri());
+    let one = home.join("one");
+    let two = home.join("two");
+    std::fs::create_dir_all(&one).expect("one");
+    std::fs::create_dir_all(&two).expect("two");
+
+    for (dir, question) in [
+        (&one, "the first project speaks"),
+        (&two, "the second project speaks"),
+    ] {
+        let out = binary()
+            .current_dir(&home)
+            .env("FLINT_HOME", &home)
+            .env_remove("NO_COLOR")
+            .args(["--cwd"])
+            .arg(dir)
+            .args(["-p", question])
+            .output()
+            .expect("failed to run flint");
+        assert!(
+            out.status.success(),
+            "--cwd {} failed: {}",
+            dir.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let sessions = home.join("sessions");
+    let mut dirs: Vec<String> = std::fs::read_dir(&sessions)
+        .expect("read sessions")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        .collect();
+    dirs.sort();
+    assert_eq!(dirs.len(), 2, "the projects were not separated: {dirs:?}");
+    assert!(dirs[0].starts_with("one-"), "{dirs:?}");
+    assert!(dirs[1].starts_with("two-"), "{dirs:?}");
+    assert_eq!(
+        std::fs::read_dir(&sessions)
+            .expect("read sessions")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
+            .count(),
+        0,
+        "a session was left in the root, where no project owns it"
+    );
+
+    // Each directory holds its own question and not the other's, so nothing was shared or crossed.
+    for (name, mine, theirs) in [
+        (
+            &dirs[0],
+            "the first project speaks",
+            "the second project speaks",
+        ),
+        (
+            &dirs[1],
+            "the second project speaks",
+            "the first project speaks",
+        ),
+    ] {
+        let files: Vec<std::path::PathBuf> = std::fs::read_dir(sessions.join(name))
+            .expect("read the project's sessions")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+            .collect();
+        assert_eq!(files.len(), 1, "{name} holds {files:?}");
+        let text = std::fs::read_to_string(&files[0]).expect("read the session");
+        assert!(text.contains(mine), "{name} does not hold its own question");
+        assert!(
+            !text.contains(theirs),
+            "{name} holds the other project's question"
+        );
+    }
+
+    // The listing is of the home, not of wherever it happens to be run from -- here, a directory
+    // with no conversation of its own.
+    let listed = binary()
+        .current_dir(&home)
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .arg("--list-sessions")
+        .output()
+        .expect("failed to run flint");
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let listing = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        listing.contains("the first project") && listing.contains("the second project"),
+        "the listing is not of the whole home: {listing}"
     );
 }
 
@@ -656,11 +790,10 @@ async fn continue_with_nothing_here_starts_one_and_says_so() {
         theirs_before,
         "the empty directory was given another directory's conversation"
     );
-    let new_sessions: Vec<String> = std::fs::read_dir(&sessions)
-        .expect("read the sessions directory")
-        .filter_map(|entry| entry.ok().map(|e| e.file_name().to_string_lossy().to_string()))
-        .filter(|name| name.ends_with(".jsonl"))
-        .collect();
+    // The other directory's conversation is where it was, and this one has a conversation of its
+    // own: the flat file the other directory was given, plus the new one, in this project's own
+    // subdirectory.
+    let new_sessions = jsonl_files(&sessions);
     assert_eq!(
         new_sessions.len(),
         2,
@@ -833,11 +966,9 @@ async fn a_session_can_be_named_after_the_fact_and_the_last_name_wins() {
     );
 
     // The same conversation, continued and renamed.
-    let resume_args = std::fs::read_dir(home.join("sessions"))
-        .expect("sessions dir")
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+    let resume_args = jsonl_files(&home.join("sessions"))
+        .into_iter()
+        .next()
         .expect("the run did not write a session");
     assert!(
         std::fs::read_to_string(&resume_args)
@@ -921,11 +1052,9 @@ async fn the_repl_names_the_open_session_and_refuses_to_delete_it() {
     let out = child.wait_with_output().expect("flint did not finish");
     let text = String::from_utf8_lossy(&out.stdout).to_string();
 
-    let session = std::fs::read_dir(home.join("sessions"))
-        .expect("sessions dir")
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+    let session = jsonl_files(&home.join("sessions"))
+        .into_iter()
+        .next()
         .expect("no session file was written");
     let body = std::fs::read_to_string(&session).expect("read session");
 
@@ -1259,12 +1388,9 @@ async fn a_forked_session_is_a_copy_and_the_original_is_untouched() {
         "the original session was written to: a fork is a copy, not a resume"
     );
 
-    let copies: Vec<std::path::PathBuf> = std::fs::read_dir(home.join("sessions"))
-        .expect("read the sessions directory")
-        .filter_map(|entry| entry.ok().map(|e| e.path()))
-        .filter(|path| {
-            path.extension().and_then(|e| e.to_str()) == Some("jsonl") && *path != original
-        })
+    let copies: Vec<std::path::PathBuf> = jsonl_files(&home.join("sessions"))
+        .into_iter()
+        .filter(|path| *path != original)
         .collect();
     assert_eq!(
         copies.len(),
@@ -2128,10 +2254,9 @@ async fn a_stopped_turn_keeps_the_answer_it_drew() {
     let bodies = provider.bodies();
     // The session file too: a message that only ever existed in memory is one a restart
     // loses, and `/resume` is how a conversation is picked up later.
-    let written: String = std::fs::read_dir(home.join("sessions"))
-        .expect("the sessions directory")
-        .filter_map(|entry| entry.ok())
-        .map(|entry| std::fs::read_to_string(entry.path()).unwrap_or_default())
+    let written: String = jsonl_files(&home.join("sessions"))
+        .into_iter()
+        .map(|path| std::fs::read_to_string(path).unwrap_or_default())
         .collect();
     let _ = std::fs::remove_dir_all(&home);
 
@@ -2280,13 +2405,14 @@ async fn through_a_switch(
         .iter()
         .map(|request| String::from_utf8_lossy(&request.body).to_string())
         .collect();
-    let files = std::fs::read_dir(&sessions)
-        .expect("the sessions directory")
-        .filter_map(|entry| entry.ok())
-        .map(|entry| {
+    // Read through `jsonl_files`, so the session is found wherever the layout puts it: a test that
+    // looked only in the sessions root would report that nothing was written at all.
+    let files = jsonl_files(&sessions)
+        .into_iter()
+        .map(|path| {
             (
-                entry.file_name().to_string_lossy().to_string(),
-                std::fs::read_to_string(entry.path()).unwrap_or_default(),
+                path.file_name().unwrap_or_default().to_string_lossy().to_string(),
+                std::fs::read_to_string(&path).unwrap_or_default(),
             )
         })
         .collect();
@@ -2294,17 +2420,35 @@ async fn through_a_switch(
     (text, files, bodies)
 }
 
-/// The `.jsonl` files in a sessions directory, sorted by name so a comparison is about the files
+/// The `.jsonl` files under a sessions directory, sorted by name so a comparison is about the files
 /// rather than about the order the filesystem happened to hand them over in.
+///
+/// One level down is included, and that is not a convenience: a conversation lives in the
+/// subdirectory belonging to the working directory it was held in, so a test that looked only in the
+/// root would find nothing and say the run wrote no session. The archive is skipped, because it is
+/// out of every listing by definition and a test asking "how many sessions are there" means the
+/// ones that are still in play.
 fn jsonl_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let mut out: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
-        .expect("the sessions directory")
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().map(|e| e == "jsonl").unwrap_or(false))
-        .collect();
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    collect_jsonl(dir, &mut out);
+    for entry in std::fs::read_dir(dir).expect("the sessions directory").flatten() {
+        let path = entry.path();
+        if path.is_dir() && path.file_name().and_then(|n| n.to_str()) != Some("archive") {
+            collect_jsonl(&path, &mut out);
+        }
+    }
     out.sort();
     out
+}
+
+fn collect_jsonl(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    out.extend(
+        std::fs::read_dir(dir)
+            .expect("the sessions directory")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().map(|e| e == "jsonl").unwrap_or(false)),
+    );
 }
 
 /// Wait until the stub has received `n` requests, without blocking the runtime it runs on.

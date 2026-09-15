@@ -7,10 +7,20 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 396 passing, 1 ignored (258 lib, 2 in
-the binary's own tests, 33 `agent_loop`, 53 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
+As of the commit that carries this file, `cargo test` is 404 passing, 1 ignored (261 lib, 2 in
+the binary's own tests, 33 `agent_loop`, 58 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
 `term_capture` plus the ignored cost measurement, 22 `web_view`), `cargo clippy --all-targets` is
 silent, and both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
+
+**Sessions are now separated by working directory.** A conversation lives in
+`sessions/<dir>/<id>.jsonl`, where `<dir>` is the last path component of the working directory plus
+a hash of its canonical path; older sessions sit directly in `sessions/` and are still found.
+`--continue` looks in this directory's own subdirectory first and falls back to the root, filtered by
+the `cwd` recorded in `meta`. The listing reads both levels, `--resume`/`/delete`/`/archive` resolve
+through the path the listing carries rather than rebuilding one, and `session::list_archived` searches
+every archive (the root's and each project's). `--cwd` is resolved to an absolute path at startup and
+refused if it is not a directory, and it is what gets recorded — so a program driving flint one
+process per question can name its project and still find its own conversation from any directory.
 
 **The last sessions were on Windows** (10.0.26200, AMD64, rustc 1.98.1, PowerShell 5.1.26100.6584
 as the only PowerShell on `PATH`, locale ANSI code page 936), and the work is now being moved to
@@ -66,7 +76,7 @@ open, so the copy needs every flint window closed first — measured twice.
 
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
-cargo test                                        # 396 passing, 1 ignored
+cargo test                                        # 404 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed
@@ -635,7 +645,7 @@ back: `the_example_renders_with_the_repls_sink` fails if the example matches on 
 (mutation-checked — re-inlining an `Event::Text` arm fails it).
 
 The extraction's whole risk was that it changed the output, which is what the byte-exact
-`term_capture` suite exists to catch: 20 tests, unchanged and passing. Counts above are 52 `cli_output`
+`term_capture` suite exists to catch: 20 tests, unchanged and passing. Counts above are 58 `cli_output`
 and the same 22 `web_view`; the test count did not move because the example had no test of its own.
 
 ### A provider can be added from the page, which is the question §8 left open
