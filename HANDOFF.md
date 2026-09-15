@@ -7,8 +7,8 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 385 passing, 1 ignored (257 lib, 2 in
-the binary's own tests, 33 `agent_loop`, 47 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
+As of the commit that carries this file, `cargo test` is 387 passing, 1 ignored (257 lib, 2 in
+the binary's own tests, 33 `agent_loop`, 49 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
 `term_capture` plus the ignored cost measurement, 18 `web_view`), `cargo clippy --all-targets` is
 silent, and both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
 
@@ -34,12 +34,12 @@ Written for a cold start: a different machine, and possibly a session with no me
 one. The repository is the whole state — there is no index, no cache and no database anywhere in
 flint, on purpose — so cloning it and running the gate below is all that "catching up" means.
 
-**Where it was left.** `main` at the commit that gives the file tools a `file_path` with `path` as an
-alias (`feat: the file tools take file_path, and path still works`), plus the documentation commit
-that carries this file, working tree clean, `origin/main` level with it. **§8 is finished** — all five
-controls are on the page — and §9's last open hole is closed; of the roadmap's small list, two items
-are left (`--fork`, and `examples/live_turn.rs` drifting from `run_turn`). The counts are in the
-section above and were re-run to write this paragraph, not remembered.
+**Where it was left.** `main` at the commit that adds `--fork`
+(`feat: --fork copies a conversation instead of continuing it`), plus the documentation commit that
+carries this file, working tree clean, `origin/main` level with it. **§8 is finished** — all five
+controls are on the page — §9's last open hole is closed, and of the roadmap's small list one item is
+left: `examples/live_turn.rs` still keeps its own copy of `run_turn`'s event handling and has drifted
+twice. The counts are in the section above and were re-run to write this paragraph, not remembered.
 
 **What the other machine needs.**
 
@@ -55,7 +55,7 @@ section above and were re-run to write this paragraph, not remembered.
 
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
-cargo test                                        # 385 passing, 1 ignored
+cargo test                                        # 387 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed
@@ -602,6 +602,32 @@ free-form, so a page form would send several settings at once, and the terminal'
 them one at a time — it would need a `/config set <key> <value>` that the terminal does not have.
 Inventing a command for the page's benefit is the thing §8's design exists to prevent. The page
 therefore writes nothing into the config file in this round.
+
+### `--fork` copies a conversation instead of continuing it
+
+Second item off the roadmap's small list, and the one that was described as "`cp` already does this;
+the flag is about making it discoverable" — which is exactly the shape it took. `--fork` names a
+session the way `--resume` does (list number, id prefix, path, or nothing for the most recent), loads
+it, and then does the one thing `--resume` must not: it makes a *new* file and continues there. The
+original is never opened for writing, and the e2e asserts that as bytes rather than as intent.
+
+**The file is seeded, not left empty.** `session::SessionWriter::seed` already existed for the
+`/model` bug — a switch that moved the conversation into a new file — and a fork is the same problem
+with a friendlier name: a run whose context held the conversation and whose session did not would be a
+transcript on screen that no file contains, and a page tailing a session that begins mid-sentence. So
+the fork goes through `seed`, which also carries the conversation's `title` line.
+
+**Combining `--fork` with `--resume`/`--continue` is refused**, naming both. All three answer "which
+file does this run write"; picking one silently is how an afternoon's work lands somewhere unexpected.
+
+**Measured**: `a_forked_session_is_a_copy_and_the_original_is_untouched` drives the real binary with
+`--fork 111-1 -p "now branch it"` against the stub provider, then asserts the original's bytes are
+identical, that exactly one new `.jsonl` exists, that it holds the copied question, answer and title
+*and* the new turn, and that stderr names both files. `forking_and_resuming_at_once_is_refused` pins
+the conflict. Both were watched red by removing the flag from the parser — the run answered `unknown
+flag '--fork'` — which is the honest red for a flag that did not exist a moment before.
+
+`README.md` gained the two command lines and a paragraph; the roadmap item is struck.
 
 ### `file_path` is the name the file tools ask for, and `path` still works
 

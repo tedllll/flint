@@ -101,6 +101,8 @@ flint why is my dsh broken       # same thing
 flint --continue                 # resume the last session
 flint --resume 3                 # resume a particular one (see the list)
 flint --resume 1789116592        # ...by id prefix, or by path to the .jsonl
+flint --fork 3                   # copy that session and carry on in the copy
+flint --fork                     # ...the most recent one, when a branch is the point
 flint exec "npm i -g @deepseek-ai/dsh"   # no model involved
 flint --list-sessions            # numbered, so --resume N works
 flint --name "codex config"      # name the conversation you are in
@@ -120,6 +122,14 @@ Resuming prints the tail of the transcript, so "did it load?" is answerable at a
 glance. Loading also happens when there is no network: an unreachable provider is
 reported and the session still opens, because the history is how you find out what
 you were doing when you broke it.
+
+`--fork` is resuming's other half: it takes the same three ways of naming a session
+(the list number, an id prefix, a path — or nothing at all for the most recent), copies
+the conversation into a new session, and continues there. The original is not written
+to, which is the point: `cp` can already do this, but wanting to try something without
+losing the conversation you have should not require knowing where flint keeps its
+sessions. The copy carries the conversation and the name, and the run says which file
+it is writing.
 
 Inside the REPL:
 
@@ -150,7 +160,8 @@ input. Ctrl-C clears a half-typed line, and quits when the line is already
 empty. Ctrl-D quits.
 
 Flags: `--provider`, `--model`, `--readonly`, `--cwd`, `--no-color` (or
-`NO_COLOR`), `--continue`, `--name`, `--archive`, `--delete`, `--json`.
+`NO_COLOR`), `--continue`, `--resume`, `--fork`, `--name`, `--archive`, `--delete`,
+`--json`.
 
 ### Reading a run from a program
 

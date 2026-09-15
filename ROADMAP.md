@@ -933,8 +933,10 @@ with it; and `/stop`, the interrupt as a short word, reachable from the composer
   is accepted; two names that disagree are refused rather than resolved. `list`, `glob` and `grep`
   keep `path`, which is not an oversight: theirs is a directory or a place to search, not a file to
   read or write, and the plan named these three.
-- `--fork`: copy a session file and continue the copy. `cp` already does this; the flag is
-  about making it discoverable.
+- ~~`--fork`: copy a session file and continue the copy.~~ **Done, 2026-09-15**: it takes the same
+  three ways of naming a session as `--resume` (and bare, the most recent), seeds a new file with
+  the conversation and the name, and leaves the original byte-for-byte untouched. Combining it with
+  `--resume`/`--continue` is refused, because both answer "which file does this run write".
 - `examples/live_turn.rs` keeps a hand-maintained copy of `run_turn`'s event handling and has
   drifted twice, costing time chasing faults that were only in the example. It should use
   the same sink the CLI does.

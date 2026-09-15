@@ -907,6 +907,111 @@ async fn answer_once(server: &MockServer) {
         .await;
 }
 
+/// A fork copies the conversation and then writes somewhere else, and the original is not touched.
+///
+/// That is the whole promise, and it is a promise about *bytes*: `--fork` exists because `cp`
+/// already does this and knowing where flint keeps a session -- or that a conversation is one
+/// file at all -- should not be the price of branching one. The failure this pins is the obvious
+/// implementation of a fork: load the conversation and then continue in the file it was loaded
+/// from, which is `--resume` with a friendlier name and quietly appends the branch to the
+/// original.
+#[tokio::test]
+async fn a_forked_session_is_a_copy_and_the_original_is_untouched() {
+    let server = MockServer::start().await;
+    answer_once(&server).await;
+    let home = test_home("fork", &server.uri());
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("working directory");
+    let original = write_session(
+        &home.join("sessions"),
+        "111-1.jsonl",
+        &[
+            &meta_line("111-1"),
+            r#"{"type":"chat","message":{"role":"user","content":"the question worth branching"}}"#,
+            r#"{"type":"chat","message":{"role":"assistant","content":"the answer it got"}}"#,
+            r#"{"type":"title","name":"branchy"}"#,
+        ],
+        10,
+    );
+    let before = std::fs::read(&original).expect("read the original");
+
+    let out = binary()
+        .current_dir(&work)
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .args(["--fork", "111-1", "-p", "now branch it"])
+        .output()
+        .expect("failed to run flint");
+    assert!(
+        out.status.success(),
+        "flint --fork failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert_eq!(
+        std::fs::read(&original).expect("read the original again"),
+        before,
+        "the original session was written to: a fork is a copy, not a resume"
+    );
+
+    let copies: Vec<std::path::PathBuf> = std::fs::read_dir(home.join("sessions"))
+        .expect("read the sessions directory")
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| {
+            path.extension().and_then(|e| e.to_str()) == Some("jsonl") && *path != original
+        })
+        .collect();
+    assert_eq!(
+        copies.len(),
+        1,
+        "a fork must leave exactly one new session behind: {copies:?}"
+    );
+    let copied = std::fs::read_to_string(&copies[0]).expect("read the copy");
+    for needed in [
+        "the question worth branching",
+        "the answer it got",
+        "now branch it",
+        r#""name":"branchy""#,
+    ] {
+        assert!(
+            copied.contains(needed),
+            "the copy does not hold `{needed}`: {copied}"
+        );
+    }
+
+    // Both names, because the question a fork raises five minutes later is which file is which.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("forking 111-1.jsonl"),
+        "the run did not say what it was copying: {stderr}"
+    );
+    assert!(
+        stderr.contains("forked into") && stderr.contains("the original is untouched"),
+        "the run did not say where the copy went: {stderr}"
+    );
+}
+
+/// `--fork` and `--resume` answer the same question -- which file does this run write -- and
+/// picking one of two answers is how an afternoon's work ends up somewhere unexpected. Refused,
+/// with both names in the message, rather than won by whichever the code checks first.
+#[test]
+fn forking_and_resuming_at_once_is_refused() {
+    let home = test_home("fork-conflict", "http://127.0.0.1:1/v1");
+    let out = binary()
+        .env("FLINT_HOME", &home)
+        .args(["--fork", "111-1", "--resume", "111-1", "-p", "x"])
+        .output()
+        .expect("failed to run flint");
+    assert!(!out.status.success(), "the two flags were accepted together");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for needed in ["--fork", "--resume"] {
+        assert!(
+            stderr.contains(needed),
+            "the refusal must name `{needed}`: {stderr}"
+        );
+    }
+}
+
 /// Resume a one-session home in the REPL and return (stdout, the first request body).
 ///
 /// The stub stands in for the provider so the test can read what was actually sent: the

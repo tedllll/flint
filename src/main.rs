@@ -35,6 +35,13 @@ struct Args {
     /// session worth returning to is three conversations back -- and going back is the
     /// normal case when the last thing you did was break something.
     resume: Option<String>,
+    /// A session to copy and continue instead of one to continue in place: the same three ways of
+    /// naming it as `--resume`, and empty for the most recent.
+    ///
+    /// `cp` already does this, which is why it is a flag and not a file format: the point is that
+    /// "take this conversation and branch it" should not require knowing where flint keeps its
+    /// sessions, or that a conversation is one file.
+    fork: Option<String>,
     /// A name for the conversation this run writes to.
     ///
     /// Applied after the session exists, as an appended `title` line: a run that resumes
@@ -341,15 +348,30 @@ async fn real_main() -> Result<i32> {
     let key_missing = key.trim().is_empty() && !is_local_endpoint(&provider_cfg.base_url);
 
     // ---- resume a session, if asked ----
+    //
+    // `--fork` opens a conversation too, so it is refused here rather than silently winning: both
+    // flags say which file the run writes, and a program that picks one of two answers to that is
+    // a program that can lose an afternoon's work to a shell history line.
+    if args.fork.is_some() && (args.continue_last || args.resume.is_some()) {
+        return Err(anyhow!(
+            "--fork copies a session and --resume/--continue write to the one they open; give one"
+        ));
+    }
     let mut history: Vec<event::Message> = Vec::new();
     let mut resumed: Option<PathBuf> = None;
+    // The conversation `--fork` copied, as the pair the seeding needs: the messages to write into
+    // the new file and the name to carry with them. Kept here rather than in `resumed` because the
+    // two do opposite things with the file -- a resume appends to the session it opened, and a fork
+    // must not touch it at all.
+    let mut forked: Option<(Vec<event::Message>, Option<String>)> = None;
     // Kept whole, not just its messages: the transcript is printed from it after the
     // terminal exists, and an empty screen cannot be told apart from a failed load.
     let mut resumed_history: Option<session::LoadedSession> = None;
-    if args.continue_last || args.resume.is_some() {
-        let target = match &args.resume {
-            Some(t) => Some(resolve_session(t)?),
-            None => session::latest(&config::sessions_dir())?,
+    if args.continue_last || args.resume.is_some() || args.fork.is_some() {
+        let target = match (&args.resume, &args.fork) {
+            (Some(t), _) => Some(resolve_session(t)?),
+            (_, Some(t)) if !t.is_empty() => Some(resolve_session(t)?),
+            _ => session::latest(&config::sessions_dir())?,
         };
         match target {
             Some(path) => {
@@ -358,8 +380,10 @@ async fn real_main() -> Result<i32> {
                 if !loaded.model.is_empty() && args.model.is_none() {
                     provider_cfg.model = loaded.model.clone();
                 }
+                let copied = args.fork.is_some();
                 eprintln!(
-                    "flint: resumed {} ({} messages){}",
+                    "flint: {} {} ({} messages){}",
+                    if copied { "forking" } else { "resumed" },
                     path.file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_default(),
@@ -369,7 +393,11 @@ async fn real_main() -> Result<i32> {
                         None => String::new(),
                     }
                 );
-                resumed = Some(path);
+                if copied {
+                    forked = Some((history.clone(), loaded.title.clone()));
+                } else {
+                    resumed = Some(path);
+                }
                 resumed_history = Some(loaded);
             }
             None => eprintln!("flint: no previous session found; starting a new one."),
@@ -402,16 +430,44 @@ async fn real_main() -> Result<i32> {
         }
     };
     // Continuing a conversation appends to the same file, so nothing said after
-    // `--continue` is lost.
-    let writer = match &resumed {
-        Some(path) => Some(session::SessionWriter::resume(path)?),
-        None => Some(session::SessionWriter::create(
+    // `--continue` is lost. A fork is the one case where the conversation and the file come
+    // apart, and the file has to be *seeded* with what was copied rather than left empty: a fork
+    // whose context held the conversation but whose session did not is the `/model` bug again --
+    // a transcript on screen that no file contains, and a page tailing a session that starts
+    // mid-sentence.
+    let writer = match (&resumed, &forked) {
+        (Some(path), _) => Some(session::SessionWriter::resume(path)?),
+        (None, Some((messages, title))) => Some(session::SessionWriter::seed(
+            &config::sessions_dir(),
+            &cwd,
+            &provider_cfg.name,
+            &provider_cfg.model,
+            messages,
+            title.as_deref(),
+        )?),
+        (None, None) => Some(session::SessionWriter::create(
             &config::sessions_dir(),
             &cwd,
             &provider_cfg.name,
             &provider_cfg.model,
         )?),
     };
+    // A fork writes a file the run has just made, and until it has a name the two sessions are
+    // indistinguishable in the only place it matters -- `/sessions`, five minutes later, where the
+    // choice is between the original and the branch. The original is named too, because "untouched"
+    // is worth saying out loud for the one command that could have been a resume by mistake.
+    if forked.is_some() {
+        if let Some(writer) = &writer {
+            eprintln!(
+                "flint: forked into {}; the original is untouched",
+                writer
+                    .path()
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            );
+        }
+    }
     // Naming is an appended event, so it works the same whether this run started the
     // conversation or continued it. Done here, before the writer is handed to the agent,
     // so the name is on disk before the first turn is asked for.
@@ -3537,6 +3593,19 @@ fn parse_args(argv: Vec<String>) -> Result<Args> {
                     args.resume = Some(next);
                 }
             }
+            // `--fork` names a session the same way `--resume` does, and the difference is what
+            // happens to the file rather than to the conversation: the original is left alone and
+            // the run writes the copy. Bare, it forks the most recent, the same tolerance `--resume`
+            // has, because "take the last conversation and branch it" is the whole use.
+            "--fork" => {
+                let next = iter.peek().cloned().unwrap_or_default();
+                if next.is_empty() || next.starts_with('-') || next == "exec" {
+                    args.fork = Some(String::new());
+                } else {
+                    iter.next();
+                    args.fork = Some(next);
+                }
+            }
             "--provider" => {
                 args.provider = Some(
                     iter.next()
@@ -3653,6 +3722,7 @@ fn print_help(color: bool, term: &Term) {
   flint <words...>                 same as -p
   flint --continue                 resume the most recent session
   flint --resume <n|id>            resume a particular session
+  flint --fork [<n|id>]            copy a session and continue the copy, leaving the original alone
   flint exec <command>             run a command directly (no model, no network)
   flint debug prompt-input [msg]   print the request that would be sent, and send nothing
   flint --list-sessions            list saved sessions, numbered for --resume
