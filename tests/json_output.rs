@@ -111,6 +111,33 @@ fn home_for(tag: &str, base_url: &str, cwd: &Path) -> PathBuf {
     dir
 }
 
+/// A scratch home whose provider block is written by the caller.
+///
+/// The exit code a caller branches on depends on *why* the run ended, so these tests need homes
+/// that differ in exactly one way -- no key, a step limit -- and a fixture that can only make one
+/// kind of home would leave those cases untested or tested by a second copy of it.
+fn home_configured(tag: &str, extra: &str, provider_block: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("flint-json-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("home directory");
+    std::fs::write(
+        dir.join("config.toml"),
+        format!("default_provider = \"stub\"\n{extra}\n[[providers]]\n{provider_block}\n"),
+    )
+    .expect("config file");
+    dir
+}
+
+/// A stub answer that asks for a tool, for ever: the model never gets to finish.
+fn always_asks_for_a_tool() -> String {
+    sse(&[
+        r#"data: {"choices":[{"delta":{"content":"looking. "}}]}"#,
+        r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"list","arguments":"{\"path\":\".\"}"}}]}}]}"#,
+        r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+        "data: [DONE]",
+    ])
+}
+
 /// Run the real binary, parse the stream, and return (exit code, lines, stderr).
 fn run_json(home: &Path, cwd: &Path, args: &[&str]) -> (i32, Vec<Value>, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_flint"))
@@ -297,7 +324,9 @@ async fn a_run_that_cannot_start_ends_the_stream_with_an_error() {
 
     let (code, lines, stderr) = run_json(&home, &cwd, &["-p", "say hello", "--json"]);
 
-    assert_eq!(code, 1, "a run with no key must fail");
+    // `EX_UNAVAILABLE`: a provider with no key is not a failed question, it is a provider that
+    // cannot be asked at all, and the answer to a caller that retries is the same nothing.
+    assert_eq!(code, exit_codes::UNAVAILABLE, "a run with no key must fail");
     assert_eq!(
         kinds(&lines),
         vec!["session.started", "turn.started", "error"],
@@ -325,7 +354,7 @@ async fn json_without_a_prompt_is_refused_without_writing_a_stream() {
     let home = home_for("refuse", &server.uri(), &cwd);
     let (code, lines, stderr) = run_json(&home, &cwd, &["--json"]);
 
-    assert_eq!(code, 1);
+    assert_eq!(code, exit_codes::USAGE, "a missing prompt is the caller's command line");
     assert!(lines.is_empty(), "a refused run still wrote a stream: {lines:?}");
     assert!(
         stderr.contains("--json needs a prompt"),
@@ -430,11 +459,21 @@ async fn a_run_can_be_stopped_from_stdin() {
              ten seconds. Stream: {lines:?}"
         )
     });
+    // Not 0, which is what this asserted when the stop was first built, and which was the bug: a
+    // truncated answer and a finished one shared a success code, so a caller that branched on the
+    // exit code -- which is what callers do -- acted on half an answer. The stream was honest
+    // throughout; the code was not.
     assert_eq!(
         status.code(),
-        Some(0),
-        "a stopped run is a turn that ended, not a failure: {:?}",
+        Some(exit_codes::INTERRUPTED),
+        "a stopped run must not exit 0: {:?}",
         kinds(&lines)
+    );
+    // And the stream says the same thing in the vocabulary a program reads.
+    assert_eq!(
+        line_of(&lines, "turn.completed")["outcome"],
+        "stopped",
+        "the end of a stopped turn does not say it was stopped: {lines:?}"
     );
     assert!(
         kinds(&lines).iter().all(|k| k != "message.delta"),
@@ -557,7 +596,7 @@ async fn a_stopped_run_keeps_what_it_had_drawn() {
     });
     assert_eq!(
         status.code(),
-        Some(0),
+        Some(exit_codes::INTERRUPTED),
         "the stopped run did not end cleanly. Stream: {text}"
     );
     assert!(
@@ -575,6 +614,148 @@ async fn a_stopped_run_keeps_what_it_had_drawn() {
         "what the caller read is not in the session file, so asking about it later answers as if it \
          had never been written. Events: {events:?}"
     );
+}
+
+/// The exit code is the first thing a program looks at, so it has to classify the failure.
+///
+/// Every one of these used to be `1`, which tells a caller nothing: not whether to retry, not
+/// whether the input was wrong, not whether the answer existed at all. The codes here are the
+/// convention `sysexits.h` settled on, because "a CLI that always exits 0 (or always 1) hides this
+/// signal, forcing agents to parse error text with regex" -- which is exactly what a caller of flint
+/// had to do.
+mod exit_codes {
+    use super::*;
+
+    pub(super) const USAGE: i32 = 2;
+    pub(super) const DATAERR: i32 = 65;
+    pub(super) const UNAVAILABLE: i32 = 69;
+    pub(super) const INTERRUPTED: i32 = 130;
+
+    /// A normal turn is a success, and says so twice: the code and the outcome.
+    #[tokio::test]
+    async fn a_finished_turn_is_a_success_with_a_complete_outcome() {
+        let server = MockServer::start().await;
+        let cwd = cwd_for("code-ok");
+        Mock::given(method("POST"))
+            .respond_with(SseFixture {
+                body: answers_in_two_fragments(),
+            })
+            .mount(&server)
+            .await;
+        let home = home_for("code-ok", &server.uri(), &cwd);
+
+        let (code, lines, stderr) = run_json(&home, &cwd, &["-p", "say hello", "--json"]);
+        let _ = std::fs::remove_dir_all(&home);
+        assert_eq!(code, 0, "a turn that answered failed: {stderr} {lines:?}");
+        assert_eq!(
+            line_of(&lines, "turn.completed")["outcome"],
+            "complete",
+            "the end of the turn does not say how it ended: {lines:?}"
+        );
+    }
+
+    /// A turn that ran out of steps is not a failure and not a success: the answer is there and it
+    /// is unfinished, and a caller that acts on it is acting on half of one.
+    #[tokio::test]
+    async fn a_turn_that_ran_out_of_steps_says_incomplete() {
+        let server = MockServer::start().await;
+        let cwd = cwd_for("code-steps");
+        Mock::given(method("POST"))
+            .respond_with(SseFixture {
+                body: always_asks_for_a_tool(),
+            })
+            .mount(&server)
+            .await;
+        let home = home_configured(
+            "code-steps",
+            "max_steps = 1\n",
+            &format!(
+                "name = \"stub\"\nbase_url = \"{}\"\napi_key = \"test\"\nmodel = \"stub-model\"",
+                server.uri()
+            ),
+        );
+        std::fs::create_dir_all(&cwd).expect("working directory");
+
+        let (code, lines, stderr) = run_json(&home, &cwd, &["-p", "keep going", "--json"]);
+        let _ = std::fs::remove_dir_all(&home);
+        assert_eq!(
+            line_of(&lines, "turn.completed")["outcome"],
+            "incomplete",
+            "a turn stopped by its own step limit ended as if it had finished: {stderr} {lines:?}"
+        );
+        assert_eq!(
+            code, DATAERR,
+            "an unfinished answer exited as if it were a usable one: {lines:?}"
+        );
+    }
+
+    /// A provider that cannot be used is not a generic failure: nothing was asked of the model, and
+    /// the fix is a key rather than a different question.
+    #[tokio::test]
+    async fn a_provider_with_no_key_is_unavailable() {
+        let cwd = cwd_for("code-nokey");
+        let home = home_configured(
+            "code-nokey",
+            "",
+            "name = \"stub\"\nbase_url = \"https://example.invalid/v1\"\napi_key = \"\"\nmodel = \"stub-model\"",
+        );
+        std::fs::create_dir_all(&cwd).expect("working directory");
+
+        let (code, lines, stderr) = run_json(&home, &cwd, &["-p", "hello", "--json"]);
+        let _ = std::fs::remove_dir_all(&home);
+        assert!(
+            kinds(&lines).iter().any(|k| k == "error"),
+            "the unusable provider was not on the stream: {stderr} {lines:?}"
+        );
+        assert_eq!(
+            code, UNAVAILABLE,
+            "a missing key is not a generic failure: {lines:?}"
+        );
+    }
+
+    /// A command line flint cannot act on is the caller's to fix, and must not look like a failed
+    /// question -- the difference decides whether a program retries or reads its own arguments.
+    #[tokio::test]
+    async fn a_bad_command_line_is_a_usage_error() {
+        let cwd = cwd_for("code-usage");
+        std::fs::create_dir_all(&cwd).expect("working directory");
+        let home = std::env::temp_dir().join(format!("flint-json-code-usage-{}", std::process::id()));
+        std::fs::create_dir_all(&home).expect("home directory");
+
+        let (code, _, _) = run_json(&home, &cwd, &["-p", "hello", "--json", "--not-a-flag"]);
+        let _ = std::fs::remove_dir_all(&home);
+        assert_eq!(code, USAGE, "an unknown flag is not a failure of the model");
+    }
+
+    /// A schema flint cannot check is a command-line mistake, not an answer that failed: nothing was
+    /// asked, and changing the schema fixes it.
+    #[test]
+    fn an_unusable_schema_is_a_usage_error() {
+        let cwd = cwd_for("code-schema");
+        std::fs::create_dir_all(&cwd).expect("working directory");
+        let home = std::env::temp_dir().join(format!("flint-json-code-schema-{}", std::process::id()));
+        std::fs::create_dir_all(&home).expect("home directory");
+
+        let (code, lines, stderr) = run_json(
+            &home,
+            &cwd,
+            &["-p", "hello", "--json", "--schema", r#"{"type":"object","pattern":1}"#],
+        );
+        let _ = std::fs::remove_dir_all(&home);
+        // The refusal reaches stderr, not stdout: the schema is resolved before the stream is opened,
+        // so a `--json` caller sees an empty stdout and a non-zero code. Recorded rather than fixed
+        // here -- `ROADMAP.md` §10 B7 is the item, and it belongs with the rest of "a run that cannot
+        // start says nothing on the stream" -- but the code is what this test is about.
+        assert!(
+            stderr.contains("pattern") || stderr.contains("schema"),
+            "the refusal does not say what is wrong: {stderr}"
+        );
+        assert!(
+            lines.is_empty(),
+            "unexpected output on a run that never started: {lines:?}"
+        );
+        assert_eq!(code, USAGE, "a schema this build cannot check is the caller's input");
+    }
 }
 
 /// A run that is working but not talking has to say so, or a caller cannot tell it from a dead one.
@@ -856,7 +1037,11 @@ async fn a_schema_that_never_matches_ends_the_stream_with_an_error() {
         &["-p", "when?", "--json", "--schema", &schema_run()],
     );
 
-    assert_eq!(code, 1, "an answer that never matched the schema must fail");
+    assert_eq!(
+        code,
+        exit_codes::DATAERR,
+        "an answer that never matched the schema is unusable, and says so in the code"
+    );
     assert!(
         !kinds(&lines).iter().any(|k| k == "result"),
         "a `result` line was emitted for an answer the schema did not accept: {lines:?}"

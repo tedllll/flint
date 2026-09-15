@@ -146,12 +146,40 @@ pub fn result(json: &serde_json::Value, attempts: usize) -> String {
     serde_json::json!({"type": "result", "json": json, "attempts": attempts}).to_string()
 }
 
-pub fn turn_completed(usage: Option<Usage>) -> String {
+/// How a turn ended, as the stream says it.
+///
+/// The exit code says this in one byte for a shell; this is for a program that reads the stream and
+/// has to judge what the answer it just received is worth. Three values, and the reason there are
+/// three is that a caller acting on the value has to tell them apart: an answer that is finished, an
+/// answer that is unfinished because flint stopped asking, and a run the caller itself cut short.
+/// Before this existed, the step limit was a `warning` string and nothing else -- so an unfinished
+/// answer and a finished one were the same shape to a program, which is the kind of fault that shows
+/// up as a wrong value rather than as an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    Complete,
+    Incomplete,
+    Stopped,
+}
+
+impl Outcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Outcome::Complete => "complete",
+            Outcome::Incomplete => "incomplete",
+            Outcome::Stopped => "stopped",
+        }
+    }
+}
+
+/// The end of a turn: what it cost, and what the answer is worth.
+pub fn turn_completed(usage: Option<Usage>, outcome: Outcome) -> String {
     frame(
         "turn.completed",
         json!({
             "prompt_tokens": usage.map_or(0, |u| u.prompt_tokens),
             "completion_tokens": usage.map_or(0, |u| u.completion_tokens),
+            "outcome": outcome.as_str(),
         }),
     )
 }
@@ -399,13 +427,22 @@ mod tests {
             serde_json::from_str(&session_started(None, Path::new("."), "m")).unwrap();
         assert!(none["session"].is_null());
 
-        let usage: Value = serde_json::from_str(&turn_completed(Some(Usage {
-            prompt_tokens: 7,
-            completion_tokens: 3,
-        })))
+        let usage: Value = serde_json::from_str(&turn_completed(
+            Some(Usage {
+                prompt_tokens: 7,
+                completion_tokens: 3,
+            }),
+            Outcome::Complete,
+        ))
         .unwrap();
         assert_eq!(usage["type"], "turn.completed");
         assert_eq!(usage["prompt_tokens"], 7);
+        // The outcome is a field on the end of the turn rather than a frame of its own: a consumer
+        // that already reads this line for the token counts gets the answer's worth for free, and
+        // there is no second thing to keep in step with the first.
+        assert_eq!(usage["outcome"], "complete");
+        assert_eq!(Outcome::Incomplete.as_str(), "incomplete");
+        assert_eq!(Outcome::Stopped.as_str(), "stopped");
 
         let failed: Value = serde_json::from_str(&error("no model configured")).unwrap();
         assert_eq!(failed["type"], "error");

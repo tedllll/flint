@@ -6,20 +6,22 @@ of it.
 
 ## Where things stand
 
-**The next round is §10 of `ROADMAP.md`: "flint as a function a program can call" — planned, not
-started, and written down in full there.** It is an audit in three buckets (what cannot be done at
-all, what cannot be told apart, what is a hole), the reference points it was measured against
-(Claude Code's `-p --output-format json`, `llm`, and the `sysexits.h` convention for exit codes), and
-the order to build it in. The first step is an outcome on the end of a turn plus exit codes that
-classify the failure — which also fixes a bug this audit found in flint's own recent work: a run
-stopped with `/stop` exits 0 while carrying a truncated answer. Start there.
+**The next round is §10 of `ROADMAP.md`: "flint as a function a program can call". Step 1 is done;
+step 2 is next.** The section is an audit in three buckets (what cannot be done at all, what cannot be
+told apart, what is a hole), the reference points it was measured against (Claude Code's
+`-p --output-format json`, `llm`, and the `sysexits.h` convention for exit codes), and the order to
+build it in. Step 1 landed the turn's `outcome` and the exit codes, and fixed the C1 bug (a `/stop`ped
+run exited 0 while carrying a truncated answer — now 130). **Step 2 is `error.code` produced where the
+cause is known**, which is what gives a caller "retry this" (75) apart from "fix your key" (69); it is
+also what B7 above (a pre-stream refusal reaching only stderr) should be folded into.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 433 passing, 1 ignored (279 lib, 2 in
-the binary's own tests, 33 `agent_loop`, 58 `cli_output`, 14 `json_output` (7 structured
-output, 1 the heartbeat, 2 the stop channel), 4 `search_tool`, 20
-`term_capture` plus the ignored cost measurement, 22 `web_view`), `cargo clippy --all-targets` is
-silent, and both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
+As of the commit that carries this file, `cargo test` is 437 passing, 1 ignored (279 lib, 2 in
+the binary's own tests, 33 `agent_loop`, 58 `cli_output`, 19 `json_output` (7 structured
+output, 1 the heartbeat, 2 the stop channel, 5 the exit codes and the turn's outcome), 4
+`search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`), `cargo clippy
+--all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
+pass, and `python examples/python/test_call.py` is 39 checks, all passing.
 
 **A `--json` run now beats while it works.** `src/main.rs` spawns `beat_while_working` beside the
 turn: every five seconds it emits the `status` frame with the phrase the stream last described, plus
@@ -29,9 +31,21 @@ under, so the last line of a stream is never a heartbeat — the test asserts th
 against a dead endpoint (`{"elapsed_secs":5,"restarted":true,"text":"thinking","type":"status"}`) and
 in `tests/json_output.rs` with a six-second stub.
 
+**An exit code means something now, and a stopped run is not a success.** Every failure used to exit 1:
+a typo in an argument, a missing key, an unreachable endpoint and an answer that never matched its
+schema were the same signal, which forced a caller to match on error text. They are now 2 (the command
+line), 65 (`EX_DATAERR`: an answer that cannot be used — a schema that never matched, or a turn that
+ran out of steps), 69 (`EX_UNAVAILABLE`: the provider cannot be used at all), 130 (interrupted), 1 for
+what is not classified yet, and the turn's end carries an `outcome` (`complete` / `incomplete` /
+`stopped`) so a program reading the stream is told the same thing. The classification is made where the
+cause is known — `parse_args` is wrapped in a `Usage` error type rather than the message being read
+back — which is the shape step 2 extends to the provider. 75 (`EX_TEMPFAIL`) is declared and unused
+until then. The Python caller's `Turn.ok` is now false for a stopped run, deliberately: it was true
+before, and that was the bug.
+
 **`/stop` works on the `-p` channel.** A `--json` run reads its stdin for the one line it acts on:
 `/stop` drops the turn, calls `agent.commit_drawn_answer()` (the same fix the REPL has had since the
-half-answer fault was reported), emits a `warning`, ends the turn and exits 0. Any other line becomes
+half-answer fault was reported), emits a `warning`, ends the turn and exits **130**. Any other line becomes
 a `warning` saying it did nothing, rather than being dropped in silence. The Python caller sends
 `/stop` when `timeout=` runs out instead of killing the process, so the half-answer survives in the
 session: `test_call.py`'s last section checks a stalled stub's fragment lands in the file, and

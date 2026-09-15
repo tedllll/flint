@@ -107,6 +107,61 @@ fn colour_allowed(no_color: bool) -> bool {
     !no_color && std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
 }
 
+/// What the exit code means, so a caller can branch without reading text.
+///
+/// A program that runs flint looks at the code first, and until now every failure was `1`: a typo in
+/// an argument, a missing key, an unreachable endpoint and an answer that never matched its schema
+/// were the same signal. The convention here is `sysexits.h`, which exists for exactly this reason --
+/// *"a CLI that always exits 0 (or always 1) hides this signal, forcing agents to parse error text
+/// with regex"*. The numbers are the ones a reader will already know:
+const EXIT_OK: i32 = 0;
+/// A failure that is not yet classified. The one honest answer while the classification is being
+/// built: say "something went wrong" rather than name the wrong cause.
+const EXIT_FAILURE: i32 = 1;
+/// The command line is wrong: nothing was asked of the model, and changing the arguments fixes it.
+/// `2` rather than `sysexits.h`'s 64 because it is the number every `getopt` program already uses.
+const EXIT_USAGE: i32 = 2;
+/// `EX_DATAERR`: the answer is not usable as it stands -- a schema that never matched, or a turn
+/// that stopped asking before the model was finished.
+const EXIT_DATAERR: i32 = 65;
+/// `EX_UNAVAILABLE`: the provider cannot be used at all. Retrying the same question changes nothing.
+const EXIT_UNAVAILABLE: i32 = 69;
+/// `EX_TEMPFAIL`: a failure worth retrying, by a caller that can wait.
+#[allow(dead_code)]
+const EXIT_TEMPFAIL: i32 = 75;
+/// `128 + SIGINT`: the run was cut short -- `/stop` on a pipe, or a Ctrl-C on a terminal.
+const EXIT_INTERRUPTED: i32 = 130;
+
+/// An error the caller can fix by changing the command line, rather than one flint has to report.
+///
+/// Marked where the cause is known, not recognised later from the message text: if the exit code is
+/// going to be read by a program, the classification has to come from the code that knows what went
+/// wrong. This is the smallest form of that, and the shape the finer codes will follow.
+#[derive(Debug)]
+struct Usage(String);
+
+impl std::fmt::Display for Usage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Usage {}
+
+/// Refuse what the caller asked for, in a way `main` can turn into [`EXIT_USAGE`].
+fn usage<T>(message: impl Into<String>) -> Result<T> {
+    Err(Usage(message.into()).into())
+}
+
+/// Mark every failure inside a block of argument handling as a usage error.
+///
+/// The whole parse is wrapped rather than each of its forty refusals: every one of them is about the
+/// command line by construction, and a refusal added later inherits the right code instead of
+/// silently defaulting to "something went wrong".
+fn as_usage<T>(result: Result<T>) -> Result<T> {
+    result.map_err(|e| Usage(format!("{e:#}")).into())
+}
+
 fn main() {
     // Set up the async runtime by hand: it keeps `#[tokio::main]` out of the
     // way and lets us return a normal exit code from any failure.
@@ -126,7 +181,13 @@ fn main() {
         Err(e) => {
             let (red, reset) = if color { ("\x1b[31m", "\x1b[0m") } else { ("", "") };
             eprintln!("{red}flint: error:{reset} {e:#}");
-            1
+            // Read from the error itself rather than guessed at here: the code is a promise to a
+            // program, and a promise made from the outside is the kind that breaks quietly.
+            if e.downcast_ref::<Usage>().is_some() {
+                EXIT_USAGE
+            } else {
+                EXIT_FAILURE
+            }
         }
     };
     std::process::exit(code);
@@ -257,7 +318,7 @@ fn print_transcript(history: &[event::Message], printer: &Printer<'_>) {
 }
 
 async fn real_main() -> Result<i32> {
-    let args = parse_args(std::env::args().skip(1).collect())?;
+    let args = as_usage(parse_args(std::env::args().skip(1).collect()))?;
 
     // Decide colour before anything prints.
     let color = colour_allowed(args.no_color);
@@ -291,7 +352,7 @@ async fn real_main() -> Result<i32> {
             let path = std::path::absolute(dir)
                 .with_context(|| format!("--cwd {dir}: cannot be resolved"))?;
             if !path.is_dir() {
-                return Err(anyhow!(
+                return usage(format!(
                     "--cwd {dir}: {}",
                     if path.exists() {
                         "not a directory"
@@ -356,7 +417,7 @@ async fn real_main() -> Result<i32> {
     // exactly the job you want to be able to do when the network is what is broken.
     match (args.archive.as_deref(), args.delete.as_deref()) {
         (Some(_), Some(_)) => {
-            return Err(anyhow!("use either --archive or --delete, not both"));
+            return usage("use either --archive or --delete, not both");
         }
         (Some(target), None) => {
             let path = resolve_session(target)?;
@@ -560,8 +621,8 @@ async fn real_main() -> Result<i32> {
     // it makes -- the clock, the answer strip, the redraw, the interrupt prompt -- and every
     // one of them is wrong for a program reading the output.
     if args.json {
-        let prompt = args.prompt.as_deref().ok_or_else(|| {
-            anyhow!("--json needs a prompt: `flint -p \"...\" --json`. Try --help.")
+        let prompt = args.prompt.as_deref().ok_or_else(|| -> anyhow::Error {
+            Usage("--json needs a prompt: `flint -p \"...\" --json`. Try --help.".to_string()).into()
         })?;
         return run_json_turn(
             &mut agent,
@@ -3179,7 +3240,9 @@ async fn run_json_turn(
     // `turn.completed` that is never coming.
     if let Err(e) = ensure_usable(provider_cfg) {
         emit(ndjson::error(&format!("{e:#}")));
-        return Ok(1);
+        // Nothing was asked of the model, and no retry of this question will change the answer: the
+        // provider has to be fixed first.
+        return Ok(EXIT_UNAVAILABLE);
     }
 
     // One turn, or as many as it takes to get an answer the schema accepts. The loop is here rather
@@ -3282,31 +3345,57 @@ async fn run_json_turn(
                 "stopped at your request -- the model is not running any more, and the answer above \
                  is what had been written",
             ));
-            emit(ndjson::turn_completed(agent.last_usage()));
+            emit(ndjson::turn_completed(
+                agent.last_usage(),
+                ndjson::Outcome::Stopped,
+            ));
             // No repair attempt and no validation: a caller that stopped the run is not waiting for
             // another one, and a half-written answer failing a schema is the expected outcome rather
             // than a problem to fix.
-            return Ok(0);
+            return Ok(EXIT_INTERRUPTED);
         };
 
+        // How the turn ended is the caller's business as much as the answer is: `incomplete` means
+        // flint stopped asking and the text above is half of what it had to say. The code says the
+        // same thing to a shell that does not read the stream, and an unfinished answer is not a
+        // success even when a schema happens to accept it -- a caller acting on half an answer has
+        // the fault the schema was there to prevent.
+        let outcome = if agent.ran_out_of_steps() {
+            ndjson::Outcome::Incomplete
+        } else {
+            ndjson::Outcome::Complete
+        };
+        let code = if outcome == ndjson::Outcome::Incomplete {
+            EXIT_DATAERR
+        } else {
+            EXIT_OK
+        };
         match result {
-            Ok(()) => emit(ndjson::turn_completed(agent.last_usage())),
+            Ok(()) => emit(ndjson::turn_completed(agent.last_usage(), outcome)),
             // The failure goes on the stream as well as the exit code: a caller that reads
-            // stdout should not have to also read stderr to find out what happened.
+            // stdout should not have to also read stderr to find out what happened. The code is
+            // `UNAVAILABLE` when the provider was already known not to be configured -- the run
+            // failing then is that fault arriving late, and a caller that retries the same question
+            // gets the same nothing -- and unclassified otherwise, because guessing the cause at the
+            // edge is what this whole change is against.
             Err(e) => {
                 emit(ndjson::error(&format!("{e:#}")));
-                return Ok(1);
+                return Ok(if provider_error.is_some() {
+                    EXIT_UNAVAILABLE
+                } else {
+                    EXIT_FAILURE
+                });
             }
         }
 
         let Some(schema) = &shaping.schema else {
-            return Ok(0);
+            return Ok(code);
         };
         let errors = match json_in(&answer) {
             Some(value) => match schema.validate(&value) {
                 problems if problems.is_empty() => {
                     emit(ndjson::result(&value, attempt));
-                    return Ok(0);
+                    return Ok(code);
                 }
                 problems => problems,
             },
@@ -3328,7 +3417,10 @@ async fn run_json_turn(
                     .collect::<Vec<_>>()
                     .join("\n")
             )));
-            return Ok(1);
+            // No `result` line and a code that says why: there is an answer, and it is not one a
+            // caller can use. `EX_UNAVAILABLE` would send it looking for a provider fault and
+            // `EXIT_FAILURE` would tell it nothing at all.
+            return Ok(EXIT_DATAERR);
         }
         asked = repair_prompt(&answer, &errors);
     }
@@ -3373,20 +3465,22 @@ fn resolve_output_schema(
         // Both at once is a contradiction, and choosing an order for them would be inventing a rule
         // nobody asked for. Refused, with the reason.
         (Some(_), true) => {
-            return Err(anyhow!(
+            return usage(
                 "--schema and --no-schema were both given: one says what shape the answer must \
-                 take and the other says there is no shape. Use one."
-            ))
+                 take and the other says there is no shape. Use one.",
+            )
         }
         (Some(value), false) => {
             let text = if value.trim_start().starts_with('{') {
                 value.clone()
             } else {
                 std::fs::read_to_string(value)
-                    .with_context(|| format!("cannot read the schema file '{value}'"))?
+                    .with_context(|| format!("cannot read the schema file '{value}'"))
+                    .map_err(|e| -> anyhow::Error { Usage(format!("{e:#}")).into() })?
             };
             let parsed = schema::Schema::parse(&text)
-                .with_context(|| format!("cannot use the schema from '{value}'"))?;
+                .with_context(|| format!("cannot use the schema from '{value}'"))
+                .map_err(|e| -> anyhow::Error { Usage(format!("{e:#}")).into() })?;
             return Ok(Shaping {
                 schema_json: serde_json::from_str(&text).ok(),
                 schema: Some(parsed),
@@ -3682,10 +3776,15 @@ fn status_done(printer: &Printer<'_>, live: Option<&web::Live>) {
 ///
 /// The line is the one `--json` ends a turn with, from the same function, because a second spelling
 /// of "the turn is over" is a second thing to keep in step with the first.
-fn turn_over(printer: &Printer<'_>, live: Option<&web::Live>, agent: &agent::Agent) {
+fn turn_over(
+    printer: &Printer<'_>,
+    live: Option<&web::Live>,
+    agent: &agent::Agent,
+    outcome: ndjson::Outcome,
+) {
     status_done(printer, live);
     if let Some(live) = live {
-        live.line(ndjson::turn_completed(agent.last_usage()));
+        live.line(ndjson::turn_completed(agent.last_usage(), outcome));
     }
 }
 
@@ -3879,17 +3978,27 @@ async fn run_turn(
             live.answer_committed();
         }
 
+        // The same three values as the `--json` path, decided the same way and from the same facts:
+        // a dropped turn is a stopped one (that is what `None` means here), a turn that ran out of
+        // steps is unfinished, and anything else finished. The page reads this, so a browser and a
+        // program are told the same thing about the same run.
+        let outcome = match (&result, agent.ran_out_of_steps()) {
+            (None, _) => ndjson::Outcome::Stopped,
+            (_, true) => ndjson::Outcome::Incomplete,
+            _ => ndjson::Outcome::Complete,
+        };
+
         // The line was not for the model, so the turn stops here rather than answering it. The
         // request in flight is dropped, which is what `Interrupt` does too -- a command is not a
         // reason to keep paying for an answer nobody is waiting for any more.
         if let Some(line) = hand_back {
-            turn_over(printer, live, agent);
+            turn_over(printer, live, agent, outcome);
             return Ok(Handover { line: Some(line), reports });
         }
 
         // Whatever happened, nothing is running now: leaving a stale clock on the strip
         // would be worse than showing none.
-        turn_over(printer, live, agent);
+        turn_over(printer, live, agent, outcome);
 
         match steering {
             None => {

@@ -1249,15 +1249,32 @@ decision, not a gap.
    by decision (the reasons are in the code), which leaves dates, identifiers and enumerations to
    `enum` or to the caller. The documentation has to say this plainly, because a caller who reads
    "schema" as a guarantee will act on a string that says the model could not determine anything.
+7. **A refusal before the stream starts reaches only stderr.** Found while building step 1: a
+   `--schema` this build cannot check is refused while the arguments are being resolved, which is
+   before the stream is opened, so a `--json` caller gets an empty stdout and a code. The code carries
+   it (2) and the reason is on stderr, but every other failure in this mode is also *on the stream*,
+   and the comment in `run_json_turn` says why ("a run which cannot even start is still described on
+   stdout"). Two shapes of failure for one caller is one shape too many.
 
 #### The order
 
-1. **An outcome, and exit codes that classify.** The turn's end says how it ended — `complete`,
-   `incomplete` (step limit), `stopped`, `refused` — and the process exits with `sysexits`-aligned
-   codes: 2 usage, 65 the answer was not usable, 69 the provider was unavailable, 75 retryable, 130
-   interrupted. This is step 1 because every other item is judged by it, and because it fixes C1.
-   Not a new event type: the end of the stream already exists and a field on it costs consumers
-   nothing.
+**Step 1 is done**, in the commit that carries this file. What was built, and the two places where
+building it changed the plan: the turn end now carries `outcome` (`complete` / `incomplete` /
+`stopped`), the exit codes classify (0, 1 unclassified, 2 usage, 65 unusable answer, 69 provider
+unavailable, 130 interrupted), and the classification is made where the cause is known rather than
+read off a message. **`refused` is not one of the outcomes**: flint cannot know a refusal — a model
+that answers "cannot determine" in prose is answering, and calling that a refusal here would be the
+same guess this section exists to remove, so it belongs in the caller's own check. **75 is not emitted
+yet**: telling a rate limit from a dead endpoint needs the typed errors of step 2, and a code that is
+never produced is worse in the table than a gap. The bug in C1 is fixed and pinned by a test that
+asserts 130 where it used to assert 0; `README.md`, `docs/python.md` and `examples/python/flint_call.py`
+carry the vocabulary, and the Python checks were what noticed the change (`Turn.ok` is now false for a
+stopped run, because it was true before — that was the bug). B7 above is what the work turned up.
+
+1. ~~**An outcome, and exit codes that classify.**~~ Done. The shape of it: the outcome is a field on
+   the turn's end rather than a new event type, because the end of the stream already exists and a
+   field costs consumers nothing; `EXIT_TEMPFAIL` (75) is declared and unused until step 2 gives it
+   something to mean.
 2. **`error.code`**, produced where the cause is known — in `provider` for no key, network and status
    codes; in `agent` for a schema that never matched; in `main` for arguments. Classified by matching
    on the error's text at the edge would be the same fragility this is meant to remove.

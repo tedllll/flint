@@ -52,8 +52,14 @@ their appends; there is one writer per file by design. Parallel work belongs in 
 flint's stdin — the same word the interactive session takes, for the same reason: it is the interrupt
 that works when there is no key to press, which is precisely the situation a program is in. flint then
 drops the turn, **commits the answer it had already drawn to the session file**, says so on the stream
-and exits 0. You get a `Turn` with `stopped=True`, the partial `answer`, and a `warning` explaining
-what happened. Only if the process ignores its own interrupt for another ten seconds is it killed.
+and exits **130**. You get a `Turn` with `stopped=True`, `outcome == "stopped"`, the partial `answer`,
+and a `warning` explaining what happened. Only if the process ignores its own interrupt for another ten
+seconds is it killed.
+
+It exits 130 rather than 0 on purpose, and `ok` is therefore `False` for a stopped run: a caller that
+branched on `ok` — which is what a caller does — was treating half an answer as a finished one. A
+stopped run is still *not an error*: `error` stays `None` and the answer is real. Ask `stopped` (or
+`complete`) about whether the answer is whole, and `error` about whether anything went wrong.
 
 The difference is not cosmetic. `subprocess.run(timeout=...)` kills, and a killed flint loses whatever
 it had drawn: the words you just read exist on your screen and nowhere else, so the next call about
@@ -83,8 +89,11 @@ a hung one if you are reading the stream yourself rather than waiting for `ask()
 | `usage` | token counts from the provider |
 | `result`, `attempts` | a schema run's checked object, and how many answers it took |
 | `stopped` | true when `timeout` ran out and the run was asked to stop rather than killed |
+| `outcome` | how the turn ended: `complete`, `incomplete` (the step limit), `stopped` |
 | `turns` | how many turns the run asked for (one, unless a schema needed repairs) |
-| `ok` | `returncode == 0 and error is None` |
+| `ok` | `returncode == 0 and error is None` — false for a stopped or unfinished run |
+| `complete` | `ok` and the outcome is not `incomplete`/`stopped`: the answer is whole |
+| `returncode` | flint's exit code: 2 usage, 65 unusable answer, 69 provider, 130 stopped, 1 unclassified |
 | `events` | every line, untouched, for anything this dataclass does not name |
 
 `of_type(*types)` picks events out by type. The vocabulary is flint's, and it is documented in the
@@ -112,7 +121,7 @@ cannot be mangled by anything.
 
 ```console
 $ cargo build
-$ python examples/python/test_call.py       # 32 checks against a local stub, no key, no cost
+$ python examples/python/test_call.py       # 39 checks against a local stub, no key, no cost
 $ python examples/python/timing_demo.py     # what blocking and failure actually look like
 $ python examples/python/ask_schema.py      # needs DEEPSEEK_API_KEY; spends real tokens
 ```

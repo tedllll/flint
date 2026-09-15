@@ -156,6 +156,15 @@ pub struct Agent {
     cwd: PathBuf,
     writer: Option<SessionWriter>,
     last_usage: Option<Usage>,
+    /// Whether the last turn ended because it ran out of steps rather than because the model
+    /// stopped asking.
+    ///
+    /// Kept here because this loop is the only thing that knows: when the `for` runs out, the
+    /// difference between "the model had nothing more to say" and "we stopped listening" is a fact
+    /// about *this* code and nothing else. The warning the loop already emits is for a person
+    /// reading a terminal; this is for a caller that has to decide whether the answer it holds is
+    /// finished, which is not a judgement a string can carry.
+    ran_out_of_steps: bool,
     /// How often each tool call has been made this turn, by name and arguments.
     ///
     /// Per turn rather than per session: an identical call in a later turn follows a new
@@ -230,6 +239,7 @@ impl Agent {
             cwd,
             writer,
             last_usage: None,
+            ran_out_of_steps: false,
             repeats: std::collections::HashMap::new(),
             drawn: String::new(),
             skills,
@@ -311,6 +321,11 @@ impl Agent {
 
     pub fn last_usage(&self) -> Option<Usage> {
         self.last_usage
+    }
+
+    /// Whether the last turn ended at the step limit, which makes its answer an unfinished one.
+    pub fn ran_out_of_steps(&self) -> bool {
+        self.ran_out_of_steps
     }
 
     pub fn readonly(&self) -> bool {
@@ -406,6 +421,9 @@ impl Agent {
         // the session permanently unusable, not just the one turn.
         self.close_dangling_tool_calls();
         self.repeats.clear();
+        // A turn begins here, so the answer it ends with is a fresh question: the flag means "this
+        // turn ran out of steps", not "some turn once did".
+        self.ran_out_of_steps = false;
 
         self.history.push(Message::user(user_input));
         self.record(SessionEvent::Chat {
@@ -513,6 +531,9 @@ impl Agent {
             }
         }
 
+        // Leaving the loop any other way is a `return` above; getting here means the `for` ran out,
+        // which is the one ending that answers the question with less than the model had to give.
+        self.ran_out_of_steps = true;
         sink(Event::Done);
         Ok(())
     }

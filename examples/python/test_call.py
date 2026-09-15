@@ -102,6 +102,8 @@ def main():
               any("flint-python-ok" in (e.get("output") or "") for e in turn.events
                   if e["type"] == "tool.completed"))
         check("usage reported", bool(turn.usage), str(turn.usage))
+        check("the turn says it finished complete", turn.outcome == "complete", str(turn.outcome))
+        check("so `complete` is true for it", turn.complete, str(turn.returncode))
 
         print("\n2. the session file on disk")
         files = session_files(scratch)
@@ -134,6 +136,11 @@ def main():
         )
         bad = ask("hello", home=str(dead), cwd=str(HERE), timeout=120)
         check("non-zero exit", bad.returncode != 0, f"rc={bad.returncode}")
+        # `1`, not 69 or 75: this provider *is* configured, so "unavailable" would be the wrong
+        # claim, and telling a network failure from a rate limit needs the typed errors that are
+        # `ROADMAP.md` §10 step 2. The code says "something went wrong", which is all flint can
+        # honestly say about it today -- and it is no longer the same code as a typo in an argument.
+        check("an unclassified failure, for now", bad.returncode == 1, f"rc={bad.returncode}")
         check("an error event arrived", bool(bad.error), repr(bad.error)[:160])
         check("and no answer was invented", bad.answer == "", repr(bad.answer))
         shutil.rmtree(dead, ignore_errors=True)
@@ -194,9 +201,16 @@ def main():
             # caller asked for, instead of being torn down with its writes half done.
             check("a run past its timeout is stopped, not left running", stopped.stopped, str(stopped.stopped))
             check("and it ended when it was asked, not minutes later", took < 15, f"{took:.1f}s")
-            # No exception: a stopped run is a turn that ended. `ok` is about the process, and the
-            # process exited 0 -- which is exactly why `stopped` has to be there to look at.
-            check("a stopped run is not reported as a failure", stopped.ok, str(stopped.error))
+            # A stopped run is not a failure and not a success. This check used to assert `ok` --
+            # which was flint exiting 0 for a truncated answer, so a caller looping on `ok` treated
+            # half an answer as a finished one. The stream was honest the whole time and the exit
+            # code was not; both now say "stopped".
+            check("a stopped run exits 130, not 0", stopped.returncode == 130, str(stopped.returncode))
+            check("so it is not `ok` -- the answer is half of one", not stopped.ok, str(stopped.error))
+            check("and not `complete` either", not stopped.complete, str(stopped.outcome))
+            check("but it is not an error -- nothing went wrong",
+                  stopped.error is None, str(stopped.error))
+            check("the turn says how it ended", stopped.outcome == "stopped", str(stopped.outcome))
             check("what had been drawn is still in the answer",
                   "半句答案" in stopped.answer, repr(stopped.answer))
             check("the stream says it was stopped",

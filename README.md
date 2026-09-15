@@ -185,12 +185,12 @@ done
 {"arguments":"{\"command\":\"dsh --version\"}","id":"call_1","name":"bash","type":"tool.args"}
 {"id":"call_1","name":"bash","ok":true,"output":"1.2.3","type":"tool.completed"}
 {"text":"Let me look. It is version 1.2.3.","type":"message.completed"}
-{"prompt_tokens":1204,"completion_tokens":88,"type":"turn.completed"}
+{"prompt_tokens":1204,"completion_tokens":88,"outcome":"complete","type":"turn.completed"}
 ```
 
 The vocabulary is closed and small: `session.started`, `turn.started`, `message.delta`,
 `reasoning.delta`, `message.completed`, `tool.started`, `tool.args`, `tool.completed`,
-`usage`, `warning`, `turn.completed`, `result`, `error`. Three things about it are worth knowing:
+`usage`, `warning`, `turn.completed`, `result`, `error`. Four things about it are worth knowing:
 
 - **A line is always a line.** Tool output containing newlines, quotes and escape codes is
   JSON-escaped, never printed raw, so splitting the stream on `\n` cannot cut an object in
@@ -201,6 +201,25 @@ The vocabulary is closed and small: `session.started`, `turn.started`, `message.
   read afterwards like anything else.
 - **A failure is on the stream too**, as an `error` line plus a non-zero exit code, so a
   caller reading stdout does not also have to read stderr to find out what happened.
+- **The end of a turn says what the answer is worth.** `turn.completed` carries an `outcome`:
+  `complete` (the model finished), `incomplete` (flint stopped asking at the `max_steps` limit, so
+  the text above is half of what it had) or `stopped` (the caller cut it short, below). A caller that
+  acts on the answer reads this before it acts, because the type it validated says nothing about
+  whether the model was finished. The exit code says the same thing to a shell:
+
+  | Code | Meaning |
+  |---|---|
+  | `0` | the turn finished |
+  | `1` | a failure flint has not classified (a network fault, and anything else not yet named) |
+  | `2` | the command line is wrong — nothing was asked of the model |
+  | `65` | the answer is not usable: a schema that never matched, or a turn that ran out of steps |
+  | `69` | the provider cannot be used at all (no key, or an endpoint that is not there) |
+  | `130` | the run was interrupted — `/stop` on the pipe, or Ctrl-C on a terminal |
+
+  The numbers are `sysexits.h`'s, because a program branches on the code and one code for
+  everything says nothing: *"a CLI that always exits 0 (or always 1) hides this signal, forcing
+  agents to parse error text with regex"*. `1` is what is left, and it is honest about being
+  unclassified rather than named wrongly.
 - **A silent run is not a dead one.** Between `tool.started` and `tool.completed` nothing happens
   for as long as the tool runs, and from a pipe that is the same thing as a crashed process. So a
   run that is working and not talking says so every five seconds:
@@ -210,7 +229,9 @@ The vocabulary is closed and small: `session.started`, `turn.started`, `message.
 - **A run can be stopped without killing it.** Write `/stop` to its stdin — the same word the
   interactive session takes, which exists precisely because a key is not always available. flint
   drops the turn, commits the answer it had already drawn to the session file, says so in a `warning`
-  and exits 0, so the half-answer you read is the one the next call is answered with in view. Killing
+  and exits **130**, so the half-answer you read is the one the next call is answered with in view.
+  It does not exit 0: a caller branching on the code would take half an answer for a finished one,
+  which is the fault the code is there to prevent. Killing
   the process instead loses exactly that. A line that is not `/stop` is reported as a `warning`
   rather than dropped in silence: a one-shot run has no next prompt to steer, and guessing whether a
   line arrived is not something a caller should have to do.
@@ -237,7 +258,7 @@ $ flint -p "when is the last trading day of 2026?" --json --schema trading-day.j
 {"text":"{\"trading_day\": \"2026-10-21\"}","type":"message.delta"}
 {"text":"{\"trading_day\": \"2026-10-21\"}","type":"message.completed"}
 {"json":{"trading_day":"2026-10-21"},"attempts":1,"type":"result"}
-{"prompt_tokens":1204,"completion_tokens":31,"type":"turn.completed"}
+{"prompt_tokens":1204,"completion_tokens":31,"outcome":"complete","type":"turn.completed"}
 ```
 
 `--schema` takes a path, or the schema itself when the value starts with `{`. It needs
@@ -253,7 +274,9 @@ keywords — and a keyword outside that subset is refused before the run rather 
 the answer does not match, the model is told which JSON path failed and asked again, up to three
 answers in all; `attempts` says how many it took. When none of them match there is no `result`
 line at all — a caller reading that type can trust it describes what the schema asked for — and
-the run ends with an `error` line and exit code 1.
+the run ends with an `error` line and exit code **65** — `EX_DATAERR`, "there is an answer and it is
+not one you can use", which is a different problem from an argument to fix (`2`) or a provider to
+repair (`69`).
 
 **The schema is recorded in the session file**, as a `schema` line holding the whole schema. A
 resumed conversation is therefore held to the same contract without the caller passing anything

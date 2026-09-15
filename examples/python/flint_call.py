@@ -42,15 +42,21 @@ result           json, attempts           a schema run's checked answer, once it
     usage            prompt_tokens, completion_tokens, total_tokens
     status           text, restarted
     warning          message
-    turn.completed   prompt_tokens, completion_tokens
-    error            message                  the run failed; the exit code is 1 as well
+    turn.completed   prompt_tokens, completion_tokens, outcome
+                                              how the turn ended: complete | incomplete | stopped
+    error            message                  the run failed; the exit code says which kind
     command          input, text, panel?      a slash command's answer, not part of a turn
 
 Notes that matter in practice:
 
 * `-p` is required for `--json`: without it flint is interactive and writes no stream.
-* `turn.error` is set and `returncode` is 1 when the run failed -- bad key, dead endpoint,
-  refused tool. Check both; the exit code is the contract.
+* `turn.error` is set and `returncode` is not 0 when the run failed. The code classifies it:
+  2 is the command line, 65 an answer that is not usable, 69 a provider that cannot be used,
+  130 a run this caller stopped, 1 a failure flint has not classified. Check the code as well as
+  `error`: a program branches on the code, and the message is for a person.
+* `turn.outcome` is how the turn ended, and it is the only place that says whether the answer is
+  whole. `incomplete` means flint stopped asking at the `max_steps` limit; `stopped` means this
+  caller's timeout arrived first. `turn.complete` folds that together with `ok`.
 * There is no approval hook. A tool runs when the model asks for it, so `tool.started` is a
   *record*, not a chance to object. `readonly` is the only switch, and it is all-or-nothing.
 * Tool output longer than `max_tool_output` spills to `<FLINT_HOME>/spill/...` and the event
@@ -117,7 +123,18 @@ class Turn:
     # True when the run outlived `timeout` and was asked to stop rather than killed. The answer is
     # then what had been written when the stop arrived -- partial, and still worth keeping: flint
     # commits it to the session, so the next call about it is answered with it in view.
+    #
+    # `ok` is False for a stopped run, deliberately: flint exits 130, not 0, because a caller that
+    # branched on `ok` was treating half an answer as a finished one. A stopped run is not an error
+    # either -- `error` stays None and the answer is real -- so a caller should ask `stopped` when it
+    # cares whether the answer is whole and `error` when it cares whether anything went wrong.
     stopped: bool = False
+    # How the turn ended, as flint's `turn.completed` line says it: "complete", "incomplete" (flint
+    # stopped asking at the step limit, so the answer is half of one) or "stopped" (this caller cut it
+    # short). `None` for a run that never reached the end of a turn -- the provider was unusable, or
+    # the answer never matched its schema. An older flint has no such field, and this is then None for
+    # every run: `ok` and `stopped` are the older signals and still work.
+    outcome: str | None = None
     # The checked answer, when the run was given a schema: the `result` line's object. `None` for a
     # run with no schema, and `None` for a schema run whose answer never matched -- flint emits no
     # `result` line at all in that case, which is the point: see `ask_json`, which raises instead.
@@ -145,6 +162,16 @@ class Turn:
     @property
     def ok(self) -> bool:
         return self.returncode == 0 and self.error is None
+
+    @property
+    def complete(self) -> bool:
+        """Whether the answer is whole: the turn ended and flint did not stop asking.
+
+        The same question `ok` answers for a run that reached its end, asked in a way that also
+        covers a caller that cut the run short -- `ok` is False for a stopped run and for an
+        unfinished one, and neither is an error. `None` (flint too old to say) counts as complete,
+        because a turn that ended before the field existed is the only thing it could have been."""
+        return self.ok and self.outcome in (None, "complete")
 
     def of_type(self, *types: str) -> list[dict]:
         return [e for e in self.events if e.get("type") in types]
@@ -302,17 +329,21 @@ def ask(
             turn.error = event.get("message", "")
         elif kind == "warning":
             turn.warnings.append(event.get("message", ""))
+        elif kind == "turn.completed":
+            # The end of a turn is the only place that says how it ended and whether the answer is
+            # whole, which is not something a caller can work out from the text it received. The
+            # token counts live on the same line, so this branch is also where the usage goes.
+            turn.outcome = event.get("outcome")
+            turn.usage = {
+                "prompt_tokens": event.get("prompt_tokens", 0),
+                "completion_tokens": event.get("completion_tokens", 0),
+            }
         elif kind == "session.started":
             turn.session = event.get("session")
             turn.cwd = event.get("cwd")
             turn.model = event.get("model")
         elif kind == "usage":
             turn.usage = event
-        elif kind == "turn.completed":
-            turn.usage = {
-                "prompt_tokens": event.get("prompt_tokens", 0),
-                "completion_tokens": event.get("completion_tokens", 0),
-            }
         elif kind == "turn.started":
             turn.turns += 1
         elif kind == "result":
