@@ -454,6 +454,42 @@ fn the_command_panel_is_drawn_from_the_frame() {
     }
 }
 
+/// The action buttons are drawn from the frame too, and send the row's own line.
+///
+/// §8's first control, and the reason it is first: an action takes no argument, so there is nothing
+/// to ask for and nothing to confirm — the whole control is "send this line", which is what the
+/// composer already does. What is checked here is the part that can go wrong: the line is the
+/// frame's `send`, not a name this page reassembles, and a press that is refused puts the header
+/// back to what is in force rather than leaving a control that quietly did nothing.
+#[test]
+fn the_action_buttons_send_the_frames_own_line() {
+    let controls = from("<div class=\"controls\" id=\"controls\" hidden>", 20);
+    assert!(
+        controls.contains("id=\"actions\""),
+        "the header has nowhere to draw the actions: {controls}"
+    );
+
+    let drawn = from("function showActions(doc)", 30);
+    for (needed, why) in [
+        ("state.commands", "the list of commands"),
+        ("command.class !== \"button\"", "the class that makes a command an action"),
+        ("sendText(command.send)", "the line, taken from the frame rather than rebuilt here"),
+        ("showState(doc)", "putting the control back when the send is refused"),
+    ] {
+        assert!(
+            drawn.contains(needed),
+            "the buttons are not drawn from `{needed}` ({why}): {drawn}"
+        );
+    }
+    // The label is the command's own words (`/reload`), which is what `/help` prints, and the help
+    // line is the tooltip: the row already carries both, and a page that shortened one would be
+    // inventing a second name for a command.
+    assert!(
+        drawn.contains("command.label") && drawn.contains("command.help"),
+        "a button is not labelled from the frame's own row: {drawn}"
+    );
+}
+
 /// A conversation archived or deleted in the terminal has to leave the sidebar.
 ///
 /// Reported from a real session: history tidied in the terminal and the page still offering it.

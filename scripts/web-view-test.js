@@ -496,6 +496,48 @@ check("a state frame with no commands in it takes the panel away", () => {
   eq(page.__node("commands").hidden, true, "a frame without a command list offers no menu");
 });
 
+console.log("the buttons the frame marks as actions");
+
+// §8's first control. The frame already says which commands are one action with no argument
+// (`class: "button"`), so the page's job is only to draw them where controls go and send the row's
+// own line. That the click sends `send` rather than a name put back together here is asserted over
+// the page's bytes in tests/web_view.rs, the same way the switches' `/<name> <value>` is: the stub
+// DOM has no event delivery, and inventing some would be testing the stub.
+check("the frame's action rows become buttons in the header", () => {
+  const page = loadViewer();
+  const d = page.newDoc();
+  page.applyState(d, JSON.stringify({
+    type: "state", provider: "stub", model: "m", providers: [], toggles: [],
+    commands: [
+      { label: "/config", send: "/config", help: "show shell, steps, proxy", class: "panel" },
+      { label: "/new", send: "/new", help: "start a fresh conversation", class: "button" },
+      { label: "/delete <n|id>", send: "/delete", help: "delete one", class: "danger" },
+      { label: "/reload", send: "/reload", help: "re-read the config file", class: "button" },
+    ],
+  }));
+  const box = page.__node("actions");
+  eq(box.children.map((b) => b.textContent), ["/new", "/reload"], "one button per action, in the frame's order");
+  eq(box.children[0].title, "start a fresh conversation", "the help is the tooltip");
+  eq(box.children[0].type, "button", "a button that cannot submit anything");
+});
+
+check("a state frame with no actions in it takes the buttons away", () => {
+  const page = loadViewer();
+  const d = page.newDoc();
+  page.applyState(d, JSON.stringify({
+    type: "state", provider: "stub", model: "m", providers: [],
+    commands: [{ label: "/reload", send: "/reload", help: "re-read the config file", class: "button" }],
+  }));
+  eq(page.__node("actions").children.length, 1, "a button while the frame lists an action");
+  // A frame with only reports in it: nothing to press. A panel is not a button -- pressing one
+  // would send a command into the terminal, which is the one place §8 says a report should not go.
+  page.applyState(d, JSON.stringify({
+    type: "state", provider: "stub", model: "m", providers: [{ name: "stub", models: ["m"] }],
+    commands: [{ label: "/config", send: "/config", help: "show shell, steps, proxy", class: "panel" }],
+  }));
+  eq(page.__node("actions").children.length, 0, "no action rows, no buttons");
+});
+
 console.log("where the lines come from");
 
 check("the token is read out of the URL that --web printed", () => {

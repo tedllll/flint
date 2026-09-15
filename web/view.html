@@ -89,6 +89,13 @@
   }
   .controls select:hover:enabled { border-color: var(--user); }
   .controls select:disabled { color: var(--dim); cursor: default; }
+  /* An action: no value to choose, just the command's own line to send. Styled with the selects so
+     the header reads as one row of controls rather than two kinds of thing. */
+  .controls button {
+    font: inherit; font-size: 12.5px; color: var(--fg); background: var(--panel);
+    border: 1px solid var(--line); border-radius: 5px; padding: 2px 8px; cursor: pointer;
+  }
+  .controls button:hover { border-color: var(--user); }
   /* The toggles, drawn from the frame rather than written here: each is a label, the command's
      own name, and a select of the values that command takes. */
   .toggle { display: inline-flex; align-items: baseline; gap: 5px; }
@@ -311,6 +318,8 @@
         <select id="pick-model" title="the model this run is using"></select>
         <!-- Where the switches go, drawn from the frame: see `showToggles`. -->
         <span id="toggles"></span>
+        <!-- Where the actions go -- one button each, no argument to ask for: see `showActions`. -->
+        <span id="actions"></span>
       </div>
       <!-- The commands the run offers, drawn from the frame as well: see `showCommands`. A panel
            rather than a button each, because most of them are reports -- the page shows the listing
@@ -867,6 +876,34 @@ function showCommands(doc) {
   }
 }
 
+/// The run's actions, one button each: every command the frame marks as taking no argument.
+///
+/// The same rule as the switches -- the page sends the row's own `send` string, put together by the
+/// process, so there is no command name in this file to go stale -- and the same courtesy: a press
+/// that is refused puts the header back to what is in force, because a control that quietly did
+/// nothing is worse than one that says it could not. The answer comes back on the `command` line,
+/// into the transcript, which is where an action's one-line report belongs.
+///
+/// Only `class: "button"` is drawn here. A report is not sent -- §8 keeps the reporting commands off
+/// this page's wire, so that the terminal is not flooded with a listing its reader did not ask for
+/// there -- and a destructive command needs a confirmation this page does not have yet.
+function showActions(doc) {
+  const box = document.getElementById("actions");
+  if (!box) return;
+  while (box.firstChild) box.removeChild(box.firstChild);
+  const commands = doc.state && Array.isArray(doc.state.commands) ? doc.state.commands : [];
+  for (const command of commands) {
+    if (!command || command.class !== "button" || typeof command.send !== "string") continue;
+    const button = el("button", "action", command.label);
+    button.type = "button";
+    if (typeof command.help === "string") button.title = command.help;
+    button.addEventListener("click", async () => {
+      if (!(await sendText(command.send))) showState(doc);
+    });
+    box.appendChild(button);
+  }
+}
+
 /// Draw the header's controls from `doc.state`, or hide them when there is no state to draw.
 ///
 /// Separate from applying a frame so that a refused send can put the controls back to what is in
@@ -877,10 +914,11 @@ function showState(doc) {
   if (!controls) return;
   const state = doc.state;
   controls.hidden = !state;
-  // Before the early return: a state that has gone away has to take its switches and its command
-  // panel with it, and leaving them behind would leave controls showing values nothing reports any
-  // more.
+  // Before the early return: a state that has gone away has to take its switches, its buttons and
+  // its command panel with it, and leaving them behind would leave controls showing values nothing
+  // reports any more.
   showToggles(doc);
+  showActions(doc);
   showCommands(doc);
   if (!state) return;
   const providers = Array.isArray(state.providers) ? state.providers : [];
@@ -1749,7 +1787,7 @@ if (typeof module !== "undefined" && module.exports) {
     newDoc, applyLine, applyText, applyEvent, tokenFromSearch, servedByFlint, sseFrames,
     sessionsFrom, messageBody, resumeLine, streamingAnswer, carryStreaming, setStreamingAnswer,
     paint, feedTrouble, tokenRefused, feedTrace, debugFeed, applyState, showState, fillSelect,
-    showToggles, showCommands,
+    showToggles, showCommands, showActions,
   };
 }
 </script>

@@ -368,7 +368,7 @@ most of a turn is text nobody could see. The retry rule is now explicit: the lad
 the first drawn character, because nothing in the chain can take text back. `docs/web-mode.md`
 §11 has the measurement; `src/provider.rs` has the rule.
 
-### 8. Web mode, from using it — **the read channel is in, and the page has its menu; the controls are next**
+### 8. Web mode, from using it — **the read channel is in, and the page has its menu and its first control**
 
 Four things turned up in the first real sessions with the browser page, after level 3 was
 finished. Two are settled (below): the sidebar bug is fixed, and the commands gap now has a
@@ -612,29 +612,43 @@ that the page contains no command name of its own (`/provider key`, `/delete <n|
 which is the same drift guard one level down: a page that knew a command would go on offering it
 after a rename, in a panel whose whole job is to say what there is.
 
-**Next: the first controls — the buttons, then the selectors — and here is what is already decided.**
-Written down because both halves have a trap that is cheaper to avoid than to find:
+**The actions are buttons now — built, 2026-09-15.** §8's first class, and it is the whole control:
+an action takes no argument, so there is nothing to ask for and nothing to confirm — the button
+sends the row's own `send` string through `sendText`, exactly as a picker or a switch composes its
+line, and its answer comes back on the `command` line. `showActions` draws one button per `class:
+"button"` row into the controls row, labelled with the row's `label` (the command's own words, which
+is what `/help` prints) and titled with its `help`; a press that is refused calls `showState(doc)`,
+the way a switch does, because a control that quietly did nothing is worse than one that says it
+could not. Two rows today, and the test that matters is the one that keeps that true rather than the
+two names: the frame's button rows are posted back to the terminal and their answers read, so a
+`class: "button"` row whose command does not exist fails before anybody presses it — and an action
+whose answer is *empty* fails too, because a button's only feedback on this page is the line it
+prints, and nothing at all would be indistinguishable from a press that never arrived.
+
+Only the button class is drawn. A report is deliberately not sent (the next bullet), and a
+destructive command still needs a confirmation this page does not have.
+
+**Next: the panels and the selectors — and here is what is already decided.** Written down because
+both halves have a trap that is cheaper to avoid than to find:
 
 - **A panel's text comes from the process.** What `/config`, `/tools`, `/skills` and `/help` print
   *is* the panel, so the process builds those lines and puts them in the frame; formatting them in
   the page would be a second implementation of the terminal's own report. The trap: those lines are
   styled (dim/bold) for the terminal and the frame must carry plain text, so either they are built
   once as data and rendered twice, or the terminal gives up its styling — and the `term_capture`
-  tests assert exact bytes, so that choice has to be made deliberately. `Term::plain` (built two
+  tests assert exact bytes, so that choice has to be made deliberately. `Term::plain` (built three
   rounds above) is what strips colour on the way to the page, and the `command` line already carries
   a command's whole answer if the cheaper route is taken and a panel is simply the answer to
-  `/<name>` — which it is, for every panel in the list.
-- **A button sends `send` through `sendText`**, exactly as a picker or a switch does, and its answer
-  arrives on the `command` line built above. A refused send puts the control back to what is in
-  force. The page already has the row it needs for this: `class: "button"`, two rows today
-  (`/new`, `/reload`).
+  `/<name>` — which it is, for every panel in the list. The open question that route raises: the
+  answer arrives on the feed like any other, so the page has to know that *this* answer belongs in
+  a panel rather than in the transcript, and the only thing that says so is which control sent it.
 - **A selector's options come from somewhere the frame already describes** — `/model`'s and
   `/provider`'s from `providers` (both controls exist), `/resume`'s and `/archive`'s from the
   sidebar's rows, which is the picked row's number rather than anything the page has to know. The
   command list says which commands take a value; it does not say where the values come from, and it
   should not, because that is what the control is for.
 - **A form is the composer's problem.** `/name <text>`, `/provider key <key>`, `/provider add` and
-  `/config edit` are interactive in the terminal, and `add`/`edit`/`edit` are wizards on top of that,
+  `/config edit` are interactive in the terminal, and `add`/`edit` are wizards on top of that,
   so the page gets a field only where the argument is a single value; the wizards stay where they
   are, which is a decision worth revisiting rather than assuming.
 - **The destructive class gets the page's own confirmation** — a second click, not a `/yes` command

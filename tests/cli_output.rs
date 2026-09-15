@@ -2893,6 +2893,15 @@ async fn every_command_the_page_may_offer_is_one_the_terminal_takes() {
             "the page is offered `{label}` as a {class} and the terminal does not have it, so a \
              button drawn from this frame would answer with a complaint: {told:?}"
         );
+        if class == "button" {
+            // A button's whole feedback is its answer, because pressing one leaves nothing else on
+            // the page: an empty one would leave a reader unable to tell a press that worked from a
+            // press that never arrived. Both of today's actions say a line.
+            assert!(
+                told.contains("\"text\":\"") && !told.contains("\"text\":\"\""),
+                "`{label}` is offered as a button and answered with nothing: {told:?}"
+            );
+        }
         checked += 1;
     }
 
