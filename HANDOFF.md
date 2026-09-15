@@ -7,8 +7,8 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 395 passing, 1 ignored (258 lib, 2 in
-the binary's own tests, 33 `agent_loop`, 52 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
+As of the commit that carries this file, `cargo test` is 396 passing, 1 ignored (258 lib, 2 in
+the binary's own tests, 33 `agent_loop`, 53 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
 `term_capture` plus the ignored cost measurement, 22 `web_view`), `cargo clippy --all-targets` is
 silent, and both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
 
@@ -34,17 +34,15 @@ Written for a cold start: a different machine, and possibly a session with no me
 one. The repository is the whole state — there is no index, no cache and no database anywhere in
 flint, on purpose — so cloning it and running the gate below is all that "catching up" means.
 
-**Where it was left.** `main` at the commit that lets a page add a provider
-(`feat: a provider can be added from the page`), plus the documentation commit that carries this file,
-working tree clean, `origin/main` level with it. **§8 is finished** — all five controls are on the page,
-the destructive rows have a second home on the sidebar, the two switches are offered the names the run
-already knows, and the one hole the round left open (adding a provider) is closed — and §9 has five
-entries, all closed. Of the roadmap's small list one item is left: `examples/live_turn.rs` still keeps
-its own copy of `run_turn`'s event handling and has drifted twice. The counts are in the section above
-and were re-run to write this paragraph, not remembered. What remains is written down where it belongs:
-`/config edit` as a page form would need a `/config set <key> <value>` the terminal does not have, the
-panel's groups are still §8's classes rather than a task, and the mid-turn report wait is unasserted
-(`docs/web-mode.md` §11).
+**Where it was left.** `main` at the commit that gives the example and the REPL one rendering of a turn
+(`refactor: one rendering of a turn, shared with the example`), plus the documentation commit that
+carries this file, working tree clean, `origin/main` level with it. **§8 is finished** — all five
+controls are on the page, the destructive rows have a second home on the sidebar, the two switches are
+offered the names the run already knows, and the one hole the round left open (adding a provider) is
+closed — §9 has five entries, all closed, and the roadmap's small list is now **empty**: this was its
+last item. What remains is written down where it belongs: `/config edit` as a page form would need a
+`/config set <key> <value>` the terminal does not have, the panel's groups are still §8's classes
+rather than a task, and the mid-turn report wait is unasserted (`docs/web-mode.md` §11).
 
 **The installed binary is older than the tree, and that matters for looking at the page.** `flint` on
 this machine's PATH resolves to `C:\Users\zhangzhuo\bin\flint.exe`, which is a copy of
@@ -68,7 +66,7 @@ open, so the copy needs every flint window closed first — measured twice.
 
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
-cargo test                                        # 395 passing, 1 ignored
+cargo test                                        # 396 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed
@@ -615,6 +613,30 @@ free-form, so a page form would send several settings at once, and the terminal'
 them one at a time — it would need a `/config set <key> <value>` that the terminal does not have.
 Inventing a command for the page's benefit is the thing §8's design exists to prevent. The page
 therefore writes nothing into the config file in this round.
+
+### The example and the REPL share one rendering of a turn
+
+The last item on the roadmap's small list, and it was there because the drift had already cost time
+twice: `examples/live_turn.rs` kept a hand-written copy of `run_turn`'s event match, so the example
+showed a transcript the REPL no longer produced — and a layout judged from the example was judged
+against the wrong rendering. Both times the fault was chased in the wrong file.
+
+The event handling moved into `src/sink.rs`: `EventSink` owns what a *rendering* of a turn needs — the
+tool calls announced but not answered (so a result can name what it was done to), the calls of the
+current round (so the clock moves to whatever is being waited for now), the answer so far (a fragment is
+not a line), and whether anything was streamed — plus the status line and the phase labels. The REPL's
+loop keeps the interrupt and steering logic, which needs the input channel and the future; everything
+inside the closure is now `sink.event(event)`. `waiting`/`named` are free functions as well as methods,
+because the loop that escalates a silent wait into "no response yet" cannot touch the sink while the
+turn's future holds it.
+
+`examples/live_turn.rs` is 60 lines shorter and calls the same sink. A test refuses the copy coming
+back: `the_example_renders_with_the_repls_sink` fails if the example matches on events itself
+(mutation-checked — re-inlining an `Event::Text` arm fails it).
+
+The extraction's whole risk was that it changed the output, which is what the byte-exact
+`term_capture` suite exists to catch: 20 tests, unchanged and passing. Counts above are 52 `cli_output`
+and the same 22 `web_view`; the test count did not move because the example had no test of its own.
 
 ### A provider can be added from the page, which is the question §8 left open
 

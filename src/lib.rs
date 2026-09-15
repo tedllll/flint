@@ -15,6 +15,7 @@ pub mod fetch;
 pub mod provider;
 pub mod search;
 pub mod session;
+pub mod sink;
 pub mod term;
 pub mod tools;
 pub mod util;

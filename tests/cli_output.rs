@@ -263,6 +263,36 @@ fn the_source_tree_contains_no_mojibake() {
     );
 }
 
+/// The example renders a turn with the REPL's own sink, not with a copy of it.
+///
+/// `examples/live_turn.rs` exists so a layout can be *judged* from real model output, which it does by
+/// driving the same code the REPL drives. It used to keep a hand-written copy of `run_turn`'s event
+/// handling, and the copy drifted twice: the example showed a transcript the REPL no longer produced
+/// and, being a second implementation, hid the real one. Both cost time chasing a fault in the wrong
+/// file. What keeps that from coming back is this: the example must call the sink, and must not match
+/// on events itself.
+#[test]
+fn the_example_renders_with_the_repls_sink() {
+    let example = std::fs::read_to_string("examples/live_turn.rs").expect("the example");
+    assert!(
+        example.contains("sink::EventSink") || example.contains("use flint::sink::EventSink"),
+        "the example does not use the sink the REPL uses, so it is a second rendering of a turn and \
+         a layout judged from it is judged against the wrong thing: {example}"
+    );
+    assert!(
+        example.contains("|event| sink.event(event)"),
+        "the example does not feed its turn to the sink, so whatever it renders is its own: \
+         {example}"
+    );
+    for copied in ["Event::Text", "Event::ToolArgs", "Event::ToolResult", "match event"] {
+        assert!(
+            !example.contains(copied),
+            "the example matches on `{copied}` itself, which is the copy of `run_turn`'s event \
+             handling that drifted twice: {example}"
+        );
+    }
+}
+
 /// `exec` must run a command without a config, and must not create one.
 ///
 /// This is the whole point of `exec`: when every provider is unreachable it still has to

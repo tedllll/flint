@@ -7,10 +7,18 @@
 // with scripts/vtscreen.js.
 //
 //   cargo run --example live_turn -- "帮我看看当前目录有几个文件"
+//
+// The rendering is the REPL's own, through `sink::EventSink`: this file used to keep a
+// hand-written copy of `run_turn`'s event handling, and the copy drifted twice, so a layout
+// fault got chased in the example and a fault in the example looked like the REPL's. An
+// example that renders something the REPL does not is worse than no example -- this one exists
+// so a layout can be *judged*, and judging it against a second implementation judges the wrong
+// thing.
 use flint::agent::Agent;
 use flint::config::Config;
-use flint::event::Event;
+use flint::display::Printer;
 use flint::provider::Provider;
+use flint::sink::EventSink;
 use flint::term::Term;
 
 #[tokio::main]
@@ -39,62 +47,22 @@ async fn main() -> anyhow::Result<()> {
     } else {
         flint::display::NORMAL
     };
-    let printer = flint::display::Printer::new(false, verbosity, &term);
+    let printer = Printer::new(false, verbosity, &term);
     // Read-only, so a layout check can never run a command by accident.
     let mut agent = Agent::new(&cfg, Provider::new(provider)?, true, cwd, None);
 
     // The REPL echoes the question before the turn, so the layout test covers it.
     printer.term().line(format_args!("> {question}"));
 
-    let mut answer = String::new();
-    let mut names: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
-    // The turn says what it is waiting for on the status line, and the reasoning goes
-    // there too rather than into the transcript -- this is the REPL's rule, and this
-    // example exists to reproduce the REPL's layout, so it has to follow it.
-    let mut streamed_text = false;
-    printer.term().activity_started("");
-    agent
-        .run(&question, |event| match event {
-            Event::Text(t) => {
-                if !streamed_text {
-                    // Same label the REPL uses. Kept in step deliberately: this example
-                    // is how the layout is inspected, and a label that differs here
-                    // reads as a REPL fault that does not exist.
-                    printer.term().activity_named("writing the answer");
-                }
-                streamed_text = true;
-                answer.push_str(&t);
-                printer.term().stream(&answer);
-            }
-            Event::Reasoning(t) => {
-                if !streamed_text && !t.trim().is_empty() {
-                    printer.term().activity_named("thinking");
-                }
-            }
-            Event::ToolStart { id, name } => {
-                names.insert(id, (name, String::new()));
-            }
-            Event::ToolArgs { id, args } => {
-                let name = names.get(&id).map(|(n, _)| n.clone()).unwrap_or_default();
-                printer.tool_call(&name, &args);
-                if let Some(entry) = names.get_mut(&id) {
-                    entry.1 = args;
-                }
-            }
-            Event::ToolResult { id, output, ok } => {
-                let (name, args) = names
-                    .get(&id)
-                    .cloned()
-                    .unwrap_or_else(|| (String::new(), String::new()));
-                // Goes through the printer, not the terminal: this is the code path
-                // under test, and writing straight to the term would bypass it.
-                printer.tool_result(&name, &args, &output, ok);
-                names.remove(&id);
-            }
-            _ => {}
-        })
-        .await?;
-    printer.term().end_stream();
+    // No browser: this is the terminal's rendering of the turn and nothing else. The REPL
+    // would hand the same sink its `--web` feed, which is why the page can be a renderer of a
+    // run rather than a reconstruction of one.
+    let mut sink = EventSink::new(&printer, None);
+    sink.begin_round();
+    agent.run(&question, |event| sink.event(event)).await?;
+    if sink.streamed() {
+        printer.term().end_stream();
+    }
     printer.term().blank();
     printer.term().line(format_args!("[done]"));
 

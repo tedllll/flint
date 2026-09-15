@@ -11,16 +11,14 @@
 //! unreachable, flint still runs commands.
 
 use flint::{
-    agent, config, context, display, engine, event, ndjson, provider, search, session, term, tools,
-    web,
+    agent, config, context, display, engine, event, ndjson, provider, search, session, sink, term,
+    tools, web,
 };
 
 use anyhow::{anyhow, Context, Result};
 use display::{Printer, BOLD, CHATTY, DIM, GREEN, NORMAL, QUIET, RED, RESET, YELLOW};
 #[allow(unused_imports)]
 use display::Palette;
-use event::Event;
-use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use term::Term;
@@ -2986,29 +2984,6 @@ async fn run_json_turn(
     }
 }
 
-/// What the turn is waiting for, said once so that both renderers say the same thing.
-///
-/// The terminal has a status row and the browser has a status line, and they are the same
-/// fact. `run_turn` decides it here and nowhere else. `Term` owns the clock and is the only
-/// thing that knows whether a call *started* a wait or merely renamed one -- a repeated tool
-/// name keeps its original start time on purpose -- so the answer is taken from it rather
-/// than guessed by the caller. A browser that guessed would reset its clock thirty seconds
-/// into a wait and show `0s` where the terminal shows `30s`.
-fn status_waiting(printer: &Printer<'_>, live: Option<&web::Live>, text: &str) {
-    let restarted = printer.term().activity_started(text);
-    announce_status(printer, live, restarted);
-}
-
-/// The same wait, named differently. The clock keeps counting.
-fn status_named(printer: &Printer<'_>, live: Option<&web::Live>, text: &str) {
-    // Nothing running: naming it would invent an activity with no start time, and the
-    // browser must not be told about a phase the terminal is not showing.
-    if !printer.term().activity_named(text) {
-        return;
-    }
-    announce_status(printer, live, false);
-}
-
 /// What a page's controls can be drawn from, as the frame named `state`.
 ///
 /// §8's read channel, and the reason it comes before any control: a picker cannot be built
@@ -3264,7 +3239,7 @@ fn toggles(agent: &agent::Agent, printer: &Printer<'_>) -> serde_json::Value {
 /// Nothing is being waited for any more.
 fn status_done(printer: &Printer<'_>, live: Option<&web::Live>) {
     printer.term().activity_done();
-    announce_status(printer, live, false);
+    sink::announce_status(printer, live, false);
 }
 
 /// Nothing is being waited for any more, and the turn is over.
@@ -3281,21 +3256,6 @@ fn turn_over(printer: &Printer<'_>, live: Option<&web::Live>, agent: &agent::Age
     status_done(printer, live);
     if let Some(live) = live {
         live.line(ndjson::turn_completed(agent.last_usage()));
-    }
-}
-
-/// What the status row now says, to whoever else is rendering this run.
-///
-/// The words come from `Term::activity_label` and not from the caller's argument. They are
-/// not the same thing: an unnamed wait is shown as `waiting for the model`, and a stream
-/// carrying the raw empty name would blank the browser's status line at the exact moment
-/// the wait began -- which is the whole thing this event exists to prevent.
-fn announce_status(printer: &Printer<'_>, live: Option<&web::Live>, restarted: bool) {
-    if let Some(live) = live {
-        live.event(&Event::Status {
-            text: printer.term().activity_label(),
-            restarted,
-        });
     }
 }
 
@@ -3345,7 +3305,12 @@ async fn run_turn(
     // Every model call starts here, including the ones after a tool round. The status
     // line carries the phase from here on; the escalation in the wait loop turns the
     // nameless wait into an explicit "no response yet".
-    status_waiting(printer, live, "");
+    //
+    // From here the turn is rendered by `sink::EventSink`, which is the same rendering
+    // `examples/live_turn.rs` replays: it was a closure body here and a hand copy there, and the copy
+    // drifted twice, so a layout fault was chased in the wrong file.
+    let mut sink = sink::EventSink::new(printer, live);
+    sink.begin_round();
 
     // Reports the page asked for while this turn is running. They wait for the turn: a listing
     // printed into the middle of an answer would be read as part of the answer, and the model's own
@@ -3354,147 +3319,17 @@ async fn run_turn(
     let mut reports: Vec<String> = Vec::new();
 
     loop {
-        let mut tool_names: HashMap<String, (String, String)> = HashMap::new();
-        // The calls of the current round, in the order they were announced, so the clock
-        // can move to the next one as each result arrives.
-        let mut round_calls: Vec<String> = Vec::new();
-        let mut streamed_text = false;
-        // The answer so far. Streamed output is redrawn in full on every fragment,
-        // because a fragment is not a line: it can stop in the middle of a word,
-        // and only the whole text can be placed correctly.
-        let mut answer = String::new();
-        // The accumulator above belongs to this turn, and so does the terminal's record
-        // of what has already been committed: starting the next turn has to start that
-        // record over too, or the answer is measured against the previous turn's text.
-        printer.term().begin_answer();
+        // A tool round is another wait: the step starts by asking the model again, and the clock has
+        // to be running for it or the pause after every tool call looks like the turn is over. The
+        // round's own state -- which tools are in flight, which are being waited for, the answer so
+        // far -- is the sink's, and this is where it starts over.
+        sink.begin_round();
 
-        // A tool round is another wait: the step starts by asking the model again, and
-        // the clock has to be running for it or the pause after every tool call looks
-        // like the turn is over.
-        status_waiting(printer, live, "");
-
-        // The turn and its output closure are confined to this scope: the future
-        // holds a mutable borrow of `buffer`, and that borrow has to end before
-        // the code below can read `buffer` to decide what to flush.
+        // The turn and its output closure are confined to this scope: the future holds a mutable
+        // borrow of the sink, and that borrow has to end before the code below can read it to decide
+        // what to flush.
         let (result, steering, hand_back) = {
-            let mut turn = Box::pin(agent.run(&current, |event| {
-                // A phase change is announced *before* the thing that caused it, so a reader
-                // of the stream sees the two in the order the terminal does: `writing the
-                // answer`, then the text. Emitting the event first and the status from
-                // inside its arm put them the wrong way round, which the first live capture
-                // showed immediately. `activity_named` is idempotent, so repeating this for
-                // every fragment of one answer costs nothing.
-                match &event {
-                    Event::Text(_) if !streamed_text => status_named(printer, live, WRITING_LABEL),
-                    // The same two guards the arm below used to carry, kept together with
-                    // the announcement they belong to: a fragment arriving after the answer
-                    // has started, or a blank one, is not a phase.
-                    Event::Reasoning(t) if !streamed_text && !t.trim().is_empty() => {
-                        status_named(printer, live, THINKING_LABEL)
-                    }
-                    _ => {}
-                }
-                // Every event the turn produces, on the browser's stream as well. This
-                // closure is the one place they all pass, which is what makes the browser a
-                // renderer of the same run rather than a reconstruction of it.
-                if let Some(live) = live {
-                    live.event(&event);
-                }
-                match event {
-                Event::Text(t) => {
-                    if printer.term().interactive() {
-                        // The answer is redrawn in full, so the terminal always
-                        // shows a complete line even when a fragment stops
-                        // mid-word.
-                        answer.push_str(&t);
-                        printer.term().stream(&answer);
-                    } else {
-                        // A pipeline gets each fragment once. Re-rendering here
-                        // would print the whole answer again per fragment.
-                        printer.term().stream(&t);
-                    }
-                    streamed_text = true;
-                }
-                Event::Reasoning(_) => {
-                    // The model thinking out loud.
-                    //
-                    // Not put in the transcript: the provider emits one event per SSE
-                    // fragment, so there is no natural place to break the block into
-                    // lines, and the whole reasoning spread down the screen is what a
-                    // live turn used to look like. It is not thrown away either -- it is
-                    // in the session file.
-                    //
-                    // What the user needs from it is *that it is happening*, and that
-                    // belongs on the status line, which is already showing how long the
-                    // turn has taken. A separate `… thinking` marker in the transcript
-                    // said the same thing a second time, one row above, and left the
-                    // status line claiming the model was still being waited for while it
-                    // was in fact already talking. The label is put up by the match above,
-                    // before this event reaches the stream.
-                }
-                Event::ToolStart { id, name } => {
-                    // Start the clock as soon as the tool is known, not when its
-                    // arguments have finished streaming: the wait begins here, and a
-                    // tool that never returns is exactly the case this is for.
-                    //
-                    // Only for the first call of the round, though. Every call in a round
-                    // is announced before any of them runs, so naming the clock on each
-                    // announcement claimed the *last* call was the one being waited for,
-                    // and reset the elapsed time of a tool that had not started yet.
-                    if round_calls.is_empty() {
-                        status_waiting(printer, live, &name);
-                    }
-                    round_calls.push(id.clone());
-                    tool_names.insert(id, (name, String::new()));
-                }
-                Event::ToolArgs { id, args } => {
-                    let name = tool_names
-                        .get(&id)
-                        .map(|(name, _)| name.clone())
-                        .unwrap_or_default();
-                    printer.tool_call(&name, &args);
-                    // Remembered so the result line can name what it was done to. Without
-                    // it, two reads of two different files both print "read N lines" and
-                    // the transcript looks like a duplicate.
-                    if let Some(entry) = tool_names.get_mut(&id) {
-                        entry.1 = args;
-                    }
-                }
-                Event::ToolResult { id, output, ok } => {
-                    // The name comes from the matching ToolStart: the result is
-                    // reported as "鉁?read" or "鉁?bash", so the transcript says what
-                    // happened rather than just that something did.
-                    let (name, args) = tool_names
-                        .get(&id)
-                        .cloned()
-                        .unwrap_or_else(|| (String::new(), String::new()));
-                    printer.tool_result(&name, &args, &output, ok);
-                    tool_names.remove(&id);
-                    round_calls.retain(|call| call != &id);
-                    // The clock belongs to whatever is being waited for now: the next call
-                    // in the round, or -- once they have all run -- the model that has to
-                    // be asked for the round after this one. Clearing it here instead left
-                    // the rest of a multi-call round and the whole following model call
-                    // with no clock at all, which is the pause a user actually stares at.
-                    let next = round_calls
-                        .first()
-                        .and_then(|next| tool_names.get(next))
-                        .map(|(name, _)| name.clone())
-                        .unwrap_or_default();
-                    status_waiting(printer, live, &next);
-                }
-                Event::Usage(_) => {}
-                Event::Warning(w) => {
-                    printer.term().blank();
-                    printer.term().line(format_args!("{} {w}", printer.style(RED, "warning:")));
-                }
-                Event::Done => {}
-                // The terminal never receives one of these: the status *is* the terminal's
-                // own row, and `status_waiting` reads from it rather than feeding it. A
-                // caller that could send one would be a second place deciding the phase.
-                Event::Status { .. } => {}
-                }
-            }));
+            let mut turn = Box::pin(agent.run(&current, |event| sink.event(event)));
 
             // Whichever happens first: the model finishes this turn, or the user
             // says something. Dropping the future cancels the HTTP stream, which
@@ -3582,7 +3417,7 @@ async fn run_turn(
                         if printer.term().activity_is_unnamed_wait()
                             && printer.term().activity_elapsed() >= NO_RESPONSE_AFTER
                         {
-                            status_named(printer, live, NO_RESPONSE_LABEL);
+                            sink::named(printer, live, NO_RESPONSE_LABEL);
                         }
                         printer.term().tick();
                     }
@@ -3631,7 +3466,7 @@ async fn run_turn(
                 // The turn finished. `stream` already rendered the whole answer, so
                 // there is no trailing fragment left to flush -- only the line
                 // break that ends it.
-                if streamed_text {
+                if sink.streamed() {
                     printer.term().end_stream();
                 }
                 if let Some(r) = result {
@@ -3643,7 +3478,7 @@ async fn run_turn(
                 if text.trim().is_empty() {
                     continue;
                 }
-                if streamed_text {
+                if sink.streamed() {
                     // A partial answer is on screen and is no longer valid.
                     printer.term().blank();
                 }
@@ -3781,12 +3616,12 @@ fn run_debug(
 /// meanings, and a single label told the user none of them.
 ///
 /// The initial wait has no label: an unnamed activity already reads "waiting for the
-/// model", and a constant for it would be a second way to say the same thing.
+/// model", and a constant for it would be a second way to say the same thing. The two labels
+/// a *stream* can be in -- `thinking` and `writing the answer` -- are `sink`'s, because they are
+/// decided inside the rendering both callers share.
 /// How long silence may last before it stops looking like a model thinking.
 const NO_RESPONSE_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
 const NO_RESPONSE_LABEL: &str = "no response yet — the network or the endpoint may be stuck";
-const THINKING_LABEL: &str = "thinking";
-const WRITING_LABEL: &str = "writing the answer";
 
 /// Reduce a tool's JSON arguments to the one value worth showing on a line.
 fn parse_args(argv: Vec<String>) -> Result<Args> {

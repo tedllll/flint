@@ -1014,9 +1014,14 @@ with it; and `/stop`, the interrupt as a short word, reachable from the composer
   three ways of naming a session as `--resume` (and bare, the most recent), seeds a new file with
   the conversation and the name, and leaves the original byte-for-byte untouched. Combining it with
   `--resume`/`--continue` is refused, because both answer "which file does this run write".
-- `examples/live_turn.rs` keeps a hand-maintained copy of `run_turn`'s event handling and has
-  drifted twice, costing time chasing faults that were only in the example. It should use
-  the same sink the CLI does.
+- ~~`examples/live_turn.rs` keeps a hand-maintained copy of `run_turn`'s event handling and has
+  drifted twice, costing time chasing faults that were only in the example.~~ **Done, 2026-09-15**: the
+  event handling moved into `src/sink.rs` — `EventSink`, one implementation of "what a turn's events
+  become": the transcript, the status line, and the page's stream — and both the REPL and the example
+  feed it. The example is now a second *caller* rather than a second version, and a test refuses a copy
+  coming back (`the_example_renders_with_the_repls_sink`: no `match event` in the example). That the
+  extraction changed no output is what the byte-exact `term_capture` suite is for, and it passed
+  unchanged. This was the last item on this list.
 
 ## Known unfinished
 
