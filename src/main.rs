@@ -3,7 +3,7 @@
 //! Modes:
 //!   flint                          interactive REPL
 //!   flint -p "..."                 one-shot prompt
-//!   flint --continue               resume the most recent session
+//!   flint --continue               resume the most recent session in this directory
 //!   flint exec "npm i -g ..."      run a command directly, no model involved
 //!   flint --list-sessions          show past sessions
 //!
@@ -369,7 +369,7 @@ async fn real_main() -> Result<i32> {
         let target = match (&args.resume, &args.fork) {
             (Some(t), _) => Some(resolve_session(t)?),
             (_, Some(t)) if !t.is_empty() => Some(resolve_session(t)?),
-            _ => session::latest(&config::sessions_dir())?,
+            _ => session::latest_for(&config::sessions_dir(), &cwd)?,
         };
         match target {
             Some(path) => {
@@ -398,7 +398,16 @@ async fn real_main() -> Result<i32> {
                 }
                 resumed_history = Some(loaded);
             }
-            None => eprintln!("flint: no previous session found; starting a new one."),
+            // Which directory is the whole point of the message. `--continue` means "the
+            // conversation I was just in *here*", so what a caller needs to hear is that nothing
+            // has happened in this directory -- not that no session exists anywhere, which was
+            // the old wording and was said while some other project's conversation sat in the
+            // same home. A caller that asked to continue and silently got a fresh conversation
+            // has lost the thread it thought it was holding.
+            None => eprintln!(
+                "flint: no session for {} yet; starting a new one.",
+                cwd.display()
+            ),
         }
     }
 
@@ -3776,7 +3785,7 @@ fn print_help(color: bool, term: &Term) {
   flint -p \"<prompt>\"              one-shot, prints the answer and exits
   flint -p \"<prompt>\" --json       the same run as one JSON object per line
   flint <words...>                 same as -p
-  flint --continue                 resume the most recent session
+  flint --continue                 resume the most recent session in this directory
   flint --resume <n|id>            resume a particular session
   flint --fork [<n|id>]            copy a session and continue the copy, leaving the original alone
   flint exec <command>             run a command directly (no model, no network)

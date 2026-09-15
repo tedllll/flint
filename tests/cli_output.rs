@@ -398,6 +398,150 @@ fn meta_line(id: &str) -> String {
     )
 }
 
+/// The same line, held in a directory of the caller's choosing.
+///
+/// Escaped, because this is JSON and a Windows path is nothing but backslashes: written raw,
+/// `"cwd":"C:\Users\..."` is not JSON, the line is skipped as damage, and a test about which
+/// directory a session belongs to would pass by skipping every session.
+fn meta_line_in(id: &str, cwd: &std::path::Path) -> String {
+    let cwd = cwd.display().to_string().replace('\\', "\\\\");
+    format!(
+        r#"{{"type":"meta","v":2,"id":"{id}","created":"epoch:1","cwd":"{cwd}","provider":"stub","model":"stub-model"}}"#
+    )
+}
+
+/// `--continue` continues the conversation held in *this* directory, not the newest one anywhere.
+///
+/// It used to be the newest file in the home, which is the wrong answer for anyone with two
+/// projects -- and wrong in silence: the run resumes the other project's history, appends to it, and
+/// says nothing. One home with a directory per project is exactly the shape a program driving flint
+/// -- one process per question -- is in, so this is the case where the wrong pick is least visible
+/// and most damaging.
+///
+/// The assertion is on bytes, because that is the promise: the other directory's file must be
+/// untouched, and this directory's file must have grown. The *newer* session is the one in the other
+/// directory, so a regression to modification-time order fails this test rather than passing it by
+/// luck.
+#[tokio::test]
+async fn continue_resumes_the_conversation_held_in_this_directory() {
+    let server = MockServer::start().await;
+    answer_once(&server).await;
+    let home = test_home("continue-here", &server.uri());
+    let sessions = home.join("sessions");
+    let work = home.join("project");
+    let elsewhere = home.join("elsewhere");
+    std::fs::create_dir_all(&work).expect("working directory");
+    std::fs::create_dir_all(&elsewhere).expect("another directory");
+
+    let mine = write_session(
+        &sessions,
+        "111-1.jsonl",
+        &[
+            &meta_line_in("111-1", &work),
+            r#"{"type":"chat","message":{"role":"user","content":"the question from this directory"}}"#,
+            r#"{"type":"chat","message":{"role":"assistant","content":"an answer"}}"#,
+        ],
+        30,
+    );
+    let theirs = write_session(
+        &sessions,
+        "222-1.jsonl",
+        &[
+            &meta_line_in("222-1", &elsewhere),
+            r#"{"type":"chat","message":{"role":"user","content":"a question from somewhere else"}}"#,
+        ],
+        0,
+    );
+    let theirs_before = std::fs::read(&theirs).expect("read the other directory's session");
+
+    let out = binary()
+        .current_dir(&work)
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .args(["--continue", "-p", "carry on"])
+        .output()
+        .expect("failed to run flint");
+    assert!(
+        out.status.success(),
+        "flint --continue failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert_eq!(
+        std::fs::read(&theirs).expect("read the other directory's session again"),
+        theirs_before,
+        "another directory's conversation was resumed into: --continue picked by time, not by place"
+    );
+    let mine_after = std::fs::read_to_string(&mine).expect("read this directory's session");
+    assert!(
+        mine_after.contains("carry on"),
+        "this directory's conversation did not continue: {mine_after}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("111-1.jsonl"),
+        "the run did not say which session it resumed: {stderr}"
+    );
+}
+
+/// With nothing held here, `--continue` starts a conversation and says so.
+///
+/// Not reaching for another directory's conversation is the point; saying so is the other half.
+/// A caller that asked to continue and got a fresh conversation in silence has lost the thread it
+/// thought it was holding, which is worse than an error, because nothing looks wrong.
+#[tokio::test]
+async fn continue_with_nothing_here_starts_one_and_says_so() {
+    let server = MockServer::start().await;
+    answer_once(&server).await;
+    let home = test_home("continue-empty", &server.uri());
+    let sessions = home.join("sessions");
+    let work = home.join("project");
+    let elsewhere = home.join("elsewhere");
+    std::fs::create_dir_all(&work).expect("working directory");
+    std::fs::create_dir_all(&elsewhere).expect("another directory");
+
+    let theirs = write_session(
+        &sessions,
+        "222-1.jsonl",
+        &[
+            &meta_line_in("222-1", &elsewhere),
+            r#"{"type":"chat","message":{"role":"user","content":"a question from somewhere else"}}"#,
+        ],
+        0,
+    );
+    let theirs_before = std::fs::read(&theirs).expect("read the other directory's session");
+
+    let out = binary()
+        .current_dir(&work)
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .args(["--continue", "-p", "first question here"])
+        .output()
+        .expect("failed to run flint");
+    assert!(out.status.success(), "flint failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    assert_eq!(
+        std::fs::read(&theirs).expect("read the other directory's session again"),
+        theirs_before,
+        "the empty directory was given another directory's conversation"
+    );
+    let new_sessions: Vec<String> = std::fs::read_dir(&sessions)
+        .expect("read the sessions directory")
+        .filter_map(|entry| entry.ok().map(|e| e.file_name().to_string_lossy().to_string()))
+        .filter(|name| name.ends_with(".jsonl"))
+        .collect();
+    assert_eq!(
+        new_sessions.len(),
+        2,
+        "a new conversation should have been started here: {new_sessions:?}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no session for"),
+        "starting fresh in silence is the failure this test exists for: {stderr}"
+    );
+}
+
 /// Tidying sessions is a file operation, and it must not need a model.
 ///
 /// `--list-sessions`, `--archive` and `--delete` all run before the provider is even

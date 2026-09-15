@@ -98,7 +98,7 @@ vLLM, llama.cpp). The client appends `/chat/completions` to `base_url`.
 flint                            # interactive session
 flint -p "why is my dsh broken"  # one-shot
 flint why is my dsh broken       # same thing
-flint --continue                 # resume the last session
+flint --continue                 # resume the last session here
 flint --resume 3                 # resume a particular one (see the list)
 flint --resume 1789116592        # ...by id prefix, or by path to the .jsonl
 flint --fork 3                   # copy that session and carry on in the copy
@@ -619,6 +619,13 @@ Sessions are append-only JSONL at `~/.flint/sessions/<id>.jsonl`, one event per
 line. A damaged line is skipped and reported rather than taking the session
 down. A resumed session is appended to, not rewritten, so nothing said after
 `--continue` is lost.
+
+A session records the directory it was held in, and `--continue` continues the most
+recent conversation *held in the directory you are in* — projects do not inherit each
+other's history, and `--resume` is the flag that names a session outright. Point
+`FLINT_HOME` at a project (`FLINT_HOME=/path/to/project/.flint`) to give it its own
+config, sessions and skills, which is how a program driving flint per project keeps them
+apart.
 
 Nothing is ever rewritten, which is what makes the format repairable by hand:
 

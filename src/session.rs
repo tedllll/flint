@@ -295,6 +295,12 @@ pub struct SessionSummary {
     /// The first thing the user said, clipped.
     pub preview: String,
     pub version: u32,
+    /// The directory the conversation was held in, from the `meta` line.
+    ///
+    /// Read so that `--continue` can mean "the conversation I was just in *here*". The session
+    /// file has always recorded this -- it is what tells a reader where the work was done -- but
+    /// nothing chose a session by it, so the newest file in the home won regardless of project.
+    pub cwd: String,
 }
 
 /// Bytes read from each end of a file to summarise it.
@@ -349,6 +355,9 @@ pub fn scan(path: &Path) -> Result<SessionSummary> {
                     .unwrap_or_else(version_one);
                 if let Some(id) = value.get("id").and_then(|v| v.as_str()) {
                     out.id = id.to_string();
+                }
+                if let Some(cwd) = value.get("cwd").and_then(|v| v.as_str()) {
+                    out.cwd = cwd.to_string();
                 }
             }
             Some("chat") => {
@@ -434,11 +443,22 @@ pub fn delete(path: &Path) -> Result<()> {
     std::fs::remove_file(path).with_context(|| format!("cannot delete {}", path.display()))
 }
 
-/// Most recent session in `dir`, if any.
+/// Most recent session in `dir` that was held in `cwd`, if any.
 ///
 /// The archive is not searched, deliberately: `--continue` means "the conversation I was
 /// just in", and something filed away is not that.
-pub fn latest(dir: &Path) -> Result<Option<PathBuf>> {
+///
+/// The directory is part of that meaning. A conversation is tied to where it happened: the
+/// files it read, the `AGENTS.md` and the skills that shaped it, and the questions that only
+/// make sense there. Choosing by modification time alone made `--continue` mean "the last
+/// thing anyone did anywhere in this home", so a second project's first `--continue` resumed
+/// the first project's conversation and appended to it -- and a caller driving flint from a
+/// program, one process per question, is exactly the case where two projects share a home and
+/// never notice until the answers start referring to the other project's files.
+///
+/// A session whose directory cannot be matched starts nothing: `--resume` names one outright,
+/// and a fallback to "some other project's conversation" is the bug this exists to remove.
+pub fn latest_for(dir: &Path, cwd: &Path) -> Result<Option<PathBuf>> {
     if !dir.exists() {
         return Ok(None);
     }
@@ -446,6 +466,13 @@ pub fn latest(dir: &Path) -> Result<Option<PathBuf>> {
     for entry in std::fs::read_dir(dir)?.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        // The `meta` line, and only the head of the file: a summary costs the same for a
+        // 400 KB conversation as for a 4 KB one, which is why choosing a session this way is
+        // affordable at all.
+        let Ok(summary) = scan(&path) else { continue };
+        if !same_dir(&summary.cwd, cwd) {
             continue;
         }
         let Ok(meta) = entry.metadata() else { continue };
@@ -457,6 +484,25 @@ pub fn latest(dir: &Path) -> Result<Option<PathBuf>> {
         }
     }
     Ok(newest.map(|(_, p)| p))
+}
+
+/// Whether a session's recorded `cwd` is the directory we are in now.
+///
+/// Compared as canonical paths, not as strings. Windows does not distinguish case or either
+/// separator, `current_dir` may hand back a different spelling than the one that was recorded
+/// -- a symlink, a `..`, a mapped drive -- and a session file is hand-editable, so the path in
+/// it is not promised to be spelled the way this process spells it. When either side cannot be
+/// canonicalised (a directory since removed, a file on a drive that is gone) the strings are
+/// compared as written rather than the session being treated as somebody else's.
+fn same_dir(recorded: &str, cwd: &Path) -> bool {
+    if recorded.is_empty() {
+        return false;
+    }
+    let recorded = Path::new(recorded);
+    match (recorded.canonicalize(), cwd.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => recorded == cwd,
+    }
 }
 
 /// All sessions, newest first, as (id, label) where the label is the name it was given
@@ -565,6 +611,18 @@ mod tests {
         }
     }
 
+    /// The same line, held in a directory of the caller's choosing.
+    ///
+    /// The path is escaped, because this is JSON and a Windows path is nothing but backslashes:
+    /// written raw, `"cwd":"C:\Users\..."` is not JSON at all, the line is skipped as damage, and
+    /// a test of "which directory was this held in" would pass by skipping everything.
+    fn meta_in(id: &str, cwd: &str) -> String {
+        let cwd = cwd.replace('\\', "\\\\");
+        format!(
+            r#"{{"type":"meta","v":1,"id":"{id}","created":"epoch:1","cwd":"{cwd}","provider":"p","model":"m"}}"#
+        )
+    }
+
     fn user(text: &str) -> String {
         format!(r#"{{"type":"chat","message":{{"role":"user","content":"{text}"}}}}"#)
     }
@@ -578,6 +636,69 @@ mod tests {
     /// conversation. `Usage` had already made this argument for its own numbers -- a file that is
     /// append-only records what changed *when* it changed -- so a switch is an event, the last one
     /// wins, and `load` reports the model actually in force.
+    /// `--continue` means "the conversation I was just in *here*", not "the newest file anywhere".
+    ///
+    /// The old choice was by modification time over the whole home, so a second project's first
+    /// `--continue` resumed the first project's conversation and appended to it, with nothing said.
+    /// One home with one directory per project is exactly the shape a program driving flint -- one
+    /// process per question -- ends up in, and it is precisely where the answers would start
+    /// referring to the wrong project's files.
+    #[test]
+    fn a_session_is_continued_only_in_the_directory_it_was_held_in() {
+        let home = TempDir::new("latest-for-home");
+        let project = TempDir::new("latest-for-project");
+        let other = TempDir::new("latest-for-other");
+        let project_cwd = project.0.display().to_string();
+        let other_cwd = other.0.display().to_string();
+
+        let mine = home.file(
+            "111-1.jsonl",
+            &[meta_in("111-1", &project_cwd), user("in the project")],
+        );
+        // Newer, and in another directory: the mistake this test exists for is picking this one.
+        let theirs = home.file(
+            "222-1.jsonl",
+            &[meta_in("222-1", &other_cwd), user("somewhere else")],
+        );
+
+        assert_eq!(
+            latest_for(&home.0, &project.0).expect("latest_for"),
+            Some(mine.clone()),
+            "the newest session in the home was picked over the one held in this directory"
+        );
+        assert_eq!(
+            latest_for(&home.0, &other.0).expect("latest_for"),
+            Some(theirs),
+            "the other directory's own conversation must still be found from there"
+        );
+
+        // The same directory spelled differently -- a trailing `.` is what a caller with a
+        // relative path hands over -- is still the same directory.
+        assert_eq!(
+            latest_for(&home.0, &project.0.join(".")).expect("latest_for"),
+            Some(mine),
+            "a differently spelled path to the same directory did not match"
+        );
+
+        // Nothing has happened here yet, and the honest answer is nothing: not another
+        // directory's conversation.
+        let untouched = TempDir::new("latest-for-untouched");
+        assert_eq!(
+            latest_for(&home.0, &untouched.0).expect("latest_for"),
+            None,
+            "a directory with no conversation of its own was given somebody else's"
+        );
+
+        // A `meta` line with no `cwd` -- hand-written, or older than the field -- belongs to
+        // nobody, so it cannot be resumed by accident from anywhere.
+        home.file("333-1.jsonl", &[meta("333-1", Some(1)), user("no cwd")]);
+        assert_eq!(
+            latest_for(&home.0, &untouched.0).expect("latest_for"),
+            None,
+            "a session that does not say where it was held was claimed by a directory"
+        );
+    }
+
     #[test]
     fn a_switch_is_a_line_and_the_last_one_is_believed() {
         use crate::event::Message;

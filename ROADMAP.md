@@ -994,6 +994,22 @@ tests, both watched red: a lib test that a switch is a line and the last one is 
 test that a `/provider` on a served run leaves exactly one session file, appended to rather than
 rewritten.
 
+**Sixth: `--continue` meant "the newest session anywhere", not "the one held here" — fixed, 2026-09-15,
+found while working out how a program should drive flint.** The session file has recorded `cwd` in its
+`meta` line since the format was written, and nothing chose a session by it: `session::latest` took the
+newest `.jsonl` in the home by modification time, so a second project's first `--continue` resumed the
+first project's conversation, appended to it, and said nothing. For a person with one project this is
+invisible; for a program driving flint one process per question -- one `FLINT_HOME`, one directory per
+project -- it is the default case, and the symptom is answers that refer to another project's files.
+`session::latest_for(dir, cwd)` compares the recorded directory with the one in force as **canonical**
+paths (Windows does not distinguish case or separator, `current_dir` may spell a path differently than it
+was recorded, and the file is hand-editable), and a session that records no directory belongs to nobody
+rather than to everybody. With nothing held here the run starts a conversation and *says so* on stderr:
+silently continuing from nothing is worse than an error, because nothing looks wrong. Three tests, all
+watched red by making the choice ignore the directory again: a lib test that the newest session in the
+home loses to the one held in this directory, and two e2e tests -- the other directory's file is
+byte-identical afterwards and this one's grew, and the empty directory gets a new session plus the note.
+
 **Done in the same round, recorded so it is not re-done**: themed scrollbars (the default grey ones
 were the complaint); a draggable sidebar and a draggable reading width, with a hairline hint at
 rest on the right hand because there is no seam at the text's edge to be discovered by; the
