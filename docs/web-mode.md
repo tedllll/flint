@@ -219,7 +219,7 @@ Four routes. No cookies, no HTTP/2, no TLS, no keep-alive, no streaming request 
 | `GET /sessions` | the conversations `/resume` can reach, numbered the way `/resume` numbers them |
 | *`event: sessions`* | not a route but its counterpart: the list has changed, re-read it |
 | *`event: state`* | the run's own configuration: provider, model, what each provider offers, the toggles, and the command list with §8's class for each row |
-| `type: command` | what a command answered, on the same stream as the turn's events: `input` and `text` |
+| `type: command` | what a command answered, on the same stream as the turn's events: `input` and `text` — which is also what a header button's answer arrives on |
 
 **All five are implemented.** `/session` and `/events` read the session path and the event feed
 through a shared handle, which is what lets `/new` and `/resume` move an open window to the
@@ -642,4 +642,25 @@ button that destroys a conversation on one click.
 **Not yet measured in a browser**: nobody has opened the `commands` panel with a real font and read
 it against `/help` in the terminal, or used it while an answer was streaming. It is pinned as
 behaviour and as bytes, and that is all it is pinned as.
+
+### The first control: a button for the actions — measured, 2026-09-15
+
+§8's first class, and the smallest honest one: an action takes no argument, so there is nothing to
+ask for and nothing to confirm, and the whole control is "send this line" — which is what the
+composer, the pickers and the switches already do. `showActions` draws one button per `class:
+"button"` row into the header's controls row, labels it with the row's `label` and titles it with the
+row's `help`, and sends the row's own `send`. Its answer arrives on the `command` line, in the
+transcript. Two classes are not drawn: a report is not sent (the panel above is where a report is
+read, and §8 keeps those commands off this page's wire), and a destructive command waits for the
+confirmation this page does not have yet.
+
+| Claim | How | Result |
+|---|---|---|
+| The frame's action rows become buttons | `showActions` under Node, over the stub DOM | one button per `class: "button"` row, in the frame's order, labelled with `label` and titled with `help`; a frame whose rows are all reports has none, which is the same assertion that a panel is not a button |
+| The press sends the frame's line | `tests/web_view.rs`, over the page's own bytes | `sendText(command.send)` — the line the process composed, not a name the page put back together — with the class filter and the refused-send path (`showState(doc)`) pinned beside it. The stub DOM has no event delivery, so this is pinned as bytes and the Node checks pin what is drawn, exactly as the switches' `/<name> <value>` is |
+| An action answers with something | the frame's button `send` strings posted to `POST /message`, the answers read off the feed | non-empty `text` for every button row. A button's whole feedback here is the line it prints, so an empty one would be indistinguishable from a press that never arrived. Mutation-checked: neutering `Live::command`'s push fails it naming `/new` |
+
+**Not yet measured in a browser**: nobody has pressed one. What a press does is pinned as bytes and
+what comes back is pinned end to end, and nothing here says how the button looks or where it lands
+under a real cursor.
 

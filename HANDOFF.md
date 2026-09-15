@@ -7,9 +7,9 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 373 passing, 1 ignored (254 lib, 1 in
+As of the commit that carries this file, `cargo test` is 374 passing, 1 ignored (254 lib, 1 in
 the binary's own tests, 33 `agent_loop`, 43 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
-`term_capture` plus the ignored cost measurement, 14 `web_view`), `cargo clippy --all-targets` is
+`term_capture` plus the ignored cost measurement, 15 `web_view`), `cargo clippy --all-targets` is
 silent, and both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
 
 **The last sessions were on Windows** (10.0.26200, AMD64, rustc 1.98.1, PowerShell 5.1.26100.6584
@@ -34,9 +34,10 @@ Written for a cold start: a different machine, and possibly a session with no me
 one. The repository is the whole state — there is no index, no cache and no database anywhere in
 flint, on purpose — so cloning it and running the gate below is all that "catching up" means.
 
-**Where it was left.** `main` at `db061a4` (`feat: the page is handed the commands there are`) plus
-the documentation commit that carries this file, working tree clean, `origin/main` level with it.
-The counts are in the section above and were re-run to write this paragraph, not remembered.
+**Where it was left.** `main` at `3fb8f9c` (`feat: the page's first control is a button for the
+actions that take no argument`) plus the documentation commit that carries this file, working tree
+clean, `origin/main` level with it. The counts are in the section above and were re-run to write this
+paragraph, not remembered.
 
 **What the other machine needs.**
 
@@ -52,7 +53,7 @@ The counts are in the section above and were re-run to write this paragraph, not
 
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
-cargo test                                        # 373 passing, 1 ignored
+cargo test                                        # 374 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed
@@ -89,13 +90,13 @@ nothing changed — watch for the `Compiling` line. And CI runs nothing on push:
 means the local gate was green and nothing more.
 
 **What is not verified anywhere yet.** The page's controls have never been looked at in a browser:
-the pickers, the switches, the command-answer block and the new command panel are pinned as behaviour
-(Node over the stub DOM) and as bytes (`tests/web_view.rs`), and measured end to end against a real
-process (`tests/cli_output.rs`), but nobody has used them with a real font, a real keyboard or a real
-scroll position. `docs/web-mode.md` §11 says so in the same words, and the first thing worth doing
-on the new machine is `cargo run -- --web`, type `/config` into the composer, and see whether the
-answer lands in the transcript the way the block is drawn — then open the `commands` panel in the
-header and read it against `/help` in the terminal.
+the pickers, the switches, the command-answer block, the new command panel and the action buttons are
+pinned as behaviour (Node over the stub DOM) and as bytes (`tests/web_view.rs`), and measured end to
+end against a real process (`tests/cli_output.rs`), but nobody has used them with a real font, a real
+keyboard or a real scroll position. `docs/web-mode.md` §11 says so in the same words, and the first
+thing worth doing on the new machine is `cargo run -- --web`, press the header's buttons and change a
+picker, type `/config` into the composer, and see whether the answer lands in the transcript the way
+the block is drawn — then open the `commands` panel and read it against `/help` in the terminal.
 
 ## What was just done
 
@@ -103,16 +104,18 @@ header and read it against `/help` in the terminal.
 no longer throw the conversation away, a stopped turn now ends on the page as well as in the
 terminal, `/readonly` sets the guard it says it sets, `/verbose off` outlives the run, the page
 can change the model or the provider from its own header, a command typed into the page's composer
-answers there — because a command that failed no longer ends the run — and the page is now told what
-commands the run has, from the same table `/help` prints.** That is this round and the three before
-it: nine items in one family — what the user has already read must not go missing, a surface must
-not go on saying a turn is running after it has stopped, a switch must not report a state it did not
-set, a setting must not be forgotten by the file that is supposed to hold it, a page must have a
-*read channel* and an *output channel* before it can offer a control at all, and the list of
-commands has to have exactly one copy before a control is drawn from it.
+answers there — because a command that failed no longer ends the run — the page is told what
+commands the run has, from the same table `/help` prints, and the one class of those commands that
+takes no argument is a button in the header.** That is this round and the four before it: ten items
+in one family — what the user has already read must not go missing, a surface must not go on saying
+a turn is running after it has stopped, a switch must not report a state it did not set, a setting
+must not be forgotten by the file that is supposed to hold it, a page must have a *read channel* and
+an *output channel* before it can offer a control at all, the list of commands has to have exactly
+one copy before a control is drawn from it, and the first control has to send the line the process
+composed rather than one the page put together.
 Each with a test watched red first, or mutation-checked where the code came first. The
 measurement that corrected last round's diagnosis is below, then the second bug, which the first
-one's measurement is what found, then the third, then this round's four.
+one's measurement is what found, then the third, then this round's five.
 
 **And the round before it, recorded here so it is not re-done — six commits on the page, all
 pushed:**
@@ -434,9 +437,10 @@ panel are the read half; buttons, selectors, forms and the destructive confirmat
 decisions already taken for them are below.
 
 **Not measured yet: the controls, or the panel, in a browser.** They are pinned as behaviour
-(`applyState`, `fillSelect`, `showToggles` and `showCommands` over the stub DOM in
+(`applyState`, `fillSelect`, `showToggles`, `showCommands` and `showActions` over the stub DOM in
 `scripts/web-view-test.js`) and as bytes (`the_pickers_offer_the_runs_own_commands`,
-`the_toggles_are_switches_that_show_their_value`, `the_command_panel_is_drawn_from_the_frame`), and
+`the_toggles_are_switches_that_show_their_value`, `the_command_panel_is_drawn_from_the_frame`,
+`the_action_buttons_send_the_frames_own_line`), and
 the frame end to end (`the_page_is_told_the_state_its_controls_would_show`, which reads `/events` on
 connect, sends `/model stub-other` and `/verbose full` to `POST /message`, and then opens a *second*
 stream, which can only have been handed the snapshot). Nobody has looked at the header with a real
@@ -444,11 +448,48 @@ font, or used a picker or a switch from the keyboard, or watched a command's ans
 transcript, or opened the command panel and read it with `/help` beside it; `docs/web-mode.md` §11
 says so in the same words.
 
+### The actions are buttons — §8's first class, and the smallest one to get right
+
+**A control that sends a line the process composed.** An action takes no argument, so there is
+nothing to ask for and nothing to confirm: `showActions` puts one button in the header's controls row
+for every `class: "button"` row of the command list, labels it with the row's `label` (the command's
+own words, which is what `/help` prints), titles it with the row's `help`, and sends the row's own
+`send` through `sendText`. Its answer arrives on the `command` line built two rounds ago, in the
+transcript, which is where an action's one-line report belongs. A press that is refused calls
+`showState(doc)`, the way a switch does: a control that quietly did nothing is worse than one that
+says it could not.
+
+**Only the button class, and both omissions are decisions.** A report is not sent — §8 keeps the
+reporting commands off this page's wire so the terminal is not flooded with a listing its reader did
+not ask for, and the panel above is where a report is read. A destructive command needs a
+confirmation this page does not have yet, and building the button before the confirmation would be
+building the accident.
+
+**The frame needed nothing new**, which is the point of having carried `class` before anything read
+it. Two things are pinned, and the second is the one worth keeping:
+
+- **The line is the frame's, not the page's.** `the_action_buttons_send_the_frames_own_line` asserts
+  over the page's own bytes that the press sends `command.send` rather than a name reassembled in the
+  page, that the class filter is what makes a command an action, that the label and the tooltip come
+  from the row, and that a refused send puts the header back. The same shape as the switches'
+  `/<name> <value>` check, and for the same reason: the stub DOM has no event delivery, so the
+  composition is pinned as bytes and the two Node checks pin what is drawn.
+- **An action that answers nothing fails.** `every_command_the_page_may_offer_is_one_the_terminal_
+  takes` now requires a non-empty answer for the button rows: a button's whole feedback on this page
+  is the line it prints, so nothing at all would be indistinguishable from a press that never
+  arrived. Mutation-checked — neutering `Live::command`'s push fails it naming `/new`, and it took
+  161 seconds, because every read in that test then waits out its deadline (1 second on a green run).
+- The two Node checks draw the buttons from a real frame and take them away when a frame has only
+  reports in it — which is also the assertion that a panel is not a button.
+
+**Not measured in a browser either**: nobody has pressed one. The click path is pinned as bytes and
+the answer path end to end, and that is all it is.
+
 ### Still owed on the page
 
 **The next unit, and the decisions already taken for it** (so a cold session does not re-derive
-them; the reasoning is in `ROADMAP.md` §8). The command list and its panel are built — what is left
-is every control that reads them:
+them; the reasoning is in `ROADMAP.md` §8). The command list, its panel and the button class are
+built — what is left is the classes that need more than "send this line":
 
 1. **A panel's text comes from the process, not from the page.** What `/config`, `/tools`,
    `/skills` and `/help` print is the panel's content, so the process builds it and puts it in the
@@ -458,21 +499,20 @@ is every control that reads them:
    either the lines are built once as data and rendered twice (styled in the terminal, plainly in
    the frame) or the terminal loses its styling — decide it deliberately rather than by accident,
    and note that the `term_capture` tests assert exact bytes. The cheaper route, worth trying first:
-   a panel *is* a command's answer, and the `command` line built last round already carries one
-   (`/config` typed in the composer arrives with its whole answer, plain).
-2. **A button sends `send` through `sendText`, and its answer arrives on the channel built last
-   round.** No second implementation of any command; the composer's own channel is the write half.
-   A refused send must put the control back to what is in force, the way a switch does. The rows the
-   page needs are already in the frame: `class: "button"` — `/new` and `/reload` today.
-3. **A selector's options come from a frame that already describes them**: `/model`'s and
+   a panel *is* a command's answer, and the `command` line built three rounds ago already carries one
+   (`/config` typed in the composer arrives with its whole answer, plain). What that route has to
+   answer: the answer arrives on the feed like any other, so the page must know that *this* one
+   belongs in a panel rather than in the transcript — and the only thing that says so is which
+   control sent it.
+2. **A selector's options come from a frame that already describes them**: `/model`'s and
    `/provider`'s from `providers` (both controls exist), `/resume`'s and `/archive <n|id>`'s from the
    sidebar's rows, where the argument is whichever row was clicked. The command list says a command
    takes a value; it deliberately does not say where the values come from.
-4. **A form is the composer's problem.** `/name <text>`, `/provider key <key>`, `/provider add` and
+3. **A form is the composer's problem.** `/name <text>`, `/provider key <key>`, `/provider add` and
    `/config edit` are interactive in the terminal, and `add`/`edit` are wizards on top of that, so
    the page gets a field only where the argument is a single value — the wizards stay where they
    are, and that is a decision to revisit rather than to assume.
-5. **The destructive class needs a confirmation step** (`/delete`, `/archive`, `/provider rm`),
+4. **The destructive class needs a confirmation step** (`/delete`, `/archive`, `/provider rm`),
    because there is no undo anywhere in flint, and the confirmation has to be the *page's*
    (a second click) rather than a `/yes` command in the terminal.
 
@@ -963,8 +1003,8 @@ section into it, so the two do not drift. The shape of it now:
    controls drawn from it, and the command list is drawn as a panel of reports; and a
    command's *output* now reaches the page too (the `command` line built two rounds ago), so
    nothing structural is left between here and the buttons. What is left is a control per class:
-   buttons for the no-argument actions, selectors, forms, and a confirmation step for the
-   destructive ones — the decisions taken for that unit are listed
+   buttons for the no-argument actions (**built** — see above), selectors, forms, and a
+   confirmation step for the destructive ones — the decisions taken for that unit are listed
    under "Still owed on the page" above. `config.toml` writes are allowed because the per-run
    loopback token already covers them, and `/exit` stays off the page.
 
