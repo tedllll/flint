@@ -928,7 +928,11 @@ with it; and `/stop`, the interrupt as a short word, reachable from the composer
 
 ## Small, agreed, unscheduled
 
-- `read`/`write`/`edit` taking `file_path`, with `path` kept as an alias so nothing breaks.
+- ~~`read`/`write`/`edit` taking `file_path`, with `path` kept as an alias so nothing breaks.~~
+  **Done, 2026-09-15**: the three schemas ask for `file_path` and say in the description that `path`
+  is accepted; two names that disagree are refused rather than resolved. `list`, `glob` and `grep`
+  keep `path`, which is not an oversight: theirs is a directory or a place to search, not a file to
+  read or write, and the plan named these three.
 - `--fork`: copy a session file and continue the copy. `cp` already does this; the flag is
   about making it discoverable.
 - `examples/live_turn.rs` keeps a hand-maintained copy of `run_turn`'s event handling and has

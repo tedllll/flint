@@ -7,7 +7,7 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 384 passing, 1 ignored (256 lib, 2 in
+As of the commit that carries this file, `cargo test` is 385 passing, 1 ignored (257 lib, 2 in
 the binary's own tests, 33 `agent_loop`, 47 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
 `term_capture` plus the ignored cost measurement, 18 `web_view`), `cargo clippy --all-targets` is
 silent, and both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
@@ -34,11 +34,11 @@ Written for a cold start: a different machine, and possibly a session with no me
 one. The repository is the whole state — there is no index, no cache and no database anywhere in
 flint, on purpose — so cloning it and running the gate below is all that "catching up" means.
 
-**Where it was left.** `main` at the commit that polls a turn once before it reads the input channel
-(`fix: a line that was already waiting no longer erases the question`), plus the documentation commit
+**Where it was left.** `main` at the commit that gives the file tools a `file_path` with `path` as an
+alias (`feat: the file tools take file_path, and path still works`), plus the documentation commit
 that carries this file, working tree clean, `origin/main` level with it. **§8 is finished** — all five
-controls are on the page — and §9's last open hole is closed; what the queue holds next is the small
-unscheduled list and the "known unfinished" notes at the end of `ROADMAP.md`. The counts are in the
+controls are on the page — and §9's last open hole is closed; of the roadmap's small list, two items
+are left (`--fork`, and `examples/live_turn.rs` drifting from `run_turn`). The counts are in the
 section above and were re-run to write this paragraph, not remembered.
 
 **What the other machine needs.**
@@ -55,7 +55,7 @@ section above and were re-run to write this paragraph, not remembered.
 
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
-cargo test                                        # 384 passing, 1 ignored
+cargo test                                        # 385 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed
@@ -602,6 +602,30 @@ free-form, so a page form would send several settings at once, and the terminal'
 them one at a time — it would need a `/config set <key> <value>` that the terminal does not have.
 Inventing a command for the page's benefit is the thing §8's design exists to prevent. The page
 therefore writes nothing into the config file in this round.
+
+### `file_path` is the name the file tools ask for, and `path` still works
+
+The first item off the roadmap's small list. `read`, `write` and `edit` now declare `file_path` — the
+name a model reaches for when a tool is shaped like the file tools it has used elsewhere — and
+`require_path` accepts `path` as an alias, which is what every earlier version of flint asked for. The
+schemas say so in the description, so a model that reads them learns both names from one place, and
+`flint debug prompt-input` shows the same sentence.
+
+**Two names that disagree are refused, not resolved.** `{"path": "a", "file_path": "b"}` is an error
+naming both; picking one would be flint choosing which of two contradictory instructions was meant,
+and the wrong guess writes a file where nobody asked. A wrong *type* still names the argument the
+caller used (`{"path": 5}` says `path`), because that message is the one that tells a model what to
+fix.
+
+**`list`, `glob` and `grep` keep `path`** — theirs is a directory or a place to search, not a file to
+read or write, and the roadmap item named these three tools.
+
+Measured by `a_file_can_be_named_by_either_spelling` in `src/tools.rs`, watched red first (the old
+schema answered `missing required string argument 'path'` for a call that used `file_path`). It asserts
+both spellings find the same file, that `write` and `edit` take the new name, that a disagreement is
+refused naming both arguments, and that the `read` schema's `required` list is `["file_path"]` with the
+alias named in its description. The existing tests that call these tools with `path` are the other half
+of the measurement: they pass unchanged, which is what "alias" has to mean.
 
 ### A line already waiting no longer erases the question it interrupts
 

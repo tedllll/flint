@@ -318,6 +318,39 @@ pub(crate) fn require_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     }
 }
 
+/// The file a `read`, `write` or `edit` call names.
+///
+/// `file_path` is what the schema asks for, because it is what a model reaches for when the tool is
+/// shaped like the file tools it has used elsewhere; `path` is accepted as an alias, because it is
+/// what every earlier version of flint asked for and a call that has worked thousands of times
+/// should not start answering "missing required string argument".
+///
+/// Two names that disagree are refused rather than resolved. Picking one is this program deciding
+/// which of two contradictory instructions was meant, and the wrong guess of that pair writes a file
+/// where nobody asked -- which is the failure the read gate above exists to prevent, arriving
+/// through the argument list instead.
+fn require_path(args: &Value) -> Result<&str> {
+    let named = args
+        .get("file_path")
+        .filter(|value| !value.is_null())
+        .map(|_| require_str(args, "file_path"))
+        .transpose()?;
+    let older = args
+        .get("path")
+        .filter(|value| !value.is_null())
+        .map(|_| require_str(args, "path"))
+        .transpose()?;
+    match (named, older) {
+        (Some(named), Some(older)) if named != older => Err(anyhow!(
+            "arguments 'file_path' and 'path' name different files ({named} and {older}); \
+             they are the same argument and only one may be given"
+        )),
+        (Some(named), _) => Ok(named),
+        (None, Some(older)) => Ok(older),
+        (None, None) => Err(anyhow!("missing required string argument 'file_path'")),
+    }
+}
+
 /// An optional string argument, refusing a value of the wrong type.
 ///
 /// The distinction matters in one direction only: absent is a choice the caller made,
@@ -1992,16 +2025,16 @@ impl Tool for ReadTool {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "File path (absolute, or relative to the working directory)." },
+                "file_path": { "type": "string", "description": "File path (absolute, or relative to the working directory). `path` is accepted as an alias." },
                 "offset": { "type": "integer", "description": "1-based first line to return." },
                 "limit": { "type": "integer", "description": "Maximum number of lines (default 2000)." }
             },
-            "required": ["path"]
+            "required": ["file_path"]
         })
     }
 
     async fn call(&self, args: &Value) -> Result<String> {
-        let path = resolve_path(&self.cwd, require_str(args, "path")?);
+        let path = resolve_path(&self.cwd, require_path(args)?);
         let offset = optional_u64(args, "offset")?.unwrap_or(1).max(1) as usize;
         let limit = optional_u64(args, "limit")?.unwrap_or(2000) as usize;
 
@@ -2066,10 +2099,10 @@ impl Tool for WriteTool {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "File path to write." },
+                "file_path": { "type": "string", "description": "File path to write. `path` is accepted as an alias." },
                 "content": { "type": "string", "description": "Full file content." }
             },
-            "required": ["path", "content"]
+            "required": ["file_path", "content"]
         })
     }
 
@@ -2079,7 +2112,7 @@ impl Tool for WriteTool {
                 "readonly mode is ON: refusing to write files. Turn it off with /readonly."
             ));
         }
-        let raw = require_str(args, "path")?;
+        let raw = require_path(args)?;
         // A name Windows would rewrite is refused before the read gate, because the gate
         // cannot see the file this would really write to. Checked on what was written, not on
         // the resolved path: `Path::join` turns `a:b.txt` into a path on drive A.
@@ -2142,12 +2175,12 @@ impl Tool for EditTool {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string", "description": "File to edit." },
+                "file_path": { "type": "string", "description": "File to edit. `path` is accepted as an alias." },
                 "old_string": { "type": "string", "description": "Exact text to replace." },
                 "new_string": { "type": "string", "description": "Replacement text." },
                 "replace_all": { "type": "boolean", "description": "Replace every occurrence (default false)." }
             },
-            "required": ["path", "old_string", "new_string"]
+            "required": ["file_path", "old_string", "new_string"]
         })
     }
 
@@ -2157,7 +2190,7 @@ impl Tool for EditTool {
                 "readonly mode is ON: refusing to edit files. Turn it off with /readonly."
             ));
         }
-        let raw = require_str(args, "path")?;
+        let raw = require_path(args)?;
         refuse_unwritable_name(raw)?;
         let path = resolve_path(&self.cwd, raw);
         let old = require_str(args, "old_string")?;
@@ -3289,6 +3322,91 @@ mod name_tests {
                 "`{name}` is a file Windows writes literally"
             );
         }
+    }
+
+    /// A file can be named by either spelling, and naming two of them is refused.
+    ///
+    /// `file_path` is what these three tools ask for now, because it is what a model reaches for
+    /// when the tool is shaped like every other file tool it has used; `path` still works, because
+    /// it is what every earlier version of flint asked for, and a call that has worked thousands of
+    /// times should not start answering "missing required string argument". The rename is in the
+    /// schema, where a model reads it, and the alias is in the reading, where an older caller needs
+    /// it -- so this test asks both spellings the same question and compares the answers.
+    ///
+    /// Two names that disagree are refused rather than resolved: picking one would be this program
+    /// deciding which of two contradictory instructions was meant, and the wrong guess of that pair
+    /// is a file written where nobody asked.
+    #[tokio::test]
+    async fn a_file_can_be_named_by_either_spelling() {
+        let dir = TempDir::new("both-names");
+        let config = Config {
+            max_tool_output: 10_000,
+            ..Config::default()
+        };
+        let tools = ToolBox::new(&config, false, dir.path().to_path_buf());
+        std::fs::write(dir.path().join("note.txt"), "one\ntwo\n").unwrap();
+
+        let now = tools
+            .invoke("read", &json!({ "file_path": "note.txt" }))
+            .await
+            .expect("`file_path` is the name the schema asks for");
+        let before = tools
+            .invoke("read", &json!({ "path": "note.txt" }))
+            .await
+            .expect("`path` is the name every earlier version asked for");
+        assert_eq!(now, before, "the two spellings must find the same file");
+
+        // The writing tools take it too -- and the read gate is on the file, not on the spelling.
+        let written = tools
+            .invoke(
+                "write",
+                &json!({ "file_path": "note.txt", "content": "one\ntwo\nthree\n" }),
+            )
+            .await
+            .expect("write by file_path");
+        assert!(written.contains("note.txt"), "{written}");
+        let edited = tools
+            .invoke(
+                "edit",
+                &json!({ "file_path": "note.txt", "old_string": "three", "new_string": "four" }),
+            )
+            .await
+            .expect("edit by file_path");
+        assert!(edited.contains("note.txt"), "{edited}");
+
+        let conflict = tools
+            .invoke(
+                "read",
+                &json!({ "path": "note.txt", "file_path": "other.txt" }),
+            )
+            .await
+            .expect_err("two names that disagree must be refused");
+        let message = conflict.to_string();
+        assert!(
+            message.contains("file_path") && message.contains("path"),
+            "the refusal must name both arguments: {message}"
+        );
+
+        // The schema is where a model reads the name, so it has to be the new one -- with `path`
+        // mentioned in the description, because a model that is told only about `file_path` never
+        // learns why its old calls still work, and a person reading `debug prompt-input` sees the
+        // same sentence.
+        let schema = tools
+            .specs()
+            .into_iter()
+            .find(|(name, _, _)| name == "read")
+            .map(|(_, _, schema)| schema)
+            .expect("read is one of the tools");
+        assert!(
+            schema["required"] == json!(["file_path"]),
+            "`file_path` is what the tools ask for: {schema}"
+        );
+        assert!(
+            schema["properties"]["file_path"]["description"]
+                .as_str()
+                .is_some_and(|text| text.contains("path")),
+            "the description must own up to the alias: {schema}"
+        );
     }
 
     /// And the gate is on the writing tools, not only on the helper.
