@@ -1277,7 +1277,62 @@ stopped run, because it was true before — that was the bug). B7 above is what 
    something to mean.
 2. **`error.code`**, produced where the cause is known — in `provider` for no key, network and status
    codes; in `agent` for a schema that never matched; in `main` for arguments. Classified by matching
-   on the error's text at the edge would be the same fragility this is meant to remove.
+   on the error's text at the edge would be the same fragility this is meant to remove. **Its first
+   job is the balance/quota cause below**, which is a bug fix as much as a classification: today an
+   OpenAI-shaped `429 insufficient_quota` is retried four times with backoff (see §10 B6), and the
+   only way a caller can recognise "there is no money" is to match the message text.
+
+#### B6. Balance and quota, which the first draft of this section missed
+
+Reported from use — "I have hit this several times" — and it is the clearest case of a cause that
+cannot be read off the status code, so it belongs with B rather than with the exit-code plumbing.
+
+| Provider | What running out of money looks like |
+|---|---|
+| DeepSeek | **HTTP 402 `Insufficient Balance`** — the [error-code table](https://api-docs.deepseek.com/quick_start/error_codes) says "you have run out of balance… go to the Top up page to add funds" |
+| OpenAI and OpenAI-compatible endpoints | **HTTP 429**, with `error.code = "insufficient_quota"` — the same status as a rate limit, which is why [openai-python added a dedicated `InsufficientQuotaError`](https://github.com/openai/openai-python/pull/3042) |
+| Anthropic | 400 `invalid_request_error`, "credit balance is too low" (it recurs in the wild, e.g. [continue#10061](https://github.com/continuedev/continue/issues/10061)) |
+
+What flint does today, read from the code rather than assumed: `status_is_transient` is "429 or 5xx"
+and `MAX_ATTEMPTS` is 4 with a 1+2+4+8-second backoff. So
+
+- a DeepSeek 402 is **not** retried (correct) and its body does reach `error.message` (correct), but it
+  exits **1** — unclassified — so a caller has to match text to know the account is empty;
+- an OpenAI-shaped `429 insufficient_quota` **is** treated as a rate limit and **retried four times**,
+  waiting about fifteen seconds to be told the same thing. For a hundred calls in a batch that is
+  twenty-five minutes spent hitting an empty account, which is the kind of waste that looks like
+  flint being slow;
+- a balance that runs out **mid-answer** cuts the stream, and that is **indistinguishable from a
+  network drop**. Nothing can classify it, which is exactly why step 1's `outcome` matters: the one
+  thing that can still be promised is "this answer is half of one, and no value was invented".
+
+What to build for it, in step 2:
+
+- `error.code` gains `insufficient_balance` (mapped per provider from the body, not the status), and
+  the **transient decision is made after reading the body** — the bug above is that it is made before.
+- the `error` frame gains **`retryable: true|false`**, which is B3's missing signal and now has its
+  first hard case: quota is `false`, a rate limit is `true`.
+- its **exit code is 69**, not 75: 75 means "retry, this is temporary" and quota means the opposite
+  ("stop, a person must pay"). The precise cause is in `error.code`, so the code stays a class. If a
+  shell-level branch between "top up" and "fix the key" is ever wanted, that is a new number and a
+  deliberate decision, not something to slip in here.
+- **`flint balance`** (or a check before a `-p` run) as the concrete first use of the preflight in A4:
+  DeepSeek's [`GET /user/balance`](https://api-docs.deepseek.com/api/get-user-balance) returns
+  `is_available` — defined as "whether the user's balance is sufficient for API calls" — plus
+  `total_balance`, `granted_balance` and `topped_up_balance`. A batch can then be told before it
+  starts, and a strategy that only has a few calls left can be told how many.
+- **the batch-level circuit breaker is the caller's**, and that is a feature of step 7 rather than of
+  flint: the first `insufficient_balance` should cancel the rest of the batch and raise, because flint
+  cannot know that twenty other calls are queued behind this one. flint's whole job is to make the
+  cause sayable; the Python side is what turns it into "stop everything".
+- **flint never switches provider by itself.** DeepSeek's own advice for a 429 is to use another
+  provider for a while; for a system whose answers become recorded values, a silent change of model is
+  a provenance fault, not a resilience feature.
+- **tests**, which wiremock already supports: one stub per shape (402, 429 with `insufficient_quota`,
+  429 with `rate_limit_exceeded`), asserting that the quota cases are attempted **exactly once** and
+  the rate-limit case is retried. The pair is the proof that the status code alone is not the
+  classification.
+
 3. **`--result-file`** (the answer written where the caller asked, so no caller parses a stream to
    get it) and **`--list-sessions --json`** (so a caller does not reimplement the session-directory
    naming, which is an internal detail).
@@ -1300,6 +1355,54 @@ stopped run, because it was true before — that was the bug). B7 above is what 
    with one session per worker (measured: 190 ms per call with an instant stub, so 100 calls are
    ~19 s in series and ~3 s on eight threads); and `require_read` for the case where a path named in
    prose has to be *seen* to have been read.
+
+#### What other people's wrappers already learned
+
+The shape is not new, which is worth knowing before inventing anything. Three tiers exist: the
+official [Claude Agent SDK for Python](https://github.com/anthropics/claude-agent-sdk-python) (bundles
+the CLI, `query()` as an async iterator, `ClaudeSDKClient` when you want a resident one, a permission
+layer, hooks and in-process MCP tools); small community adapters that shell out and parse, e.g.
+[`oh-no-my-claudecode`'s adapters](https://github.com/adaline-ankit/oh-no-my-claudecode/blob/main/src/oh_no_my_claudecode/loop/adapters.py),
+where the entry point is literally `runner(prompt, escalation_level=0) -> AgentRunResult` for
+`claude -p`, `codex exec` and `opencode run`; and the older "LLM is a function" line — `llm`, `fabric`
+(pipes), `shell_gpt`, `marvin`, `instructor`, `DSPy` — which never spawns anything. flint's differences
+are the ones already decided: one file and no dependencies, blocking rather than async, one process per
+call, and the CLI itself owning the schema check rather than the caller.
+
+Five lessons from them, and what each becomes here:
+
+1. **An error can arrive inside a structurally successful envelope.** A comment in that adapter file
+   records the case: the CLI reports an auth failure as `{"subtype": "success", "is_error": true,
+   "api_error_status": 401}`, and *"without this check the error text would be parsed as ordinary agent
+   output and a lenient verifier could let the loop converge on a run where the agent never actually
+   authenticated"*. flint is half-way safe here already: a failed run emits `error` and no
+   `turn.completed` at all. But there is one combination that is deliberate, undocumented and
+   **untested**: when a schema never matches, the stream carries `turn.completed` with
+   `outcome:"complete"` *and then* `error`, and exits 65 — because the turn really did finish while
+   the answer is unusable. Two signals, two questions (`outcome` is about the turn, the code and the
+   `result` line are about the answer). It has to be written down and pinned by a test, or the next
+   reader will "fix" it in one direction or the other.
+2. **Defensive parsing across versions** (they try several known key layouts and fall back to raw
+   stdout) is the cost of a stream that is not a contract. That is step 6's stream-integrity test, and
+   the reason the vocabulary is closed.
+3. **A timeout that kills loses the half answer** — they use `subprocess.run(timeout=)`, get exit 1 and
+   a `[agent timed out after Ns]` note on stderr, and the words the agent had written are gone. That is
+   the fault step 1's `/stop` work fixed; here the prior art is worse, which is worth remembering when
+   someone proposes the simple version.
+4. **"What did this turn change?" is answered outside the agent** — that adapter derives `files_touched`
+   by diffing `git status --porcelain` before and after, "so the list is always derived from the real
+   working tree rather than fabricated". This settles B4: the caller owns the write and the diff, and
+   flint's part is to be auditable (the session path, the tool events). A flint-side summary would have
+   to work outside git as well, for a question the caller can already answer.
+5. **No structured output leaves a hack in its place** — with nothing schema-shaped to read, that
+   project keeps `prediction = first non-empty line, truncated to 120 characters`. `--schema` is the
+   answer to that. Its other gap is B5: Codex headless reports no token usage at all and OpenCode no
+   cost, so the cheap half of B5 belongs in the same round as the balance work — **`duration_ms` on
+   `turn.completed`**, which costs one `Instant` and answers "was that slow or was it stuck".
+
+Also worth doing while the release workflow is fresh: it **builds on every push and runs no tests**.
+The three commands in `AGENTS.md` ("Verifying a change") are exactly what a job should run, and a
+green build says nothing about whether a `[exit code: N]` path works.
 
 **Deliberately not in this section**: a resident `flint serve` (190 ms per call does not buy back the
 complexity of a second process lifetime, and a resident mode was explicitly not wanted), an asyncio

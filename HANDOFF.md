@@ -11,9 +11,22 @@ step 2 is next.** The section is an audit in three buckets (what cannot be done 
 told apart, what is a hole), the reference points it was measured against (Claude Code's
 `-p --output-format json`, `llm`, and the `sysexits.h` convention for exit codes), and the order to
 build it in. Step 1 landed the turn's `outcome` and the exit codes, and fixed the C1 bug (a `/stop`ped
-run exited 0 while carrying a truncated answer — now 130). **Step 2 is `error.code` produced where the
-cause is known**, which is what gives a caller "retry this" (75) apart from "fix your key" (69); it is
-also what B7 above (a pre-stream refusal reaching only stderr) should be folded into.
+run exited 0 while carrying a truncated answer — now 130).
+
+**Step 2 is `error.code` produced where the cause is known, and its first job is money**: §10 **B6**
+was added after the fact, from a report of hitting an empty balance repeatedly, and it is a bug fix as
+much as a classification. Read it before touching `src/provider.rs`. In short: DeepSeek says it with
+**402**, OpenAI-shaped endpoints say it with **429 `insufficient_quota`** — the same status as a rate
+limit — and Anthropic with a 400 and a sentence. flint currently decides "transient" from the status
+*before* reading the body, so a quota 429 is retried four times with a 1+2+4+8-second backoff and the
+caller learns nothing from the exit code (1). The plan is `error.code: "insufficient_balance"`, a
+`retryable: true|false` field on the `error` frame, exit 69 for it (never 75, which invites the retry
+that cannot work), `flint balance` as the preflight that A4 has been missing (DeepSeek's
+`GET /user/balance` returns `is_available`), a batch circuit breaker on the Python side, and a test per
+provider shape asserting the quota cases are attempted **once**. §10 also gained a survey of the prior
+art (Claude Agent SDK, community subprocess adapters, the "LLM is a function" line) and the two small
+things it settled: the `error`-and-`outcome` combination that needs documenting and a test, and
+`duration_ms` on `turn.completed`.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
 As of the commit that carries this file, `cargo test` is 437 passing, 1 ignored (279 lib, 2 in
