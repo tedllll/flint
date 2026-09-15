@@ -2947,7 +2947,94 @@ async fn a_report_the_page_asks_for_is_not_printed_here() {
     );
 }
 
+/// A selector the page can choose from: `/skills <name>`.
 ///
+/// §8's selector class for the one value-taking command whose options the frame now describes. The
+/// names come from the run's own walk of the skill directories -- the same walk as its system prompt,
+/// which is why the menu cannot offer a skill the model was never told about -- and the values are
+/// the *permission* as well as the options: the page may read the command with one of them, and with
+/// nothing else.
+///
+/// The second half is asserted with a skill that appears **after** the run started. That is the case
+/// which tells the two rules apart: the command itself discovers the directory fresh, so a loose
+/// check would happily read a name the menu never offered, while the rule here is that the menu *is*
+/// the permission. `/reload` is what makes a new skill appear, and that is the documented way to pick
+/// one up.
+#[tokio::test]
+async fn a_skill_the_run_has_is_readable_from_the_page_and_nothing_else_is() {
+    let home = test_home("report-skills", "http://127.0.0.1:9/v1");
+    let skill = home.join("skills").join("demo");
+    std::fs::create_dir_all(&skill).expect("skill directory");
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: demo\ndescription: a fixture skill\n---\n\nDo the demo thing.\n",
+    )
+    .expect("skill file");
+
+    let log = home.join("transcript.txt");
+    let mut child = binary()
+        .arg("--web")
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::fs::File::create(&log).expect("transcript file"))
+        .stderr(std::fs::File::create(home.join("stderr.txt")).expect("stderr file"))
+        .spawn()
+        .expect("failed to run flint");
+
+    let (port, token) = port_and_token(&wait_for_url(&log));
+    let mut watching = http_stream(port, "/events", &token);
+    let opening = read_until(&mut watching, "\"type\":\"state\"}\n\n", 20);
+
+    // The value rides on the row that takes one. The frame's keys are alphabetical, so this fragment
+    // is the whole row: the label the page shows, the line it sends, and the one name it may append.
+    assert!(
+        opening.contains("\"label\":\"/skills [name]\",\"send\":\"/skills\",\"values\":[\"demo\"]"),
+        "the run has a skill and the page's menu does not offer it, so a selector would have \
+         nothing to choose from: {opening:?}"
+    );
+
+    // Reading it: the body arrives as a panel's, and the terminal never sees it.
+    let asked = post_to(port, &token, "/report", "/skills demo");
+    assert!(asked.starts_with("HTTP/1.1 202"), "the report route refused it: {asked:?}");
+    let read = read_until(&mut watching, "\"input\":\"/skills demo\"", 20);
+    assert!(
+        read.contains("\"panel\":true") && read.contains("Do the demo thing."),
+        "asking for a skill the menu offered did not come back as a reading: {read:?}"
+    );
+
+    // A skill that exists on disk and was never in the menu. The command would read it -- `/skills`
+    // discovers the directories on every call -- so this is the assertion that the *menu* is the
+    // permission rather than whatever the filesystem happens to hold at press time.
+    let late = home.join("skills").join("late");
+    std::fs::create_dir_all(&late).expect("late skill directory");
+    std::fs::write(late.join("SKILL.md"), "---\nname: late\n---\n\nDo the late thing.\n")
+        .expect("late skill file");
+    let refused = post_to(port, &token, "/report", "/skills late");
+    assert!(refused.starts_with("HTTP/1.1 202"), "the request itself was refused: {refused:?}");
+    let complaint = read_until(&mut watching, "\"input\":\"/skills late\"", 20);
+    assert!(
+        complaint.contains("not a report"),
+        "a skill the menu never offered was read, so the page may compose any argument it likes \
+         and the frame's values are decoration: {complaint:?}"
+    );
+
+    drop(watching);
+    drop(child.stdin.take());
+    let exited = wait_for_exit(&mut child, 20);
+    let transcript = std::fs::read_to_string(&log).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit");
+    for never in ["Do the demo thing.", "Do the late thing."] {
+        assert_eq!(
+            transcript.matches(never).count(),
+            0,
+            "a listing the page asked for was printed on this terminal as well: {transcript:?}"
+        );
+    }
+}
+
 /// Every command the page may offer is one the terminal accepts.
 ///
 /// The drift this catches is the whole reason the list is a table: a page that offers a button for

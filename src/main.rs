@@ -1657,7 +1657,7 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp::row("/detail [on|off]", "/detail", "print tool output (off: one line per result)", HelpSection::Commands, OnPage::Toggles),
     CommandHelp::row("/readonly [on|off]", "/readonly", "toggle the write guard", HelpSection::Commands, OnPage::Toggles),
     CommandHelp::row("/tools", "/tools", "list available tools", HelpSection::Commands, OnPage::Panel),
-    CommandHelp::row("/skills [name]", "/skills", "list skills, or print one as the model would see it", HelpSection::Commands, OnPage::Selector),
+    CommandHelp::row("/skills [name]", "/skills", "list skills, or print one as the model would see it", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/sessions", "/sessions", "list past sessions, numbered", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/resume <n|id>", "/resume", "switch to one of them", HelpSection::Commands, OnPage::Selector),
     CommandHelp::row("/name [text]", "/name", "name this conversation", HelpSection::Commands, OnPage::Form),
@@ -1781,12 +1781,20 @@ async fn run_report(
     viewer: &mut Option<web::Viewer>,
 ) {
     let asked = asked.trim();
-    // Matched on `send` rather than on the label, because a row whose label carries a placeholder
-    // (`/delete <n|id>`) would otherwise let a page compose an argument of its own and have this run
-    // it. Only rows that are a report *and* take no argument have a `send` equal to their label.
-    let is_report = COMMANDS
-        .iter()
-        .any(|row| row.on_page.class() == Some("panel") && row.send == asked);
+    // What the page may read: a line its own menu offers as a report. The bare `send` of a panel row
+    // is that report; a row that carries `values` may also be asked with one of them, which is how
+    // `/skills <name>` reaches the panel. Matched against the *frame's own rows* rather than the
+    // table, because the frame is what the page was shown -- and because the values are part of the
+    // permission: `/provider <name>` takes a value too, and running that one quietly would start a
+    // local engine without printing a word anywhere.
+    let is_report = page_rows(agent).iter().any(|row| {
+        row.class == "panel"
+            && (row.send == asked
+                || row
+                    .values
+                    .iter()
+                    .any(|value| format!("{} {value}", row.send) == asked))
+    });
     if !is_report {
         report_refused(asked, printer, viewer);
         return;
@@ -1794,13 +1802,22 @@ async fn run_report(
 
     printer.term().quiet_start();
     let flow = handle_command(asked, cfg, agent, provider_cfg, printer, reader, viewer).await;
-    let said = printer.term().quiet_take();
+    let mut said = printer.term().quiet_take();
 
-    // A report is a read, so it can only come back as "carry on". Anything else would mean the table
-    // calls a command a report that is not one, and the page is told rather than left waiting.
-    if !matches!(flow, Ok(Flow::Continue)) {
-        report_refused(asked, printer, viewer);
-        return;
+    match flow {
+        // A report is a read, so "carry on" is the only flow it can come back as.
+        Ok(Flow::Continue) => {}
+        // Anything else would mean the table calls a command a report that is not one, and the page
+        // is told rather than left waiting.
+        Ok(_) => {
+            report_refused(asked, printer, viewer);
+            return;
+        }
+        // A read can *fail* -- a skill whose file went away between the menu being drawn and the row
+        // being pressed -- and the failure is the answer: the page asked to read this, so the error
+        // belongs in the panel it opened rather than nowhere. Through the same channel as the text,
+        // which is also what keeps a failed read from printing on this terminal.
+        Err(e) => said.push(format!("error: {e:#}")),
     }
     if let Some(live) = viewer.as_ref().map(web::Viewer::live) {
         live.report(asked, &said);
@@ -1814,7 +1831,7 @@ async fn run_report(
 /// not be able to make this terminal print anything. The page is told too, in the panel it opened,
 /// or it would sit waiting for an answer that is never coming.
 fn report_refused(asked: &str, printer: &Printer<'_>, viewer: &Option<web::Viewer>) {
-    let said = format!("{asked} is not a report -- the page may read only the commands that take no argument and change nothing");
+    let said = format!("{asked} is not a report -- the page may read only the commands its own menu offers, with a value it carries");
     printer.term().line(format_args!(
         "{} {}",
         printer.style(RED, "refused:"),
@@ -2694,7 +2711,7 @@ fn state_frame(
         "model": provider.model,
         "toggles": toggles(agent, printer),
         "providers": providers,
-        "commands": page_commands(),
+        "commands": page_commands(agent),
     })
     .to_string()
 }
@@ -2709,21 +2726,66 @@ fn state_frame(
 /// Two kinds of row are left out rather than marked: the toggles, which the `toggles` field carries
 /// in the shape a switch needs, and the terminal's own commands, which have no business on a page
 /// (`/exit` above all: a misclick must not end a session).
-fn page_commands() -> serde_json::Value {
-    let rows: Vec<serde_json::Value> = COMMANDS
-        .iter()
-        .filter_map(|row| {
-            row.on_page.class().map(|class| {
-                serde_json::json!({
-                    "label": row.label,
-                    "send": row.send,
-                    "help": row.help,
-                    "class": class,
-                })
-            })
+fn page_commands(agent: &agent::Agent) -> serde_json::Value {
+    let rows: Vec<serde_json::Value> = page_rows(agent)
+        .into_iter()
+        .map(|row| {
+            let mut json = serde_json::json!({
+                "label": row.label,
+                "send": row.send,
+                "help": row.help,
+                "class": row.class,
+            });
+            // Omitted when there are none, which is every row but `/skills`: a frame that carried
+            // `"values": []` on twenty-eight rows would be saying "no values" twenty-eight times.
+            if !row.values.is_empty() {
+                json["values"] = serde_json::json!(row.values);
+            }
+            json
         })
         .collect();
     serde_json::Value::Array(rows)
+}
+
+/// One row of the page's menu, before it becomes JSON.
+///
+/// A struct rather than `serde_json::json!` straight away, because the *report route* has to ask the
+/// same question the page asks -- "may I send this line?" -- and rebuilding that answer by parsing
+/// the frame's own JSON would be a second implementation of the menu, which is the mistake this
+/// whole file's single table exists to avoid. One list, rendered once and checked once.
+struct PageRow {
+    label: &'static str,
+    send: &'static str,
+    help: &'static str,
+    class: &'static str,
+    /// The argument values this page may ask for, when the row takes one it may *read*.
+    ///
+    /// Carried on the row rather than looked up in a `providers`-style field, because it is the
+    /// permission as much as the options: `/provider <name>` takes a value too, and running that one
+    /// quietly would start a local engine without printing a word anywhere.
+    values: Vec<String>,
+}
+
+/// Every row the page may offer, with the values it may be given.
+fn page_rows(agent: &agent::Agent) -> Vec<PageRow> {
+    COMMANDS
+        .iter()
+        .filter_map(|row| {
+            row.on_page.class().map(|class| PageRow {
+                label: row.label,
+                send: row.send,
+                help: row.help,
+                class,
+                // The one row whose values this run knows. `/skills <name>` is a read, so the page
+                // may ask for it, and the names are the ones this run's prompt was built with --
+                // see `Agent::skills`, which is why a directory walk is not needed here.
+                values: match row.send {
+                    "/skills" => agent.skills().to_vec(),
+                    _ => Vec::new(),
+                },
+            })
+        })
+        .collect()
 }
 
 impl OnPage {

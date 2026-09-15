@@ -90,7 +90,24 @@ mod platform {
 /// What it *cannot* infer is the shell dialect -- trying `ls` in cmd.exe is the
 /// single most common way this agent wastes a turn -- and where commands will
 /// run, because the working directory is set at run time.
+///
+/// Discovers the workspace itself, for the callers that have only a config and a directory.
+/// The constructors below do the walk once and call `prompt_with_workspace` with what they found,
+/// because they need the same answer for two things -- the prompt, and the skill names the page's
+/// menu is built from.
 pub fn build_system_prompt(config: &Config, cwd: &std::path::Path) -> String {
+    prompt_with_workspace(
+        config,
+        cwd,
+        &context::Workspace::discover(cwd, &config.skill_dirs),
+    )
+}
+
+fn prompt_with_workspace(
+    config: &Config,
+    cwd: &std::path::Path,
+    workspace: &context::Workspace,
+) -> String {
     let shell = tools::probe_shell(&config.shell, &config.shell_args).join(" ");
 
     let mut prompt = format!(
@@ -117,10 +134,12 @@ pub fn build_system_prompt(config: &Config, cwd: &std::path::Path) -> String {
 
     // What the project has written down. Discovered here, once per agent, because the
     // answer depends on the working directory -- and rebuilt by `/model` and friends,
-    // which is how a file added mid-session gets noticed without a restart.
+    // which is how a file added mid-session gets noticed without a restart. The same
+    // walk gives the skill names the page's menu offers, so the two cannot disagree
+    // about what this run has.
     let mode =
         context::Instructions::parse(&config.instructions).unwrap_or(context::Instructions::Hint);
-    let note = context::Workspace::discover(cwd, &config.skill_dirs).prompt_note(mode);
+    let note = workspace.prompt_note(mode);
     if !note.is_empty() {
         prompt.push_str("\n\n");
         prompt.push_str(&note);
@@ -153,6 +172,15 @@ pub struct Agent {
     /// [`Agent::commit_drawn_answer`] turns whatever is left into a message when a turn ends
     /// without finishing its step.
     drawn: String,
+    /// The names of the skills this run was given, from the same walk as its system prompt.
+    ///
+    /// Kept so the page's menu can offer `/skills <name>` without walking the skill directories
+    /// again on every state frame -- the frame is built after every line, and a directory walk per
+    /// line is not the comparison the frame's own comment claims it is. It also makes the menu mean
+    /// the right thing: these are the skills the *model* was told about, and `/reload` (which
+    /// rebuilds this agent) is what makes a new one appear. `/skills` typed by hand still discovers
+    /// fresh, because that is a person asking what is on disk right now.
+    skills: Vec<String>,
 }
 
 impl Agent {
@@ -181,10 +209,13 @@ impl Agent {
             .unwrap_or_else(|| "unattached".to_string());
         let tools = ToolBox::new(config, readonly, cwd.clone())
             .with_spill_dir(crate::config::spill_dir().join(tag));
+        // One walk, two answers: the prompt's note and the page's menu. See `Agent::skills`.
+        let workspace = context::Workspace::discover(&cwd, &config.skill_dirs);
+        let skills = workspace.skill_names();
         Agent {
             provider,
             tools,
-            history: vec![Message::system(build_system_prompt(config, &cwd))],
+            history: vec![Message::system(prompt_with_workspace(config, &cwd, &workspace))],
             max_steps: config.max_steps,
             readonly,
             cwd,
@@ -192,6 +223,7 @@ impl Agent {
             last_usage: None,
             repeats: std::collections::HashMap::new(),
             drawn: String::new(),
+            skills,
         }
     }
 
@@ -253,13 +285,22 @@ impl Agent {
     /// directory, cannot be trusted to still be right about. So it is rebuilt and the stored
     /// one is dropped rather than kept.
     pub fn splice_loaded_history(&mut self, cfg: &Config, cwd: &std::path::Path, loaded: Vec<Message>) {
-        let mut merged = vec![Message::system(build_system_prompt(cfg, cwd))];
+        let workspace = context::Workspace::discover(cwd, &cfg.skill_dirs);
+        let mut merged = vec![Message::system(prompt_with_workspace(cfg, cwd, &workspace))];
         merged.extend(
             loaded
                 .into_iter()
                 .filter(|m| !matches!(m, Message::System { .. })),
         );
         self.history = merged;
+        // The prompt was rebuilt, so the menu the page draws is rebuilt with it: a page offering a
+        // skill this run's prompt no longer mentions would be promising more than the model has.
+        self.skills = workspace.skill_names();
+    }
+
+    /// The skills this run was given, in the order the model sees them.
+    pub fn skills(&self) -> &[String] {
+        &self.skills
     }
 
     /// The file this conversation is being appended to, when it is being saved at all.

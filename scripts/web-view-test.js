@@ -537,6 +537,28 @@ check("a report row is pressable and the other rows are not", () => {
   );
 });
 
+check("a row that carries values offers one line per value", () => {
+  const page = loadViewer();
+  const d = page.newDoc();
+  page.applyState(d, JSON.stringify({
+    type: "state", provider: "stub", model: "m", providers: [{ name: "stub", models: ["m"] }],
+    commands: [
+      { label: "/skills [name]", send: "/skills", help: "list skills", class: "panel", values: ["alpha", "beta"] },
+      // A frame that carries no values is drawn as one row, so this check also says the value rows come
+      // from the frame rather than from the class: the second command here is a panel row too.
+      { label: "/config", send: "/config", help: "show shell", class: "panel" },
+    ],
+  }));
+  const reports = page.__node("command-list").children[0].children.slice(1);
+  eq(
+    reports.map((r) => r.children[0].textContent),
+    ["/skills [name]", "/skills alpha", "/skills beta", "/config"],
+    "the row itself, then one line per value, then the next row"
+  );
+  eq(reports.map((r) => r.tag), ["button", "button", "button", "button"], "all of them are controls");
+  eq(reports[1].title, "list skills", "a value row carries the row's own help");
+});
+
 check("a listing being read replaces the list, and the way back restores it", () => {
   const page = loadViewer();
   const d = page.newDoc();

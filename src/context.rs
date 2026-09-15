@@ -109,6 +109,16 @@ impl Workspace {
         load_skill(&self.skill_dirs, name)
     }
 
+    /// The skill names, in the order the model is given them.
+    ///
+    /// Names only, and deliberately: the description is prose for the *model*, and a caller that
+    /// wants it in front of a person should ask `/skills` for the listing rather than re-render
+    /// the catalog itself. What this answers is "which of these may be named", which is what a
+    /// menu needs.
+    pub fn skill_names(&self) -> Vec<String> {
+        self.skills.iter().map(|skill| skill.name.clone()).collect()
+    }
+
     /// The text to append to the system prompt. Empty when there is nothing to say.
     pub fn prompt_note(&self, mode: Instructions) -> String {
         let mut out = String::new();

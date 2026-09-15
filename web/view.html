@@ -889,7 +889,9 @@ const COMMAND_GROUPS = [
 /// The list is drawn from the frame and never assembled here, so a row cannot offer a command the
 /// terminal does not take. The report rows are pressable, and what a press does is ask the process
 /// for that listing on `/report` -- the route that keeps the answer off the terminal, where the
-/// reader did not ask for it (ROADMAP §8).
+/// reader did not ask for it (ROADMAP §8). A row that carries `values` is drawn once per value, which
+/// is how a read that takes an argument (`/skills <name>`) gets a control without the page ever
+/// knowing what the command is called.
 ///
 /// One surface rather than a `<details>` per row, and that is a decision rather than a shortcut: a
 /// panel here is a window onto the run, and what it shows is one thing at a time. Nothing is cached
@@ -928,22 +930,42 @@ function showCommands(doc) {
     const group = el("div", "group");
     group.appendChild(el("div", "group-name", heading));
     for (const command of rows) {
-      // A report is read here rather than sent: `doc.reading` is the toggle between the two modes,
-      // and the row only has to name the line to ask for. Anything else is a row of reference --
-      // the class decides which, and it comes from the frame.
-      const readable = className === "panel" && typeof command.send === "string";
-      const row = readable ? el("button", "row") : el("div", "row");
-      if (readable) {
-        row.type = "button";
-        row.title = typeof command.help === "string" ? command.help : "";
-        const asked = command.send;
-        row.addEventListener("click", () => {
-          askReport(doc, asked);
-        });
+      const send = typeof command.send === "string" ? command.send : "";
+      const help = typeof command.help === "string" ? command.help : "";
+      // Which lines this row offers. A report is read here rather than sent: `doc.reading` is the
+      // toggle between the two modes, and the row only has to name the line to ask for. Anything
+      // else is a row of reference -- the class decides which, and it comes from the frame.
+      //
+      // A row that carries `values` offers one line per value as well, and the page composes it as
+      // `<send> <value>` from the frame's own two strings -- exactly what a toggle does with
+      // `/<name> <value>`. It is the frame that says which values may be asked for, so the page
+      // cannot name one that was not offered; the process refuses the rest. The row's own line is
+      // kept next to them because it is a command in its own right: `/skills` is the catalog, and
+      // `/skills <name>` is one entry in it.
+      const values = Array.isArray(command.values)
+        ? command.values.filter((value) => typeof value === "string" && value.trim())
+        : [];
+      const offered = [];
+      if (className === "panel" && send) offered.push({ label: command.label, line: send });
+      for (const value of values) offered.push({ label: send + " " + value, line: send + " " + value });
+      if (offered.length === 0) {
+        const row = el("div", "row");
+        row.appendChild(el("code", "", command.label));
+        row.appendChild(el("span", "", help));
+        group.appendChild(row);
+        continue;
       }
-      row.appendChild(el("code", "", command.label));
-      row.appendChild(el("span", "", typeof command.help === "string" ? command.help : ""));
-      group.appendChild(row);
+      for (const item of offered) {
+        const row = el("button", "row");
+        row.type = "button";
+        row.title = help;
+        row.addEventListener("click", () => {
+          askReport(doc, item.line);
+        });
+        row.appendChild(el("code", "", item.label));
+        row.appendChild(el("span", "", help));
+        group.appendChild(row);
+      }
     }
     list.appendChild(group);
   }

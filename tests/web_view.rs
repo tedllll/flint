@@ -506,7 +506,9 @@ fn the_panel_reads_a_report_rather_than_sending_it() {
     for (needed, why) in [
         ("className === \"panel\"", "the class that makes a row readable"),
         ("command.send", "the line to ask for, taken from the frame rather than rebuilt here"),
-        ("askReport(doc, asked)", "asking the process for it"),
+        ("askReport(doc, item.line)", "asking the process for the line the row offers"),
+        ("command.values", "the values the frame says this row may be given"),
+        ("send + \" \" + value", "the line for one of them, composed from the frame's own strings"),
     ] {
         assert!(
             built.contains(needed),
