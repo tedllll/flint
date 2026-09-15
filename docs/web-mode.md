@@ -219,7 +219,7 @@ Four routes. No cookies, no HTTP/2, no TLS, no keep-alive, no streaming request 
 | `POST /report` | one command *read* from the browser: same channel, and its answer is captured with the terminal quiet (§11) |
 | `GET /sessions` | the conversations `/resume` can reach, numbered the way `/resume` numbers them |
 | *`event: sessions`* | not a route but its counterpart: the list has changed, re-read it |
-| *`event: state`* | the run's own configuration: provider, model, what each provider offers, the toggles, and the command list with §8's class for each row — a row also carries `values` when the page may read that command with an argument the frame names, and `field` when the page may fill its argument in (§11) |
+| *`event: state`* | the run's own configuration: provider, model, what each provider offers, the toggles, and the command list with §8's class for each row — a row also carries `values` when the page may read that command with an argument the frame names, `field` when the page may fill its argument in, and `from` when it destroys something and the argument is one of a list (§11) |
 | `type: command` | what a command answered, on the same stream as the turn's events: `input` and `text` — which is also what a header button's answer arrives on. Carries `panel: true` when the page asked to read it rather than typing it, and `input` is the command's own `send` rather than the line in the one case the line carries a credential (§11) |
 
 **All six are implemented.** `/session` and `/events` read the session path and the event feed
@@ -746,4 +746,32 @@ free-form, so a page form would send several settings at once while the terminal
 at a time; it would need a `/config set <key> <value>` the terminal does not have, and a command
 invented for the page's benefit is what §8's design exists to prevent. The page writes nothing into the
 config file in this round.
+
+### The destructive class, and the two presses — measured, 2026-09-15
+
+§8's last class, and the end of it. `/delete <n|id>`, `/archive <n|id>` and `/provider rm <name>` are
+controls now, and the control is shaped like the promise: the row does not send, it opens its
+candidates, and each candidate row prints the whole line it will send (`/delete 7`) — so the second
+press is one that can be read before it is made. The process is unchanged: the line goes to
+`/message`, exactly as if it had been typed, because a confirmation the terminal does not have would be
+a second way to run `/delete`.
+
+The frame had to grow one field it is otherwise proud of not having. §8 says a selector's options come
+from a frame that already describes them and that the command list should not say where — the control
+decides. That holds while the control is one control; it does not hold here, because the choices must
+be drawn before anything can be confirmed and the two lists are different ones. So three rows carry
+`from`, and a page that could not see it would have to recognise `/delete <n|id>` by name.
+
+| Claim | How | Result |
+|---|---|---|
+| The frame says which list, and only for the three rows | a real `--web` process, the connect-time state frame | `/delete <n|id>` and `/archive <n|id>` carry `"from":"sessions"`, `/provider rm <name>` carries `"from":"providers"`, and the frame contains exactly three `"from":` — a fourth would have the page offering candidates for a command that reads. Mutation-checked: marking every row `providers` fails it |
+| The first press sends nothing | `tests/web_view.rs`, over the page's own bytes | the branch that opens the choices contains no `sendText`, checked at the shape of the branch rather than by eye. Mutation-checked: drawing no choices at all fails the Node check below |
+| The choices are the lists the page already holds | Node, over the stub DOM | opened on `from: "providers"`, the panel holds a `‹ commands` back button and one `row danger` per provider, each reading `/provider rm stub` — the frame's `send` plus the frame's name |
+| A choice list with nothing in it says so | Node, the same check, opened on `from: "sessions"` with no list | one row reading `nothing to choose from` rather than an empty list that looks like one with nothing in it |
+| An open list does not outlive its numbers | `web/view.html`, read | `readSessions` redraws the panel when a choice list is open, and a `reset` clears `doc.confirm` — `/delete` in the terminal shifts every number below the one that went, and the numbers in a list are positions |
+
+**Not measured**: a browser, as ever, and the deletion itself — that is the terminal's own command
+reached through the composer's route, and it is measured in the terminal's terms elsewhere. What this
+class adds is the two presses, and the thing that stops a single press is that there is nothing on the
+page to press that sends.
 

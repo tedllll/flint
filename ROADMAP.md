@@ -707,8 +707,36 @@ Two things were decided rather than discovered:
   page is told the input's `type` by the frame rather than deciding from the command's name that a key
   is a secret, and it empties the field the moment it sends it.
 
-**Next: the confirmation for the destructive class — and here is what is already decided.** Written
-down because the trap is cheaper to avoid than to find:
+**The destructive class closes §8, and it is the one where the frame had to say where a value comes
+from — built, 2026-09-15.** `/delete <n|id>`, `/archive <n|id>` and `/provider rm <name>` are controls
+on the page now, and the shape of the control is the promise: the row does not send, it *opens its
+candidates*, and the candidate row prints the whole line it will send (`/delete 7`) — so the second
+press is one that can be read before it is made. There is no undo anywhere in flint for the page to
+offer, and a one-press `/delete` is the exact misclick §8 keeps `/exit` off the page for.
+Two decisions were forced by that:
+
+- **A destructive row has to say which list its argument comes from.** §8 says a selector's values come
+  from a frame that already describes them *and that the command list should not say where* — the
+  control decides. That holds while the control is one control. It does not hold here, because the
+  page must draw the choices before anything can be confirmed, and the two lists are different ones:
+  conversations by the sidebar's numbers, providers by name. Without a mark on the row the page would
+  have to tell `/delete <n|id>` from `/provider rm <name>` by reading the commands, which is the one
+  thing every other control is built to avoid. So three rows carry `from`, and the assertion counts
+  them: exactly three, because a `from` anywhere else would have the page offering candidates for a
+  command that reads.
+- **`doc.confirm` is the row, not a countdown.** Nothing has been sent while the choices are open, so
+  an armed state is harmless and a timer would only be a second thing to get wrong. It is cleared by
+  the way back, by anything else the panel is asked to draw, and by a `reset` — a choice list is aimed
+  at a document, and the numbers in it are positions, so an open list whose document was replaced
+  would point the next press at the conversation below the one that went. The same reason makes the
+  sidebar's own re-read redraw an open list: `/delete` in the terminal shifts every number under it.
+
+**§8 is built.** All five controls are on the page — the buttons, the panels that read, the selectors,
+the forms and now the destructive ones — and what is left is not a class but three residues, each
+written down where it belongs: `/config edit` as a page form (it would need a command the terminal
+does not have, above), the mid-turn wait for a report (not asserted; needs a stub turn slow enough to
+click during, in `docs/web-mode.md` §11), and a browser, which nobody has opened with a real font and
+a real click. The queue below is what comes next.
 
 - **A selector's options come from somewhere the frame already describes** — built: `/model`'s and
   `/provider`'s from `providers` (both controls exist), `/resume`'s and `/archive`'s from the
@@ -721,8 +749,10 @@ down because the trap is cheaper to avoid than to find:
   row the frame marks with one, and `/provider add`, `/provider edit` and `/config edit` stay in the
   terminal. `/provider key`'s redaction is in the table rather than in the page (see the built
   paragraph); `/config edit` as a page form is the piece that needs a command the terminal lacks.
-- **The destructive class gets the page's own confirmation** — a second click, not a `/yes` command
-  — because there is no undo anywhere in flint.
+- **The destructive class gets the page's own confirmation** — built: two presses, the second naming
+  the line, because there is no undo anywhere in flint. The candidates come from the list the row's
+  `from` names; the process-side command is unchanged, since a confirmation the terminal does not have
+  would be a second way to run `/delete`.
 
 Four gates. `the_page_is_told_the_state_its_controls_would_show` is the one that needs a real
 process: `--web`, `/events` read as it arrives, the state frame read on connect, then `/model
@@ -740,9 +770,10 @@ alternatives, where a `<select>` silently keeps its first option and would then 
 
 **Renaming a conversation from the sidebar.** Not tried by the person who asked, and the mechanism
 is already there: `/name <text>` appends a `title` line, the page already *renders* titles (its
-header shows one), and typing `/name x` in the composer works today. What is missing is an
-affordance and any feedback — and the feedback is the previous item. So this one is small once that
-is built, and it is not worth doing first.
+header shows one), and `/name` now has a field in the panel — so a rename typed on the page works and
+its answer lands in the transcript, which was the feedback that was missing. What is still missing is
+the *sidebar* affordance (`/resume`'s neighbour), and that is a small drawing job rather than a
+mechanism. It is not worth doing first.
 
 
 ### 9. The page, and the conversations that get thrown away

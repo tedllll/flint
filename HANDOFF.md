@@ -7,9 +7,9 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 381 passing, 1 ignored (256 lib, 1 in
-the binary's own tests, 33 `agent_loop`, 46 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
-`term_capture` plus the ignored cost measurement, 17 `web_view`), `cargo clippy --all-targets` is
+As of the commit that carries this file, `cargo test` is 383 passing, 1 ignored (256 lib, 1 in
+the binary's own tests, 33 `agent_loop`, 47 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
+`term_capture` plus the ignored cost measurement, 18 `web_view`), `cargo clippy --all-targets` is
 silent, and both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
 
 **The last sessions were on Windows** (10.0.26200, AMD64, rustc 1.98.1, PowerShell 5.1.26100.6584
@@ -34,10 +34,11 @@ Written for a cold start: a different machine, and possibly a session with no me
 one. The repository is the whole state — there is no index, no cache and no database anywhere in
 flint, on purpose — so cloning it and running the gate below is all that "catching up" means.
 
-**Where it was left.** `main` at the commit that gives a form row a field
-(`feat: a form row gets a field, and a key never comes back`), plus the documentation commit that
-carries this file, working tree clean, `origin/main` level with it. The counts are in the section
-above and were re-run to write this paragraph, not remembered.
+**Where it was left.** `main` at the commit that gives the destructive rows their two presses
+(`feat: a destructive row opens its choices, and the second press is the one that sends`), plus the
+documentation commit that carries this file, working tree clean, `origin/main` level with it. **§8 is
+finished** — all five controls are on the page — and the queue's next item is §9. The counts are in
+the section above and were re-run to write this paragraph, not remembered.
 
 **What the other machine needs.**
 
@@ -53,7 +54,7 @@ above and were re-run to write this paragraph, not remembered.
 
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
-cargo test                                        # 381 passing, 1 ignored
+cargo test                                        # 383 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed
@@ -601,18 +602,57 @@ them one at a time — it would need a `/config set <key> <value>` that the term
 Inventing a command for the page's benefit is the thing §8's design exists to prevent. The page
 therefore writes nothing into the config file in this round.
 
+### A destructive row opens its choices, and the second press is the one that sends
+
+`/delete <n|id>`, `/archive <n|id>` and `/provider rm <name>` are page controls now, and the shape of
+the control *is* the promise: the row does not send — it opens its candidates, and the candidate row
+prints the whole line it will send (`/delete 7`), so the second press is one that can be read before
+it is made. There is no undo anywhere in flint for a page to offer, and a one-press `/delete` is the
+misclick §8 keeps `/exit` off the page for.
+
+**The frame had to say one thing it otherwise never says: where a value comes from.** §8's rule for
+selectors is that the control decides and the command list does not say. That holds while the control
+is one control. It does not hold here, because the page must draw the choices *before* anything can be
+confirmed, and the two lists are different ones — conversations by the sidebar's numbers, providers by
+name. Without a mark the page would have to tell `/delete <n|id>` from `/provider rm <name>` by
+reading the commands, which is what every other control is built to avoid. So three rows carry `from`
+(`"sessions"` or `"providers"`), and the e2e that pins it counts them: exactly three, because a `from`
+anywhere else would have the page offering candidates for a command that reads.
+
+**`doc.confirm` is the row, not a countdown.** Nothing has been sent while the choices are open, so an
+armed state is harmless and a timer would be a second thing to get wrong. It is cleared by the way
+back, by a `reset` (a choice list is aimed at a document, and its numbers are positions), and the
+sidebar's own re-read redraws an open list — `/delete` in the terminal shifts every number below the
+one that went, and a stale number is a wrong deletion.
+
+**Measured.** `a_destructive_row_says_where_its_argument_comes_from` reads the frame off a real
+`--web` process; `a_destructive_row_opens_its_choices_and_sends_on_the_second_press` pins the page's
+half over its own bytes, including that the press that opens the choices contains no `sendText`; and
+the Node check drives `showCommands` through both states and reads back the rows — the candidates, the
+way back, the destructive mark, and the empty list saying so. Mutation-checked: marking every row
+`from: "providers"` fails the e2e, and drawing no choices fails the Node check.
+
+**Not measured**: a browser, as ever — and the deletion itself, which is the terminal's own command
+reached through the composer's route. What the page adds is the two presses, and what stops a single
+press is that there is nothing to press that sends.
+
 ### Still owed on the page
 
-**The next unit, and the decisions already taken for it** (so a cold session does not re-derive them;
-the reasoning is in `ROADMAP.md` §8). The command list, its panel, the buttons, the reports, the
-selectors and the forms are built — what is left is the class that destroys things:
+**§8 is built, so this list is now the residues rather than a class.** The command list, its panel, the
+buttons, the reports, the selectors, the forms and the destructive controls are all in. What is left,
+each with the reason it is left:
 
-1. **The destructive class needs a confirmation step** (`/delete`, `/archive`, `/provider rm`),
-   because there is no undo anywhere in flint, and the confirmation has to be the *page's*
-   (a second click) rather than a `/yes` command in the terminal. The report route's refusal of
-   `/delete <n>` is what stands in for it meanwhile, and the numbers themselves already reach the
-   page: the sidebar carries them, and the row a reader clicked is where `/archive <n>` and
-   `/delete <n>` should take their argument from.
+1. **`/config edit` as a page form** — deliberately not built: its keys are enumerable and its values
+   are free-form, so a page form would send several settings at once while the terminal prompts for
+   them one at a time, and it would need a `/config set <key> <value>` the terminal does not have.
+   Inventing a command for the page's benefit is what §8's design exists to prevent.
+2. **The mid-turn wait for a report** — the behaviour is built (`Handover` stashes it rather than
+   treating it as an interrupt) and asserted nowhere, because the assertion needs a stub turn slow
+   enough to click during.
+3. **A browser** — nobody has opened this page with a real font and a real click. That is what §11's
+   "not measured" lines keep saying, and it is the one gap that a test cannot close.
+4. **Renaming from the sidebar** — a `/name` field exists in the panel and works; the sidebar has no
+   affordance for it. Small drawing job, not a mechanism.
 
 - The small queued-line hole above still wants its two structural lines before a test can hold it.
   The report path now leans on the same machinery and does *not* have the hole: a report arriving
