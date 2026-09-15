@@ -626,6 +626,12 @@ per line. A damaged line is skipped and reported rather than taking the session
 down. A resumed session is appended to, not rewritten, so nothing said after
 `--continue` is lost.
 
+A session file is created by the first thing *said*, not when flint starts. Open the REPL or
+`--web` and type nothing, and there is no file, no row in `/sessions` and nothing in the
+sidebar — a run that is refused before it says anything (no key, an endpoint that cannot be
+reached) leaves nothing behind either. A command that changes the conversation's environment,
+such as `/provider`, does count as something happening.
+
 `<dir>` is the working directory the conversation was held in — its last path component and
 a hash of the whole path, `flint-1f0a7c93` — so two projects sharing one home are separated
 on disk and not by a filter that has to read every file to decide whose it is. The session

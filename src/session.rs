@@ -92,6 +92,12 @@ fn names_a_known_event(line: &str) -> bool {
 /// Append handle for a session file.
 pub struct SessionWriter {
     path: PathBuf,
+    /// The `meta` line this writer would put in the file, if it is the one that creates it.
+    ///
+    /// `None` when resuming, because the file is already there and already has one. Held rather than
+    /// written at construction because a session file appears when the first thing is *said*, not
+    /// when flint is opened -- see `append`.
+    meta: Option<SessionEvent>,
 }
 
 impl SessionWriter {
@@ -102,7 +108,6 @@ impl SessionWriter {
         // other's history by anything that walks the listing. Sessions written before this live
         // directly in the root and are still found -- see `latest_for`.
         let dir = dir.join(dir_key(cwd));
-        std::fs::create_dir_all(&dir).context("cannot create sessions directory")?;
         let id = new_id();
         let path = dir.join(format!("{id}.jsonl"));
         let meta = SessionEvent::Meta {
@@ -113,9 +118,10 @@ impl SessionWriter {
             provider: provider.to_string(),
             model: model.to_string(),
         };
-        let writer = SessionWriter { path };
-        writer.append(&meta)?;
-        Ok(writer)
+        Ok(SessionWriter {
+            path,
+            meta: Some(meta),
+        })
     }
 
     /// Start a new file that already holds a conversation.
@@ -163,8 +169,21 @@ impl SessionWriter {
     /// `--continue` were written nowhere. A conversation you cannot save is
     /// barely a conversation, and the whole point of resuming is to carry on.
     pub fn resume(path: &Path) -> Result<Self> {
+        // A file that is not there is not a session to continue. This used to be silent, and the
+        // writer then made one: with a session that had said nothing yet, its file did not exist, and
+        // the first line written into it was the switch -- a file with no `meta`, which is a
+        // conversation with no model and no working directory attached to it. Callers that may be
+        // handed such a path check it themselves (`continue_conversation`); this is the backstop.
+        if !path.exists() {
+            return Err(anyhow::anyhow!(
+                "cannot resume {}: no such session file",
+                path.display()
+            ));
+        }
         Ok(SessionWriter {
             path: path.to_path_buf(),
+            // Nothing: the file is already there, and its `meta` line is already in it.
+            meta: None,
         })
     }
 
@@ -173,14 +192,48 @@ impl SessionWriter {
         &self.path
     }
 
-    /// Append one event. Flushed immediately so a crash loses at most one event.
+    /// Append one event, creating the file and writing its `meta` line first if this is the first.
+    ///
+    /// The file is created here, by the first event, and not when the run started. Opening flint --
+    /// the REPL, or `--web` -- and saying nothing is not a conversation, and a home that collects an
+    /// empty file every time the page is opened is a listing of things that never happened. A run
+    /// that is refused before it says anything (no key, an endpoint that cannot be reached) now
+    /// leaves nothing behind at all, not even the directory.
+    ///
+    /// `create_new` decides whether this write is the first, rather than a flag: whoever creates the
+    /// file is the one that puts `meta` in it, and nothing has to be remembered about whether that
+    /// happened. A flag is wrong the moment a writer is handed on -- a switch builds a new agent for
+    /// the same conversation -- and `meta` is the one line a file must not be missing.
     pub fn append(&self, event: &SessionEvent) -> Result<()> {
+        // The directory goes first, and on every write rather than once: a writer can be resuming a
+        // file in a directory that is not there (a home moved by hand) and the cost is one `mkdir`
+        // against the open, write and flush that follow it.
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir).context("cannot create sessions directory")?;
+        }
         let line = serde_json::to_string(event).context("cannot serialize session event")?;
-        let mut file = OpenOptions::new()
-            .create(true)
+        let mut file = match OpenOptions::new()
+            .create_new(true)
             .append(true)
             .open(&self.path)
-            .with_context(|| format!("cannot open session file {}", self.path.display()))?;
+        {
+            Ok(file) => {
+                if let Some(meta) = &self.meta {
+                    let meta =
+                        serde_json::to_string(meta).context("cannot serialize session event")?;
+                    writeln!(&file, "{meta}").context("cannot write session event")?;
+                }
+                file
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => OpenOptions::new()
+                .append(true)
+                .open(&self.path)
+                .with_context(|| format!("cannot open session file {}", self.path.display()))?,
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("cannot open session file {}", self.path.display()))
+            }
+        };
         writeln!(file, "{line}").context("cannot write session event")?;
         file.flush().context("cannot flush session event")?;
         Ok(())
@@ -882,6 +935,59 @@ mod tests {
         assert_eq!(latest_for(&root.0, &other.0).expect("latest"), None);
     }
 
+    /// A new session writes nothing until something is said.
+    ///
+    /// Reported from the page, which is where it is most obvious: opening `--web` created a session
+    /// file before anyone had typed a word, so the sidebar filled up with conversations that never
+    /// happened and `/sessions` numbered them. The file -- and the directory it goes in -- is created
+    /// by the first event now, and `meta` is still the first line, because a file whose first line is
+    /// not `meta` is a conversation with no model and no working directory attached to it.
+    #[test]
+    fn a_session_file_appears_when_something_is_said() {
+        let root = TempDir::new("lazy-create");
+        let project = TempDir::new("lazy-create-project");
+        let writer = SessionWriter::create(&root.0, &project.0, "p", "m").expect("create");
+        assert!(
+            !writer.path().exists(),
+            "a session file was written before anything was said: {}",
+            writer.path().display()
+        );
+        assert!(
+            !root.0.join(dir_key(&project.0)).exists(),
+            "the sessions directory was created for a run that said nothing"
+        );
+
+        writer
+            .append(&SessionEvent::Chat {
+                message: Message::User {
+                    content: "the first thing said".to_string(),
+                },
+            })
+            .expect("append");
+        let text = std::fs::read_to_string(writer.path()).expect("read the session");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "not one line per event: {text:?}");
+        assert!(
+            lines[0].contains(r#""type":"meta""#),
+            "`meta` is not the first line: {text:?}"
+        );
+        assert!(
+            lines[1].contains("the first thing said"),
+            "the first thing said is not in the file: {text:?}"
+        );
+
+        // Resuming does not write a second `meta`: the file already has one.
+        let resumed = SessionWriter::resume(writer.path()).expect("resume");
+        resumed.title("a name").expect("title");
+        let text = std::fs::read_to_string(writer.path()).expect("read the session");
+        assert_eq!(
+            text.matches(r#""type":"meta""#).count(),
+            1,
+            "resuming wrote a second `meta`: {text:?}"
+        );
+        assert!(text.contains(r#""type":"title""#), "{text:?}");
+    }
+
     /// A switch is a line in the file, not a second file.
     ///
     /// Switching provider or model used to seed a **new** session with the whole conversation in it,
@@ -934,6 +1040,9 @@ mod tests {
     fn the_writer_records_the_current_format_version() {
         let dir = TempDir::new("version");
         let writer = SessionWriter::create(&dir.0, Path::new("/tmp"), "p", "m").unwrap();
+        // Named, because a session file exists from the first thing said -- see
+        // `a_session_file_appears_when_something_is_said`.
+        writer.title("a name").unwrap();
         let text = std::fs::read_to_string(writer.path()).unwrap();
         assert!(
             text.contains(&format!(r#""v":{FORMAT_VERSION}"#)),

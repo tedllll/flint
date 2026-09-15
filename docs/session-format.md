@@ -18,6 +18,13 @@ looks in both places.
 The id is the file name: a Unix timestamp and a counter, `1789290356-957.jsonl`. Nothing
 else identifies a session, so `cp` is how you fork one and `mv` is how you rename the file.
 
+The file is created by the **first event in it**, not when flint starts. A run that says
+nothing — the page opened and closed again, a `--continue` that found no conversation — leaves
+no file behind, and a run refused before it says anything (no key, an endpoint that cannot be
+reached) leaves nothing either. That is why `meta` is still the first line of every file that
+exists: whoever creates the file writes `meta` into it first, and a file whose first line is
+not `meta` is a conversation with no model and no working directory attached to it.
+
 ## One event per line
 
 Every line is a JSON object with a `type`. This build understands five:

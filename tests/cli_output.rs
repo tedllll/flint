@@ -3265,14 +3265,22 @@ async fn switching_provider_keeps_the_conversation_in_its_file() {
     let mut watching = http_stream(port, "/events", &token);
     let _opening = read_until(&mut watching, "\"type\":\"state\"}\n\n", 20);
 
-    let before = jsonl_files(&sessions);
-    assert_eq!(before.len(), 1, "a fresh run is not writing exactly one session: {before:?}");
-    let was = std::fs::read_to_string(&before[0]).expect("the session file");
+    // Opening the page says nothing, so it writes nothing. A home that collected an empty session
+    // every time someone looked at the page was a listing of conversations that never happened.
+    assert!(
+        jsonl_files(&sessions).is_empty(),
+        "opening the page wrote a session before anything was said"
+    );
 
-    // The provider switch, exactly as the header's picker sends it.
+    // The provider switch, exactly as the header's picker sends it. This *is* something happening, so
+    // it is where the conversation's file begins: `meta` first, then the switch.
     let switched = post_message(port, &token, "/provider other");
     assert!(switched.starts_with("HTTP/1.1 202"), "the switch was refused: {switched:?}");
     let told = read_until(&mut watching, "\"provider\":\"other\"", 20);
+
+    let before = jsonl_files(&sessions);
+    assert_eq!(before.len(), 1, "the switch wrote {} sessions: {before:?}", before.len());
+    let was = std::fs::read_to_string(&before[0]).expect("the session file");
 
     let after = jsonl_files(&sessions);
     // Read before the scratch home is removed below: the point of the two assertions on this text is
@@ -3870,8 +3878,12 @@ async fn a_provider_can_be_added_from_the_page() {
     );
 
     let sessions = home.join("sessions");
-    let before = jsonl_files(&sessions);
-    assert_eq!(before.len(), 1, "a fresh run is not writing one session: {before:?}");
+    // Nothing has been said yet -- opening the page is not saying anything -- so there is no session
+    // to find. The first thing that happens writes the file, and that is asserted below.
+    assert!(
+        jsonl_files(&sessions).is_empty(),
+        "opening the page wrote a session before anything was said"
+    );
 
     // The line the page composes: the row's own `send`, then the answers, with the empty optional one
     // left off. Nineteen is a base address; nothing is ever sent to it.
@@ -3923,6 +3935,10 @@ async fn a_provider_can_be_added_from_the_page() {
          {transcript:?}"
     );
     assert_eq!(after.len(), 1, "adding a provider started a second conversation: {after:?}");
+    assert!(
+        text.contains("\"type\":\"meta\""),
+        "the file the first thing said begins with something other than `meta`: {text:?}"
+    );
     assert!(
         text.contains("\"type\":\"switch\",\"provider\":\"claw\""),
         "the file does not say the conversation moved to the provider that was just added: {text:?}"

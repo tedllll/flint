@@ -1059,6 +1059,34 @@ its own question and not the other's, and `--list-sessions` seeing both from a d
 conversation of its own), plus the two `--cwd` end-to-end tests, which now assert the layout rather
 than assuming it.
 
+**Eighth: opening flint created an empty conversation — fixed, 2026-09-15, reported from the page.**
+"我打开 web 的瞬间就有一个空的会话" — and measured before it was believed: starting `--web` against a
+scratch home left exactly one session file, `{"type":"meta",…}` and nothing else, before a word had
+been typed. The REPL did the same. So a home collected one conversation per look at the page: rows in
+the sidebar that never had anything in them, numbers in `/sessions` that counted openings, and
+`--continue` able to resume a conversation nobody had. The writer's file is now created by its first
+event, not by the run starting, and the directory with it — a run that is refused before it says
+anything (no key, an endpoint that cannot be reached) leaves nothing behind at all.
+
+**The rule is "the first thing said", and deciding it needed a mechanism rather than a flag.**
+`create_new` decides: whoever creates the file is the one holding the `meta` line, and nothing has to
+be remembered about whether it was written. A flag was wrong the moment a writer is handed on, and the
+switch is exactly that — `/provider` builds a new agent for the same conversation — which is how the
+first attempt produced a file whose first line was the switch instead of `meta`. Two more real defects
+came with it, both caught by existing tests: `/readonly` rebuilt its tool set through
+`SessionWriter::resume` on a session whose file did not exist yet and failed outright, and
+`continue_conversation` recorded the switch in one arm only, so a `/provider` on a session that had
+said nothing wrote nothing while the page was told the provider had changed. `resume` now also refuses
+a file that is not there, which is the backstop that turns "a session with no `meta`" into an error
+next time.
+
+**Two page tests changed their minds, deliberately.** Both asserted that a fresh `--web` run writes
+exactly one session — which was the behaviour, and was wrong. They now assert that opening the page
+writes *nothing*, and that the provider switch is what creates the file, `meta` first. Two mutations,
+both seen red: making the file eager ("a session file was written before anything was said") and
+skipping `meta` (four tests, including the seeded fork, which is where a file with no `meta` would do
+the most damage).
+
 **Done in the same round, recorded so it is not re-done**: themed scrollbars (the default grey ones
 were the complaint); a draggable sidebar and a draggable reading width, with a hairline hint at
 rest on the right hand because there is no seam at the text's edge to be discovered by; the

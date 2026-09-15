@@ -1595,14 +1595,10 @@ fn continue_conversation(
     old: &agent::Agent,
 ) -> Result<agent::Agent> {
     let cwd = old.cwd().clone();
-    let writer = match old.session_path() {
-        Some(path) => {
-            let writer = session::SessionWriter::resume(&path)?;
-            writer.switched(&target.name, &target.model)?;
-            writer
-        }
-        // A run with no file to write (a bare `exec`, say): there is nothing to keep, so this is
-        // where a session begins rather than where one is continued.
+    let writer = match old.session_path().filter(|path| path.exists()) {
+        Some(path) => session::SessionWriter::resume(&path)?,
+        // A session that has said nothing yet has no file -- sessions are created by their first
+        // event -- so continuing is starting: the same conversation, still with nothing in it.
         None => session::SessionWriter::create(
             &config::sessions_dir(),
             &cwd,
@@ -1610,6 +1606,12 @@ fn continue_conversation(
             &target.model,
         )?,
     };
+    // The move is recorded either way, and on a session with no file yet this is the write that
+    // makes the file. It has to be: leaving it out of one branch is how a switch came to write
+    // nothing at all, with the page told the provider had changed and no file to prove it. That it
+    // repeats what `meta` already says on a brand-new session is the price of one code path, and
+    // `load` believes the last line either way.
+    writer.switched(&target.name, &target.model)?;
     let mut next = agent::Agent::new(cfg, provider, old.readonly(), cwd.clone(), Some(writer));
     next.splice_loaded_history(cfg, &cwd, old.history().to_vec());
     Ok(next)
@@ -2540,7 +2542,10 @@ async fn handle_command(
                 ));
                 return Ok(Flow::Continue);
             }
-            let writer = match agent.session_path() {
+            // A session that has said nothing yet has no file, and `/readonly` must not be what
+            // creates one: this is a change of permission, not of conversation, so the run keeps the
+            // writer it has and says nothing to disk.
+            let writer = match agent.session_path().filter(|path| path.exists()) {
                 Some(path) => Some(session::SessionWriter::resume(&path)?),
                 None => None,
             };

@@ -61,7 +61,7 @@ in a scratch directory for the same reason.
 | Path | What it is |
 |---|---|
 | `<FLINT_HOME>/config.toml` | the configuration; created on first run |
-| `<FLINT_HOME>/sessions/<dir>/<stamp>-<n>.jsonl` | one conversation per file, append-only, in the directory belonging to the working directory it was held in (older sessions sit directly in `sessions/`, and are still found) |
+| `<FLINT_HOME>/sessions/<dir>/<stamp>-<n>.jsonl` | one conversation per file, append-only, in the directory belonging to the working directory it was held in (older sessions sit directly in `sessions/`, and are still found). A file is created by the first thing said in it, so opening flint and typing nothing leaves nothing |
 | `<FLINT_HOME>/sessions/archive/` | conversations filed away with `/archive` (a project's archive is `sessions/<dir>/archive/`) |
 | `<FLINT_HOME>/spill/<session>/<n>.txt` | tool output too long for one request, in full |
 | `<FLINT_HOME>/engines/<provider>.log` | a local engine's output, and the only place a failed start says why |
