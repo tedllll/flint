@@ -1112,6 +1112,16 @@ without the caller passing anything again, `--schema` overrides it, and `--no-sc
 line rather than leaving the next reader to infer it from silence. A run that merely inherited a shape
 writes nothing.
 
+**Tenth: the Python caller is in the repository, not in a scratch directory.** It was written and
+measured in `%TEMP%`, which is where a wrapper that only its author has is kept: the measured record
+of how a Python caller has to behave — a call blocks, a failed run does not raise, `cwd` is what
+separates conversations — was in files no clone would ever see. It now lives in `examples/python/`
+with the stub it tests against, and `docs/python.md` says what the four things a caller must get
+right are and which script shows each one. The checks run the binary **built from the checkout** when
+there is one, because a check that runs yesterday's installed flint passes for the wrong reason: the
+session-layout expectations in `test_call.py` were first written while `PATH` still held a build from
+before the layout changed, and they failed for a reason that had nothing to do with the code.
+
 **Done in the same round, recorded so it is not re-done**: themed scrollbars (the default grey ones
 were the complaint); a draggable sidebar and a draggable reading width, with a hairline hint at
 rest on the right hand because there is no seam at the text's edge to be discovered by; the

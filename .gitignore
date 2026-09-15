@@ -3,6 +3,11 @@
 Cargo.lock.orig
 .DS_Store
 
+# Python bytecode. The caller in `examples/python/` is imported (and so compiled) by every run of
+# its own checks, and a `.pyc` next to the source it was built from is noise, not a file to review.
+__pycache__/
+*.pyc
+
 # Secret files. The real config lives in ~/.flint/config.toml, outside the repo,
 # but these patterns stop a stray key file from ever being committed.
 .env

@@ -13,6 +13,13 @@ output), 4 `search_tool`, 20
 `term_capture` plus the ignored cost measurement, 22 `web_view`), `cargo clippy --all-targets` is
 silent, and both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
 
+**The Python caller lives in the repository**: `examples/python/flint_call.py` (`ask`, `ask_json`,
+`Turn`, no dependencies), `test_call.py` (21 checks against a local stub, `cargo build` first),
+`stub_provider.py`, `timing_demo.py` (what blocking and a non-raising failure actually look like) and
+`ask_schema.py` (live, needs a key). `docs/python.md` is the prose, README points at it, and
+`flint_call._binary` runs the build in this checkout when there is one so a check cannot pass against
+an older installed flint.
+
 **Structured output is in**: `flint -p "..." --json --schema <file|{...}>` puts the schema in the
 system prompt, asks the provider for `response_format: {"type":"json_object"}` (the only JSON mode
 DeepSeek accepts — it rejects `json_schema`), validates the answer against a hand-written JSON Schema

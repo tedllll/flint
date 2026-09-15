@@ -248,6 +248,31 @@ again, and `--no-schema` is how a caller says "prose this time" without editing 
 the same rule as everything else here: what a run agreed to is in the file, and the file is the
 truth.
 
+### Calling flint from Python
+
+`examples/python/flint_call.py` is a single dependency-free file that runs a turn and hands back the
+stream as a `Turn`: `ask()` for prose, `ask_json()` for a checked object, and every event untouched
+for anything it does not name. Copy it into your project, or read it first — there is nothing under
+it but `subprocess` and `json`.
+
+```python
+from flint_call import ask_json
+
+day = ask_json("MA2610 的最后交易日是哪天？", cwd="/path/to/project", schema={
+    "type": "object",
+    "properties": {"last_trading_day": {"type": "string"}},
+    "required": ["last_trading_day"],
+})
+print(day["last_trading_day"])
+```
+
+Two things about it are worth knowing before you build on it, and the second is the reason
+`ask_json` exists: **a call blocks** until the run is over, and **a failed run does not raise** —
+`ask()` returns a `Turn` whose `ok` is `False` and whose `answer` is `''`, so a caller that does not
+check carries on with nothing. `cwd=` is required and is what separates conversations.
+`docs/python.md` is the whole story, and `examples/python/timing_demo.py` shows both behaviours as
+measured output.
+
 ### Watching a run in a browser
 
 A terminal is a poor renderer for a long answer: the scroll region fights you, a tool call is
