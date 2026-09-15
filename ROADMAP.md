@@ -368,7 +368,7 @@ most of a turn is text nobody could see. The retry rule is now explicit: the lad
 the first drawn character, because nothing in the chain can take text back. `docs/web-mode.md`
 §11 has the measurement; `src/provider.rs` has the rule.
 
-### 8. Web mode, from using it — **the read channel is in, and the page has its menu and its first control**
+### 8. Web mode, from using it — **the read channel is in, and the page reads as well as sends**
 
 Four things turned up in the first real sessions with the browser page, after level 3 was
 finished. Two are settled (below): the sidebar bug is fixed, and the commands gap now has a
@@ -439,8 +439,10 @@ The design, in the order the pieces depend on each other:
 - **Where the output lives is answered per class, not globally.** What an *action* answers goes
   to the transcript, which means `printer.term()` has to become something the feed carries —
   the same gap `turn.started` closed for user messages. What a *panel* shows (the provider
-  list, usage, the skill catalog) comes from the `state` frame and is rendered in the page only,
-  so the terminal is not flooded with a listing its reader did not ask for there.
+  list, usage, the skill catalog) is that same capture with the printing turned off: a report is a
+  command's answer, sent to the page as a `command` frame marked `panel`, so the terminal is not
+  flooded with a listing its reader did not ask for there. Built; the paragraph below has what it
+  cost and the three decisions inside it.
 - **The page may write `config.toml`**, which is what `/provider add` is for. That is acceptable
   because of what already exists rather than anything new: `--web` binds loopback and hands the
   page a per-run token (docs/web-mode.md §4), and that token is checked on every request,
@@ -628,20 +630,38 @@ prints, and nothing at all would be indistinguishable from a press that never ar
 Only the button class is drawn. A report is deliberately not sent (the next bullet), and a
 destructive command still needs a confirmation this page does not have.
 
-**Next: the panels and the selectors — and here is what is already decided.** Written down because
-both halves have a trap that is cheaper to avoid than to find:
+**A report is a command answered to the page, not printed here — built, 2026-09-15.** §8's second
+class, and the first one that needs something the composer route could not give it. A report *is* a
+command's answer, so the cheap route was to send it through `POST /message` like a button — but then
+the listing prints on the terminal as well, and the terminal is where somebody typed `/help`: the
+person watching a run would read `/config`'s twelve lines because a browser asked for them. So the
+same channel carries a second kind of line. `POST /report` queues a `Report` where `/message` queues
+a `Line`, `InputMsg` keeps them apart, and the REPL runs a report with `Term::quiet_start` — the
+recording a command's answer already got, with the printing off — so the answer is captured, sent as
+a `command` frame carrying `"panel": true`, and drawn nowhere else. One funnel, one dispatch, one
+flag; `Term::quiet_take` puts the terminal back whatever the command did.
+Three decisions are worth keeping:
 
-- **A panel's text comes from the process.** What `/config`, `/tools`, `/skills` and `/help` print
-  *is* the panel, so the process builds those lines and puts them in the frame; formatting them in
-  the page would be a second implementation of the terminal's own report. The trap: those lines are
-  styled (dim/bold) for the terminal and the frame must carry plain text, so either they are built
-  once as data and rendered twice, or the terminal gives up its styling — and the `term_capture`
-  tests assert exact bytes, so that choice has to be made deliberately. `Term::plain` (built three
-  rounds above) is what strips colour on the way to the page, and the `command` line already carries
-  a command's whole answer if the cheaper route is taken and a panel is simply the answer to
-  `/<name>` — which it is, for every panel in the list. The open question that route raises: the
-  answer arrives on the feed like any other, so the page has to know that *this* answer belongs in
-  a panel rather than in the transcript, and the only thing that says so is which control sent it.
+- **The refusal lives beside the table, not in the route.** `web.rs` does not know what a slash
+  command means — that is the property that keeps the browser from being a second place that decides
+  — so the route takes any line, and the REPL runs it only if `COMMANDS` has a row with that exact
+  `send` *and* `class: "panel"`. Matched on `send` rather than on the label because `/delete <n|id>`
+  is a label with a placeholder in it: a page that composed an argument of its own would otherwise
+  have the process run it. The page has no confirmation step yet, so this is the safety half as well
+  as the drift guard.
+- **A report waits for the turn.** A report arriving mid-turn is kept and answered when the model is
+  done, where a typed line interrupts: a listing printed into the middle of an answer would be read
+  as part of the answer. `Handover` is what a turn leaves the REPL — the line it could not use, and
+  the reports the page asked for — and the line goes first because it is what a person typed.
+- **The page reads one listing at a time, and caches nothing.** A press replaces the panel's list
+  with the reading and a way back; the answer fills it when the frame arrives, and only if it is the
+  answer to what is on screen. No cache, because a listing held from a moment ago would be a second
+  copy of a fact the process owns: asking again is cheaper and truer, and `/config` after an edit
+  shows what is in force now.
+
+**Next: the selectors, the forms, and the confirmation — and here is what is already decided.**
+Written down because each half has a trap that is cheaper to avoid than to find:
+
 - **A selector's options come from somewhere the frame already describes** — `/model`'s and
   `/provider`'s from `providers` (both controls exist), `/resume`'s and `/archive`'s from the
   sidebar's rows, which is the picked row's number rather than anything the page has to know. The

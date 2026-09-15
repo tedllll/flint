@@ -216,12 +216,13 @@ Four routes. No cookies, no HTTP/2, no TLS, no keep-alive, no streaming request 
 | `GET /session` | the session so far, as the session file's own lines (`NDJSON`) |
 | `GET /events` | SSE: replays from `Last-Event-ID`, then live events |
 | `POST /message` | one message from the browser, into the steering channel |
+| `POST /report` | one command *read* from the browser: same channel, and its answer is captured with the terminal quiet (§11) |
 | `GET /sessions` | the conversations `/resume` can reach, numbered the way `/resume` numbers them |
 | *`event: sessions`* | not a route but its counterpart: the list has changed, re-read it |
 | *`event: state`* | the run's own configuration: provider, model, what each provider offers, the toggles, and the command list with §8's class for each row |
-| `type: command` | what a command answered, on the same stream as the turn's events: `input` and `text` — which is also what a header button's answer arrives on |
+| `type: command` | what a command answered, on the same stream as the turn's events: `input` and `text` — which is also what a header button's answer arrives on. Carries `panel: true` when the page asked to read it rather than typing it |
 
-**All five are implemented.** `/session` and `/events` read the session path and the event feed
+**All six are implemented.** `/session` and `/events` read the session path and the event feed
 through a shared handle, which is what lets `/new` and `/resume` move an open window to the
 conversation the terminal moved to. `/sessions` is the sidebar's source and goes through
 `session::list` — the same function `resolve_session` uses — so the numbers in the page *are*
@@ -232,6 +233,13 @@ point at the wrong conversation.
 command because the REPL says so, `!` is a shell escape because the REPL says so, and neither
 fact is known to `web.rs`. So `/resume 3` from the sidebar works without the page knowing that
 slash commands exist, and there is exactly one place that decides what a typed line means.
+
+**`POST /report` is the same body and the same channel, and the one field that differs is what the
+terminal does with the answer.** A report is a command the *page* reads (§8's panel class), so it is
+run with `Term::quiet_start`: recorded for the page, not drawn here. The route still does not
+interpret the text, which is why it does not check *which* command a report names — the table that
+says a command is a report lives beside the dispatch, and the REPL refuses anything else. A whitelist
+in `web.rs` would be a second copy of that table in the one file that is proudest of not having one.
 
 It is also the only route that can make something *happen*, and that is worth stating plainly:
 reachable at that port with that token, a caller can run the agent. What keeps it acceptable is
@@ -663,4 +671,29 @@ confirmation this page does not have yet.
 **Not yet measured in a browser**: nobody has pressed one. What a press does is pinned as bytes and
 what comes back is pinned end to end, and nothing here says how the button looks or where it lands
 under a real cursor.
+
+### A report is read, not printed — measured, 2026-09-15
+
+§8's second class, and the first the composer's route could not carry. A report *is* a command's
+answer, so the cheap route was to send it on `POST /message` like a button — but then the listing
+prints on the terminal too, and the terminal is where somebody typed `/help`. So the same input
+channel carries two kinds of line: `FromPage::Line` (a person typing, which prints here and lands in
+the transcript) and `FromPage::Report` (the page reading, which is recorded and not drawn). The
+answer goes out as a `command` frame with `panel: true`, because it *is* a command's answer — only
+its destination differs. The panel is one reading at a time, with a way back to the list, and nothing
+is cached: a listing kept from a moment ago would be a second copy of a fact the process owns.
+
+| Claim | How | Result |
+|---|---|---|
+| A report is not printed here | a real `--web` process; `/config` sent to `POST /report` **and** to `POST /message` in one run, then the transcript read off disk | `config.toml` appears exactly **once**. The same command by both routes is the assertion: the typed one prints, the read one does not, and a report route that printed would be a listing twice on a screen nobody asked it for |
+| The answer is the process's own text | the same run, the feed | a `command` frame with `"input":"/config"`, `"panel":true`, and the whole listing in `text`. Mutation-checked: `Term::quiet_start` not setting the flag gives 2 occurrences and fails with that sentence |
+| Only reports may be read | `POST /report` with `/new` (a button), then the feed and the transcript | the frame carries `not a report`, the terminal says `refused:`, and `started a new session` is nowhere in the transcript — a report route that ran what it was handed would delete a conversation on one click that never happened |
+| The route carries the kind, not just the text | `src/web.rs` unit tests | `/message` queues `Line` and `/report` queues `Report` for the same body; a report without the token is 403 and never queued |
+| The page sends a report to `/report` | `tests/web_view.rs`, over the page's own bytes | `fetch("/report"` with the row's `send` as the body, `doc.reading` set, the panel redrawn — and no `/message` in that function at all |
+| A panel's answer fills the panel | Node, over the stub DOM | a `panel` frame fills the reading only when it answers what is on screen; a frame without the mark stays a transcript block. Mutation-checked: `ev.panel === true` → `false` fails the first, dropping the class filter fails the row check |
+| The row is a control and the others are not | Node, over the stub DOM | report rows are `button` (type `button`), a selector row is still a `div`, and each still says what to type and what it does |
+
+**Not measured**: a report asked for *while a turn runs*. The wait is stashed rather than treated as
+an interrupt (`Handover` in `main.rs`), and the assertion that it waits needs a stub turn slow enough
+to click during — which the suite does not have yet. And no browser, as ever.
 

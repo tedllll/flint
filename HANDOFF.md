@@ -7,9 +7,9 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 374 passing, 1 ignored (254 lib, 1 in
-the binary's own tests, 33 `agent_loop`, 43 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
-`term_capture` plus the ignored cost measurement, 15 `web_view`), `cargo clippy --all-targets` is
+As of the commit that carries this file, `cargo test` is 378 passing, 1 ignored (256 lib, 1 in
+the binary's own tests, 33 `agent_loop`, 44 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
+`term_capture` plus the ignored cost measurement, 16 `web_view`), `cargo clippy --all-targets` is
 silent, and both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
 
 **The last sessions were on Windows** (10.0.26200, AMD64, rustc 1.98.1, PowerShell 5.1.26100.6584
@@ -34,10 +34,10 @@ Written for a cold start: a different machine, and possibly a session with no me
 one. The repository is the whole state — there is no index, no cache and no database anywhere in
 flint, on purpose — so cloning it and running the gate below is all that "catching up" means.
 
-**Where it was left.** `main` at `3fb8f9c` (`feat: the page's first control is a button for the
-actions that take no argument`) plus the documentation commit that carries this file, working tree
-clean, `origin/main` level with it. The counts are in the section above and were re-run to write this
-paragraph, not remembered.
+**Where it was left.** `main` at the commit that adds the report route and the panel that reads it
+(`feat: a report is a command the page reads, and the terminal stays quiet`), plus the documentation
+commit that carries this file, working tree clean, `origin/main` level with it. The counts are in the
+section above and were re-run to write this paragraph, not remembered.
 
 **What the other machine needs.**
 
@@ -53,7 +53,7 @@ paragraph, not remembered.
 
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
-cargo test                                        # 374 passing, 1 ignored
+cargo test                                        # 378 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed
@@ -485,38 +485,78 @@ it. Two things are pinned, and the second is the one worth keeping:
 **Not measured in a browser either**: nobody has pressed one. The click path is pinned as bytes and
 the answer path end to end, and that is all it is.
 
+### A report is answered to the page, and not printed here
+
+§8's second class, and the first one the composer's route could not carry. A report *is* a command's
+answer, so the cheap route was to send it through `POST /message` like a button — but then the
+listing prints on the terminal too, and the terminal is where somebody typed `/help`: whoever is
+watching the run would read `/config`'s twelve lines because a browser asked for them. So the same
+input channel carries a second kind of line, and the difference is one flag on the terminal.
+
+**The route and the kind.** `web::FromPage` is `Line` or `Report`; `POST /message` queues the first
+and `POST /report` the second, into the *same* channel, because they are the same queue of work for
+the same loop. `main.rs` adapts them to `InputMsg::Line` / `InputMsg::Report`, which is the only
+place the browser's vocabulary meets the keyboard's. `Term::quiet_start` turns on the recording a
+command's answer already got *and* turns off the printing; `quiet_take` puts the terminal back
+whatever the command did. The answer goes out as a `command` frame with `"panel": true` — one
+vocabulary, not two, because it *is* a command's answer and only its destination differs.
+
+**Three decisions worth keeping:**
+
+- **The refusal lives beside the table, not in the route.** The route takes any line, and the REPL
+  runs it only if `COMMANDS` has a row whose exact `send` is that line *and* whose class is `panel`.
+  Matched on `send` rather than the label because `/delete <n|id>` is a label with a placeholder in
+  it: a page that composed an argument would otherwise have the process run it. With no confirmation
+  step on the page yet, this is the safety half as well as the drift guard. A refused report is said
+  on the terminal *and* sent to the panel, so the page is not left waiting.
+- **A report waits for the turn.** Mid-turn, a report is stashed and answered when the model is
+  done, where a typed line interrupts: a listing printed into the middle of an answer would be read
+  as part of the answer. `Handover` is what a turn leaves the REPL — the line it could not use, and
+  the reports the page asked for — and the line goes first, because it is what a person typed.
+- **The panel reads one listing at a time and caches nothing.** A press replaces the list with the
+  reading and a way back; the frame fills it only when it is the answer to what is on screen, so a
+  reader who moved on does not get the old listing under the new one's name. No cache: a listing
+  held from a moment ago would be a second copy of a fact the process owns, and asking again is
+  cheaper *and* truer.
+
+**Measured, and the measurement is the whole point of the class.** `a_report_the_page_asks_for_is_
+not_printed_here` runs a real `--web` process, asks for `/config` on `/report`, posts the same
+command on `/message`, and counts: the transcript must carry `config.toml` exactly *once*. Then it
+asks for `/new` as a report and asserts the refusal, because a report route that ran whatever it was
+handed would delete a conversation with one click that never happened. Mutation-checked both ways —
+`quiet_start` not setting the flag gives 2 occurrences and the right message; the e2e run stays under
+a second.
+
+**Page side.** Report rows in the panel are pressable, and the press posts the row's own `send` to
+`/report` (`askReport`). The panel has two modes — the list, or one reading with a `‹ commands` way
+back — and a `command` frame marked `panel` fills the reading rather than the transcript. The
+composition is pinned as bytes (`the_panel_reads_a_report_rather_than_sending_it`) and the drawing in
+Node (four checks), with the mutation checks recorded in `docs/web-mode.md` §11.
+
+**Not measured**: a report asked for *while a turn runs*, which needs a stub turn slow enough to
+click during; and a browser, as ever.
+
 ### Still owed on the page
 
-**The next unit, and the decisions already taken for it** (so a cold session does not re-derive
-them; the reasoning is in `ROADMAP.md` §8). The command list, its panel and the button class are
-built — what is left is the classes that need more than "send this line":
+**The next units, and the decisions already taken for them** (so a cold session does not re-derive
+them; the reasoning is in `ROADMAP.md` §8). The command list, its panel, the buttons and the reports
+are built — what is left is the classes that need a value from the reader:
 
-1. **A panel's text comes from the process, not from the page.** What `/config`, `/tools`,
-   `/skills` and `/help` print is the panel's content, so the process builds it and puts it in the
-   frame; the page only renders it. Formatting it in the page would be a second implementation of
-   the terminal's own report, which is what "one fact, one place" forbids. The open question to
-   settle first: those arms print *styled* text (dim/bold) and the frame must carry plain text, so
-   either the lines are built once as data and rendered twice (styled in the terminal, plainly in
-   the frame) or the terminal loses its styling — decide it deliberately rather than by accident,
-   and note that the `term_capture` tests assert exact bytes. The cheaper route, worth trying first:
-   a panel *is* a command's answer, and the `command` line built three rounds ago already carries one
-   (`/config` typed in the composer arrives with its whole answer, plain). What that route has to
-   answer: the answer arrives on the feed like any other, so the page must know that *this* one
-   belongs in a panel rather than in the transcript — and the only thing that says so is which
-   control sent it.
-2. **A selector's options come from a frame that already describes them**: `/model`'s and
+1. **A selector's options come from a frame that already describes them**: `/model`'s and
    `/provider`'s from `providers` (both controls exist), `/resume`'s and `/archive <n|id>`'s from the
    sidebar's rows, where the argument is whichever row was clicked. The command list says a command
    takes a value; it deliberately does not say where the values come from.
-3. **A form is the composer's problem.** `/name <text>`, `/provider key <key>`, `/provider add` and
+2. **A form is the composer's problem.** `/name <text>`, `/provider key <key>`, `/provider add` and
    `/config edit` are interactive in the terminal, and `add`/`edit` are wizards on top of that, so
    the page gets a field only where the argument is a single value — the wizards stay where they
    are, and that is a decision to revisit rather than to assume.
-4. **The destructive class needs a confirmation step** (`/delete`, `/archive`, `/provider rm`),
+3. **The destructive class needs a confirmation step** (`/delete`, `/archive`, `/provider rm`),
    because there is no undo anywhere in flint, and the confirmation has to be the *page's*
    (a second click) rather than a `/yes` command in the terminal.
 
 - The small queued-line hole above still wants its two structural lines before a test can hold it.
+  The report path now leans on the same machinery and does *not* have the hole: a report arriving
+  mid-turn is stashed rather than consumed as an interrupt.
 
 **The Windows plan is finished, and the measurements are the useful part.**
 `docs/windows-tooling.md` had been "settled and unimplemented" for several sessions: a
