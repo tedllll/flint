@@ -3231,6 +3231,21 @@ async fn run_turn(
             // model is about to be asked: one of them becomes a prompt and the other must not.
             let mut hand_back = None;
             let mut interrupted = false;
+            // The turn's future is polled once *before* the channel is read, and that ordering is the
+            // whole of this fix. `Agent::run` pushes the user's message on its first poll, so a line
+            // already waiting in the channel used to be taken first -- and taken as an interrupt, which
+            // drops a future that had never run a single step: the question was in the history and in
+            // the file nowhere, and the command went on as if it had been asked. The window is
+            // milliseconds wide in a real session, which is why it was found by accident and left
+            // alone; polling here makes the order a fact rather than a race, whatever a fast typist or
+            // a browser does. The result is ignored on purpose: a turn that manages to finish inside
+            // this one poll has already been dealt with by the loop below, and an interrupt's own error
+            // is not news -- that is what `interrupted` means two lines further down.
+            let _ = std::future::poll_fn(|cx| {
+                let _ = std::future::Future::poll(turn.as_mut(), cx);
+                std::task::Poll::Ready(())
+            })
+            .await;
             loop {
                 // Only a submitted line interrupts. `Quit` here means stdin ended
                 // (a one-shot run, or a script that closed the pipe) -- treating
@@ -3718,5 +3733,92 @@ mod tests {
             }
             assert_eq!(run.args, vec![url.to_string()]);
         }
+    }
+
+    /// A line that was already waiting does not erase the question it interrupts.
+    ///
+    /// The hole ROADMAP §9 measured by accident and deliberately left alone: a line already in the
+    /// channel when a turn starts used to be read *before the turn's future was ever polled*, and the
+    /// turn's user message is pushed by that first poll -- so a `/model x` quick enough to beat it (or
+    /// sent from the browser, which has no keyboard to blame) switched away from a question that had
+    /// never been written down, in the history or in the file. Nothing failed and nothing said so.
+    ///
+    /// The window is milliseconds wide in a real session, which is why the fix is not a slower version
+    /// of the same race: the turn is polled once *before* the channel is read, so the ordering no
+    /// longer depends on time. That is also what makes this test possible -- the line goes into the
+    /// channel before `run_turn` is called, which is exactly the state the old order got wrong and
+    /// which no amount of waiting can tell apart from a fast typist.
+    #[tokio::test]
+    async fn a_line_that_was_already_waiting_does_not_erase_the_question() {
+        // A listener that accepts and then says nothing, so the turn stays in flight and the queued
+        // line has to be what ends it. The same shape §9's own measurement used.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port to sit on");
+        let port = listener.local_addr().expect("the port").port();
+        std::thread::spawn(move || {
+            if let Ok((mut socket, _)) = listener.accept() {
+                let _ = std::io::Read::read(&mut socket, &mut [0u8; 1024]);
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            }
+        });
+
+        let cfg = config::Config {
+            default_provider: "stub".to_string(),
+            providers: vec![config::ProviderConfig {
+                name: "stub".to_string(),
+                base_url: format!("http://127.0.0.1:{port}/v1"),
+                api_key: "test".to_string(),
+                model: "stub-model".to_string(),
+                models: vec!["stub-model".to_string(), "stub-other".to_string()],
+                api_key_env: None,
+                start: None,
+                stop: None,
+                start_timeout_secs: 0,
+                proxy: None,
+            }],
+            ..config::Config::default()
+        };
+        let provider_cfg = cfg.providers[0].clone();
+
+        let term = Term::plain();
+        let printer = Printer::new(false, display::Verbosity::Off.level(), &term);
+        let provider = provider::Provider::new(provider_cfg.clone()).expect("a provider");
+        let mut agent = agent::Agent::new(
+            &cfg,
+            provider,
+            false,
+            std::env::temp_dir(),
+            None,
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tx.send(InputMsg::Line("/model stub-other".to_string()))
+            .expect("the line is in the channel before the turn starts");
+
+        let handover = run_turn(
+            &mut agent,
+            &provider_cfg,
+            "the question",
+            &printer,
+            &mut rx,
+            true,
+            None,
+        )
+        .await;
+
+        let asked = agent.history().iter().any(|message| {
+            matches!(message, event::Message::User { content } if content.contains("the question"))
+        });
+        assert!(
+            asked,
+            "the question is in neither the history nor the file: the queued line was taken before \
+             the turn's own first poll, so the turn never existed. History: {:?}",
+            agent.history()
+        );
+        let handed = handover.expect("the turn left a line for the REPL");
+        assert_eq!(
+            handed.line.as_deref(),
+            Some("/model stub-other"),
+            "the queued command was not handed back to the REPL, so it was executed as a steer"
+        );
     }
 }

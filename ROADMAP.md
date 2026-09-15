@@ -857,15 +857,6 @@ each and then assert that the *next request* carries the whole conversation and 
 all of it exists. All three were watched red first, failing on precisely that: the body was
 `[system, "and now?"]`.
 
-**And a smaller hole in the same family, measured by accident and left alone on purpose.** A line
-that is already waiting in the channel when a turn starts is taken as an interrupt *before the turn
-future is ever polled*: the turn's `user` message is pushed on its first poll, so a `/model` or a
-second line that arrives first is executed with the turn never having existed -- not in the history
-and not in the file. It showed up while measuring the item above, where the first question produced
-no request at all. The fix is a turn polled once before the input channel is read, but a test for it
-would be a race with the reader thread rather than an assertion, so it wants the two lines that make
-it structural rather than a gate over a 2ms window.
-
 **Third: a stop button in the composer — fixed, 2026-09-14.** Shown only while a turn is in
 flight, sending `sendText("/stop")` — no new route and no new verb, because the composer's route
 already carries lines and `/stop` is a line. **The button was the easy half.** What the round
@@ -907,6 +898,24 @@ the fix, with no `turn.completed` in the frames and the status frame still namin
 `the_composer_can_stop_the_turn_it_is_watching` (the page's bytes: the word, the route, and the state
 it is offered in), `a_page_opened_after_a_stop_is_not_told_the_stopped_answer_is_still_arriving`, and
 the page's own Node check, which runs `paint` and reads the button back.
+
+**Fourth: a line that is already waiting erases the question it interrupts — fixed, 2026-09-15, and
+the test the note said could not be written was written.** The smaller hole in the same family, found
+while measuring the first one. A line already in the channel when a turn starts was read *before the
+turn future was ever polled*, and the turn's `user` message is pushed by that first poll -- so a
+`/model` or a second line that arrived first was executed with the turn never having existed, in the
+history and in the file nowhere, and the question produced no request at all. The fix is the one the
+note asked for: the turn is polled once *before* the input channel is read, which makes the ordering a
+fact rather than a two-millisecond window. The note was wrong about one thing, and it is worth
+recording because it nearly stopped the fix: it said a test for this would be a race with the reader
+thread. There is no reader thread to race when the line is put in the channel *before* `run_turn` is
+called -- which is exactly the state the old order got wrong, and which waiting cannot tell apart from
+a fast typist. `a_line_that_was_already_waiting_does_not_erase_the_question` binds a listener that
+accepts and then says nothing (the shape the first item's measurement used), queues `/model
+stub-other`, runs the turn, and asks the history whether the question is in it. It was watched red
+first, with the history holding the system prompt and nothing else. The one consequence worth knowing:
+a queued `/stop` now lets the request go out before it stops the turn. A question that was asked is
+worth one wasted request, and that is the whole point of the fix.
 
 **Done in the same round, recorded so it is not re-done**: themed scrollbars (the default grey ones
 were the complaint); a draggable sidebar and a draggable reading width, with a hairline hint at

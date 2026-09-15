@@ -7,7 +7,7 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 383 passing, 1 ignored (256 lib, 1 in
+As of the commit that carries this file, `cargo test` is 384 passing, 1 ignored (256 lib, 2 in
 the binary's own tests, 33 `agent_loop`, 47 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
 `term_capture` plus the ignored cost measurement, 18 `web_view`), `cargo clippy --all-targets` is
 silent, and both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
@@ -34,11 +34,12 @@ Written for a cold start: a different machine, and possibly a session with no me
 one. The repository is the whole state — there is no index, no cache and no database anywhere in
 flint, on purpose — so cloning it and running the gate below is all that "catching up" means.
 
-**Where it was left.** `main` at the commit that gives the destructive rows their two presses
-(`feat: a destructive row opens its choices, and the second press is the one that sends`), plus the
-documentation commit that carries this file, working tree clean, `origin/main` level with it. **§8 is
-finished** — all five controls are on the page — and the queue's next item is §9. The counts are in
-the section above and were re-run to write this paragraph, not remembered.
+**Where it was left.** `main` at the commit that polls a turn once before it reads the input channel
+(`fix: a line that was already waiting no longer erases the question`), plus the documentation commit
+that carries this file, working tree clean, `origin/main` level with it. **§8 is finished** — all five
+controls are on the page — and §9's last open hole is closed; what the queue holds next is the small
+unscheduled list and the "known unfinished" notes at the end of `ROADMAP.md`. The counts are in the
+section above and were re-run to write this paragraph, not remembered.
 
 **What the other machine needs.**
 
@@ -54,7 +55,7 @@ the section above and were re-run to write this paragraph, not remembered.
 
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
-cargo test                                        # 383 passing, 1 ignored
+cargo test                                        # 384 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed
@@ -601,6 +602,34 @@ free-form, so a page form would send several settings at once, and the terminal'
 them one at a time — it would need a `/config set <key> <value>` that the terminal does not have.
 Inventing a command for the page's benefit is the thing §8's design exists to prevent. The page
 therefore writes nothing into the config file in this round.
+
+### A line already waiting no longer erases the question it interrupts
+
+§9's last open hole, and the one whose note in the roadmap said a test could not be written for it.
+`run_turn` read the input channel *before* polling the turn future, and the turn's `user` message is
+pushed by that first poll — so a line that was already in the channel when the turn began was taken as
+an interrupt, the future was dropped unpolled, and the question was in the history and in the file
+nowhere. Nothing failed; the command that had been waiting simply ran as if the question had not been
+asked. The window is milliseconds wide, which is why it was found by accident while measuring the
+`/model` fix and left alone then.
+
+**The fix is the ordering, made a fact rather than a window**: the turn is polled once with
+`std::future::poll_fn` before the loop starts reading input, so the question is in the history before
+anything can pre-empt it. `std` only — no new dependency, and no timer, so a slow machine cannot
+reopen the hole.
+
+**The note was wrong, and that is the useful part.** It said a test would be a race with the reader
+thread. There is no reader thread in the test: put the line in the channel *before* calling `run_turn`
+and you have the exact state the old order got wrong, without waiting for anything. That is
+`a_line_that_was_already_waiting_does_not_erase_the_question` in `src/main.rs`'s own tests — the second
+test in that module, and the first async one. It binds a listener that accepts a request and then says
+nothing (the shape §9's own measurement used), queues `/model stub-other`, runs the turn, and asks the
+agent's history whether the question is in it. Watched red first: the history held the system prompt
+and nothing else. It also asserts the queued line was handed back to the REPL rather than executed as a
+steer.
+
+**One consequence, on purpose**: a queued `/stop` now lets the request go out before the stop stops the
+turn. A question that was asked is worth one wasted request, and that is what the fix is for.
 
 ### A destructive row opens its choices, and the second press is the one that sends
 
