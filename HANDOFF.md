@@ -7,8 +7,8 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 378 passing, 1 ignored (256 lib, 1 in
-the binary's own tests, 33 `agent_loop`, 44 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
+As of the commit that carries this file, `cargo test` is 379 passing, 1 ignored (256 lib, 1 in
+the binary's own tests, 33 `agent_loop`, 45 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
 `term_capture` plus the ignored cost measurement, 16 `web_view`), `cargo clippy --all-targets` is
 silent, and both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
 
@@ -34,9 +34,9 @@ Written for a cold start: a different machine, and possibly a session with no me
 one. The repository is the whole state — there is no index, no cache and no database anywhere in
 flint, on purpose — so cloning it and running the gate below is all that "catching up" means.
 
-**Where it was left.** `main` at the commit that adds the report route and the panel that reads it
-(`feat: a report is a command the page reads, and the terminal stays quiet`), plus the documentation
-commit that carries this file, working tree clean, `origin/main` level with it. The counts are in the
+**Where it was left.** `main` at the commit that makes `/skills <name>` readable from the page
+(`feat: the page can read a skill, and only a skill the menu offers`), plus the documentation commit
+that carries this file, working tree clean, `origin/main` level with it. The counts are in the
 section above and were re-run to write this paragraph, not remembered.
 
 **What the other machine needs.**
@@ -53,7 +53,7 @@ section above and were re-run to write this paragraph, not remembered.
 
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
-cargo test                                        # 378 passing, 1 ignored
+cargo test                                        # 379 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed
@@ -536,23 +536,58 @@ Node (four checks), with the mutation checks recorded in `docs/web-mode.md` §11
 **Not measured**: a report asked for *while a turn runs*, which needs a stub turn slow enough to
 click during; and a browser, as ever.
 
+### A selector's values ride on the row, and they are the permission too
+
+`/skills <name>` was the last selector without a control, because the frame had no source for its
+options. It has one now: a command row may carry `values`, and `page_rows` fills that one row from
+`Agent::skills` — the names this run's system prompt was built with, kept as a field so the state
+frame stays a comparison rather than a directory walk per line (`/skills` typed by hand still
+discovers fresh, because that is a person asking what is on disk now).
+
+**Two things follow from `values` being on the row rather than in a `providers`-style field.**
+
+- **The page draws one pressable line per value**, composed as `<send> <value>` from the frame's own
+  two strings — the same thing a toggle does with `/<name> <value>`, and for the same reason: the
+  page never assembles a command out of parts it invented. The row's own line is drawn beside them
+  (`/skills` is the catalog; `/skills <name>` is one entry in it).
+- **The report route admits a line when the menu offers it**: a panel row's bare `send`, or its
+  `send` plus one of its own values. The values are therefore the permission as well as the options.
+  `/provider <name>` takes a value too, and running that one quietly would start a local engine
+  without printing a word; `/delete <n|id>` stays refused until the confirmation exists.
+
+`/skills [name]` also moved from the selector class to `panel`: it reads rather than changes, and
+the page puts it in the group it belongs in. The class is not printed by `/help`, so nothing
+user-visible moved with it — the label, the `send` and the description in `/help` are unchanged.
+
+**Measured.** `a_skill_the_run_has_is_readable_from_the_page_and_nothing_else_is` writes a skill into
+a scratch `FLINT_HOME`, reads the frame's `values`, asks for `/skills demo` on `/report` (the body
+arrives marked `panel`, the transcript never sees it) and then writes a *second* skill after the run
+started and asks for that one. The second half is the discriminating case: the command discovers the
+directory on every call, so a loose rule would read it, and the assertion is that the frame says
+`not a report` instead. Mutation-checked both ways — dropping the values from the frame fails the
+first half; admitting any argument that starts with a panel row's `send` reads the late skill and
+fails the second.
+
+**Not measured**: whether a page should *also* offer the values of a command whose values the frame
+does not carry; nothing does today, and the field is where that would go.
+
 ### Still owed on the page
 
 **The next units, and the decisions already taken for them** (so a cold session does not re-derive
-them; the reasoning is in `ROADMAP.md` §8). The command list, its panel, the buttons and the reports
-are built — what is left is the classes that need a value from the reader:
+them; the reasoning is in `ROADMAP.md` §8). The command list, its panel, the buttons, the reports and
+the selectors are built — what is left is the two classes that need a value the reader types or
+confirms:
 
-1. **A selector's options come from a frame that already describes them**: `/model`'s and
-   `/provider`'s from `providers` (both controls exist), `/resume`'s and `/archive <n|id>`'s from the
-   sidebar's rows, where the argument is whichever row was clicked. The command list says a command
-   takes a value; it deliberately does not say where the values come from.
-2. **A form is the composer's problem.** `/name <text>`, `/provider key <key>`, `/provider add` and
+1. **A form is the composer's problem.** `/name <text>`, `/provider key <key>`, `/provider add` and
    `/config edit` are interactive in the terminal, and `add`/`edit` are wizards on top of that, so
    the page gets a field only where the argument is a single value — the wizards stay where they
-   are, and that is a decision to revisit rather than to assume.
-3. **The destructive class needs a confirmation step** (`/delete`, `/archive`, `/provider rm`),
+   are, and that is a decision to revisit rather than to assume. `/provider key` needs the redaction
+   decision taken first: the `command` frame echoes the line that asked, and a key must never be in
+   a frame, in the transcript, or in a session file.
+2. **The destructive class needs a confirmation step** (`/delete`, `/archive`, `/provider rm`),
    because there is no undo anywhere in flint, and the confirmation has to be the *page's*
-   (a second click) rather than a `/yes` command in the terminal.
+   (a second click) rather than a `/yes` command in the terminal. The report route's refusal of
+   `/delete <n>` is what stands in for it meanwhile.
 
 - The small queued-line hole above still wants its two structural lines before a test can hold it.
   The report path now leans on the same machinery and does *not* have the hole: a report arriving

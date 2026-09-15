@@ -219,7 +219,7 @@ Four routes. No cookies, no HTTP/2, no TLS, no keep-alive, no streaming request 
 | `POST /report` | one command *read* from the browser: same channel, and its answer is captured with the terminal quiet (§11) |
 | `GET /sessions` | the conversations `/resume` can reach, numbered the way `/resume` numbers them |
 | *`event: sessions`* | not a route but its counterpart: the list has changed, re-read it |
-| *`event: state`* | the run's own configuration: provider, model, what each provider offers, the toggles, and the command list with §8's class for each row |
+| *`event: state`* | the run's own configuration: provider, model, what each provider offers, the toggles, and the command list with §8's class for each row — a row also carries `values` when the page may read that command with an argument the frame names (§11) |
 | `type: command` | what a command answered, on the same stream as the turn's events: `input` and `text` — which is also what a header button's answer arrives on. Carries `panel: true` when the page asked to read it rather than typing it |
 
 **All six are implemented.** `/session` and `/events` read the session path and the event feed
@@ -626,12 +626,13 @@ there are. `/help` printed a hand-written block, dispatch is a `match`, and a th
 frame is exactly the drift this project spends its comments preventing, so the list became one table
 in `src/main.rs` (`COMMANDS`), with `/help` printing it and the frame carrying it.
 
-An entry is `{label, send, help, class}`. `label` is what `/help` prints (`/provider key <key>`);
-`send` is what the page puts on the wire (`/provider key`) — carried beside the label rather than
-split out of it, because the split is not uniform (`add` is part of `/provider add`, `<key>` is not)
-and a page re-deriving that would be re-deriving this program's grammar. `class` is §8's own, and
-two kinds of row are *not* in the frame: the toggles (the `toggles` field already carries them in the
-shape a switch needs) and the terminal's own — `/exit`, `/web`, `!`, `/stop`.
+An entry is `{label, send, help, class}`, and later `values` on the rows a page may *read* with an
+argument (§11's last section). `label` is what `/help` prints (`/provider key <key>`); `send` is what
+the page puts on the wire (`/provider key`) — carried beside the label rather than split out of it,
+because the split is not uniform (`add` is part of `/provider add`, `<key>` is not) and a page
+re-deriving that would be re-deriving this program's grammar. `class` is §8's own, and two kinds of
+row are *not* in the frame: the toggles (the `toggles` field already carries them in the shape a
+switch needs) and the terminal's own — `/exit`, `/web`, `!`, `/stop`.
 
 | Claim | How | Result |
 |---|---|---|
@@ -642,10 +643,9 @@ shape a switch needs) and the terminal's own — `/exit`, `/web`, `!`, `/stop`.
 | The panel is drawn from the frame | `showCommands` under Node, over the stub DOM | one group per class the page was taught, in the page's reading order (reports, actions, selectors, forms, destructive), each row showing what to type and what it does; a frame with no command list takes the panel away |
 | The page holds no copy of the list | `tests/web_view.rs`, over the page's own bytes | the panel is built from `state.commands`, and `/provider key`, `/delete <n|id>` and `/reload` appear nowhere in the page |
 
-The panel is deliberately not a control: it lists the rows and groups them, and clicking one does
-nothing yet. A report should be *shown* rather than sent (§8 keeps `/config` and `/sessions` off this
-page's wire), and a button that sends a command the page has not been taught to confirm would be a
-button that destroys a conversation on one click.
+The panel was deliberately not a control at this point: it listed the rows and grouped them, and
+clicking one did nothing. Both halves have since been built — the header's buttons send, and a report
+row is read — and this paragraph is left as the record of what this commit measured.
 
 **Not yet measured in a browser**: nobody has opened the `commands` panel with a real font and read
 it against `/help` in the terminal, or used it while an answer was streaming. It is pinned as
@@ -696,4 +696,27 @@ is cached: a listing kept from a moment ago would be a second copy of a fact the
 **Not measured**: a report asked for *while a turn runs*. The wait is stashed rather than treated as
 an interrupt (`Handover` in `main.rs`), and the assertion that it waits needs a stub turn slow enough
 to click during — which the suite does not have yet. And no browser, as ever.
+
+### A read that takes an argument, and the values as the permission — measured, 2026-09-15
+
+§8's selector class, completed. Four of its controls existed already (the two pickers, the switches,
+`/resume` from the sidebar). `/skills <name>` had no source for its options, so a command row may now
+carry `values`: the argument values the page may ask for, filled from `Agent::skills` — the names the
+run's prompt was built with, kept as a field because the state frame is rebuilt after every line and a
+directory walk per line is not the comparison its own comment claims. Because the field is on the row
+rather than in a `providers`-style list, it is also the *permission*: the route admits a panel row's
+bare `send`, or its `send` plus one of its own values, and nothing else.
+
+| Claim | How | Result |
+|---|---|---|
+| The frame offers the run's skills | a real `--web` process with a scratch `FLINT_HOME` holding `skills/demo/SKILL.md` | the row is `{"label":"/skills [name]","send":"/skills","values":["demo"]}` — mutation-checked: with the values emptied the frame is still a valid menu and the test fails on exactly that fragment |
+| Reading one is quiet, like any report | the same run; `/skills demo` to `POST /report` | a `command` frame with `"panel":true` and the body in `text`, and the transcript does not contain the body at all |
+| A value the menu did not offer is refused | the same run, with a *second* skill written **after** startup | the frame says `not a report`. This is the discriminating case: the command discovers the directory on every call, so a rule of "any argument after a panel row's `send`" would read the late skill — mutation-checked, and it does |
+| The page draws one line per value | Node, over the stub DOM | a row with `values: ["alpha","beta"]` is drawn as the roster line plus `/skills alpha` and `/skills beta`, each a `button` with the row's own `help`; a panel row without values is still one row |
+| The page composes no command of its own | `tests/web_view.rs`, over the page's own bytes | the value rows are built as `send + " " + value` from the frame's two strings, next to the `command.values` that named them — the same shape a toggle uses for `/<name> <value>` |
+
+**Not measured**: a command whose values the frame does not carry gaining a control. Nothing does
+today — `/provider <name>` takes a value and its list comes from `providers`, deliberately, because
+running *that* quietly would start a local engine without printing a word — and `values` is where a
+second such row would go.
 

@@ -427,7 +427,9 @@ The design, in the order the pieces depend on each other:
      `/verbose on|off|full`, `/detail on|off`, `/readonly on|off`. A toggle is a switch that
      shows its current value, not a button that blind-toggles. `/archive <n>` and `/delete <n>`
      are selector-shaped with the argument supplied by *which row was clicked*, which the sidebar
-     already has.
+     already has. (`/skills` came out of the building as a panel row that carries values rather than
+     as a selector: it reads rather than changes, and the values are then also the permission — see
+     the built paragraph for §8.)
   3. **Forms** — free-form or typed input: `/name <text>`; `/provider key <key>`, a password
      field that is never echoed back, never in a `state` frame and never in the transcript;
      `/provider add` and `/provider edit <name>`, which are the terminal's interactive wizard as
@@ -659,14 +661,35 @@ Three decisions are worth keeping:
   copy of a fact the process owns: asking again is cheaper and truer, and `/config` after an edit
   shows what is in force now.
 
-**Next: the selectors, the forms, and the confirmation — and here is what is already decided.**
-Written down because each half has a trap that is cheaper to avoid than to find:
+**The selectors are done, and the last one cost a new kind of frame field — built, 2026-09-15.** Four
+of §8's five selector controls existed already: the provider picker, the model picker, the switches,
+and `/resume`'s numbers supplied by whichever sidebar row was clicked. The fifth, `/skills <name>`,
+had no source for its options — the plan said where `/model`'s and `/resume`'s come from and left this
+one open — and it is the one that reads rather than changes, so it belongs in the panel class with an
+argument. So a row may now carry `values`: the argument values the page may ask for, on the row that
+takes one. Two things follow from that being *on the row* rather than in a `providers`-style field.
+The page draws one pressable line per value (`/skills alpha`), composed from the frame's own two
+strings exactly as a toggle composes `/<name> <value>`; and the report route accepts a line when the
+menu offers it — a panel row's own `send`, or its `send` plus one of its values — which makes the
+values the *permission* as well as the options. `/provider <name>` takes a value too, and running that
+one quietly would start a local engine without printing a word; `/delete <n|id>` is refused for the
+same reason, and stays refused until the confirmation below exists.
+The names come from the run's own walk of the skill directories — the same walk as its system prompt,
+which is why the menu cannot offer a skill the model was never told about, and why `/reload` is what
+makes a new one appear. That is asserted with a skill written *after* the run started: the command
+would read it, and the menu must not. `Agent::skills` is where the names live, because the frame is
+built after every line and a directory walk per line is not the comparison its own comment claims.
 
-- **A selector's options come from somewhere the frame already describes** — `/model`'s and
+**Next: the forms, and the confirmation — and here is what is already decided.** Written down
+because each half has a trap that is cheaper to avoid than to find:
+
+- **A selector's options come from somewhere the frame already describes** — built: `/model`'s and
   `/provider`'s from `providers` (both controls exist), `/resume`'s and `/archive`'s from the
-  sidebar's rows, which is the picked row's number rather than anything the page has to know. The
-  command list says which commands take a value; it does not say where the values come from, and it
-  should not, because that is what the control is for.
+  sidebar's rows, which is the picked row's number rather than anything the page has to know, and
+  `/skills`'s from the row's own `values`. The command list says which commands take a value *it may
+  be read with*; it does not say where a picker's values come from, and it should not, because that
+  is what the control is for. The two kinds are deliberately different fields: `values` on a row is
+  the permission to read that argument, which is a smaller thing than the list of models on offer.
 - **A form is the composer's problem.** `/name <text>`, `/provider key <key>`, `/provider add` and
   `/config edit` are interactive in the terminal, and `add`/`edit` are wizards on top of that,
   so the page gets a field only where the argument is a single value; the wizards stay where they
