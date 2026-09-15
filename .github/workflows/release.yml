@@ -4,8 +4,10 @@ name: release
 # toolchain. If the thing you use to fix broken machines requires a working
 # compiler, it is not a rescue tool.
 on:
+  # Every push builds, so a target that breaks is found by the push that broke
+  # it rather than by whoever next goes to cut a release. A tag push builds
+  # too; cutting a release is still the manual dispatch below.
   push:
-    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
