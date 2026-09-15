@@ -600,6 +600,58 @@ check("a row that takes a field gets one, and only the rows the frame marks", ()
   eq(mixed.map((n) => n.tag), ["form", "div"], "the wizard stays a row of reference");
 });
 
+check("a destructive row opens its choices rather than sending", () => {
+  const page = loadViewer();
+  // A row is a `code` child and the back button is its own text, so "what this row says" is one or
+  // the other.
+  const says = (n) => (n.children[0] ? n.children[0].textContent : n.textContent);
+  const d = page.newDoc();
+  page.applyState(d, JSON.stringify({
+    type: "state", provider: "stub", model: "m",
+    providers: [{ name: "stub", models: ["m"] }, { name: "other", models: ["x"] }],
+    commands: [
+      { label: "/provider rm <name>", send: "/provider rm", help: "delete one", class: "danger", from: "providers" },
+      { label: "/delete <n|id>", send: "/delete", help: "delete one", class: "danger", from: "sessions" },
+    ],
+  }));
+  const closed = page.__node("command-list").children[0].children.slice(1);
+  eq(closed.map((n) => n.tag), ["button", "button"], "both rows are pressable");
+  eq(
+    closed.map(says),
+    ["/provider rm <name>", "/delete <n|id>"],
+    "and closing the choices sends nothing: the line is not on any row yet"
+  );
+
+  // Opened, on the list this page already holds in `state`. The row being pressed says the whole
+  // line, which is the point of two presses rather than one: the second press is the one that can
+  // be read before it is made.
+  d.confirm = { send: "/provider rm" };
+  page.showCommands(d);
+  const open = page.__node("command-list").children[0].children.slice(1);
+  // The open row's candidates *replace* that row inside the list, and the other destructive row is
+  // still there below them: the panel is a list of what the terminal takes, and one row being open
+  // is not a reason to hide the rest.
+  eq(open.map((n) => n.tag), ["button", "button", "button", "button"], "a way back, two candidates, and the other row");
+  eq(
+    open.map(says),
+    ["\u2039 commands", "/provider rm stub", "/provider rm other", "/delete <n|id>"],
+    "each candidate is the line that would be sent"
+  );
+  eq(open[0].className, "back", "the way back is marked as one");
+  eq(open[1].className, "row danger", "and the ones that send are marked as destructive");
+
+  // The conversation row, on a page with no list to draw from -- which is the honest answer rather
+  // than an empty list that looks like a list with nothing in it.
+  d.confirm = { send: "/delete" };
+  page.showCommands(d);
+  const empty = page.__node("command-list").children[0].children.slice(1);
+  eq(
+    empty.map(says),
+    ["/provider rm <name>", "\u2039 commands", "nothing to choose from"],
+    "an empty list of candidates says so"
+  );
+});
+
 check("a listing being read replaces the list, and the way back restores it", () => {
   const page = loadViewer();
   const d = page.newDoc();

@@ -3120,6 +3120,64 @@ async fn a_key_typed_into_a_field_is_not_echoed_anywhere() {
     );
 }
 
+/// A destructive row says which list its argument comes from, and nothing else does.
+///
+/// §8's last class. The confirmation itself is the page's -- two deliberate presses, with the line
+/// about to be sent printed on the row being pressed -- because a process-side confirmation would be
+/// a second way to run `/delete` that the terminal does not have, and because there is no undo
+/// anywhere in flint for a *page* to offer one either. What the process has to supply is the part the
+/// page cannot work out: which of the two lists it already holds is the one this row takes its
+/// argument from. Without it a page would have to recognise `/delete <n|id>` by name, which is the
+/// one thing every other control is built to avoid.
+#[tokio::test]
+async fn a_destructive_row_says_where_its_argument_comes_from() {
+    let home = test_home("danger-from", "http://127.0.0.1:9/v1");
+    let log = home.join("transcript.txt");
+    let mut child = binary()
+        .arg("--web")
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::fs::File::create(&log).expect("transcript file"))
+        .stderr(std::fs::File::create(home.join("stderr.txt")).expect("stderr file"))
+        .spawn()
+        .expect("failed to run flint");
+
+    let (port, token) = port_and_token(&wait_for_url(&log));
+    let mut watching = http_stream(port, "/events", &token);
+    let opening = read_until(&mut watching, "\"type\":\"state\"}\n\n", 20);
+    drop(watching);
+    drop(child.stdin.take());
+    let exited = wait_for_exit(&mut child, 20);
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit");
+    // The frame's keys are alphabetical, so each fragment is one whole row.
+    assert!(
+        opening.contains(
+            "\"from\":\"sessions\",\"help\":\"delete one\",\"label\":\"/delete <n|id>\",\"send\":\"/delete\""
+        ) && opening.contains(
+            "\"from\":\"sessions\",\"help\":\"file one away, out of the list\",\"label\":\"/archive <n|id>\",\"send\":\"/archive\""
+        ),
+        "a row that deletes a conversation does not say that its argument is one of the \
+         conversations: {opening:?}"
+    );
+    assert!(
+        opening.contains(
+            "\"from\":\"providers\",\"help\":\"delete one\",\"label\":\"/provider rm <name>\",\"send\":\"/provider rm\""
+        ),
+        "the row that deletes a provider does not say that its argument is one of the providers, so \
+         a page would have to tell the two lists apart by reading the command's name: {opening:?}"
+    );
+    // And only those three: a `from` on a report row would have the page offer candidates for a
+    // command that reads, and the count is what says the mark is a decision rather than a default.
+    assert_eq!(
+        opening.matches("\"from\":").count(),
+        3,
+        "the frame marks a row as taking its argument from a list when it does not: {opening:?}"
+    );
+}
+
 /// Every command the page may offer is one the terminal accepts.
 ///
 /// The drift this catches is the whole reason the list is a table: a page that offers a button for

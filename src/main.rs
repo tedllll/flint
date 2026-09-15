@@ -1596,6 +1596,32 @@ enum OnPage {
     Terminal,
 }
 
+/// Where the page gets the argument of a destructive row from.
+///
+/// §8 says a selector's values come from a frame that already describes them rather than from the
+/// command list, and that holds for `/resume` and `/model`: the control decides. A destructive row is
+/// the exception, because the page has to draw the *choices* before anything can be confirmed -- and
+/// the two it has are different lists, so a page that could not tell `/delete <n|id>` from
+/// `/provider rm <name>` would have to recognise the commands by name, which is the one thing it must
+/// never do. So the row says which list, and the page offers the candidates it already holds for
+/// that list: the sidebar's numbers for a conversation, the picker's names for a provider.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArgFrom {
+    /// The conversations the sidebar is already showing, by the number it shows them with.
+    Sessions,
+    /// The providers the state frame is already carrying, by name.
+    Providers,
+}
+
+impl ArgFrom {
+    fn word(self) -> &'static str {
+        match self {
+            ArgFrom::Sessions => "sessions",
+            ArgFrom::Providers => "providers",
+        }
+    }
+}
+
 /// The kind of value a row's argument is, when the page draws a field for it.
 ///
 /// The page draws a field for a row that has one and no field for a row that does not, which is how
@@ -1644,6 +1670,8 @@ struct CommandHelp {
     on_page: OnPage,
     /// Set when the page may fill this row's argument in with a field of its own.
     field: Option<Field>,
+    /// Set on a destructive row: which list the page offers the argument from. See [`ArgFrom`].
+    from: Option<ArgFrom>,
 }
 
 impl CommandHelp {
@@ -1662,6 +1690,7 @@ impl CommandHelp {
             section,
             on_page,
             field: None,
+            from: None,
         }
     }
 
@@ -1684,6 +1713,28 @@ impl CommandHelp {
             section,
             on_page,
             field: Some(field),
+            from: None,
+        }
+    }
+
+    /// A row that destroys something, whose argument the page offers from a list it already holds.
+    ///
+    /// The separate constructor for the same reason as the field's, and one more: this is the class
+    /// where a wrong line is unrecoverable, so it is worth a row that cannot be written by accident.
+    const fn destroying(
+        label: &'static str,
+        send: &'static str,
+        help: &'static str,
+        from: ArgFrom,
+    ) -> Self {
+        Self {
+            label,
+            send,
+            help,
+            section: HelpSection::Commands,
+            on_page: OnPage::Danger,
+            field: None,
+            from: Some(from),
         }
     }
 }
@@ -1700,7 +1751,7 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp::row("/provider add", "/provider add", "set up a new provider (interactive)", HelpSection::Commands, OnPage::Form),
     CommandHelp::row("/provider edit <name>", "/provider edit", "change one (interactive)", HelpSection::Commands, OnPage::Form),
     CommandHelp::field_row("/provider key <key>", "/provider key", "set the API key for the active provider", HelpSection::Commands, OnPage::Form, Field::Password),
-    CommandHelp::row("/provider rm <name>", "/provider rm", "delete one", HelpSection::Commands, OnPage::Danger),
+    CommandHelp::destroying("/provider rm <name>", "/provider rm", "delete one", ArgFrom::Providers),
     CommandHelp::row("/config", "/config", "show shell, steps, proxy", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/config edit", "/config edit", "change shell, steps, proxy", HelpSection::Commands, OnPage::Form),
     CommandHelp::row("/model [name]", "/model", "show or change the model", HelpSection::Commands, OnPage::Panel),
@@ -1713,8 +1764,8 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp::row("/sessions", "/sessions", "list past sessions, numbered", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/resume <n|id>", "/resume", "switch to one of them", HelpSection::Commands, OnPage::Selector),
     CommandHelp::field_row("/name [text]", "/name", "name this conversation", HelpSection::Commands, OnPage::Form, Field::Text),
-    CommandHelp::row("/archive <n|id>", "/archive", "file one away, out of the list", HelpSection::Commands, OnPage::Danger),
-    CommandHelp::row("/delete <n|id>", "/delete", "delete one", HelpSection::Commands, OnPage::Danger),
+    CommandHelp::destroying("/archive <n|id>", "/archive", "file one away, out of the list", ArgFrom::Sessions),
+    CommandHelp::destroying("/delete <n|id>", "/delete", "delete one", ArgFrom::Sessions),
     CommandHelp::row("/new", "/new", "start a fresh conversation", HelpSection::Commands, OnPage::Button),
     CommandHelp::row("/web [port]", "/web", "open the browser view of this conversation", HelpSection::Commands, OnPage::Terminal),
     CommandHelp::row("/reload", "/reload", "re-read the config file (after editing it yourself)", HelpSection::Commands, OnPage::Button),
@@ -2805,6 +2856,11 @@ fn page_commands(agent: &agent::Agent) -> serde_json::Value {
             if let Some(field) = row.field {
                 json["field"] = serde_json::json!(field.word());
             }
+            // And for a destructive row, which list its argument comes from. The page has to draw
+            // the choices before anything can be confirmed, and the two lists it has are different.
+            if let Some(from) = row.from {
+                json["from"] = serde_json::json!(from.word());
+            }
             json
         })
         .collect();
@@ -2830,6 +2886,8 @@ struct PageRow {
     values: Vec<String>,
     /// The kind of field the page may draw for this row's argument, if it may draw one at all.
     field: Option<Field>,
+    /// On a destructive row: which list the page offers the argument from.
+    from: Option<ArgFrom>,
 }
 
 /// Every row the page may offer, with the values it may be given.
@@ -2850,6 +2908,7 @@ fn page_rows(agent: &agent::Agent) -> Vec<PageRow> {
                     _ => Vec::new(),
                 },
                 field: row.field,
+                from: row.from,
             })
         })
         .collect()

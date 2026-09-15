@@ -120,6 +120,9 @@
     color: inherit; cursor: pointer;
   }
   .panel button.row:hover code, .panel button.row:hover span { color: var(--user); }
+  /* A row that destroys something: the same shape, coloured so that the press that sends is
+     unmistakably not the press that opens the choices. */
+  .panel button.row.danger:hover code, .panel button.row.danger:hover span { color: var(--bad); }
   /* The reading itself: one listing, and the way back to the list. `pre-wrap` because these
      listings are the terminal's own text, aligned with spaces. */
   .panel .back {
@@ -439,6 +442,10 @@ function newDoc() {
     // back with the next state frame, which is one press away.
     reading: null,
     readingText: "",
+    // The destructive row whose choices are open, and nothing else: see `showCommands`. Not carried
+    // over a `load` either, and for a stronger reason than `reading` -- a choice list that survived
+    // the document it was opened in would be a delete button aimed at whatever number is next.
+    confirm: null,
   };
 }
 
@@ -987,6 +994,58 @@ function showCommands(doc) {
         group.appendChild(form);
         continue;
       }
+      // A destructive row is the one class where a single press could destroy work, so it takes two
+      // deliberate presses and the second one is a row that prints the line it will send. The first
+      // press opens the choices, taken from the list the frame named -- which the page already
+      // holds: the sidebar's own numbers, or the provider names from the state frame -- and the
+      // second sends `send + " " + value`, the same composition as everywhere else. `doc.confirm`
+      // is that state, and it is only the row: nothing has been sent while it is open, so there is
+      // no countdown to get wrong and nothing to disarm on a timer.
+      const choices =
+        command.from === "sessions"
+          ? sessions.map((s) => ({ value: String(s.n), label: s.label }))
+          : command.from === "providers"
+            ? ((doc.state && Array.isArray(doc.state.providers) ? doc.state.providers : [])
+                .filter((p) => p && typeof p.name === "string")
+                .map((p) => ({ value: p.name, label: p.name })))
+            : null;
+      if (className === "danger" && choices) {
+        if (doc.confirm && doc.confirm.send === send) {
+          const back = el("button", "back", "\u2039 commands");
+          back.type = "button";
+          back.addEventListener("click", () => {
+            doc.confirm = null;
+            showCommands(doc);
+          });
+          group.appendChild(back);
+          for (const choice of choices) {
+            const row = el("button", "row danger");
+            row.type = "button";
+            row.title = help;
+            row.addEventListener("click", () => {
+              // The second press: the row says the line, and the line is what goes.
+              doc.confirm = null;
+              sendText(send + " " + choice.value);
+            });
+            row.appendChild(el("code", "", send + " " + choice.value));
+            row.appendChild(el("span", "", choice.label));
+            group.appendChild(row);
+          }
+          if (choices.length === 0) group.appendChild(el("div", "row", "nothing to choose from"));
+        } else {
+          const row = el("button", "row danger");
+          row.type = "button";
+          row.title = help;
+          row.addEventListener("click", () => {
+            doc.confirm = { send: send };
+            showCommands(doc);
+          });
+          row.appendChild(el("code", "", command.label));
+          row.appendChild(el("span", "", help));
+          group.appendChild(row);
+        }
+        continue;
+      }
       const values = Array.isArray(command.values)
         ? command.values.filter((value) => typeof value === "string" && value.trim())
         : [];
@@ -1059,7 +1118,9 @@ async function askReport(doc, input) {
 ///
 /// Only `class: "button"` is drawn here. A report is not sent -- §8 keeps the reporting commands off
 /// this page's wire, so that the terminal is not flooded with a listing its reader did not ask for
-/// there -- and a destructive command needs a confirmation this page does not have yet.
+/// there -- and a destructive command has its own control in the panel, where the two presses and the
+/// line they will send can be shown (see `showCommands`). A one-press button for `/delete` would be
+/// the whole reason that class has its own shape.
 function showActions(doc) {
   const box = document.getElementById("actions");
   if (!box) return;
@@ -1446,6 +1507,10 @@ async function readSessions() {
     return;
   }
   paintSessions();
+  // If a destructive row's choices are open, they are *these* rows: the numbers in the list are
+  // positions, and a list that changed under an open choice list would point the next press at the
+  // conversation below the one that went.
+  if (doc.confirm) showCommands(doc);
 }
 
 // ---------------------------------------------------------------------------
@@ -1608,6 +1673,9 @@ async function follow() {
             // behind and the frames in between are gone. So both are handled -- re-read, and
             // carry over an answer the file cannot have yet.
             const streaming = streamingAnswer(doc);
+            // A destructive row's choice list is aimed at a document, not at a run: the numbers in
+            // it are that document's, and the next one's are not the same list.
+            doc.confirm = null;
             await readSession();
             carryStreaming(doc, streaming);
             await readSessions();

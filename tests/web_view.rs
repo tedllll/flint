@@ -505,7 +505,7 @@ fn the_action_buttons_send_the_frames_own_line() {
 #[test]
 fn the_panel_reads_a_report_rather_than_sending_it() {
     // The row itself: only the class the frame marks, and the line comes from the frame.
-    let built = from("function showCommands(doc)", 115);
+    let built = from("function showCommands(doc)", 180);
     for (needed, why) in [
         ("className === \"panel\"", "the class that makes a row readable"),
         ("command.send", "the line to ask for, taken from the frame rather than rebuilt here"),
@@ -588,6 +588,45 @@ fn a_form_row_gets_a_field_and_sends_what_was_typed_into_it() {
     assert!(
         drawn.contains("if (!value) return;"),
         "an empty field is submitted, which sends the bare command instead of nothing: {drawn}"
+    );
+}
+
+/// A destructive row takes two presses, and the second one prints the line it will send.
+///
+/// §8's last class, and the one where a single press could destroy work that no undo anywhere in
+/// flint can bring back. So the row does not send: it opens the candidates the *frame* named a source
+/// for (`from: "sessions"` or `"providers"`), drawn from lists the page already holds -- the sidebar's
+/// rows and the state frame's providers -- and the candidate row says `<send> <value>`, which is the
+/// line that goes when it is pressed. The page never names a command or a number of its own, and the
+/// `from` fact is why it does not have to tell `/delete <n|id>` from `/provider rm <name>` by reading
+/// them.
+#[test]
+fn a_destructive_row_opens_its_choices_and_sends_on_the_second_press() {
+    let drawn = from("function showCommands(doc)", 175);
+    for (needed, why) in [
+        ("command.from === \"sessions\"", "the list the frame named, rather than a recognised command"),
+        ("command.from === \"providers\"", "the other list, which comes from the state frame"),
+        ("doc.confirm = { send: send }", "opening the choices without sending anything"),
+        ("sendText(send + \" \" + choice.value)", "the second press sending the frame's `send` plus one candidate"),
+    ] {
+        assert!(
+            drawn.contains(needed),
+            "a destructive row is not drawn through `{needed}` ({why}): {drawn}"
+        );
+    }
+    // The first press must not send: the row that opens the choices has no `sendText` in it. Checked
+    // at the shape of the branch rather than by eye, because this is the property the whole class
+    // exists for.
+    let opening = drawn
+        .split("doc.confirm = { send: send };")
+        .next()
+        .expect("the opening press must set the armed state");
+    let last_open = opening
+        .rfind("row.addEventListener")
+        .expect("the row must have a press");
+    assert!(
+        !opening[last_open..].contains("sendText"),
+        "the first press sends: {drawn}"
     );
 }
 
