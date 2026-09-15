@@ -333,7 +333,69 @@ async fn json_without_a_prompt_is_refused_without_writing_a_stream() {
     );
 }
 
-/// Structured output: the answer shape a caller asked for, checked before it is handed over.
+/// A run that is working but not talking has to say so, or a caller cannot tell it from a dead one.
+///
+/// This is the one gap the streaming interface had. `--json` flushes every line as it happens, so
+/// a caller sees the answer being written -- but between `tool.started` and `tool.completed` there is
+/// nothing at all, and a slow tool call, a slow model and a crashed process look identical from a
+/// pipe: silence. The turn below takes six seconds without saying a word, and the stream has to
+/// carry a status while it does, before the answer rather than after it.
+#[tokio::test]
+async fn a_silent_turn_says_it_is_still_working() {
+    /// Answers after a delay, which is what "a slow provider or a slow tool" looks like from here.
+    struct Slow {
+        body: String,
+        delay: std::time::Duration,
+    }
+
+    impl Respond for Slow {
+        fn respond(&self, _req: &Request) -> ResponseTemplate {
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_delay(self.delay)
+                .set_body_string(self.body.clone())
+        }
+    }
+
+    let server = MockServer::start().await;
+    let cwd = cwd_for("heartbeat");
+    let home = home_for("heartbeat", &server.uri(), &cwd);
+    Mock::given(method("POST"))
+        .respond_with(Slow {
+            body: answers_in_two_fragments(),
+            delay: std::time::Duration::from_millis(6000),
+        })
+        .mount(&server)
+        .await;
+
+    let started = std::time::Instant::now();
+    let (code, lines, stderr) = run_json(&home, &cwd, &["-p", "say hello", "--json"]);
+    assert_eq!(code, 0, "the run failed: {stderr} {lines:?}");
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(6000),
+        "the stub did not actually delay, so this proves nothing"
+    );
+
+    let beats: Vec<&Value> = lines.iter().filter(|l| l["type"] == "status").collect();
+    assert!(
+        !beats.is_empty(),
+        "six seconds of silence and not one status line: {lines:?}"
+    );
+    assert!(
+        beats[0]["elapsed_secs"].as_u64().unwrap_or(0) >= 5,
+        "the first status does not say how long the wait has been: {}",
+        beats[0]
+    );
+    // Before the answer, not after it: a beat that arrives with the answer tells a caller nothing
+    // about the silence it was meant to fill.
+    let beat_at = lines.iter().position(|l| l["type"] == "status").expect("a status");
+    let done_at = lines
+        .iter()
+        .position(|l| l["type"] == "message.completed")
+        .expect("an answer");
+    assert!(beat_at < done_at, "the status came after the answer: {lines:?}");
+}
+
 ///
 /// This is the rest of the machine interface. `--json` already made a run readable line by line;
 /// a caller that has to *act* on the answer wants the answer as data, and the only thing the

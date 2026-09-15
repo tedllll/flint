@@ -1122,6 +1122,18 @@ there is one, because a check that runs yesterday's installed flint passes for t
 session-layout expectations in `test_call.py` were first written while `PATH` still held a build from
 before the layout changed, and they failed for a reason that had nothing to do with the code.
 
+**Eleventh: a silent turn now says it is still working.** The gap was the one the streaming interface
+left: `--json` flushes every line as it happens, so a caller sees the answer being written — but
+between `tool.started` and `tool.completed` nothing happens for as long as the tool runs, and a slow
+tool, a slow model and a crashed process are the same thing from a pipe. Measured before it was
+fixed: a six-second turn produced no line at all between `turn.started` and the answer. A run that is
+working and not talking now emits a `status` line every five seconds, carrying the phrase the stream
+last described (`running bash`, `writing the answer`, `thinking`) plus `elapsed_secs` and
+`restarted`. It reuses the `status` frame rather than adding a type, because the page's status row
+already reads it — and `restarted` keeps its existing meaning, so a renderer that runs its own clock
+is unaffected while a reader that joined late, or that is reading somebody else's log, gets a number
+instead. Deliberately not a config key: the rate is not a preference anybody has.
+
 **Done in the same round, recorded so it is not re-done**: themed scrollbars (the default grey ones
 were the complaint); a draggable sidebar and a draggable reading width, with a hairline hint at
 rest on the right hand because there is no seam at the text's edge to be discovered by; the

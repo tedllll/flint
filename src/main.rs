@@ -3053,6 +3053,97 @@ fn json_in(answer: &str) -> Option<serde_json::Value> {
     serde_json::from_str(body).ok()
 }
 
+/// How often a run that has said nothing says it is still working.
+///
+/// Five seconds: short enough that a caller waiting on a pipe hears from the run well inside any
+/// sensible timeout, long enough that a ten-minute tool call adds a hundred short lines rather than
+/// thousands. Not a setting -- a caller that wants a different rate is asking for a different
+/// interface, and one more number in the config would be one more thing to get wrong.
+const HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What the run is doing, for a heartbeat to repeat while nothing else is being said.
+///
+/// Shared between the turn and the clock beside it, because the turn cannot help: it is `await`ing a
+/// tool, which is exactly the moment nobody can emit anything. The phrase is the last thing the
+/// stream described rather than something invented here, so a caller that hears "running bash" knows
+/// what it would have seen if the tool were talking.
+struct Progress {
+    started: std::time::Instant,
+    doing: String,
+    /// Whether the wait in force has been announced by a heartbeat yet.
+    ///
+    /// This is what `restarted` means on the wire: the first line about a wait says the clock starts
+    /// here, and the repeats say the same wait is still going. True to begin with, because the run
+    /// has been "thinking" since it started and nothing has said so.
+    fresh: bool,
+    /// Cleared when the turn is over, under the same lock the beat writes under: a status line
+    /// after `turn.completed` would tell a caller the run was still working after it had stopped.
+    running: bool,
+}
+
+impl Progress {
+    fn new() -> Self {
+        Progress {
+            started: std::time::Instant::now(),
+            doing: "thinking".to_string(),
+            fresh: true,
+            running: true,
+        }
+    }
+
+    /// Name the step a line described.
+    fn saw(&mut self, event: &event::Event) {
+        let doing = match event {
+            event::Event::Text(_) | event::Event::Reasoning(_) => "writing the answer".to_string(),
+            event::Event::ToolStart { name, .. } => format!("running {name}"),
+            event::Event::ToolResult { .. } => "thinking".to_string(),
+            // The agent's own status wins: it knows more about what it is waiting for than this
+            // frame can infer from the events around it.
+            event::Event::Status { text, .. } => text.clone(),
+            _ => return,
+        };
+        if doing != self.doing {
+            self.doing = doing;
+            self.fresh = true;
+        }
+    }
+}
+
+/// Say the run is still working, every [`HEARTBEAT`], until [`Progress::running`] is cleared.
+///
+/// The lock is held across the write on purpose: that is what makes "no heartbeat after the turn
+/// ended" true rather than likely. The turn clears the flag under the same lock, so a beat is either
+/// entirely before that or does not happen at all.
+async fn beat_while_working(progress: std::sync::Arc<std::sync::Mutex<Progress>>) {
+    let mut ticker = tokio::time::interval(HEARTBEAT);
+    // Intervals fire immediately and then on schedule; the first tick is thrown away because a run
+    // that has only just started has nothing to report.
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ticker.tick().await;
+    loop {
+        ticker.tick().await;
+        let mut out = std::io::stdout();
+        let mut progress = progress.lock().unwrap_or_else(|e| e.into_inner());
+        if !progress.running {
+            return;
+        }
+        // Taken, not read: the first beat about a wait starts the reader's clock, the rest say the
+        // same wait is still going. In its own statement because the guard is borrowed immutably by
+        // the frame and mutably by this, and one expression cannot hold both.
+        let restarted = std::mem::replace(&mut progress.fresh, false);
+        let _ = writeln!(
+            out,
+            "{}",
+            ndjson::heartbeat(
+                &progress.doing,
+                restarted,
+                progress.started.elapsed().as_secs(),
+            )
+        );
+        let _ = out.flush();
+    }
+}
+
 async fn run_json_turn(
     agent: &mut agent::Agent,
     provider_cfg: &config::ProviderConfig,
@@ -3108,16 +3199,34 @@ async fn run_json_turn(
         // drains the accumulator (a second `Done` must not repeat the message), so the turn's answer
         // is gone the moment it has been reported -- which is the trap this line exists to miss.
         let mut answer = String::new();
+        // The clock beside the turn. Started here, where the turn starts, so the seconds a caller
+        // reads are the seconds it has been waiting; stopped below under the same lock, so the last
+        // line of the stream is never a heartbeat.
+        let progress = std::sync::Arc::new(std::sync::Mutex::new(Progress::new()));
+        let beat = tokio::spawn(beat_while_working(std::sync::Arc::clone(&progress)));
         let result = agent
             .run(&asked, |event| {
                 if matches!(event, event::Event::Done) {
                     answer = sink.answer_so_far().to_string();
+                }
+                {
+                    // Poisoning is not a reason to lose the line: the lock only ever guards two
+                    // fields, and the beat ignores a panic anyway.
+                    let mut progress = progress.lock().unwrap_or_else(|e| e.into_inner());
+                    progress.saw(&event);
                 }
                 if let Some(line) = sink.line(&event) {
                     emit(line);
                 }
             })
             .await;
+        {
+            progress
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .running = false;
+        }
+        beat.abort();
 
         match result {
             Ok(()) => emit(ndjson::turn_completed(agent.last_usage())),

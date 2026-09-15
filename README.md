@@ -201,6 +201,12 @@ The vocabulary is closed and small: `session.started`, `turn.started`, `message.
   read afterwards like anything else.
 - **A failure is on the stream too**, as an `error` line plus a non-zero exit code, so a
   caller reading stdout does not also have to read stderr to find out what happened.
+- **A silent run is not a dead one.** Between `tool.started` and `tool.completed` nothing happens
+  for as long as the tool runs, and from a pipe that is the same thing as a crashed process. So a
+  run that is working and not talking says so every five seconds:
+  `{"elapsed_secs":42,"restarted":false,"text":"running bash","type":"status"}`. `restarted` is true
+  on the first line about a wait — a renderer starts its clock there — and `elapsed_secs` is for a
+  reader that cannot run one, such as one reading a log later.
 
 `--json` needs a prompt: an interactive session has no stream to write, and `flint exec`
 is plain by contract because its output is the child's own bytes. Ctrl-C during a `--json`

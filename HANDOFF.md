@@ -7,11 +7,19 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 429 passing, 1 ignored (279 lib, 2 in
+As of the commit that carries this file, `cargo test` is 430 passing, 1 ignored (279 lib, 2 in
 the binary's own tests, 33 `agent_loop`, 58 `cli_output`, 11 `json_output` (7 of them structured
 output), 4 `search_tool`, 20
 `term_capture` plus the ignored cost measurement, 22 `web_view`), `cargo clippy --all-targets` is
 silent, and both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
+
+**A `--json` run now beats while it works.** `src/main.rs` spawns `beat_while_working` beside the
+turn: every five seconds it emits the `status` frame with the phrase the stream last described, plus
+`elapsed_secs` and `restarted`. The flag that stops it is cleared under the same lock the beat writes
+under, so the last line of a stream is never a heartbeat — the test asserts the beat comes *before*
+`message.completed`, because a beat that arrives with the answer fills no silence. Verified live
+against a dead endpoint (`{"elapsed_secs":5,"restarted":true,"text":"thinking","type":"status"}`) and
+in `tests/json_output.rs` with a six-second stub.
 
 **The Python caller lives in the repository**: `examples/python/flint_call.py` (`ask`, `ask_json`,
 `Turn`, no dependencies), `test_call.py` (21 checks against a local stub, `cargo build` first),
@@ -103,7 +111,7 @@ open, so the copy needs every flint window closed first — measured twice.
 
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
-cargo test                                        # 429 passing, 1 ignored
+cargo test                                        # 430 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed

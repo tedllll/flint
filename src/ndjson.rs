@@ -199,6 +199,25 @@ pub fn status(text: &str, restarted: bool) -> String {
     frame("status", json!({ "text": text, "restarted": restarted }))
 }
 
+/// The same frame on a clock, carrying how long the current wait has been going.
+///
+/// The gap this fills is not decoration. Everything else on this stream is emitted when something
+/// *happens*, and between `tool.started` and `tool.completed` nothing happens for as long as the tool
+/// runs -- so a slow command, a slow model and a crashed process are the same thing from a pipe:
+/// silence. Measured: a six-second turn produced no line at all between `turn.started` and the
+/// answer, and a caller waiting on that has no way to choose between waiting and killing.
+///
+/// `restarted` keeps the meaning it has in [`status`], so a renderer that runs its own clock is
+/// unaffected, and `elapsed_secs` is for the readers that cannot run one: a consumer that joined the
+/// stream late, or that is reading a log somebody else wrote. Two answers to the same question,
+/// because the two readers are genuinely different.
+pub fn heartbeat(text: &str, restarted: bool, elapsed_secs: u64) -> String {
+    frame(
+        "status",
+        json!({ "text": text, "restarted": restarted, "elapsed_secs": elapsed_secs }),
+    )
+}
+
 /// One line: the fields with `type` added.
 ///
 /// `Value::to_string` is compact and escapes control characters, which is what makes the
