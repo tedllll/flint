@@ -31,7 +31,9 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             use_zigbuild: false
-          - os: macos-13
+          # macos-13 is gone: the free Intel image was retired, so the arm64
+          # runner cross-compiles the Intel target instead of never being scheduled.
+          - os: macos-15
             target: x86_64-apple-darwin
             use_zigbuild: false
           # Windows.
@@ -90,7 +92,9 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    # Publishing is a deliberate act: a tag push builds and uploads artifacts,
+    # and only a manual dispatch on that tag cuts a release.
+    if: github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/')
     permissions:
       # Required by softprops/action-gh-release to attach files to the release.
       contents: write
