@@ -2946,15 +2946,21 @@ async fn the_page_is_told_which_commands_it_may_offer() {
         );
     }
     // And the terminal's own help is the same table: every row the page was handed is a row
-    // `/help` prints, with the same one-line description.
+    // `/help` prints, with the same one-line description. The one row that may differ is the one
+    // whose sentence names the provider in force: `/provider key`'s help says "the active provider",
+    // which means nothing to somebody looking at a browser, so the frame substitutes the name. Every
+    // other row must match word for word -- this loop is what keeps the page from growing a second
+    // description of a command that drifts from `/help`.
     for (label, _, help, _) in &commands {
         assert!(
             transcript.contains(label.as_str()),
             "the page is offered `{label}` and `/help` does not print it, so the two lists have \
              drifted apart: {transcript:?}"
         );
+        // `test_home` names the provider `stub`, which is the name that would have been substituted.
+        let unsubstituted = help.replace("stub", "the active provider");
         assert!(
-            transcript.contains(help.as_str()),
+            transcript.contains(help.as_str()) || transcript.contains(unsubstituted.as_str()),
             "`{label}` is described one way to the page and another in `/help`: {transcript:?}"
         );
     }
@@ -3138,6 +3144,106 @@ async fn a_skill_the_run_has_is_readable_from_the_page_and_nothing_else_is() {
             "a listing the page asked for was printed on this terminal as well: {transcript:?}"
         );
     }
+}
+
+/// A switch is offered the values it may take, and a switch is not a reading.
+///
+/// `/provider <name>` and `/model <name>` take an argument out of a list this run already knows, and
+/// the page is shown that list twice over: the header's pickers are filled from `providers`, and the
+/// rows now carry the same names as `values`. Asking somebody to read a name off one control and type
+/// it into another is the kind of thing this round exists to remove.
+///
+/// The second half is the interesting one. A `values` row used to mean "a read the page may ask for",
+/// and the report route runs a command **with the terminal quiet** — which for `/provider llamacpp`
+/// means starting a local engine without a word anywhere. So the values alone are not the permission:
+/// a value is a reading only on a `panel` row. These rows are `selector`s, the page types the line it
+/// was given, and the answer lands in the transcript where the change is. The refusal below is that
+/// boundary, asserted at the route rather than reasoned about.
+#[tokio::test]
+async fn a_switch_is_offered_the_values_it_may_take() {
+    let home = test_home("switch-values", "http://127.0.0.1:9/v1");
+    std::fs::write(
+        home.join("config.toml"),
+        "default_provider = \"stub\"\n\n\
+         [[providers]]\n\
+         name = \"stub\"\n\
+         base_url = \"http://127.0.0.1:9/v1\"\n\
+         model = \"stub-model\"\n\
+         models = [\"stub-other\"]\n\
+         api_key = \"not-a-real-key\"\n\n\
+         [[providers]]\n\
+         name = \"other\"\n\
+         base_url = \"http://127.0.0.1:9/v1\"\n\
+         model = \"other-model\"\n\
+         api_key = \"not-a-real-key\"\n",
+    )
+    .expect("a config with two providers");
+    let log = home.join("transcript.txt");
+    let mut child = binary()
+        .arg("--web")
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::fs::File::create(&log).expect("transcript file"))
+        .stderr(std::fs::File::create(home.join("stderr.txt")).expect("stderr file"))
+        .spawn()
+        .expect("failed to run flint");
+
+    let (port, token) = port_and_token(&wait_for_url(&log));
+    let mut watching = http_stream(port, "/events", &token);
+    let opening = read_until(&mut watching, "\"type\":\"state\"}\n\n", 20);
+
+    // Every name the run can switch to, in the file's order, on the row that switches.
+    assert!(
+        opening.contains(
+            "\"label\":\"/provider <name>\",\"send\":\"/provider\",\"values\":[\"stub\",\"other\"]"
+        ),
+        "the page cannot switch provider without the reader typing a name it was never shown: \
+         {opening:?}"
+    );
+    // The models of the provider in force, from the same `choices()` the picker and `/model` use --
+    // the active one first, and the extras the config lists after it.
+    assert!(
+        opening.contains(
+            "\"label\":\"/model <name>\",\"send\":\"/model\",\"values\":[\"stub-model\",\"stub-other\"]"
+        ),
+        "the page cannot switch model without the reader typing one: {opening:?}"
+    );
+    // And the listing is still a listing: `/model` on its own is a report, and carries no values.
+    assert!(
+        opening.contains("\"class\":\"panel\",\"help\":\"show the model in force\",\"label\":\"/model\",\"send\":\"/model\""),
+        "`/model` is no longer offered as a report: {opening:?}"
+    );
+
+    // And the key row says *which* provider's key it is for. `/help` says "the active provider",
+    // which is a phrase somebody looking at a browser cannot resolve -- and which provider the key
+    // belongs to is the one thing that reader needs before pasting a credential into a box.
+    assert!(
+        opening.contains(
+            "\"class\":\"form\",\"field\":\"password\",\"help\":\"set the API key for stub\",\
+             \"label\":\"/provider key <key>\",\"send\":\"/provider key\""
+        ),
+        "the key row does not name the provider it is for, so a masked box appears with no way to \
+         tell whose key goes in it: {opening:?}"
+    );
+
+    // A value on a selector row is typed, not read: the report route refuses it, which is what keeps
+    // a local engine from being started with the terminal quiet.
+    let refused = post_to(port, &token, "/report", "/provider other");
+    assert!(refused.starts_with("HTTP/1.1 202"), "the request itself was refused: {refused:?}");
+    let complaint = read_until(&mut watching, "\"input\":\"/provider other\"", 20);
+    assert!(
+        complaint.contains("not a report"),
+        "a provider switch was run as a reading, so the page may start an engine quietly: \
+         {complaint:?}"
+    );
+
+    drop(watching);
+    drop(child.stdin.take());
+    let exited = wait_for_exit(&mut child, 20);
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit");
 }
 
 /// A form the page fills in: `/provider key <key>`, and the key does not come back.

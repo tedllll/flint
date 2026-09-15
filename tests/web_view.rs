@@ -630,6 +630,61 @@ fn a_destructive_row_opens_its_choices_and_sends_on_the_second_press() {
     );
 }
 
+/// A value is a reading only on a report row; anywhere else it is a line typed for you.
+///
+/// The rows that switch provider and model carry `values` now, and the tempting shortcut was to send
+/// every value through `askReport`, which is how `/skills <name>` is read. That route runs a command
+/// with the terminal **quiet**: for `/provider llamacpp` that means starting a local engine without
+/// printing a word anywhere, and for `/model` it means a change nobody can see. So the class decides
+/// the route, exactly as it decides which control is drawn: a `panel` row's value is a read, and any
+/// other row's value goes on `/message` like something typed into the composer, where the answer
+/// lands in the transcript next to the change. `tests/cli_output.rs` asserts the other half of this —
+/// that `/report` refuses `/provider other` — because the page honoring it is not the same thing as
+/// the process enforcing it.
+#[test]
+fn a_switch_value_is_typed_rather_than_read() {
+    let offered = from("for (const item of offered) {", 22);
+    assert!(
+        offered.contains("if (className === \"panel\") askReport(doc, item.line);")
+            && offered.contains("else sendText(item.line);"),
+        "the route a value takes is not the row's class, so a switch could be run with the terminal \
+         quiet: {offered}"
+    );
+}
+
+/// A row the panel cannot press says where its control is.
+///
+/// The first person to use the panel asked why some rows press and others do not, and the honest
+/// answer was in the CSS: a reference row was deliberately drawn to look exactly like a pressable
+/// one, so that no command looked different from the others. That reads well and it does not work —
+/// two rows that look the same and behave differently are a puzzle, not a list. The panel still lists
+/// every command (a list with holes in it teaches nothing), and a row with no control of its own is
+/// now marked and says, on hover, where its control is. The words are the page's own, because where
+/// *this page* puts its pickers and switches is the page's business; which commands exist is not.
+#[test]
+fn a_row_the_panel_cannot_press_says_where_its_control_is() {
+    let homes = from("const COMMAND_HOMES = {", 8);
+    for (needed, why) in [
+        ("button:", "the header's buttons"),
+        ("selector:", "the one selector the page cannot offer values for"),
+        ("form:", "the terminal, for the ones that ask questions"),
+    ] {
+        assert!(
+            homes.contains(needed),
+            "`{needed}` has no home to name ({why}): {homes}"
+        );
+    }
+    let drawn = from("if (offered.length === 0) {", 14);
+    assert!(
+        drawn.contains("el(\"div\", \"row reference\")"),
+        "a row with no control must be drawn as a marked, unpressed row rather than as a button: {drawn}"
+    );
+    assert!(
+        drawn.contains("COMMAND_HOMES[className]"),
+        "and it must take its explanation from the class the frame gave: {drawn}"
+    );
+}
+
 /// A conversation's row carries its own actions, behind one button, and the frame says which.
 ///
 /// Asked for after using the page: deleting a conversation meant finding the command panel, reading

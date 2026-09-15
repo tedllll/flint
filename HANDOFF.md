@@ -7,9 +7,9 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 388 passing, 1 ignored (257 lib, 2 in
-the binary's own tests, 33 `agent_loop`, 49 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
-`term_capture` plus the ignored cost measurement, 19 `web_view`), `cargo clippy --all-targets` is
+As of the commit that carries this file, `cargo test` is 391 passing, 1 ignored (257 lib, 2 in
+the binary's own tests, 33 `agent_loop`, 50 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
+`term_capture` plus the ignored cost measurement, 21 `web_view`), `cargo clippy --all-targets` is
 silent, and both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
 
 **The last sessions were on Windows** (10.0.26200, AMD64, rustc 1.98.1, PowerShell 5.1.26100.6584
@@ -34,13 +34,16 @@ Written for a cold start: a different machine, and possibly a session with no me
 one. The repository is the whole state — there is no index, no cache and no database anywhere in
 flint, on purpose — so cloning it and running the gate below is all that "catching up" means.
 
-**Where it was left.** `main` at the commit that puts a conversation's actions on its own row
-(`feat: a conversation's row carries its own actions`), plus the documentation commit that carries this
-file, working tree clean, `origin/main` level with it. **§8 is finished** — all five controls are on the
-page, and the destructive rows now have a second home on the sidebar — §9's last open hole is closed,
-and of the roadmap's small list one item is left: `examples/live_turn.rs` still keeps its own copy of
-`run_turn`'s event handling and has drifted twice. The counts are in the section above and were re-run
-to write this paragraph, not remembered.
+**Where it was left.** `main` at the commit that makes the provider and model switches pressable
+(`feat: the switches are offered the values they may take`), plus the documentation commit that carries
+this file, working tree clean, `origin/main` level with it. **§8 is finished** — all five controls are
+on the page, the destructive rows have a second home on the sidebar, and the two switches are offered
+the names the run already knows — §9's last open hole is closed, and of the roadmap's small list one
+item is left: `examples/live_turn.rs` still keeps its own copy of `run_turn`'s event handling and has
+drifted twice. The counts are in the section above and were re-run to write this paragraph, not
+remembered. The one design question the round leaves behind is written down in both `ROADMAP.md` and
+`docs/web-mode.md` §11: a page form that could add a provider needs a non-interactive `/provider add`
+and multi-field rows, and the panel's groups are still §8's classes rather than a task.
 
 **The installed binary is older than the tree, and that matters for looking at the page.** `flint` on
 this machine's PATH resolves to `C:\Users\zhangzhuo\bin\flint.exe`, which is a copy of
@@ -64,7 +67,7 @@ open, so the copy needs every flint window closed first — measured twice.
 
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
-cargo test                                        # 388 passing, 1 ignored
+cargo test                                        # 391 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed
@@ -611,6 +614,40 @@ free-form, so a page form would send several settings at once, and the terminal'
 them one at a time — it would need a `/config set <key> <value>` that the terminal does not have.
 Inventing a command for the page's benefit is the thing §8's design exists to prevent. The page
 therefore writes nothing into the config file in this round.
+
+### The switches are pressable, and a plain row says why it is plain
+
+The second and third things asked for after using the page. `/provider <name>` and `/model <name>` take
+an argument out of a list the run already knows — the same list that fills the header's pickers — and
+the panel drew them as rows of reference, so switching meant reading a name off one control and typing
+it into another. Both carry `values` now (`page_rows` takes `cfg` and the provider config for exactly
+these), and the page draws one pressable line per value.
+
+**The near-miss is the part to keep.** `values` had meant "a read the page may ask for", and the report
+route runs its command with the terminal **quiet** — for `/provider llamacpp` that is starting a local
+engine and printing nothing anywhere. So the *class* routes the line now: a `panel` row's value is a
+read, and a value on any other row is typed through `/message`, where the answer lands in the
+transcript next to the change. `/model [name]` had to split into `/model` (a report) and
+`/model <name>` (a selector) for the same reason. `tests/cli_output.rs` asserts that `/report` refuses
+`/provider other`: the page honoring the rule is not the same as the process enforcing it.
+
+**A reference row is now marked and dimmed, and says where its control is.** The panel had drawn them to
+look exactly like pressable rows, deliberately; the first person to use the panel asked why some rows
+press and others do not, which is a puzzle rather than a list. `COMMAND_HOMES` names the three homes
+(the header, the list on the left, the terminal) and each entry is the page's own fact about where *it*
+put its controls. A `selector` that carries values never reaches that branch.
+
+**`/provider key`'s sentence names the provider.** `/help` says "the active provider", which a browser's
+reader cannot resolve; `page_help` substitutes the name, and `tests/cli_output.rs` allows the frame's
+help to be the table's sentence or that sentence with the name filled in — never a second description
+that can drift from `/help`.
+
+**Left open, deliberately**: adding a provider from the page. `/provider add` asks four questions one at
+a time, and a page form can send exactly one value, so doing it from the browser needs a
+non-interactive `/provider add <name> <base_url>` *and* a frame row carrying several fields — the
+second is the same shape §11 refused for `/config edit`. The panel's grouping is also §8's classes
+rather than a task, so "set a key" means switching provider in one group and filling a masked box in
+another. Both are the next round's question. **Not measured**: a browser, as always.
 
 ### A conversation's row carries its own actions
 

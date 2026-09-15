@@ -138,7 +138,8 @@ Inside the REPL:
 | `/help` | command list |
 | `/provider [name]` | list, switch, add, edit or remove providers |
 | `/provider key <key>` | set the API key for the active provider |
-| `/model [name]` | show or change the model |
+| `/model` | show the model in force |
+| `/model <name>` | switch to one of that provider's models |
 | `/usage` | context size and token accounting |
 | `/verbose [on\|off\|full]` | how much of the agent's activity to narrate |
 | `/detail [on\|off]` | print tool output (default off: one line per result) |

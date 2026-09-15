@@ -750,6 +750,38 @@ it sends it. Two decisions worth keeping:
   shifted under an open menu would point the next press at the conversation below the one that was
   meant. That is the same argument `doc.confirm` is built on, one level down.
 
+**The switches are offered their values, and a plain row says why it is plain — 2026-09-15, both asked
+for after using the page.** `/provider <name>` and `/model <name>` take an argument out of a list the
+run already knows and the page was already shown (the header's pickers), and the panel drew them as
+plain rows, so switching meant reading a name off one control and typing it into another. Both carry
+`values` now, and the page draws one pressable line per value. Two things make that safe rather than
+merely convenient:
+
+- **A value is a reading only on a `panel` row.** The report route runs its command with the terminal
+  quiet, and for `/provider llamacpp` that is starting a local engine without printing a word. So the
+  class routes the line: a `panel` row's value goes to `/report`, anything else is *typed* through
+  `/message` and its answer lands in the transcript next to the change. `/model [name]` had to split
+  into a report (`/model`) and a selector (`/model <name>`) for the same reason — one row cannot be
+  both. `tests/cli_output.rs` asserts the refusal, because the page honoring the rule is not the same
+  as the process enforcing it.
+- **A row the page cannot press now says so.** The panel had been drawing reference rows to look
+  exactly like pressable ones, on the theory that no command should look different from the others;
+  the first person to use it asked why some rows press and others do not. Reference rows are marked
+  and dimmed, and their hover says where the control is (`COMMAND_HOMES`: the header, the list on the
+  left, or the terminal for the commands that ask questions one at a time).
+
+`/provider key`'s sentence names the provider in force — "the active provider" is a phrase a browser's
+reader cannot resolve, and `page_help` substitutes the name. The frame may do that and nothing else to
+a help line, and `tests/cli_output.rs` holds the line at exactly that substitution.
+
+**What this leaves open, and it is the honest residue of the round:** adding a provider is still a
+terminal-only command, because `/provider add` asks four questions one at a time and a page form can
+send exactly one value. Doing it from the page needs two things this round did not build — a
+non-interactive `/provider add <name> <base_url>` and a frame row that carries *several* fields — and
+the second is the same shape `docs/web-mode.md` §11 refused for `/config edit`. The panel's grouping is
+also still §8's classes rather than a task: "set a key" means switching provider in one group and
+filling a masked box in another. Both are the next round's question, not this one's oversight.
+
 **§8 is built.** All five controls are on the page — the buttons, the panels that read, the selectors,
 the forms and now the destructive ones — and what is left is not a class but three residues, each
 written down where it belongs: `/config edit` as a page form (it would need a command the terminal

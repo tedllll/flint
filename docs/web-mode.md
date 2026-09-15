@@ -219,7 +219,7 @@ Four routes. No cookies, no HTTP/2, no TLS, no keep-alive, no streaming request 
 | `POST /report` | one command *read* from the browser: same channel, and its answer is captured with the terminal quiet (§11) |
 | `GET /sessions` | the conversations `/resume` can reach, numbered the way `/resume` numbers them |
 | *`event: sessions`* | not a route but its counterpart: the list has changed, re-read it |
-| *`event: state`* | the run's own configuration: provider, model, what each provider offers, the toggles, and the command list with §8's class for each row — a row also carries `values` when the page may read that command with an argument the frame names, `field` when the page may fill its argument in, and `from` when it destroys something and the argument is one of a list (§11) |
+| *`event: state`* | the run's own configuration: provider, model, what each provider offers, the toggles, and the command list with §8's class for each row — a row also carries `values` when the page may send that command with an argument the frame names (a *read* on a `panel` row, a line the page types for you on a `selector`), `field` when the page may fill its argument in, and `from` when it destroys something and the argument is one of a list (§11) |
 | `type: command` | what a command answered, on the same stream as the turn's events: `input` and `text` — which is also what a header button's answer arrives on. Carries `panel: true` when the page asked to read it rather than typing it, and `input` is the command's own `send` rather than the line in the one case the line carries a credential (§11) |
 
 **All six are implemented.** `/session` and `/events` read the session path and the event feed
@@ -626,8 +626,9 @@ there are. `/help` printed a hand-written block, dispatch is a `match`, and a th
 frame is exactly the drift this project spends its comments preventing, so the list became one table
 in `src/main.rs` (`COMMANDS`), with `/help` printing it and the frame carrying it.
 
-An entry is `{label, send, help, class}`, and later `values` on the rows a page may *read* with an
-argument (§11's last section). `label` is what `/help` prints (`/provider key <key>`); `send` is what
+An entry is `{label, send, help, class}`, and later `values` on the rows a page may send with an
+argument — a *read* on a `panel` row, a line the page types for you on a `selector` (§11's two
+sections). `label` is what `/help` prints (`/provider key <key>`); `send` is what
 the page puts on the wire (`/provider key`) — carried beside the label rather than split out of it,
 because the split is not uniform (`add` is part of `/provider add`, `<key>` is not) and a page
 re-deriving that would be re-deriving this program's grammar. `class` is §8's own, and two kinds of
@@ -715,10 +716,46 @@ bare `send`, or its `send` plus one of its own values, and nothing else.
 | The page draws one line per value | Node, over the stub DOM | a row with `values: ["alpha","beta"]` is drawn as the roster line plus `/skills alpha` and `/skills beta`, each a `button` with the row's own `help`; a panel row without values is still one row |
 | The page composes no command of its own | `tests/web_view.rs`, over the page's own bytes | the value rows are built as `send + " " + value` from the frame's two strings, next to the `command.values` that named them — the same shape a toggle uses for `/<name> <value>` |
 
-**Not measured**: a command whose values the frame does not carry gaining a control. Nothing does
-today — `/provider <name>` takes a value and its list comes from `providers`, deliberately, because
-running *that* quietly would start a local engine without printing a word — and `values` is where a
-second such row would go.
+**Not measured here**: a command whose values the frame does not carry gaining a control — see the
+next section, which is where the two switches did.
+
+### The switches are offered their values, and a value is a reading only on a report — measured, 2026-09-15
+
+The second thing this round added because somebody used the page: `/provider <name>` and `/model <name>`
+take an argument out of a list the run already knows, the page was already *shown* that list (the
+header's pickers are filled from `providers`), and the panel still drew them as plain rows — so
+switching meant reading a name off one control and typing it into another. Both rows now carry `values`
+in the frame, and the page draws them the way it draws every other value row: one pressable line per
+value, composed as `send + " " + value`.
+
+That alone would have been a bug, and the near-miss is the interesting half. `values` had meant "a read
+the page may ask for", and the report route runs its command **with the terminal quiet** — for
+`/provider llamacpp` that is starting a local engine and printing nothing anywhere. So the class is
+what routes the line: a value on a `panel` row is a read (`/report`, answered into the panel), and a
+value on any other row is a line the page *types* for you (`/message`, answered in the transcript next
+to the change). `/model [name]` also had to split into a report (`/model`) and a selector
+(`/model <name>`), because one row cannot be both.
+
+| Claim | How | Result |
+|---|---|---|
+| The switches are offered the names | a real `--web` process, a scratch `FLINT_HOME` with two providers | `{"label":"/provider <name>","send":"/provider","values":["stub","other"]}` and `{"label":"/model <name>","send":"/model","values":["stub-model","stub-other"]}`. Mutation-checked: emptying `/model`'s values fails on exactly that fragment |
+| The list is the run's, not the page's | the same frame, and `ProviderConfig::choices()` | the model values are the active provider's, in its own order, active model first — the same function that fills the picker and `/model`'s own listing |
+| A switch is not a reading | the same run, `POST /report` with `/provider other` | refused, `not a report`. Mutation-checked the other way: the route would have to admit a non-`panel` row before this could pass |
+| The page routes by class | `tests/web_view.rs`, over the page's own bytes | `if (className === "panel") askReport(…) else sendText(…)` in the value loop; Node checks the same rows are drawn as controls either way |
+| A selector with nothing to offer still says where its control is | Node | `/resume <n\|id>` is a `div.row.reference` whose hover says "a conversation on the left" — it is the one selector whose list is not in this frame |
+
+**The key row names its provider.** `/provider key <key>`'s help in `/help` reads "set the API key for
+the active provider", which is a phrase a browser's reader cannot resolve — and which provider the key
+belongs to is the one thing they need before pasting a credential into a box. The frame substitutes the
+name (`page_help`), and `tests/cli_output.rs` holds the line at exactly that substitution: a frame's
+help must be the table's sentence or that same sentence with the name filled in, never a second
+description that can drift from `/help`.
+
+**Not measured**: a browser, as ever. What a reader actually makes of the panel's order — reports,
+actions, selectors, forms, destructive — is unknown; the first person to open it asked why some rows
+press and others do not, which is why the reference rows are now marked and explain themselves on
+hover. Whether that is enough, or whether the groups should be ordered around a *task* (add a provider,
+set a key) rather than around §8's classes, is the open question this round leaves behind.
 
 ### A form row gets a field, and a key never comes back — measured, 2026-09-15
 

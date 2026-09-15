@@ -708,6 +708,55 @@ check("a conversation's row carries its own actions behind one button", () => {
   eq(menuOf(page.sessionRow(d, session)).children.map(says), ["nothing to do from here"], "an empty menu says so");
 });
 
+check("a row the panel cannot press says where its control is", () => {
+  const page = loadViewer();
+  const d = page.newDoc();
+  page.applyState(d, JSON.stringify({
+    type: "state", provider: "stub", model: "m",
+    commands: [
+      { label: "/tools", send: "/tools", help: "list available tools", class: "panel" },
+      { label: "/new", send: "/new", help: "start a fresh conversation", class: "button" },
+      { label: "/model <name>", send: "/model", help: "switch to one", class: "selector", values: ["stub-model", "stub-other"] },
+      { label: "/resume <n|id>", send: "/resume", help: "switch to one of them", class: "selector" },
+      { label: "/provider add", send: "/provider add", help: "set up a new provider", class: "form" },
+    ],
+  }));
+  page.showCommands(d);
+  const drawn = page.__node("command-list").children;
+  // One group per class the frame sends, with the rows in the order the frame gave them. The
+  // switches are not here because they are not in the frame at all: their value is already a field
+  // of it, and one fact in two places is how the two come to disagree.
+  const rows = drawn.filter((n) => n.className === "group").map((g) => g.children.slice(1));
+  eq(rows.length, 4, "four groups, one per class the frame sends");
+  const [reports, actions, selectors, forms] = rows;
+
+  // The report row is pressable, and carries no "reference" mark.
+  eq(reports[0].tag, "button", "a report is a control");
+  eq(reports[0].className, "row", "and is not marked as reference");
+  eq(reports[0].title, "list available tools", "and explains itself with the frame's own help, not with a home");
+
+  // A row the frame gave `values` is pressable wherever it sits: the switch rows are offered the
+  // names the run already knows, which is the whole point of them -- the reader should not have to
+  // read a name off one control and type it into another.
+  eq(selectors[0].tag, "button", "a switch with values is a control");
+  eq(selectors[0].className, "row", "not a reference row");
+  eq(selectors[0].title, "switch to one", "and keeps the frame's own help");
+  eq(selectors[0].children.map((n) => n.textContent), ["/model stub-model", "switch to one"], "the first value, as the line it sends");
+  eq(selectors[1].children.map((n) => n.textContent), ["/model stub-other", "switch to one"], "and the second");
+  // ...while a selector the frame gave no values keeps saying where its own control is.
+  eq(selectors[2].tag, "div", "the selector with nothing to offer is not pressable");
+  eq(selectors[2].className, "row reference", "it is marked as reference");
+  eq(selectors[2].title, "this one is a conversation on the left", "and names the one home it has");
+
+  // Everything else is reference: a row that says what the command is, dressed so that it cannot be
+  // mistaken for the control it is not -- and saying, on hover, where that control actually is.
+  eq(actions[0].tag, "div", "an action is not pressable in the panel");
+  eq(actions[0].className, "row reference", "it is marked as reference");
+  eq(actions[0].title, "this one is a button in the header", "and says where its control is");
+  eq(forms[0].title, "this one is typed in the terminal -- it asks questions", "a form without a field is the terminal's");
+  eq(forms[0].children.map((n) => n.textContent), ["/provider add", "set up a new provider"], "and it still reads like a row");
+});
+
 check("a listing being read replaces the list, and the way back restores it", () => {
   const page = loadViewer();
   const d = page.newDoc();

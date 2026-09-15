@@ -1810,7 +1810,8 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp::destroying("/provider rm <name>", "/provider rm", "delete one", ArgFrom::Providers),
     CommandHelp::row("/config", "/config", "show shell, steps, proxy", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/config edit", "/config edit", "change shell, steps, proxy", HelpSection::Commands, OnPage::Form),
-    CommandHelp::row("/model [name]", "/model", "show or change the model", HelpSection::Commands, OnPage::Panel),
+    CommandHelp::row("/model", "/model", "show the model in force", HelpSection::Commands, OnPage::Panel),
+    CommandHelp::row("/model <name>", "/model", "switch to one", HelpSection::Commands, OnPage::Selector),
     CommandHelp::row("/usage", "/usage", "context and token accounting", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/verbose [on|off|full]", "/verbose", "how much of the agent's activity to narrate", HelpSection::Commands, OnPage::Toggles),
     CommandHelp::row("/detail [on|off]", "/detail", "print tool output (off: one line per result)", HelpSection::Commands, OnPage::Toggles),
@@ -1944,9 +1945,10 @@ async fn run_report(
     // is that report; a row that carries `values` may also be asked with one of them, which is how
     // `/skills <name>` reaches the panel. Matched against the *frame's own rows* rather than the
     // table, because the frame is what the page was shown -- and because the values are part of the
-    // permission: `/provider <name>` takes a value too, and running that one quietly would start a
-    // local engine without printing a word anywhere.
-    let is_report = page_rows(agent).iter().any(|row| {
+    // permission: `/provider <name>` and `/model <name>` take values too, and running those quietly
+    // would switch provider or model with nothing printed anywhere. They are not reports because
+    // their class is not `panel`: the page types those lines instead, which is what the class is for.
+    let is_report = page_rows(cfg, provider_cfg, agent).iter().any(|row| {
         row.class == "panel"
             && (row.send == asked
                 || row
@@ -2876,7 +2878,7 @@ fn state_frame(
         "model": provider.model,
         "toggles": toggles(agent, printer),
         "providers": providers,
-        "commands": page_commands(agent),
+        "commands": page_commands(cfg, provider, agent),
     })
     .to_string()
 }
@@ -2891,8 +2893,12 @@ fn state_frame(
 /// Two kinds of row are left out rather than marked: the toggles, which the `toggles` field carries
 /// in the shape a switch needs, and the terminal's own commands, which have no business on a page
 /// (`/exit` above all: a misclick must not end a session).
-fn page_commands(agent: &agent::Agent) -> serde_json::Value {
-    let rows: Vec<serde_json::Value> = page_rows(agent)
+fn page_commands(
+    cfg: &config::Config,
+    provider_cfg: &config::ProviderConfig,
+    agent: &agent::Agent,
+) -> serde_json::Value {
+    let rows: Vec<serde_json::Value> = page_rows(cfg, provider_cfg, agent)
         .into_iter()
         .map(|row| {
             let mut json = serde_json::json!({
@@ -2932,13 +2938,18 @@ fn page_commands(agent: &agent::Agent) -> serde_json::Value {
 struct PageRow {
     label: &'static str,
     send: &'static str,
-    help: &'static str,
+    /// What the page says the row does: the table's own sentence, with the provider's name filled in
+    /// where the table says "the active provider" (see `page_help`). A `String` for that one
+    /// substitution, and for nothing else.
+    help: String,
     class: &'static str,
     /// The argument values this page may ask for, when the row takes one it may *read*.
     ///
     /// Carried on the row rather than looked up in a `providers`-style field, because it is the
-    /// permission as much as the options: `/provider <name>` takes a value too, and running that one
-    /// quietly would start a local engine without printing a word anywhere.
+    /// permission as much as the options. On a `panel` row a value is a reading, and the report route
+    /// admits it; on a `selector` row -- `/provider <name>`, `/model <name>` -- it is a list the page
+    /// may *type* for the reader, and the route refuses it, because running a provider switch with the
+    /// terminal quiet would start a local engine without printing a word anywhere.
     values: Vec<String>,
     /// The kind of field the page may draw for this row's argument, if it may draw one at all.
     field: Option<Field>,
@@ -2947,20 +2958,37 @@ struct PageRow {
 }
 
 /// Every row the page may offer, with the values it may be given.
-fn page_rows(agent: &agent::Agent) -> Vec<PageRow> {
+///
+/// Takes the config as well as the agent because three rows' options come from it: the providers this
+/// run can switch to, the models the one in force offers, and the name in the key row's own sentence.
+/// All three are the same facts the header's pickers and `/provider` are built from, so a page cannot
+/// offer a provider the config does not have, or a model the active provider does not.
+fn page_rows(
+    cfg: &config::Config,
+    provider_cfg: &config::ProviderConfig,
+    agent: &agent::Agent,
+) -> Vec<PageRow> {
     COMMANDS
         .iter()
         .filter_map(|row| {
             row.on_page.class().map(|class| PageRow {
                 label: row.label,
                 send: row.send,
-                help: row.help,
+                help: page_help(row, provider_cfg),
                 class,
-                // The one row whose values this run knows. `/skills <name>` is a read, so the page
-                // may ask for it, and the names are the ones this run's prompt was built with --
-                // see `Agent::skills`, which is why a directory walk is not needed here.
-                values: match row.send {
-                    "/skills" => agent.skills().to_vec(),
+                // The rows whose argument this run has a list for. `/skills <name>` is a read, so the
+                // page may ask for it, and the names are the ones this run's prompt was built with --
+                // see `Agent::skills`, which is why a directory walk is not needed here. The two
+                // switches take their options from the config, which is also where the pickers get
+                // them: the reader is shown the names rather than asked to remember one.
+                values: match (row.send, row.on_page) {
+                    ("/skills", _) => agent.skills().to_vec(),
+                    ("/provider", OnPage::Selector) => {
+                        cfg.providers.iter().map(|p| p.name.clone()).collect()
+                    }
+                    ("/model", OnPage::Selector) => provider_cfg.choices(),
+                    // `/resume <n|id>` is the third selector and has no values on purpose: its list is
+                    // the sidebar's, where the numbers are and where a press already resumes.
                     _ => Vec::new(),
                 },
                 field: row.field,
@@ -2968,6 +2996,18 @@ fn page_rows(agent: &agent::Agent) -> Vec<PageRow> {
             })
         })
         .collect()
+}
+
+/// The sentence the page shows for a row: the table's own, with the one thing the page can say better.
+///
+/// `/provider key`'s help says "the active provider", which is a phrase somebody looking at a browser
+/// cannot resolve -- and which provider the key is for is exactly the fact that reader needs. The
+/// frame knows the name, so it substitutes it: "set the API key for stub". That is the whole of the
+/// licence here, and `tests/cli_output.rs` holds the line -- a frame's help must be the table's
+/// sentence, or the table's sentence with that name filled in, so the page can never grow a second
+/// description of a command that drifts from `/help`.
+fn page_help(row: &CommandHelp, provider_cfg: &config::ProviderConfig) -> String {
+    row.help.replace("the active provider", &provider_cfg.name)
 }
 
 /// What the feed is told asked for a command's answer.

@@ -112,6 +112,10 @@
   .panel .row { display: flex; gap: 8px; align-items: baseline; }
   .panel .row code { color: var(--fg); white-space: nowrap; }
   .panel .row span { color: var(--dim); }
+  /* A row this page has no control for: still a row, dimmed right down, because it is a fact about
+     the run rather than something to press. The hover says where its control is. */
+  .panel .row.reference code, .panel .row.reference span { color: var(--dim); opacity: .75; }
+  .panel .row.reference { cursor: help; }
   /* A row that can be read: the same shape as the rows above, made pressable. Reset to look like
      them rather than like a control, because the panel is a list of what the terminal takes and a
      row of chrome would make one command look different from the others. */
@@ -934,6 +938,26 @@ const COMMAND_GROUPS = [
   ["danger", "destructive"],
 ];
 
+/// Where the control for a command the panel cannot press actually is, per class.
+///
+/// The panel lists every command -- a list with holes in it teaches nothing -- and this page only
+/// draws a control where the frame said how to supply the argument. So the rest are rows of
+/// reference, and the first person to use the panel asked why some rows press and others do not. The
+/// answer is here, on hover, where the question is asked: the words are this page's own, because
+/// where *this* page put its buttons and pickers is its own business, while which commands exist is
+/// the process's.
+///
+/// `toggles` is absent on purpose: those rows are not in the frame at all (their value is already a
+/// field of it), so no row can ever ask for a home. See `OnPage::Toggles`. A `selector` that carries
+/// `values` never reaches here either -- it is a control, and this entry is for the one selector whose
+/// list lives somewhere else on the page (`/resume`'s, which is the sidebar).
+const COMMAND_HOMES = {
+  button: "a button in the header",
+  selector: "a conversation on the left",
+  form: "typed in the terminal -- it asks questions",
+};
+const COMMAND_HOME_FALLBACK = "typed in the terminal";
+
 /// The panel, in one of its two modes: the commands, or one report being read.
 ///
 /// The list is drawn from the frame and never assembled here, so a row cannot offer a command the
@@ -1082,7 +1106,14 @@ function showCommands(doc) {
       if (className === "panel" && send) offered.push({ label: command.label, line: send });
       for (const value of values) offered.push({ label: send + " " + value, line: send + " " + value });
       if (offered.length === 0) {
-        const row = el("div", "row");
+        // Nothing this page can send: a row of reference, marked and dimmed so that it cannot be
+        // mistaken for the control it is not, and carrying the one thing it can usefully say --
+        // where that control is (see `COMMAND_HOMES`). It used to be drawn to look exactly like a
+        // pressable row, on the theory that no command should look different from the others. That
+        // reads well and does not work: the first person to use the panel asked why some rows press
+        // and others do not, which is a puzzle rather than a list.
+        const row = el("div", "row reference");
+        row.title = "this one is " + (COMMAND_HOMES[className] || COMMAND_HOME_FALLBACK);
         row.appendChild(el("code", "", command.label));
         row.appendChild(el("span", "", help));
         group.appendChild(row);
@@ -1093,7 +1124,14 @@ function showCommands(doc) {
         row.type = "button";
         row.title = help;
         row.addEventListener("click", () => {
-          askReport(doc, item.line);
+          // A value on a *report* row is a read, and its answer belongs in the panel. A value on any
+          // other row is a line this page types for you -- `/provider other`, `/model x` -- and its
+          // answer belongs in the transcript, where the change is. The class is the frame's, and it
+          // is the only thing that tells the two apart: sending a switch through the report route
+          // would run it with the terminal quiet, which for a provider that starts a local engine
+          // means starting one without printing a word anywhere.
+          if (className === "panel") askReport(doc, item.line);
+          else sendText(item.line);
         });
         row.appendChild(el("code", "", item.label));
         row.appendChild(el("span", "", help));
