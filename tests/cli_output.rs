@@ -3035,6 +3035,91 @@ async fn a_skill_the_run_has_is_readable_from_the_page_and_nothing_else_is() {
     }
 }
 
+/// A form the page fills in: `/provider key <key>`, and the key does not come back.
+///
+/// §8's form class, and the one promise in it that is a promise about *secrets*: the argument is a
+/// credential, so it may not be echoed to the page, printed on the terminal, or written anywhere
+/// except the config file it is for. The `command` frame echoes the line that asked for the answer,
+/// which is exactly right for every other command and exactly wrong for this one, so the table says
+/// which rows take a credential and the echo is the row's own `send` instead.
+///
+/// The three absences are asserted *separately*, because they are three different failures: a frame
+/// carrying the key is a leak to every page connected to this run and to the event ring; a key in
+/// the transcript is a leak to whoever reads the log; and the fourth assertion -- that the key *did*
+/// reach `config.toml` -- is what keeps the first three from being satisfied by a command that never
+/// ran.
+#[tokio::test]
+async fn a_key_typed_into_a_field_is_not_echoed_anywhere() {
+    let home = test_home("form-key", "http://127.0.0.1:9/v1");
+    let log = home.join("transcript.txt");
+    let mut child = binary()
+        .arg("--web")
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::fs::File::create(&log).expect("transcript file"))
+        .stderr(std::fs::File::create(home.join("stderr.txt")).expect("stderr file"))
+        .spawn()
+        .expect("failed to run flint");
+
+    let (port, token) = port_and_token(&wait_for_url(&log));
+    let mut watching = http_stream(port, "/events", &token);
+    let opening = read_until(&mut watching, "\"type\":\"state\"}\n\n", 20);
+
+    // The frame says the page may fill this one in, and how to draw it -- so the page is not
+    // deciding from the command's name that a key is a secret.
+    assert!(
+        opening.contains("\"label\":\"/provider key <key>\",\"send\":\"/provider key\"")
+            && opening.contains("\"field\":\"password\""),
+        "the frame does not tell the page that this row takes a credential it may fill in: \
+         {opening:?}"
+    );
+
+    // A fixture, not a key: no test in this repository contains a real one.
+    const NOT_A_KEY: &str = "sk-not-a-real-key-0000";
+    let sent = post_message(port, &token, &format!("/provider key {NOT_A_KEY}"));
+    assert!(sent.starts_with("HTTP/1.1 202"), "the composer refused: {sent:?}");
+    let answered = read_until(&mut watching, "\"input\":\"/provider key\"", 20);
+    assert!(
+        answered.contains("key saved"),
+        "the key was never saved, so the absences below would hold for a command that did nothing: \
+         {answered:?}"
+    );
+    assert!(
+        !answered.contains(NOT_A_KEY),
+        "the answer echoed the key back to every page watching this run: {answered:?}"
+    );
+
+    // And the refusal path: a key posted to the read route is refused -- reading is not what that
+    // command does -- and the refusal names the line it refused, which is the other place the key
+    // would be printed and sent on.
+    let refused = post_to(port, &token, "/report", &format!("/provider key {NOT_A_KEY}"));
+    assert!(refused.starts_with("HTTP/1.1 202"), "the request itself was refused: {refused:?}");
+    let complaint = read_until(&mut watching, "\"input\":\"/provider key\"", 20);
+    assert!(
+        complaint.contains("not a report") && !complaint.contains(NOT_A_KEY),
+        "the refusal of a key-carrying line repeated the key: {complaint:?}"
+    );
+
+    drop(watching);
+    drop(child.stdin.take());
+    let exited = wait_for_exit(&mut child, 20);
+    let transcript = std::fs::read_to_string(&log).unwrap_or_default();
+    let config = std::fs::read_to_string(home.join("config.toml")).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit");
+    assert!(
+        !transcript.contains(NOT_A_KEY),
+        "the key was printed on the terminal, where a session log or a shoulder can read it: \
+         {transcript:?}"
+    );
+    assert!(
+        config.contains(NOT_A_KEY),
+        "the key did not reach the config file, which is the one place it belongs: {config:?}"
+    );
+}
+
 /// Every command the page may offer is one the terminal accepts.
 ///
 /// The drift this catches is the whole reason the list is a table: a page that offers a button for

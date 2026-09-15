@@ -177,10 +177,13 @@ fn the_composer_is_honest_about_what_it_sent() {
         html.contains("not sent:"),
         "a refused message must be reported, not silently dropped"
     );
+    // The composer's own handler, named rather than taken as "the first submit handler in the
+    // file": a form row in the panel has a submit handler too, and this test is about the box that
+    // sends a message.
     let handler = html
-        .split("addEventListener(\"submit\"")
+        .split("getElementById(\"composer\").addEventListener(\"submit\"")
         .nth(1)
-        .expect("the form must have a submit handler");
+        .expect("the composer must have a submit handler");
     let cleared = handler
         .find("message.value = \"\"")
         .expect("the input must be cleared somewhere");
@@ -502,7 +505,7 @@ fn the_action_buttons_send_the_frames_own_line() {
 #[test]
 fn the_panel_reads_a_report_rather_than_sending_it() {
     // The row itself: only the class the frame marks, and the line comes from the frame.
-    let built = from("function showCommands(doc)", 80);
+    let built = from("function showCommands(doc)", 115);
     for (needed, why) in [
         ("className === \"panel\"", "the class that makes a row readable"),
         ("command.send", "the line to ask for, taken from the frame rather than rebuilt here"),
@@ -554,6 +557,37 @@ fn the_panel_reads_a_report_rather_than_sending_it() {
         handled.contains("kind: \"command\"") && handled.contains("push(doc,"),
         "a command's answer stopped being a transcript block, so a typed `/config` would show \
          nothing: {handled}"
+    );
+}
+
+/// A row the frame marks as taking a field gets one, and what it sends is still the frame's.
+///
+/// §8's form class, and the only class whose argument a person types freely. The page draws an input
+/// because the *frame* says so (`field` is the input's `type`), composes the line as `send` plus what
+/// was typed -- the same composition a toggle and a value row use -- and posts it where a typed line
+/// goes, because a form changes something and its answer belongs in the transcript.
+///
+/// The masked case is the one with a promise attached: a password field is emptied the moment it is
+/// sent, so the value lives in the input, on the wire, and in the config file it was for, and nowhere
+/// else on the page. What the *process* does with it -- the frame's own echo, which would otherwise
+/// hand the key back to every page watching -- is measured in `tests/cli_output.rs`.
+#[test]
+fn a_form_row_gets_a_field_and_sends_what_was_typed_into_it() {
+    let drawn = from("function showCommands(doc)", 110);
+    for (needed, why) in [
+        ("command.field", "the frame saying this row takes a field, and of which kind"),
+        ("input.type = field", "drawing it as the frame said rather than by guessing from the name"),
+        ("sendText(send + \" \" + value)", "sending the row's own `send` plus what was typed"),
+        ("if (field === \"password\") input.value = \"\"", "keeping no copy of a credential"),
+    ] {
+        assert!(
+            drawn.contains(needed),
+            "a form row is not drawn from `{needed}` ({why}): {drawn}"
+        );
+    }
+    assert!(
+        drawn.contains("if (!value) return;"),
+        "an empty field is submitted, which sends the bare command instead of nothing: {drawn}"
     );
 }
 

@@ -127,6 +127,20 @@
     cursor: pointer;
   }
   .panel .back:hover { color: var(--user); }
+  /* A row that takes a field: a form row is still a row, so the input sits where the description
+     would and the button says which command it sends -- the row's own `send`, never a word the page
+     made up. */
+  .panel form.field { display: flex; gap: 8px; align-items: baseline; }
+  .panel form.field input.value {
+    font: inherit; flex: 1 1 auto; min-width: 0; color: var(--fg); background: none;
+    border: 0; border-bottom: 1px solid var(--dim); padding: 0 0 1px;
+  }
+  .panel form.field input.value:focus { outline: none; border-bottom-color: var(--user); }
+  .panel form.field button.send {
+    font: inherit; color: var(--dim); background: none; border: 0; padding: 0; cursor: pointer;
+    white-space: nowrap;
+  }
+  .panel form.field button.send:hover { color: var(--user); }
   .panel .reading { white-space: pre-wrap; margin: 4px 0 0; }
   .meta { color: var(--dim); font-size: 12.5px; word-break: break-all; }
   .meta span { margin-right: 14px; white-space: nowrap; }
@@ -891,7 +905,10 @@ const COMMAND_GROUPS = [
 /// for that listing on `/report` -- the route that keeps the answer off the terminal, where the
 /// reader did not ask for it (ROADMAP §8). A row that carries `values` is drawn once per value, which
 /// is how a read that takes an argument (`/skills <name>`) gets a control without the page ever
-/// knowing what the command is called.
+/// knowing what the command is called. A row the frame marks with a `field` gets an input instead,
+/// and what its button sends is the row's `send` plus what was typed -- the same composition again,
+/// and the input's `type` comes from the frame, so a credential is masked because the process said
+/// it was one.
 ///
 /// One surface rather than a `<details>` per row, and that is a decision rather than a shortcut: a
 /// panel here is a window onto the run, and what it shows is one thing at a time. Nothing is cached
@@ -942,6 +959,34 @@ function showCommands(doc) {
       // cannot name one that was not offered; the process refuses the rest. The row's own line is
       // kept next to them because it is a command in its own right: `/skills` is the catalog, and
       // `/skills <name>` is one entry in it.
+      // A row the frame says takes a field gets one. It is a *form*, not a report: the value goes on
+      // `/message` with the rest of what a person sends, because a form changes something and its
+      // answer belongs in the transcript where the change is. `field` is the input's `type`, so the
+      // page is told how to draw it rather than deciding from the command's name that a key is a
+      // secret -- and a masked field is emptied the moment it is sent, so the value exists in the
+      // input, on the wire, and in the config file it was for, and nowhere else.
+      const field = command.field === "text" || command.field === "password" ? command.field : null;
+      if (field) {
+        const form = el("form", "field");
+        const input = el("input", "value");
+        input.type = field;
+        input.placeholder = help;
+        const submit = el("button", "send", send);
+        submit.type = "submit";
+        form.addEventListener("submit", (event) => {
+          if (event && typeof event.preventDefault === "function") event.preventDefault();
+          const value = typeof input.value === "string" ? input.value.trim() : "";
+          // An empty field is not a submission: the bare command is a different thing (`/name` with
+          // no text reads the name it has), and the page has no business sending it by accident.
+          if (!value) return;
+          if (field === "password") input.value = "";
+          sendText(send + " " + value);
+        });
+        form.appendChild(input);
+        form.appendChild(submit);
+        group.appendChild(form);
+        continue;
+      }
       const values = Array.isArray(command.values)
         ? command.values.filter((value) => typeof value === "string" && value.trim())
         : [];

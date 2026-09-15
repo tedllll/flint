@@ -559,6 +559,47 @@ check("a row that carries values offers one line per value", () => {
   eq(reports[1].title, "list skills", "a value row carries the row's own help");
 });
 
+check("a row that takes a field gets one, and only the rows the frame marks", () => {
+  const page = loadViewer();
+  const d = page.newDoc();
+  page.applyState(d, JSON.stringify({
+    type: "state", provider: "stub", model: "m", providers: [{ name: "stub", models: ["m"] }],
+    commands: [
+      { label: "/name [text]", send: "/name", help: "name this conversation", class: "form", field: "text" },
+      { label: "/provider key <key>", send: "/provider key", help: "set the API key", class: "form", field: "password" },
+      { label: "/config edit", send: "/config edit", help: "change shell", class: "form", field: "text" },
+    ],
+  }));
+  const forms = page.__node("command-list").children[0].children.slice(1);
+  eq(
+    forms.map((n) => n.tag),
+    ["form", "form", "form"],
+    "every row the frame marks gets a field, whatever its label looks like"
+  );
+  eq(
+    forms.map((f) => f.children[0].tag + ":" + f.children[0].type),
+    ["input:text", "input:password", "input:text"],
+    "the frame's word is the input's type, so a credential is masked because the process said so"
+  );
+  eq(
+    forms.map((f) => f.children[1].textContent),
+    ["/name", "/provider key", "/config edit"],
+    "the button sends the row's own `send`, which is also what it says"
+  );
+  eq(forms[0].children[0].placeholder, "name this conversation", "the help is what the field suggests");
+  // A form row the frame does *not* mark is still a row of reference, which is the half that says
+  // the field comes from the frame rather than from the class.
+  page.applyState(d, JSON.stringify({
+    type: "state", provider: "stub", model: "m", providers: [{ name: "stub", models: ["m"] }],
+    commands: [
+      { label: "/name [text]", send: "/name", help: "name this conversation", class: "form", field: "text" },
+      { label: "/config edit", send: "/config edit", help: "change shell", class: "form" },
+    ],
+  }));
+  const mixed = page.__node("command-list").children[0].children.slice(1);
+  eq(mixed.map((n) => n.tag), ["form", "div"], "the wizard stays a row of reference");
+});
+
 check("a listing being read replaces the list, and the way back restores it", () => {
   const page = loadViewer();
   const d = page.newDoc();

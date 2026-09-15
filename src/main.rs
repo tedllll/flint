@@ -981,7 +981,7 @@ async fn interactive(
             };
             if let Some(viewer) = viewer.as_ref() {
                 let said = printer.term().answer_take();
-                viewer.live().command(&input, &said);
+                viewer.live().command(echoed_input(&input), &said);
             }
             match flow {
                 Flow::Continue => continue,
@@ -1596,6 +1596,33 @@ enum OnPage {
     Terminal,
 }
 
+/// The kind of value a row's argument is, when the page draws a field for it.
+///
+/// The page draws a field for a row that has one and no field for a row that does not, which is how
+/// `/provider add`, `/provider edit` and `/config edit` stay where they are: they ask for several
+/// values, one at a time, and a page with a single field would be guessing at the rest. `/config
+/// edit` is the one worth revisiting -- its keys are enumerable and only its values are free-form --
+/// and a page form for it would need a `/config set <key> <value>` the terminal does not have,
+/// which is a command invented for the page's benefit rather than one it was taught.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Field {
+    /// One line of text, shown as it is typed.
+    Text,
+    /// A credential: drawn masked, cleared once sent, and never repeated in a frame. See
+    /// `echoed_input`, which is the other half of that promise.
+    Password,
+}
+
+impl Field {
+    /// The word this kind is carried as, which is also the `type` attribute of the input element.
+    fn word(self) -> &'static str {
+        match self {
+            Field::Text => "text",
+            Field::Password => "password",
+        }
+    }
+}
+
 /// One row of `/help`, and one row of what the page is offered.
 ///
 /// There are three readers of this fact -- the terminal's help, the REPL's dispatch, and the page's
@@ -1615,6 +1642,8 @@ struct CommandHelp {
     help: &'static str,
     section: HelpSection,
     on_page: OnPage,
+    /// Set when the page may fill this row's argument in with a field of its own.
+    field: Option<Field>,
 }
 
 impl CommandHelp {
@@ -1632,6 +1661,29 @@ impl CommandHelp {
             help,
             section,
             on_page,
+            field: None,
+        }
+    }
+
+    /// A row whose one argument the page may type into a field.
+    ///
+    /// A separate constructor rather than a `row` with another argument, because the field is the
+    /// exception -- two rows have one, and every other row would be passing `None` to say so.
+    const fn field_row(
+        label: &'static str,
+        send: &'static str,
+        help: &'static str,
+        section: HelpSection,
+        on_page: OnPage,
+        field: Field,
+    ) -> Self {
+        Self {
+            label,
+            send,
+            help,
+            section,
+            on_page,
+            field: Some(field),
         }
     }
 }
@@ -1647,7 +1699,7 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp::row("/provider <name>", "/provider", "switch to one", HelpSection::Commands, OnPage::Selector),
     CommandHelp::row("/provider add", "/provider add", "set up a new provider (interactive)", HelpSection::Commands, OnPage::Form),
     CommandHelp::row("/provider edit <name>", "/provider edit", "change one (interactive)", HelpSection::Commands, OnPage::Form),
-    CommandHelp::row("/provider key <key>", "/provider key", "set the API key for the active provider", HelpSection::Commands, OnPage::Form),
+    CommandHelp::field_row("/provider key <key>", "/provider key", "set the API key for the active provider", HelpSection::Commands, OnPage::Form, Field::Password),
     CommandHelp::row("/provider rm <name>", "/provider rm", "delete one", HelpSection::Commands, OnPage::Danger),
     CommandHelp::row("/config", "/config", "show shell, steps, proxy", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/config edit", "/config edit", "change shell, steps, proxy", HelpSection::Commands, OnPage::Form),
@@ -1660,7 +1712,7 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp::row("/skills [name]", "/skills", "list skills, or print one as the model would see it", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/sessions", "/sessions", "list past sessions, numbered", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/resume <n|id>", "/resume", "switch to one of them", HelpSection::Commands, OnPage::Selector),
-    CommandHelp::row("/name [text]", "/name", "name this conversation", HelpSection::Commands, OnPage::Form),
+    CommandHelp::field_row("/name [text]", "/name", "name this conversation", HelpSection::Commands, OnPage::Form, Field::Text),
     CommandHelp::row("/archive <n|id>", "/archive", "file one away, out of the list", HelpSection::Commands, OnPage::Danger),
     CommandHelp::row("/delete <n|id>", "/delete", "delete one", HelpSection::Commands, OnPage::Danger),
     CommandHelp::row("/new", "/new", "start a fresh conversation", HelpSection::Commands, OnPage::Button),
@@ -1830,15 +1882,21 @@ async fn run_report(
 /// the *request*, not about a listing, and a page that asked for something it may not have should
 /// not be able to make this terminal print anything. The page is told too, in the panel it opened,
 /// or it would sit waiting for an answer that is never coming.
+///
+/// The line is echoed through `echoed_input` like any other answer: a refusal names what was asked
+/// for, and a page that posted `/provider key <key>` to the read route -- which is refused, because
+/// reading is not what that command does -- would otherwise have its key printed here and sent to
+/// every other page watching.
 fn report_refused(asked: &str, printer: &Printer<'_>, viewer: &Option<web::Viewer>) {
-    let said = format!("{asked} is not a report -- the page may read only the commands its own menu offers, with a value it carries");
+    let shown = echoed_input(asked);
+    let said = format!("{shown} is not a report -- the page may read only the commands its own menu offers, with a value it carries");
     printer.term().line(format_args!(
         "{} {}",
         printer.style(RED, "refused:"),
         printer.dim(&said)
     ));
     if let Some(live) = viewer.as_ref().map(web::Viewer::live) {
-        live.report(asked, &[said]);
+        live.report(shown, &[said]);
     }
 }
 
@@ -2741,6 +2799,12 @@ fn page_commands(agent: &agent::Agent) -> serde_json::Value {
             if !row.values.is_empty() {
                 json["values"] = serde_json::json!(row.values);
             }
+            // And the same for the rows the page may fill in with a field of its own. The word is
+            // the input's `type`, so the page is told *how* to draw it rather than left to decide
+            // from the command's name that a key is a secret.
+            if let Some(field) = row.field {
+                json["field"] = serde_json::json!(field.word());
+            }
             json
         })
         .collect();
@@ -2764,6 +2828,8 @@ struct PageRow {
     /// permission as much as the options: `/provider <name>` takes a value too, and running that one
     /// quietly would start a local engine without printing a word anywhere.
     values: Vec<String>,
+    /// The kind of field the page may draw for this row's argument, if it may draw one at all.
+    field: Option<Field>,
 }
 
 /// Every row the page may offer, with the values it may be given.
@@ -2783,9 +2849,35 @@ fn page_rows(agent: &agent::Agent) -> Vec<PageRow> {
                     "/skills" => agent.skills().to_vec(),
                     _ => Vec::new(),
                 },
+                field: row.field,
             })
         })
         .collect()
+}
+
+/// What the feed is told asked for a command's answer.
+///
+/// The line itself, except when the command's argument is a credential. `/provider key <key>` writes
+/// a key into the config file, and a `command` frame goes to *every* page connected to this run and
+/// stays in the event ring -- so echoing the line would hand a key back to the browser that just
+/// typed it into a masked field, and to anything else watching. The row says which commands those
+/// are (`Field::Password`), so a command added later is redacted by its own row rather than by a
+/// list here that nobody would remember to update. The bare `send` is what the page gets instead:
+/// its own block then reads `/provider key`, which is what the reader did.
+fn echoed_input(line: &str) -> &str {
+    for row in COMMANDS {
+        if row.field == Some(Field::Password) && takes_argument(row.send, line) {
+            return row.send;
+        }
+    }
+    line
+}
+
+/// Whether `line` is this command *with* an argument after it, rather than a longer word that merely
+/// begins with the same letters.
+fn takes_argument(send: &str, line: &str) -> bool {
+    line.strip_prefix(send)
+        .is_some_and(|rest| rest.starts_with(' '))
 }
 
 impl OnPage {
