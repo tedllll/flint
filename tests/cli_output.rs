@@ -410,6 +410,137 @@ fn meta_line_in(id: &str, cwd: &std::path::Path) -> String {
     )
 }
 
+/// `--cwd` is the directory the run works in, whatever the process's own directory is.
+///
+/// A program that drives flint one process per question does not start in the project it is asking
+/// about -- it names it. Everything that makes a conversation findable later has to agree on that
+/// directory: the tools run in it, the `meta` line records it, and `--continue` matches on it. So
+/// this drives the binary from one directory with `--cwd` naming another, twice, and requires the
+/// second run to continue the first one's conversation. Two different process directories are used,
+/// because that is the case a caller that passes a *relative* path would otherwise lose: the
+/// recorded path would be resolved against the next process's directory and match nothing.
+#[tokio::test]
+async fn a_run_works_in_the_directory_it_was_given() {
+    let server = MockServer::start().await;
+    answer_once(&server).await;
+    let home = test_home("cwd-flag", &server.uri());
+    let project = home.join("project");
+    let elsewhere = home.join("elsewhere");
+    let also_elsewhere = home.join("also-elsewhere");
+    for dir in [&project, &elsewhere, &also_elsewhere] {
+        std::fs::create_dir_all(dir).expect("directory");
+    }
+
+    // Run one: started in a directory that has nothing to do with the project.
+    let first = binary()
+        .current_dir(&elsewhere)
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .args(["--cwd"])
+        .arg(&project)
+        .args(["-p", "the first question"])
+        .output()
+        .expect("failed to run flint");
+    assert!(
+        first.status.success(),
+        "flint --cwd failed: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let sessions = home.join("sessions");
+    let files: Vec<std::path::PathBuf> = std::fs::read_dir(&sessions)
+        .expect("read sessions")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+        .collect();
+    assert_eq!(files.len(), 1, "one run, one session: {files:?}");
+    let text = std::fs::read_to_string(&files[0]).expect("read the session");
+    let meta = text.lines().next().expect("a meta line");
+    let recorded: serde_json::Value = serde_json::from_str(meta).expect("the meta line is JSON");
+    let recorded = recorded["cwd"].as_str().unwrap_or_default();
+    // Compared canonicalised, because what is recorded is the path as the caller spelled it made
+    // absolute -- deliberately not canonicalised, which on Windows means a verbatim `\\?\` prefix
+    // in a file people read and edit by hand.
+    let want = std::fs::canonicalize(&project).expect("canonical project");
+    let got = std::fs::canonicalize(recorded).expect("canonical recorded cwd");
+    assert_eq!(
+        got, want,
+        "the session did not record the directory the run was asked for: {meta}"
+    );
+
+    // Run two: a *different* process directory, the same project. The conversation must be found.
+    let second = binary()
+        .current_dir(&also_elsewhere)
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .args(["--cwd"])
+        .arg(&project)
+        .args(["--continue", "-p", "the second question"])
+        .output()
+        .expect("failed to run flint");
+    assert!(
+        second.status.success(),
+        "flint --cwd --continue failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        stderr.contains("resumed"),
+        "the conversation held in --cwd was not found from another process directory: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_dir(&sessions)
+            .expect("read sessions")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
+            .count(),
+        1,
+        "continuing the conversation started a second one"
+    );
+    let after = std::fs::read_to_string(&files[0]).expect("read the session again");
+    assert!(
+        after.contains("the second question"),
+        "the second run did not append to the conversation in --cwd: {after}"
+    );
+}
+
+/// `--cwd` naming something that is not a directory is refused, and nothing is created.
+///
+/// The alternative -- letting the run start and watching every tool fail -- reads as flint being
+/// broken rather than as a typo in the caller, and creating the directory would leave one behind
+/// from a run that never happened.
+#[test]
+fn a_cwd_that_is_not_a_directory_is_refused() {
+    let home = test_home("cwd-missing", "http://127.0.0.1:1/v1");
+    let missing = home.join("not-a-directory-at-all");
+
+    let out = binary()
+        .current_dir(&home)
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .args(["--cwd"])
+        .arg(&missing)
+        .args(["-p", "anything"])
+        .output()
+        .expect("failed to run flint");
+
+    assert!(!out.status.success(), "--cwd with no such directory was accepted");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--cwd"),
+        "the refusal must name the flag whose value was wrong: {stderr}"
+    );
+    assert!(!missing.exists(), "--cwd created the directory it was given");
+    let sessions: Vec<_> = std::fs::read_dir(home.join("sessions"))
+        .expect("read sessions")
+        .filter_map(|e| e.ok())
+        .collect();
+    assert!(
+        sessions.is_empty(),
+        "a refused run left a session behind: {sessions:?}"
+    );
+}
+
 /// `--continue` continues the conversation held in *this* directory, not the newest one anywhere.
 ///
 /// It used to be the newest file in the home, which is the wrong answer for anyone with two

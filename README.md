@@ -206,6 +206,12 @@ The vocabulary is closed and small: `session.started`, `turn.started`, `message.
 is plain by contract because its output is the child's own bytes. Ctrl-C during a `--json`
 run ends the process; the session file keeps every event that was complete.
 
+A caller that does not start in the project it is asking about names it with `--cwd`: the
+path is resolved absolutely at startup and refused if it is not a directory, and the
+resolved path is what goes into the session's `meta` line — the same value `--continue`
+matches on, so a program driving flint one process per question finds its own conversation
+again from any directory it happens to run in.
+
 ### Watching a run in a browser
 
 A terminal is a poor renderer for a long answer: the scroll region fights you, a tool call is

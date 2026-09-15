@@ -1010,6 +1010,20 @@ watched red by making the choice ignore the directory again: a lib test that the
 home loses to the one held in this directory, and two e2e tests -- the other directory's file is
 byte-identical afterwards and this one's grew, and the empty directory gets a new session plus the note.
 
+**And the directory a run is *given* now means one thing — same commit.** `--cwd` was
+`PathBuf::from(dir)`: a relative path stayed relative. Everything downstream then disagreed about
+which directory the run was in — the tools used it as written, the session's `meta` line recorded it
+as written, and `--continue` compares the two — so a caller that passed a relative path recorded a
+relative one, and the next process (started somewhere else, which for a program driving flint is every
+time) resolved it to a different directory and matched nothing. It is now made absolute with
+`std::path::absolute`, deliberately *not* `canonicalize`: canonicalising on Windows prepends the
+verbatim `\\?\` prefix, and this path goes into a file meant to be read and edited by hand — caught by
+an existing `json_output` test, which is the only reason it is not in the tree. A `--cwd` that is not a
+directory is refused rather than created, and the message says which of the two it is. Two e2e tests: a
+run driven from one directory with `--cwd` naming another records that directory and then continues its
+own conversation from a *third* process directory, and a `--cwd` that does not exist is refused with
+nothing created and no session left behind.
+
 **Done in the same round, recorded so it is not re-done**: themed scrollbars (the default grey ones
 were the complaint); a draggable sidebar and a draggable reading width, with a hairline hint at
 rest on the right hand because there is no seam at the text's edge to be discovered by; the

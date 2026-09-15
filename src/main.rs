@@ -252,8 +252,41 @@ async fn real_main() -> Result<i32> {
         return Ok(0);
     }
 
+    // The directory this run works in, resolved once and absolutely.
+    //
+    // Three things have to agree on it: the tools run in it, the session's `meta` line records it,
+    // and `--continue` finds a conversation by comparing the two. A relative `--cwd` recorded as
+    // written would be resolved later against whatever directory the *next* process started in,
+    // and a program driving flint one process per question starts somewhere different every time
+    // -- so the conversation would become unfindable by the caller that created it, which is the
+    // quietest possible way to lose one.
+    //
+    // `absolute`, not `canonicalize`: canonicalising a path on Windows prepends the verbatim `\\?\`
+    // prefix, and this path is *recorded*, in a file meant to be read and edited by hand. Symlinks
+    // are left alone for the same reason -- the session should say where the run was asked to work,
+    // not where that turned out to point. Spelling differences between two paths to one directory
+    // are handled where they matter, by the comparison in `session::latest_for`.
+    //
+    // A directory that does not exist is refused rather than created: every tool in the run would
+    // fail for a reason that has nothing to do with the question, which reads as flint being
+    // broken, and creating it would leave a directory behind from a run that was never meant to
+    // happen.
     let cwd = match &args.cwd {
-        Some(dir) => PathBuf::from(dir),
+        Some(dir) => {
+            let path = std::path::absolute(dir)
+                .with_context(|| format!("--cwd {dir}: cannot be resolved"))?;
+            if !path.is_dir() {
+                return Err(anyhow!(
+                    "--cwd {dir}: {}",
+                    if path.exists() {
+                        "not a directory"
+                    } else {
+                        "no such directory"
+                    }
+                ));
+            }
+            path
+        }
         None => std::env::current_dir().context("cannot determine working directory")?,
     };
 
