@@ -1156,6 +1156,141 @@ line no longer crosses the composer; **the page's own log, written by default** 
 the hand's code made the boot's first paint throw, taking the sidebar, the sessions and the feed
 with it; and `/stop`, the interrupt as a short word, reachable from the composer today.
 
+### 10. flint as a function a program can call — **planned**
+
+flint answers; it cannot yet be *trusted as a function*. A caller that acts on the result — writes a
+config, queues a job, retries a batch, feeds it data it did not author — has to know four things
+flint does not say: why the run ended, whether the answer is complete, whether the value is
+trustworthy, and whether retrying it is safe. Three of the items below were found by using flint from
+Python with a program on the other end rather than by reading the code, which is the only way to find
+this class: every one of them is invisible from a terminal.
+
+**What other "one command, one answer" tools converged on**, and which of the six flint has:
+
+| The property | Who works this way | flint |
+|---|---|---|
+| the answer is separated from the noise | `simonw/llm`, `mods -r` | ✓ stdout is only the stream |
+| the result says **why the run ended** | Claude Code `-p --output-format json`, whose `subtype` is `success`, `error_max_budget_usd`, … | ✗ |
+| structured output is a field, not prose | the same: `structured_output` beside `result` | ✓ the `result` frame |
+| cost and duration are part of the result | the same: `total_cost_usd`, `duration_ms`, `model_usage` | ✗ |
+| the conversation can be named and resumed | the same: `session_id`, `--resume` | ✓ |
+| the exit code classifies the failure | `sysexits.h`: 2 usage, 65 data error, 69 unavailable, 75 retryable. "A CLI that always exits 0 (or always 1) hides this signal, forcing agents to parse error text with regex" | ✗ 0 and 1 only |
+
+That last row is the whole section in one line. flint currently does exactly what the convention was
+written to warn against.
+
+#### A. Cannot be done at all
+
+1. **A large input.** Measured from Python: a 30000-character prompt is fine, 33000 is
+   `FileNotFoundError [WinError 206]`, because the prompt can only travel as an argument and Windows
+   caps a command line at ~32k. The failure is *not* flint's: it is `subprocess` refusing to start,
+   which is the worst way to learn this. A caller with a document, a rule table or a diff has no way
+   in at all.
+2. **A budget for one call.** `max_steps` is a runaway guard, and exhausting it emits a `warning`
+   string. Nothing bounds wall-clock time or spend from flint's side, so a caller cannot ask for
+   "something in thirty seconds, or tell me you could not" and cannot cap what one call costs.
+   Claude Code's `error_max_budget_usd` is evidence that "the budget ran out" is a first-class
+   outcome rather than an error string.
+3. **The answer in a file.** Only a schema run has a `result` line to read. Everything else is prose
+   the caller must reassemble from deltas or `message.completed` — so every caller writes the same
+   parser, and each one can get it subtly wrong.
+4. **A preflight.** There is no cheap "is this provider usable right now" — a missing key or an
+   unreachable endpoint is discovered by a real call failing, after it may have spent money or run a
+   tool. `debug prompt-input` answers a different question (what would be sent) without needing a key.
+5. **Retry safety.** Nothing identifies a request. A caller that times out and retries may repeat the
+   tools the first attempt already ran. The tool events are in the stream, so the information exists,
+   but nothing states it as a contract and nothing tests it.
+
+*One item was withdrawn after checking*: `--readonly` **does** exist as a one-shot flag
+(`--readonly`, `--no-edit`), so a query-shaped call can already refuse to write. The audit assumed it
+was config-and-slash-command only. What remains true is that it is all-or-nothing, which is a
+decision, not a gap.
+
+#### B. Cannot be told apart
+
+1. **Why the run ended — the one that matters most.** `turn.completed` carries two token counts and
+   nothing else. `error` carries a message and nothing else. The step limit is a `warning` string.
+   So to a program, a complete answer, a truncated answer, a refusal and a tool failure that still
+   produced prose are the *same shape*. Measured, and it is exactly the trap: with
+   `{"type": "string"}` as the schema, `{"last_trading_day": "error: 无法确定"}` validates — the type
+   is right, it is a string, and it says the model could not tell. A caller acting on that value has
+   a bug that nothing in the interface reported.
+2. **One exit code for everything.** Usage errors, a missing key, an unreachable endpoint, a rate
+   limit, a schema that never matched and a run with no answer all exit 1. Callers branch on exit
+   codes; the only alternative offered is matching text.
+3. **Retryable or not.** No signal distinguishes "try again in ten seconds" from "this will fail
+   identically forever, fix the input".
+4. **Whether the turn changed anything.** Tool calls are visible individually, but no summary says
+   which files were written or which commands ran. For a caller deciding whether it is safe to
+   proceed, that is the first question, and today it is answered by reading the whole event stream.
+5. **What it cost.** Token counts for the last turn are in `turn.completed`; cost, wall-clock
+   duration and how many provider retries happened (currently only on stderr) are not.
+
+#### C. Holes
+
+1. **A stopped run exits 0 — introduced by the round above this one, found by this audit.** `/stop`
+   drops the turn and commits the half-answer, then exits 0 with a `warning` on the stream. A caller
+   that branches on the exit code — which is what callers do — treats a truncated answer as a
+   finished one. The stream is honest; the exit code lies. This one is flint's own bug and is fixed
+   as step 1.
+2. **Stream integrity is a promise with no test.** `--json` means "one object per line on stdout and
+   nothing else". A stray `println!` anywhere on that path, or a child process inheriting stdout,
+   breaks every caller at once. Nothing holds the line today.
+3. **Retrying is not safe** (A5), and a truncated turn makes it worse: the answer says nothing about
+   what already happened.
+4. **Injection is action injection.** flint has no permission layer by decision, and it reads data
+   with tools — so data that a caller fed in can direct actions. `--readonly` is the only gate and it
+   is global, which means "ask me a question" and "do something for me" cannot be separated by a
+   caller that handles untrusted input.
+5. **A session reused for a second purpose.** `--continue` carries the earlier conversation into the
+   new question. Data crosses purposes, and the answer is coloured by context the caller did not
+   intend — a silent fault, because the run succeeds.
+6. **A schema that passes is not a value that is true.** The subset has no `pattern` and no `format`
+   by decision (the reasons are in the code), which leaves dates, identifiers and enumerations to
+   `enum` or to the caller. The documentation has to say this plainly, because a caller who reads
+   "schema" as a guarantee will act on a string that says the model could not determine anything.
+
+#### The order
+
+1. **An outcome, and exit codes that classify.** The turn's end says how it ended — `complete`,
+   `incomplete` (step limit), `stopped`, `refused` — and the process exits with `sysexits`-aligned
+   codes: 2 usage, 65 the answer was not usable, 69 the provider was unavailable, 75 retryable, 130
+   interrupted. This is step 1 because every other item is judged by it, and because it fixes C1.
+   Not a new event type: the end of the stream already exists and a field on it costs consumers
+   nothing.
+2. **`error.code`**, produced where the cause is known — in `provider` for no key, network and status
+   codes; in `agent` for a schema that never matched; in `main` for arguments. Classified by matching
+   on the error's text at the edge would be the same fragility this is meant to remove.
+3. **`--result-file`** (the answer written where the caller asked, so no caller parses a stream to
+   get it) and **`--list-sessions --json`** (so a caller does not reimplement the session-directory
+   naming, which is an internal detail).
+4. **`@path`** — a file named inside the prompt and inlined by flint before the request. This is how
+   A1 is solved, and it is deliberately not "tell the model a path": content that must be seen has to
+   *be* in the prompt, where it is not subject to the model's discretion, to `read`'s 2000-line
+   default, or to the 30000-character tool-output spill. It also composes with prose ("compare
+   `@a.txt` with `@b.txt`") and removes shell quoting from the caller's life.
+5. **`--max-seconds`**, so a caller can ask for a bounded run and get `incomplete` rather than a
+   process that is still going.
+6. **A stream-integrity test** — the thing C2 says does not exist: a run's stdout contains nothing
+   but parseable frames, asserted on raw bytes.
+7. **The Python side, once flint can be told apart.** `Chat`, which pins the session path
+   (`continue_last` re-derives "the latest for this working directory" on every call, which is a race
+   the moment there are two workers — and one file has one writer by design); streaming callbacks, so
+   the deltas and the heartbeat reach the caller while they happen; `history()` to read the record
+   back (this is how "the half-answer was really committed" was verified); `paths=` / `attach=` /
+   `inline=` as three separate arguments, because their guarantees differ and folding them into one
+   would leave the caller unable to say which is a promise and which is a hope; `map_calls(workers=)`
+   with one session per worker (measured: 190 ms per call with an instant stub, so 100 calls are
+   ~19 s in series and ~3 s on eight threads); and `require_read` for the case where a path named in
+   prose has to be *seen* to have been read.
+
+**Deliberately not in this section**: a resident `flint serve` (190 ms per call does not buy back the
+complexity of a second process lifetime, and a resident mode was explicitly not wanted), an asyncio
+API (every call is a process; `await` would add a second surface and no capability), Python-side tool
+callbacks (a protocol to invent, against "no MCP and no subagents"), and `pattern`/`format` in the
+schema subset (a dependency and a rabbit hole — `enum` and the caller's own check are the substitute,
+and C6 is the note that the documentation has to say so).
+
 ## Small, agreed, unscheduled
 
 - ~~`read`/`write`/`edit` taking `file_path`, with `path` kept as an alias so nothing breaks.~~

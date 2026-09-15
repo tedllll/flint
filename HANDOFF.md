@@ -6,6 +6,14 @@ of it.
 
 ## Where things stand
 
+**The next round is §10 of `ROADMAP.md`: "flint as a function a program can call" — planned, not
+started, and written down in full there.** It is an audit in three buckets (what cannot be done at
+all, what cannot be told apart, what is a hole), the reference points it was measured against
+(Claude Code's `-p --output-format json`, `llm`, and the `sysexits.h` convention for exit codes), and
+the order to build it in. The first step is an outcome on the end of a turn plus exit codes that
+classify the failure — which also fixes a bug this audit found in flint's own recent work: a run
+stopped with `/stop` exits 0 while carrying a truncated answer. Start there.
+
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
 As of the commit that carries this file, `cargo test` is 433 passing, 1 ignored (279 lib, 2 in
 the binary's own tests, 33 `agent_loop`, 58 `cli_output`, 14 `json_output` (7 structured
