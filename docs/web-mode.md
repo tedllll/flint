@@ -741,6 +741,29 @@ with no `field` stays a row of reference, which is how `/provider add`, `/provid
 **Not measured**: a browser, as ever — and the masked field has never been typed into by a person, so
 what is pinned is the markup and the route, not the browser's own password-manager behaviour.
 
+### A conversation's own actions, one level down — measured, 2026-09-15
+
+The last thing added to the page, and the only part of §8 asked for after using it: archiving or
+removing a conversation meant opening the command panel, finding the destructive row and reading the
+number off the sidebar by eye. The sidebar row is the conversation, so the row carries a `⋯` button
+that opens a short menu — the panel's shape one level down — and the rows in that menu print the whole
+line they will send before they send it.
+
+| Claim | How | Result |
+|---|---|---|
+| The row has its own control, dim until the row is pointed at | Node, over the stub DOM | one `button` per row, reading `⋯`, titled "actions for this conversation"; no menu node while `doc.menu` is unset |
+| The menu is the frame's rows, not a list in the page | `tests/web_view.rs` over the page's bytes, and Node | the items are `/archive 3` and `/delete 3` from a frame offering four danger rows — the `from: "providers"` one and the `selector` one are not there. Mutation-checked: asking for `"providers"` instead fails both |
+| The second press sends the frame's line | Node, and by construction | `command.send + " " + session.n` — the line is on screen from the moment the menu opens |
+| The menu belongs to one conversation | Node | a menu whose `id` is another row's is not drawn on this one |
+| An empty menu says so | Node | a frame with no `from: "sessions"` rows draws `nothing to do from here` rather than an empty box |
+| It cannot outlive its numbers | `web/view.html`, read | a `reset` clears `doc.menu`, and `readSessions` closes a menu whose conversation is gone — the same argument `doc.confirm` is built on, because the `n` in a menu is a position |
+
+**Not measured**: a browser, as ever. Nobody has opened this menu with a real pointer, so its position
+(`absolute`, against a `relative` row), its dismissal (the button toggles it, a `reset` clears it, and
+a click elsewhere does **not** close it) and its behaviour while the sidebar scrolls are reasoned
+rather than seen. The dismissal is the one worth watching in a real browser: the panel's choice list
+has an explicit `‹ commands` row to close it, and this menu has only its own button.
+
 **Deliberately not built**: `/config edit` on the page. Its keys are enumerable and its values are
 free-form, so a page form would send several settings at once while the terminal prompts for them one
 at a time; it would need a `/config set <key> <value>` the terminal does not have, and a command

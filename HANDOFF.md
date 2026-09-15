@@ -7,9 +7,9 @@ of it.
 ## Where things stand
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 387 passing, 1 ignored (257 lib, 2 in
+As of the commit that carries this file, `cargo test` is 388 passing, 1 ignored (257 lib, 2 in
 the binary's own tests, 33 `agent_loop`, 49 `cli_output`, 4 `json_output`, 4 `search_tool`, 20
-`term_capture` plus the ignored cost measurement, 18 `web_view`), `cargo clippy --all-targets` is
+`term_capture` plus the ignored cost measurement, 19 `web_view`), `cargo clippy --all-targets` is
 silent, and both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass.
 
 **The last sessions were on Windows** (10.0.26200, AMD64, rustc 1.98.1, PowerShell 5.1.26100.6584
@@ -34,12 +34,21 @@ Written for a cold start: a different machine, and possibly a session with no me
 one. The repository is the whole state — there is no index, no cache and no database anywhere in
 flint, on purpose — so cloning it and running the gate below is all that "catching up" means.
 
-**Where it was left.** `main` at the commit that adds `--fork`
-(`feat: --fork copies a conversation instead of continuing it`), plus the documentation commit that
-carries this file, working tree clean, `origin/main` level with it. **§8 is finished** — all five
-controls are on the page — §9's last open hole is closed, and of the roadmap's small list one item is
-left: `examples/live_turn.rs` still keeps its own copy of `run_turn`'s event handling and has drifted
-twice. The counts are in the section above and were re-run to write this paragraph, not remembered.
+**Where it was left.** `main` at the commit that puts a conversation's actions on its own row
+(`feat: a conversation's row carries its own actions`), plus the documentation commit that carries this
+file, working tree clean, `origin/main` level with it. **§8 is finished** — all five controls are on the
+page, and the destructive rows now have a second home on the sidebar — §9's last open hole is closed,
+and of the roadmap's small list one item is left: `examples/live_turn.rs` still keeps its own copy of
+`run_turn`'s event handling and has drifted twice. The counts are in the section above and were re-run
+to write this paragraph, not remembered.
+
+**The installed binary is older than the tree, and that matters for looking at the page.** `flint` on
+this machine's PATH resolves to `C:\Users\zhangzhuo\bin\flint.exe`, which is a copy of
+`target\release\flint.exe` as it was on 2026-09-14 16:08 — before the panel, the selectors, the forms,
+the destructive controls and the sidebar menu. The page is `include_str!`-embedded, so a page change
+does not reach an existing binary: `cargo build --release` and copy it over, and the `commands` panel
+appears in the header (a `<details>`, opened by clicking the word). A running `flint` holds that file
+open, so the copy needs every flint window closed first — measured twice.
 
 **What the other machine needs.**
 
@@ -55,7 +64,7 @@ twice. The counts are in the section above and were re-run to write this paragra
 
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
-cargo test                                        # 387 passing, 1 ignored
+cargo test                                        # 388 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed
@@ -602,6 +611,40 @@ free-form, so a page form would send several settings at once, and the terminal'
 them one at a time — it would need a `/config set <key> <value>` that the terminal does not have.
 Inventing a command for the page's benefit is the thing §8's design exists to prevent. The page
 therefore writes nothing into the config file in this round.
+
+### A conversation's row carries its own actions
+
+The one part of the page asked for **after using it**, and the first thing this session added that no
+plan asked for: archiving or removing a conversation meant opening the command panel, finding the
+destructive row there and reading the number off the sidebar by eye. The row *is* the conversation, so
+each row now carries a `⋯` button that opens a short menu — the panel one level down, the shape DSH
+uses — and the rows in it print the whole line they will send (`/delete 3`) before they send it.
+
+**Built from the frame, through the helper the panel also uses.** `destroyingRows(doc, from)` is now
+the single place that reads "a row that destroys something and says where its argument comes from", so
+the panel's choice lists and the sidebar's menu cannot disagree about what may be sent at another
+conversation. The page still does not contain the word `/delete`.
+
+**`doc.menu` is named by the conversation's id, not its number**, and is cleared by a `reset` and by a
+list re-read that no longer holds it. The argument is `doc.confirm`'s, one level down: the numbers in a
+menu are positions, and a sidebar that shifted under an open menu would aim the next press at the
+conversation below the one that was meant.
+
+**The conversation you are in is offered the actions too**, and the terminal's refusal is the answer
+("/new starts a fresh one; then this one can be filed away by its number"). Hiding the row would be the
+page deciding a rule the terminal owns.
+
+**Measured**: `sessionRow(doc, session)` is exported and driven under Node with a hand-written state
+frame — the row's three children, the `⋯` button's text and title, the menu's two `row danger` items
+reading `/archive 3` and `/delete 3` (the frame's `from: "providers"` and `selector` rows are *not*
+there), a menu whose id is another row's drawing nothing, and an empty frame drawing `nothing to do
+from here`. `tests/web_view.rs` pins the composition over the page's own bytes, including that both
+the class and the `from` are required. Mutation-checked: asking `destroyingRows` for `"providers"`
+fails both the Node check and the policy test.
+
+**Not measured**: a browser, as ever — so the menu's placement, and its dismissal (the button toggles
+it, a `reset` clears it, and a click elsewhere does **not** close it) are reasoned rather than seen.
+That dismissal is the thing worth watching first when someone finally looks at this page with a mouse.
 
 ### `--fork` copies a conversation instead of continuing it
 

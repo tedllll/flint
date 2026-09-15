@@ -652,6 +652,62 @@ check("a destructive row opens its choices rather than sending", () => {
   );
 });
 
+check("a conversation's row carries its own actions behind one button", () => {
+  const page = loadViewer();
+  const d = page.newDoc();
+  page.applyState(d, JSON.stringify({
+    type: "state", provider: "stub", model: "m",
+    providers: [{ name: "stub", models: ["m"] }],
+    commands: [
+      { label: "/archive <n|id>", send: "/archive", help: "file it away", class: "danger", from: "sessions" },
+      { label: "/delete <n|id>", send: "/delete", help: "delete one", class: "danger", from: "sessions" },
+      { label: "/provider rm <name>", send: "/provider rm", help: "delete one", class: "danger", from: "providers" },
+      { label: "/model <name>", send: "/model", help: "pick one", class: "selector" },
+    ],
+  }));
+  const session = { n: 3, id: "173-9", label: "the branch", current: false };
+  const says = (n) => (n.children[0] ? n.children[0].textContent : n.textContent);
+  const menuOf = (row) => row.children.find((n) => n.className === "menu");
+
+  const closed = page.sessionRow(d, session);
+  eq(closed.tag, "li", "a conversation is a list item");
+  eq(closed.children.map((n) => n.tag), ["span", "span", "button"], "the number, the label, and one button");
+  eq(closed.children[2].textContent, "\u22ef", "the button is the three dots, without a word");
+  eq(closed.children[2].title, "actions for this conversation", "and explains itself on hover");
+  eq(menuOf(closed), undefined, "closed: no menu is drawn");
+
+  // Opened, on the row the document names -- by id, because the numbers under a menu are positions
+  // and a list that shifted under it would aim the next press at the wrong conversation.
+  d.menu = { n: 3, id: "173-9" };
+  const open = page.sessionRow(d, session);
+  const menu = menuOf(open);
+  if (!menu) throw new Error("the open row has no menu");
+  eq(menu.children.map((n) => n.tag), ["button", "button"], "one row per action the frame offers");
+  eq(menu.children.map(says), ["/archive 3", "/delete 3"], "each row is the line it will send");
+  eq(menu.children.map((n) => n.className), ["row danger", "row danger"], "both of them destroy something");
+  eq(
+    menu.children.map((n) => n.children[1].textContent),
+    ["file it away", "delete one"],
+    "the description is the frame's own, not a word this page made up"
+  );
+
+  d.menu = { n: 3, id: "someone-else" };
+  eq(menuOf(page.sessionRow(d, session)), undefined, "a menu belongs to the row it names");
+
+  // The conversation you are in is offered them too, and the *terminal* is what refuses: its
+  // refusal explains itself ("/new starts a fresh one; then this one can be filed away"), and a
+  // page that hid the row would be deciding a rule it does not own.
+  d.menu = { n: 1, id: "111-1" };
+  const current = menuOf(page.sessionRow(d, { n: 1, id: "111-1", label: "this one", current: true }));
+  eq(current.children.length, 2, "the open conversation is offered them as well");
+
+  // A frame that offers no way to act on another conversation says so rather than drawing nothing:
+  // an empty menu is indistinguishable from a menu that failed to draw.
+  d.menu = { n: 3, id: "173-9" };
+  page.applyState(d, JSON.stringify({ type: "state", provider: "stub", model: "m", commands: [] }));
+  eq(menuOf(page.sessionRow(d, session)).children.map(says), ["nothing to do from here"], "an empty menu says so");
+});
+
 check("a listing being read replaces the list, and the way back restores it", () => {
   const page = loadViewer();
   const d = page.newDoc();

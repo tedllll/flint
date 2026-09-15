@@ -630,6 +630,45 @@ fn a_destructive_row_opens_its_choices_and_sends_on_the_second_press() {
     );
 }
 
+/// A conversation's row carries its own actions, behind one button, and the frame says which.
+///
+/// Asked for after using the page: deleting a conversation meant finding the command panel, reading
+/// `/delete <n|id>` there and picking the number off the sidebar by eye. The row is where the
+/// conversation is, so the row is where its actions belong -- and the shape is the panel's, one
+/// level down: a button that opens a short list, and a row in that list that prints the whole line
+/// it will send (`/delete 3`) before it sends it.
+///
+/// The list is built from the **frame**, like every other control: the rows the state frame marks
+/// `class: "danger"` with `from: "sessions"`. This file does not know the word `/delete`, and a
+/// command the terminal gains or loses moves the menu with no edit here.
+#[test]
+fn a_conversation_row_carries_its_own_actions() {
+    let drawn = from("function sessionRow(doc, session)", 80);
+    for (needed, why) in [
+        ("el(\"button\", \"more\"", "the row has a control of its own"),
+        ("doc.menu", "the open menu is document state, not a hidden node"),
+        ("destroyingRows(doc, \"sessions\")", "the actions come from the frame, not from a word in this file"),
+        (
+            "command.send + \" \" + session.n",
+            "the line it sends is the frame's `send` and the row's own number",
+        ),
+        ("nothing to do from here", "an empty menu says so rather than drawing nothing"),
+    ] {
+        assert!(
+            drawn.contains(needed),
+            "the row's menu is not drawn through `{needed}` ({why}): {drawn}"
+        );
+    }
+    // One place reads `from` for the sidebar, and it is the same test the panel's choice lists make:
+    // a row is an action on another conversation only if it destroys something *and* says where its
+    // argument comes from.
+    let helper = from("function destroyingRows(doc, from)", 12);
+    assert!(
+        helper.contains("command.class === \"danger\"") && helper.contains("command.from === from"),
+        "the helper must require both the class and the source of the argument: {helper}"
+    );
+}
+
 /// A conversation archived or deleted in the terminal has to leave the sidebar.
 ///
 /// Reported from a real session: history tidied in the terminal and the page still offering it.

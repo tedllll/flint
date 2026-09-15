@@ -731,6 +731,25 @@ Two decisions were forced by that:
   would point the next press at the conversation below the one that went. The same reason makes the
   sidebar's own re-read redraw an open list: `/delete` in the terminal shifts every number under it.
 
+**The destructive rows have a second home, on the conversation they act on — the sidebar's own menu,
+2026-09-15.** Asked for after using the page: deleting a conversation meant opening the command panel,
+finding the `/delete <n|id>` row and reading the number off the sidebar by eye. The row *is* the
+conversation, so the row now carries a `⋯` button that opens a short menu -- the panel one level down,
+in the shape DSH uses -- and a row in that menu prints the whole line it will send (`/delete 3`) before
+it sends it. Two decisions worth keeping:
+
+- **The menu is built from the frame**, like every other control, and through the same helper the
+  panel's choice lists use: the rows the state frame marks `class: "danger"` with `from: "sessions"`.
+  The page still does not know the word `/delete`, and a command the terminal gains or loses moves both
+  controls with no edit to the page.
+- **The conversation you are in is offered the actions too.** The terminal refuses that one and says
+  why ("/new starts a fresh one; then this one can be filed away by its number"); a page that hid the
+  row would be deciding a rule the terminal owns, and a menu with a hole in it explains nothing.
+  The open menu is named by the conversation's **id** rather than its number, and closed by a `reset`
+  or by a list re-read that no longer holds it -- the numbers in it are positions, and a list that
+  shifted under an open menu would point the next press at the conversation below the one that was
+  meant. That is the same argument `doc.confirm` is built on, one level down.
+
 **§8 is built.** All five controls are on the page — the buttons, the panels that read, the selectors,
 the forms and now the destructive ones — and what is left is not a class but three residues, each
 written down where it belongs: `/config edit` as a page form (it would need a command the terminal
