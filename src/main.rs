@@ -673,7 +673,7 @@ async fn real_main(args: Args) -> Result<i32> {
     // appear in the answer to "who is working here". Held for the rest of `main` on purpose, so that
     // every exit -- an early return, an error, an unwinding panic -- removes the record by
     // construction rather than by remembering to.
-    let _live = live::Guard::begin(&cwd, &provider_cfg.name, &provider_cfg.model, readonly);
+    let live_guard = live::Guard::begin(&cwd, &provider_cfg.name, &provider_cfg.model, readonly);
 
     // ---- resume a session, if asked ----
     //
@@ -791,6 +791,15 @@ async fn real_main(args: Args) -> Result<i32> {
             parent_session().as_deref(),
         )?),
     };
+    // Which conversation this run is holding, said in the record rather than worked out by a reader.
+    // The writer is the authority on it and is created here; a reader that instead guessed "the newest
+    // session file in this directory" was wrong exactly when two runs write at once, which is what the
+    // record exists to answer. A name that had to move at its first write would make this wrong until
+    // the run that moved was asked again -- that needs two conversations started in the same
+    // millisecond of one process, and `docs/session-format.md` records why it cannot happen.
+    if let Some(writer) = &writer {
+        live_guard.set_session(writer.path());
+    }
     // A fork writes a file the run has just made, and until it has a name the two sessions are
     // indistinguishable in the only place it matters -- `/sessions`, five minutes later, where the
     // choice is between the original and the branch. The original is named too, because "untouched"
@@ -1051,6 +1060,7 @@ async fn real_main(args: Args) -> Result<i32> {
         &reader,
         &mut input_rx,
         &mut viewer,
+        &live_guard,
     )
     .await;
     term.stop();
@@ -1285,6 +1295,7 @@ async fn interactive(
     reader: &InputReader,
     input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<InputMsg>,
     viewer: &mut Option<web::Viewer>,
+    live_guard: &live::Guard,
 ) -> Result<()> {
 
     // Colour codes as this terminal should show them: the names below shadow the
@@ -1487,6 +1498,14 @@ async fn interactive(
                     // the one it just left. A no-op when the file is the same one.
                     if let Some(viewer) = viewer.as_mut() {
                         viewer.follow(new_agent.session_path());
+                    }
+                    // The presence record follows the same move, for the same reason and at the same
+                    // place: "which conversation is this run holding" has one answer, and the two
+                    // readers of it should not be told at different moments. A run that `/new`s into
+                    // another file and goes on being announced under the old one would make the record
+                    // worse than the guess it replaced.
+                    if let Some(path) = new_agent.session_path() {
+                        live_guard.set_session(&path);
                     }
                     *agent = new_agent;
                     *provider_cfg = new_provider;
@@ -5194,6 +5213,14 @@ fn who_and_stop(cwd: std::path::PathBuf, all: bool, json: bool) -> Result<i32> {
             "started": record.started,
             "last_seen": record.last_seen,
             "seen_secs_ago": live::now_secs().saturating_sub(record.last_seen),
+            // The conversation this run is writing, or null when it has not said. A path rather than
+            // an id, because the id does not say where the file is -- the same reason the session
+            // listing carries paths.
+            "session": if record.session.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::json!(record.session)
+            },
         })
     };
 
@@ -5270,8 +5297,14 @@ fn who_and_stop(cwd: std::path::PathBuf, all: bool, json: bool) -> Result<i32> {
     }
 
     let line = |record: &live::Presence| {
+        // The session as its id, not its path: the directory it lives in is derived from the cwd on
+        // the same line, and the id is what a person types at `--resume`.
+        let session = std::path::Path::new(&record.session)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
         println!(
-            "  pid {}  {}  started {} ago, last seen {}  provider={} model={}{}",
+            "  pid {}  {}  started {} ago, last seen {}  provider={} model={}{}{}",
             record.pid,
             record.cwd.display(),
             record.age(),
@@ -5279,6 +5312,11 @@ fn who_and_stop(cwd: std::path::PathBuf, all: bool, json: bool) -> Result<i32> {
             record.provider,
             record.model,
             if record.readonly { " readonly" } else { "" },
+            if session.is_empty() {
+                String::new()
+            } else {
+                format!("  session={session}")
+            },
         );
     };
 

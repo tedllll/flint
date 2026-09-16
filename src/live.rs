@@ -75,6 +75,14 @@ pub struct Presence {
     /// file with `notepad` has something they can subtract.
     pub started: u64,
     pub last_seen: u64,
+    /// The conversation this run is writing, as a path, empty until there is one.
+    ///
+    /// A path rather than the id, because the id is not enough to find the file: which directory keys
+    /// it, and whether it sits in `children/`, are not reconstructible from the name -- the same reason
+    /// `--list-sessions --json` carries paths. Defaulted on read so that a record written by an older
+    /// build, or by hand, is still a record rather than damage.
+    #[serde(default)]
+    pub session: String,
     /// The nonce is in the *file name* and not in the record: a reader never needs it, and only the
     /// run that wrote a record ever removes one. Two guards in one process -- a rebuilt agent, a
     /// `--web` viewer beside a run -- therefore cannot delete each other's file.
@@ -121,7 +129,13 @@ impl Presence {
 /// return, an error, a panic that unwinds. `kill -9` leaves the file behind, which is the case
 /// [`Presence::is_stale`] exists for.
 pub struct Guard {
-    record: Presence,
+    /// Shared with the refresh thread, because the session is not known when the record starts: the
+    /// writer is created a moment later, and a run that is announcing itself before it has a
+    /// conversation is the normal case rather than an edge one.
+    record: std::sync::Arc<std::sync::Mutex<Presence>>,
+    /// Held separately: the file name is pid plus nonce and never changes, so `Drop` can remove the
+    /// record without taking the lock.
+    path: PathBuf,
     /// Closed when the guard is dropped, which is what wakes the thread immediately.
     ///
     /// A channel rather than an `AtomicBool` beside a `sleep`: the thread is *joined* on the way out,
@@ -148,6 +162,7 @@ impl Guard {
             readonly,
             started,
             last_seen: started,
+            session: String::new(),
             nonce,
         };
         if let Err(e) = write_record(&record) {
@@ -157,9 +172,13 @@ impl Guard {
             eprintln!("flint: warning: cannot write {}: {e}", record.file().display());
         }
 
+        let path = record.file();
+        // Poisoning is ignored on purpose: the record is a single JSON object and the worst a panic
+        // under the lock can leave behind is a stale one, which readers already handle by design.
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(record));
         let (stop, wake) = std::sync::mpsc::channel::<()>();
         let thread = {
-            let mut record = record.clone();
+            let shared = std::sync::Arc::clone(&shared);
             std::thread::Builder::new()
                 .name("flint-live".to_string())
                 .spawn(move || {
@@ -170,6 +189,7 @@ impl Guard {
                     while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
                         wake.recv_timeout(TOUCH_EVERY)
                     {
+                        let mut record = shared.lock().unwrap_or_else(|e| e.into_inner());
                         record.last_seen = now_secs();
                         let _ = write_record(&record);
                     }
@@ -177,15 +197,32 @@ impl Guard {
                 .ok()
         };
         Guard {
-            record,
+            record: shared,
+            path,
             stop: Some(stop),
             thread,
         }
     }
 
+    /// Say which conversation this run is holding.
+    ///
+    /// Written at once rather than at the next refresh: a parent that starts a child asks "which
+    /// conversation is that" immediately, and a five-second-old answer is the difference between a
+    /// handle and a guess. Called with the same path more than once is the normal case -- every turn
+    /// of a REPL -- so an unchanged session costs nothing but the comparison.
+    pub fn set_session(&self, session: &Path) {
+        let text = session.display().to_string();
+        let mut record = self.record.lock().unwrap_or_else(|e| e.into_inner());
+        if record.session == text {
+            return;
+        }
+        record.session = text;
+        let _ = write_record(&record);
+    }
+
     /// Where this run's record is, for a message that wants to name it.
     pub fn path(&self) -> PathBuf {
-        self.record.file()
+        self.path.clone()
     }
 }
 
@@ -196,7 +233,7 @@ impl Drop for Guard {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
-        let _ = std::fs::remove_file(self.record.file());
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -593,6 +630,7 @@ mod tests {
             readonly: false,
             started: now_secs(),
             last_seen: now_secs(),
+            session: String::new(),
             nonce: "n".into(),
         };
         assert!(!record.is_stale());
@@ -689,9 +727,22 @@ mod tests {
             readonly: false,
             started: now_secs() - 3700,
             last_seen: now_secs() - 3,
+            session: String::new(),
             nonce: "n".into(),
         };
         assert_eq!(record.seen_ago(), "3s ago");
         assert_eq!(record.age(), "1h");
+    }
+
+    /// A record from a build that had no session, or one a person wrote by hand, still reads.
+    ///
+    /// The alternative -- a required field -- would turn every existing record into damage on the day
+    /// this shipped, and "damage" is what the reader reports to a person as something to look at.
+    #[test]
+    fn a_record_without_a_session_is_a_record_with_no_session() {
+        let old = r#"{"pid":1,"cwd":"/tmp","provider":"p","model":"m","readonly":false,
+                      "started":1,"last_seen":2}"#;
+        let record: Presence = serde_json::from_str(old).expect("an older record still reads");
+        assert_eq!(record.session, "");
     }
 }

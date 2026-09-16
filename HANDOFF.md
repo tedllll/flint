@@ -89,13 +89,13 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 506 passing, 1 ignored (304 lib, 3 in
+As of the commit that carries this file, `cargo test` is 508 passing, 1 ignored (305 lib, 3 in
 the binary's own tests, 33 `agent_loop`, 61 `cli_output`, 34 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
 be able to read, 4 the answer written where the caller asked, 3 the file inlined into the prompt,
 1 the stream checked on its bytes),
-7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 6 `who`, 10 `task`, 2 `say`), `cargo clippy
+7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 7 `who`, 10 `task`, 2 `say`), `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
 pass, and `python examples/python/test_call.py` is 117 checks, all passing (one of them waits
 out the fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from),
@@ -218,9 +218,17 @@ is a **real process**, so its session file exists and holds the prompt and the a
 `readonly` run **cannot be talked into a writing child** (the attempt is made in the test, and the same
 script with a writable parent does write, so the refusal is the flag and not the child's inability);
 and the chain is **bounded** by `FLINT_DEPTH` (maximum 2, set by the tool for its child and by nothing
-else, so a model cannot edit it out of its own command line). Not built: the background handle
-(`background: true`, `task_status`, `task_wait`, `task_stop`) and a session id in the presence record,
-so a child appears in `flint who` as a run in that directory rather than as *this* run's child.
+else, so a model cannot edit it out of its own command line). **The presence record now names the
+conversation a run is holding**, which was the other open half: `Presence.session` carries the session
+*path* (a path rather than an id, for the same reason `--list-sessions --json` does — the id does not say
+which directory keyed the file or whether it sits in `children/`), it is written the moment the writer
+exists and follows `/new` and `/resume` because the page is told at the same place and for the same
+reason, and `flint who` prints the id on the human line and the path in `--json`. A record written by an
+older build or by hand still reads (`#[serde(default)]`), and reports "session": null rather than an
+empty name; the reader keeps the older "newest session file written here" line as well, because it covers
+a record that has said nothing yet. Not built: the background handle (`background: true`,
+`task_status`, `task_wait`, `task_stop`), so the record is a readable handle from a person's side and not
+yet a collectable one from a model's side.
 
 **Two runs in one directory can talk — the mailbox half of stage 3 of `docs/agents.md`.** `flint say
 "…" [--to <pid>] [--cwd <dir>] [--json]` appends one JSON line to

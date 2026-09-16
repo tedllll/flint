@@ -204,6 +204,113 @@ async fn a_run_says_it_is_here_and_stops_saying_it_when_it_ends() {
     );
 }
 
+/// Every conversation file in a home, whichever working directory keyed it.
+fn session_files(home: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let Ok(dirs) = std::fs::read_dir(home.join("sessions")) else {
+        return found;
+    };
+    for dir in dirs.flatten() {
+        let Ok(entries) = std::fs::read_dir(dir.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// A live run says *which conversation* it is holding, not only that it is here.
+///
+/// The stage-2 note in `docs/agents.md` recorded this as the gap, and it is the gap that matters for a
+/// parent watching a child: the record named the provider, the model and the flags, and `who` answered
+/// "which conversation is live" by reporting the newest session file in the directory -- a guess that
+/// is wrong exactly when it matters, with two runs writing at once, and it says nothing at all about a
+/// run whose directory is not yours. The session travels in the record, so a person reading `who` can
+/// point at the conversation a run is holding while it is still working, which is also what a handle
+/// for a background child is made of.
+#[tokio::test]
+async fn a_live_run_names_the_conversation_it_is_holding() {
+    let server = MockServer::start().await;
+    let cwd = cwd_for("session");
+    let home = home_for("session", &server.uri(), "not-a-real-key");
+    Mock::given(method("POST"))
+        .respond_with(Slow(one_fragment()))
+        .mount(&server)
+        .await;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_flint"))
+        .args(["-p", "say hello", "--json"])
+        .arg("--cwd")
+        .arg(&cwd)
+        .env("FLINT_HOME", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn flint");
+
+    // The conversation is created by the first thing said, which is the prompt itself, so this waits
+    // for the file rather than for the model: the model is deliberately still answering.
+    let mut written = Vec::new();
+    for _ in 0..100 {
+        written = session_files(&home);
+        if !written.is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(written.len(), 1, "the run never wrote its conversation: {written:?}");
+    let session = written[0].display().to_string();
+
+    let (stdout, code) = run_who(&home, &cwd, &[]);
+    assert_eq!(code, 0, "who failed: {stdout}");
+    let answer = json_of(&stdout);
+    let live = answer["live"].as_array().expect("live");
+    assert_eq!(live.len(), 1, "expected one live run: {answer}");
+    assert_eq!(
+        live[0]["session"].as_str().unwrap_or_default(),
+        session,
+        "the record must name the file this run is writing, not the newest one it can find: {answer}"
+    );
+    // A record written by a hand or by an older build has no session, and that is reported as "not
+    // known" rather than as an empty file name: `null`, like every other absent field here.
+    assert!(
+        !live[0]["session"].is_null(),
+        "a run holding a conversation reported none: {answer}"
+    );
+
+    // The human line names it too, because a person reading `who` is the reader who cannot look up a
+    // JSON field -- and the id is what they would type at `--resume`.
+    let human = Command::new(env!("CARGO_BIN_EXE_flint"))
+        .arg("who")
+        .arg("--cwd")
+        .arg(&cwd)
+        .env("FLINT_HOME", &home)
+        .output()
+        .expect("run flint who");
+    let text = String::from_utf8_lossy(&human.stdout);
+    let stem = written[0]
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    assert!(text.contains(&stem), "the human listing must name it too: {text}");
+
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().expect("stdin");
+        stdin.write_all(b"/stop\n").expect("stop");
+        stdin.flush().expect("flush");
+    }
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 /// A record nobody cleaned up is *stale*, and is never listed as a live run.
 ///
 /// This is the case a killed process leaves, and it is the reason nothing here depends on asking the

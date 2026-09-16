@@ -167,7 +167,11 @@ and the first version does not carry: the record names the run's provider, model
 `readonly`, but **not its session id**. `flint who` instead reports the newest session file written in
 that directory and how long ago, which answers "which conversation is live" for a process it cannot
 otherwise see. Putting the session id in the record needs a hook where the writer is created, and it is
-a stage-2 addition rather than a reason to hold this one back.
+a stage-2 addition rather than a reason to hold this one back. — **Built since**: `Presence.session`
+carries the conversation's *path*, written where the writer is created and updated where the page is
+told the run has moved (`/new`, `/resume`), so `flint who` names the file a run is holding rather than
+guessing at the newest one in the directory. The oldest-signal line stays, because it still answers for
+a record that has said nothing yet.
 
 **Stage 2 — the `task` tool.** One child per call, with `readonly`, `model`, `provider`, `cwd`,
 `schema`, a timeout and a depth bound. Adopting it edited the "Subagents" entry in `ROADMAP.md` in the
@@ -194,9 +198,12 @@ worth reading:
 - **The result is answer-first**, then `exit code: N (meaning)`, `outcome`, `cause`, `error`, the
   validated `result` object on one line when a schema matched, and `session: <path>`. Everything a
   caller branches on is in the text, because a tool result is text — there is no second channel.
-- **A session id in the presence record is still open.** The stage-1 note above stands: the record has
-  no session id, so a `task` child appears in `flint who` as a run in that directory rather than as
-  *this* run's child, and a parent cannot point at a handle for it.
+- **A session id in the presence record is built.** The stage-1 note above is now history: the record
+  carries `session` as a **path** (written where the writer is created, updated where the page is told
+  the run has moved), so a `task` child appears in `flint who` as a run *and* as the conversation it is
+  holding, and a reader no longer has to guess which file is live. What is still missing from the
+  handle is the part a model can use: nothing here can *wait* for that child or *stop* it, because a
+  process can only write `/stop` to a stdin it owns.
 - **A child's conversation is not one of the person's, and it says whose it is.** Reported from a real
   session: a `task` child's conversation appeared in `/sessions` and in the page's sidebar exactly like
   one the person had, and `--continue` — "the newest conversation in this directory" — resumed the
