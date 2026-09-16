@@ -1413,6 +1413,39 @@ Also worth doing while the release workflow is fresh: it **builds on every push 
 The three commands in `AGENTS.md` ("Verifying a change") are exactly what a job should run, and a
 green build says nothing about whether a `[exit code: N]` path works.
 
+#### Being used by another agent
+
+Asked directly ("can Codex use flint as a subagent?"), and the answer changes two small things. Codex
+has no first-class subagent the way Claude Code does (`.claude/agents/*.md` plus a `Task` tool); its
+native extension point is **MCP**, configured in `~/.codex/config.toml` under `[mcp_servers.<name>]`
+with `command`/`args` for a local stdio server (and a tool allow/deny list alongside). So there are
+three ways in, and two of them need nothing from flint:
+
+1. Codex's shell tool runs `flint -p "…" --json --readonly --cwd <dir> --fork`, and the model reads the
+   `result` line and the exit code. Works today.
+2. A thin **MCP wrapper** — `examples/mcp/flint_server.py`, stdio JSON-RPC, one tool — which makes
+   flint a tool rather than a command. flint itself stays out of MCP, which was a decision about
+   *consuming* MCP rather than about being callable; this is the other direction, and it is a Python
+   example with no dependencies, like the caller in `examples/python/`. **Not built yet.** MCP's tool
+   input is a JSON Schema and flint's `--schema` already takes one, so the mapping is direct and the
+   answer comes back structured.
+3. A custom prompt or skill that wraps option 1 — the lightest, and the least honest about it.
+
+Two findings from checking rather than assuming:
+
+- **Codex's sandbox covers flint**, because Codex runs its shell commands inside an OS-level sandbox
+  (Landlock on Linux, Seatbelt on macOS) and children inherit it: with `--sandbox read-only`, a flint
+  that Codex starts cannot write either. Worth knowing, because it means the guard is not flint's to
+  invent — and `--readonly` on the flint side is then a second, cheap one rather than the only one.
+- **flint's stdin steering is unconditional**, and a parent agent or a pipeline that writes to flint's
+  stdin gets `warning` lines for it. Harmless in practice (the lines are ignored and reported, never
+  acted on), but it is a surprise a caller should not have to discover. **Decide**: a `--steer` flag
+  that turns the reader on, with the Python caller passing it, or keep it on and document it as part
+  of the contract. The first is safer for a program that owns the pipe; the second has no new flag.
+- Nothing stops a flint from starting another flint, and nothing bounds how deep that goes: tools are
+  not restricted by choice, so a nested call is a spend that recurses. Recording it rather than
+  proposing a guard — the honest place for a limit here is the caller that started the first one.
+
 **Deliberately not in this section**: a resident `flint serve` (190 ms per call does not buy back the
 complexity of a second process lifetime, and a resident mode was explicitly not wanted), an asyncio
 API (every call is a process; `await` would add a second surface and no capability), Python-side tool
