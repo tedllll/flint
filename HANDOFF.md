@@ -45,20 +45,22 @@ each other — prompted by three questions asked directly, and by the incident i
 in this checkout at once, one of them mid-write in `docs/sandbox.md`, and the other committing a
 half-written revision of it with `git add -A`). Its claim is that a subagent, a Python call, an MCP call
 and "a background process" are one thing — a run — seen through four doors, and that the MCP and Python
-doors are already built. **Stages 1, 2 and the mailbox half of stage 3 are built** (`flint who`, the
-`task` tool, `flint say`), the "Subagents" entry in `ROADMAP.md` was edited in the same commit as the
-code that adopts it, and **the five decisions at the end of that file were answered on 2026-09-16 at
-the recommended values** — the depth bound (`FLINT_DEPTH`, maximum 2), the mailbox default (a peer's
-words are shown to the human and never fed to the model, which is why the opt-in is not built), what
-"another agent is here" may claim (no author, ever), and presence in `FLINT_HOME` only. What stage 3
-still owes: the `.flint/` marker in the project and that opt-in; stage 4 (profiles and fan-out) is the
-part that would have to come back through `ROADMAP.md` before it is adopted.
+doors are already built. **Stages 1, 2 and 4 are built, and so is the mailbox half of stage 3**
+(`flint who`, the `task` tool, `tasks`, profiles, `flint say`), the "Subagents" entry in `ROADMAP.md`
+was edited in the same commit as the code that adopts it, and **the five decisions at the end of that
+file were answered on 2026-09-16 at the recommended values** — the depth bound (`FLINT_DEPTH`, maximum
+2), the mailbox default (a peer's words are shown to the human and never fed to the model, which is why
+the opt-in is not built), what "another agent is here" may claim (no author, ever), and presence in
+`FLINT_HOME` only. What stage 3 still owes: the `.flint/` marker in the project and that opt-in. Stage
+4 was written into `ROADMAP.md` and `docs/agents.md` in the same commit as the code, with the line
+drawn where it was built: profiles and an explicit, capped fan-out, and nothing above it — no shared
+context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 468 passing, 1 ignored (288 lib, 3 in
+As of the commit that carries this file, `cargo test` is 476 passing, 1 ignored (293 lib, 3 in
 the binary's own tests, 33 `agent_loop`, 58 `cli_output`, 22 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 5 the exit codes and the turn's outcome, 2 the
-balance, 1 what a caller's pipe must not come back out of), 7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 6 `who`, 3 `task`, 2 `say`)), `cargo clippy
+balance, 1 what a caller's pipe must not come back out of), 7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 6 `who`, 6 `task`, 2 `say`), `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
 pass, and `python examples/python/test_call.py` is 49 checks, all passing (one of them now waits
 out the fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from),
@@ -106,6 +108,32 @@ a model, the `.flint/` presence marker in the project, and a `/say` inside the p
 remembering: `flint say` takes everything after it as prose, so `--cwd` and `--json` have to be pulled
 out before the rest is joined — the first version put `--cwd` *inside* the message and sent it to the
 wrong directory's mailbox, which the end-to-end test caught.
+
+**A profile is a file, and a fan-out is one call — stage 4 of `docs/agents.md`.** `<project>/.flint/agents/
+<name>.md` (and `<FLINT_HOME>/agents/`, with the project's copy winning on a name) has front matter for
+`description`, `model`, `provider` and `readonly`, and a body that is the child's instructions. It is
+read by the same widened hand-written front-matter parser the skill catalog uses — no YAML crate — and
+only the front matter is read during discovery, so a directory of long profiles costs a few lines of
+request rather than all of their text, and editing one takes effect in the next child without a restart.
+Three properties are deliberate and each is asserted in `tests/task.rs`: a profile's facts are
+**defaults** an argument on the call still wins, *except* `readonly`, which a profile can only add,
+because a profile that could talk a readonly run into a writing child would route around the one
+property this path exists to keep; the instructions go **in front of** the job (they answer different
+questions, and the child has no flag for a system prompt); and the catalog reaches the model **inside
+the `task` tool's schema**, only when this directory has profiles at all, since an `agent` property with
+nothing behind it is a schema's worth of tokens teaching a model that a tool lies. `/agents` lists them
+in the REPL (`[readonly, model cheap]`) and `/agents <name>` prints one the way a child receives it. The
+fan-out
+is `tasks`: 1–8 jobs, `max_parallel` 4 by default, **every** child prepared before any starts (a bad
+argument in job three must not leave one and two already spending money), one labelled block per job in
+ask order, and the same provenance a `task` gives. Two tests were watched red first, and both are worth
+keeping: with `DEFAULT_PARALLEL = 1` the fan-out test reported "their requests arrived 2.8068615s
+apart", and with the profile body replaced by the empty string the profile test reported "the profile's
+instructions never reached the child". Not built, and not an oversight: no shared context (children
+cannot see this conversation or each other), no merge, no background handle, and no flint deciding to
+parallelise — the model asks for N jobs or it does not. The price is stated where it lands: `tasks`
+adds one tool schema to every request, always offered, and N jobs is N bills at once, which is why every
+block comes back with its session path attached.
 
 **A `--json` run now beats while it works.** `src/main.rs` spawns `beat_while_working` beside the
 turn: every five seconds it emits the `status` frame with the phrase the stream last described, plus
@@ -227,7 +255,7 @@ open, so the copy needs every flint window closed first — measured twice.
 
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
-cargo test                                        # 468 passing, 1 ignored
+cargo test                                        # 476 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed

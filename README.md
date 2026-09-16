@@ -394,8 +394,37 @@ like any other.
 
 ```jsonc
 // what the tool takes
-{"prompt": "…", "cwd": "…", "readonly": true, "model": "…", "provider": "…", "schema": {…}, "timeout_secs": 600}
+{"prompt": "…", "cwd": "…", "readonly": true, "model": "…", "provider": "…", "schema": {…}, "timeout_secs": 600,
+ "agent": "explorer"}   // optional: a profile, which brings its own instructions, model and readonly
 ```
+
+A **profile** is a file — `<project>/.flint/agents/<name>.md`, or `<FLINT_HOME>/agents/<name>.md` for one
+that applies everywhere — so that "the explorer" means the same thing to a person typing it and to a
+model naming it, instead of a model composing a command line and getting a flag wrong:
+
+```markdown
+---
+description: Reads the tree and reports. Never writes.
+model: deepseek-flash
+readonly: true
+---
+
+You are exploring this repository and reporting what is there. Read, do not change.
+```
+
+A profile's `model`, `provider` and `readonly` are **defaults**, which a `task` call may override —
+except `readonly`, which a profile can only add. `/agents` lists what is on disk and prints one the way a
+child would receive it.
+
+```jsonc
+// several jobs in one call, run at the same time, answers labelled in the order asked
+{"tasks": [{"prompt": "…", "agent": "explorer"}, {"prompt": "…"}], "max_parallel": 4}
+```
+
+`tasks` prepares every child before starting any of them, runs them a few at a time (1–8 jobs, 4 at
+once by default), and returns one block per job with the same provenance `task` gives. It is still not a
+shared context: the children cannot see this conversation or each other, so a set of jobs that depend on
+each other is the wrong set of jobs for it.
 
 Three things it is not, said here because each one is a reasonable expectation to have:
 

@@ -1550,9 +1550,16 @@ measured and what was not.
   too (`flint who`, `src/live.rs`) and does not contradict this bullet. **The mailbox is built as
   well, in the only form this bullet allows**: `flint say` writes a line, a running flint shows it to
   its person, and it never reaches a request — a peer's words cannot become a second author of this
-  conversation, so the "one conversation, one context window" claim is untouched. Stage 4 of that
-  file — profiles with parallel fan-out — is still a plan and still has to come back through this
-  list, because fan-out is the part the bullet actually feared.
+  conversation, so the "one conversation, one context window" claim is untouched. **Stage 4 is adopted
+  too, and the line is drawn inside it rather than around it**: a profile
+  (`<project>/.flint/agents/<name>.md` — instructions, model, `readonly`) is a way to write down what
+  "the explorer" means, and `tasks` runs several children **at the same time** when the model asks for
+  several jobs in one call. What is still refused is everything the bullet was actually about: there
+  is no shared context, so nothing learned by one child reaches another; there is no merge step beyond
+  labelling each answer with the job that produced it; and flint never decides to fan out on its own —
+  a model that wants N children asks for N children, and a cap of 8 jobs, 4 at a time, keeps "ask for
+  N" from being a way to spend without saying so. The parent's context is still one window, and a
+  child still spends it rather than adding to it.
 - **MCP** — deferred, not refused: it is a protocol with real weight, and nothing here yet
   needs what it offers. **Being callable over MCP is the other direction and is built**:
   `examples/mcp/flint_server.py`.

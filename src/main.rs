@@ -2165,6 +2165,7 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp::row("/readonly [on|off]", "/readonly", "toggle the write guard", HelpSection::Commands, OnPage::Toggles),
     CommandHelp::row("/tools", "/tools", "list available tools", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/skills [name]", "/skills", "list skills, or print one as the model would see it", HelpSection::Commands, OnPage::Panel),
+    CommandHelp::row("/agents [name]", "/agents", "list agent profiles (.flint/agents/*.md), or print one", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/sessions", "/sessions", "list past sessions, numbered", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/resume <n|id>", "/resume", "switch to one of them", HelpSection::Commands, OnPage::Selector),
     CommandHelp::field_row("/name [text]", "/name", "name this conversation", HelpSection::Commands, OnPage::Form, &NAME_ARG),
@@ -2930,6 +2931,51 @@ async fn handle_command(
                     .line(format_args!("{dim}  searched: {}{reset}", searched.join(", ")));
             } else {
                 for line in workspace.load(arg)?.lines() {
+                    printer.term().line(format_args!("{line}"));
+                }
+            }
+        }
+
+        "/agents" => {
+            // Re-discovered rather than remembered, for the same reason as `/skills`: what is on
+            // disk now is the answer, and a profile edited while a run is open is a profile the next
+            // child will use. `/agents <name>` prints the body the child would be given, so "did it
+            // get what I wrote" needs no model call.
+            let workspace = context::Workspace::discover(agent.cwd(), &cfg.skill_dirs);
+            if arg.is_empty() {
+                if workspace.agents.is_empty() {
+                    printer
+                        .term()
+                        .line(format_args!("{dim}no agent profiles found{reset}"));
+                    printer.term().line(format_args!(
+                        "{dim}  a profile is <dir>/<name>.md, with `model`, `provider` and \
+                         `readonly` in front matter and the instructions in the body{reset}"
+                    ));
+                } else {
+                    printer.term().line(format_args!("{dim}agent profiles:{reset}"));
+                    for profile in &workspace.agents {
+                        printer
+                            .term()
+                            .line(format_args!("  {}", profile.summary()));
+                        printer.term().line(format_args!(
+                            "      {dim}{}{reset}",
+                            profile.path.display()
+                        ));
+                    }
+                }
+                let searched: Vec<String> = workspace
+                    .agent_dirs
+                    .iter()
+                    .map(|d| d.display().to_string())
+                    .collect();
+                printer
+                    .term()
+                    .line(format_args!("{dim}  searched: {}{reset}", searched.join(", ")));
+                printer.term().line(format_args!(
+                    "{dim}  a `task` or `tasks` call names one with `agent`{reset}"
+                ));
+            } else {
+                for line in workspace.load_agent(arg)?.1.lines() {
                     printer.term().line(format_args!("{line}"));
                 }
             }

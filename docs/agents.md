@@ -1,13 +1,14 @@
 # Agents as processes: spawning, finding, and talking to peers
 
-**Status: stages 1 and 2 are built, and so is the mailbox half of stage 3; the MCP and Python doors
-are built; stage 4 is a plan.** — a running flint writes a presence record and `flint who` reads it
-(`src/live.rs`, `tests/who.rs`), a running flint can start another flint with its `task` tool
-(`src/tools.rs`, `tests/task.rs`), and a peer can leave it a message with `flint say` that is shown to
-the person and never sent to a model (`tests/say.rs`), so *being called*, *seeing each other*,
-*spawning* and *talking* all work today. The five decisions at the end of this file **were answered on
-2026-09-16: every recommended value was adopted**, and each is marked below with what that means for
-the code.
+**Status: stages 1, 2 and 4 are built, and so is the mailbox half of stage 3; the MCP and Python doors
+are built.** — a running flint writes a presence record and `flint who` reads it (`src/live.rs`,
+`tests/who.rs`), a running flint can start another flint with its `task` tool and start several at once
+with `tasks` (`src/tools.rs`, `tests/task.rs`), a profile in `.flint/agents/` says how a child should
+start (`src/context.rs`), and a peer can leave it a message with `flint say` that is shown to the person
+and never sent to a model (`tests/say.rs`), so *being called*, *seeing each other*, *spawning*,
+*talking* and *naming a way to work* all work today. The five decisions at the end of this file **were
+answered on 2026-09-16: every recommended value was adopted**, and each is marked below with what that
+means for the code.
 
 Written because of three questions asked directly, and because the same afternoon produced the incident
 that makes the middle of this document concrete: two agents were working in this checkout at once, one
@@ -39,7 +40,8 @@ That equality is the design, not a coincidence: a feature that works from outsid
 |---|---|---|
 | `flint -p … --json` over a pipe | Python, a shell, an editor, another agent's shell tool | **Built.** `examples/python/flint_call.py`; every fact needed to branch is on the stream |
 | an MCP tool call | Codex, Claude Code, Cursor | **Built.** `examples/mcp/flint_server.py`, one tool, stdio |
-| a `task` tool inside flint | flint itself | **Built.** `src/tools.rs` (`TaskTool`), `tests/task.rs`; one child per call, no background handle yet |
+| a `task` tool inside flint | flint itself | **Built.** `src/tools.rs` (`TaskTool`), `tests/task.rs`; one child per call, plus `tasks` for several at once. No background handle yet |
+| a profile in `<project>/.flint/agents/<name>.md` | a person, once; a model or a person afterwards | **Built.** `src/context.rs`; the same child, started with instructions, a model and `readonly` already decided |
 
 The third door is the first two in Rust. It runs `std::env::current_exe()` with the same arguments,
 reads the same stream, and returns the same facts — which is the argument for building it *that* way
@@ -213,7 +215,39 @@ person saw it, the session file kept it, and **every request body the provider r
 **Stage 4 — profiles and fan-out.** `.flint/agents/*.md`: a name, a description, a model, `readonly`,
 and a prompt, so "the explorer" is a thing a person and a model can both refer to; and one call that
 runs N children at once. This is where "native subagents" as people mean the phrase actually lands — and
-it is last on purpose, because everything above is useful without it.
+it is last on purpose, because everything above is useful without it. — **Built**, and the two halves
+are worth reading separately, because one is a file format and the other is a spending decision.
+
+**A profile is a file, not a feature.** `<project>/.flint/agents/<name>.md` (and `<FLINT_HOME>/agents/`
+for one that applies everywhere, with the project winning on a name), front matter for `name`,
+`description`, `model`, `provider` and `readonly`, body for the instructions. The same hand-written
+front-matter parser the skill catalog uses, widened from two keys to any key, so there is still no YAML
+crate between a person and their own file. Discovery reads only the front matter, exactly like skills:
+a directory of long profiles costs a few lines of request rather than all of their text, and the body
+is read when a profile is used, so editing one takes effect in the next child without restarting the
+run. Three properties are the design rather than the plumbing. A profile's facts are **defaults**: an
+argument on the call still wins — except `readonly`, which a profile can only add, because a profile
+that could talk a readonly run into a writing child would be a way around the one property this whole
+path exists to keep. The instructions go in front of the job, because they say different things ("how
+to work" and "what to do") and the child has no flag for a system prompt. And the catalog reaches the
+model **in the tool's schema**, only when this directory actually has profiles: an `agent` property
+with nothing behind it would be a schema's worth of tokens teaching the model that a tool lies, and a
+model chooses a profile by reading the one line that says what it is for.
+
+**The fan-out is one call, several children, and it is deliberately not more than that.** `tasks` takes
+a list of jobs (1–8) and a `max_parallel` (default 4), prepares **every** child before starting any of
+them — a bad argument in job three must not leave jobs one and two already spending money — then runs
+them a batch at a time and returns one block per job, labelled in the order asked for, each with the
+same provenance a single `task` gives (exit code, outcome, cause, session path). What it is not: a
+shared context. The children cannot see this conversation or each other, so nothing learned by one
+helps another, and a set of jobs that depend on each other is not a set of jobs for this tool. Nor is
+it flint deciding to parallelise: the model asks for N jobs or it does not, and the cap exists because
+"ask for N" is otherwise a way to spend without saying so.
+
+Two things are worth keeping honest about the price. `tasks` costs one more tool schema in every
+request, always offered rather than appearing when it might be useful — a tool that comes and goes is
+one a model cannot plan around. And N jobs is N bills at once, which is why the answers come back with
+their session paths attached: whoever pays can read what was actually asked.
 
 ## Decisions this needed from the person whose repository it is
 
@@ -247,7 +281,10 @@ because a decision that is only in a conversation is not a decision.
 ## What would make this the wrong idea
 
 If the only real use is "run twenty prompts in parallel", a shell loop and `map_calls` are already
-that, and stage 4 is unnecessary. If peers are only ever used to *watch* rather than to *work together*,
-the mailbox is a `flint who` that prints and nothing more. And if the first thing that happens when two
-agents can talk is that one of them talks the other into something it should not do, the default in
-decision 3 was the only part of this that mattered.
+that, and stage 4 is unnecessary. It was built anyway, on the narrower argument that a fan-out the
+*model* asks for, capped and labelled, is not the same thing as flint deciding to parallelise work on
+its own — and if it turns out nobody asks for several jobs in one call, the honest move is to delete
+`tasks` rather than to grow it into a scheduler. If peers are only ever used to *watch* rather than to
+*work together*, the mailbox is a `flint who` that prints and nothing more. And if the first thing that
+happens when two agents can talk is that one of them talks the other into something it should not do,
+the default in decision 3 was the only part of this that mattered.

@@ -65,6 +65,40 @@ impl Respond for Scripted {
     }
 }
 
+/// Answers by request number like `Scripted`, and remembers what was asked and when.
+///
+/// The time matters for the fan-out: whether three children ran at the same time is a fact about
+/// when their requests *arrived*, and nothing else in this test can see it. `delay` holds each answer
+/// so that "at the same time" and "one after another" are distinguishable by the clock rather than by
+/// the order of a list.
+struct Watched {
+    step: Arc<AtomicUsize>,
+    bodies: Vec<String>,
+    seen: Arc<std::sync::Mutex<Vec<(String, std::time::Instant)>>>,
+    delay: std::time::Duration,
+}
+
+impl Respond for Watched {
+    fn respond(&self, req: &Request) -> ResponseTemplate {
+        let body = String::from_utf8_lossy(&req.body).to_string();
+        self.seen
+            .lock()
+            .expect("seen lock")
+            .push((body, std::time::Instant::now()));
+        let n = self.step.fetch_add(1, Ordering::SeqCst);
+        let body = self
+            .bodies
+            .get(n)
+            .or_else(|| self.bodies.last())
+            .cloned()
+            .unwrap_or_else(|| prose("NOTHING SCRIPTED"));
+        ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_delay(self.delay)
+            .set_body_string(body)
+    }
+}
+
 /// A `FLINT_HOME` of its own with the stub as its default provider, and a directory to work in.
 ///
 /// The child inherits the environment, so it reads the same config and talks to the same stub --
@@ -368,6 +402,272 @@ async fn a_run_that_is_already_deep_refuses_to_go_deeper() {
         step.load(Ordering::SeqCst),
         2,
         "a child was started despite the depth limit"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[tokio::test]
+async fn a_profile_is_what_decides_the_instructions_the_model_and_readonly() {
+    let step = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(Watched {
+            step: step.clone(),
+            seen: seen.clone(),
+            delay: std::time::Duration::ZERO,
+            bodies: vec![
+                // The parent names the profile.
+                tool_call("task", r#"{"prompt":"look around","agent":"explorer"}"#),
+                // The child, being readonly, is asked to write -- which is the only way to see from
+                // outside that the profile's `readonly: true` arrived.
+                tool_call("write", r#"{"path":"child.txt","content":"should not exist"}"#),
+                prose("CHILD LOOKED"),
+                prose("PARENT DONE"),
+            ],
+        })
+        .mount(&server)
+        .await;
+
+    let home = scratch("profile", &server.uri());
+    let work = home.join("work");
+    std::fs::create_dir_all(work.join(".flint/agents")).expect("agents dir");
+    std::fs::write(
+        work.join(".flint/agents/explorer.md"),
+        "---\nname: explorer\ndescription: Reads and reports.\nmodel: profile-model\nreadonly: true\n---\n\n\
+         PROFILE INSTRUCTIONS: you only read, and you report what you found.\n",
+    )
+    .expect("profile");
+
+    let (code, stdout, stderr) = run_flint(&home, &work, &[]);
+    assert_eq!(code, 0, "flint failed: {stderr}");
+    let text = transcript(&session_of(&stdout));
+
+    let requests = seen.lock().expect("seen lock").clone();
+    assert_eq!(requests.len(), 4, "expected four requests, got {}", requests.len());
+    // Request 0 is the parent's, request 1 is the child's: two processes, one stub, and order is the
+    // only thing that tells them apart.
+    let parent_asked = &requests[0].0;
+    let child_asked = &requests[1].0;
+    assert!(
+        child_asked.contains("PROFILE INSTRUCTIONS"),
+        "the profile's instructions never reached the child: {child_asked}"
+    );
+    assert!(
+        child_asked.contains("look around"),
+        "the job itself never reached the child: {child_asked}"
+    );
+    assert!(
+        child_asked.contains("\"model\":\"profile-model\""),
+        "the profile's model was not used for the child: {child_asked}"
+    );
+    assert!(
+        !parent_asked.contains("PROFILE INSTRUCTIONS"),
+        "the profile's instructions leaked into this run's own request: {parent_asked}"
+    );
+
+    assert!(
+        !work.join("child.txt").exists(),
+        "the profile said readonly and the child wrote anyway"
+    );
+    assert!(text.contains("readonly: true"), "{text}");
+    assert!(text.contains("CHILD LOOKED"), "{text}");
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A provider for a fan-out: the parent is scripted, and every other request is answered *from its
+/// own prompt*.
+///
+/// That is the whole trick of this responder, and the reason it exists. Three children start at the
+/// same moment, so the order their requests arrive is not the order the jobs were listed in -- a stub
+/// that answered by request number would be asserting a mapping that does not exist. Answering "job
+/// two" with "ANSWER TWO" makes the pairing checkable from both ends: the block that says `task 2`
+/// must hold the answer that only job two could have provoked.
+struct Jobs {
+    step: Arc<AtomicUsize>,
+    seen: Arc<std::sync::Mutex<Vec<(String, std::time::Instant)>>>,
+    delay: std::time::Duration,
+}
+
+const JOBS: [(&str, &str); 3] = [
+    ("job one", "ANSWER ONE"),
+    ("job two", "ANSWER TWO"),
+    ("job three", "ANSWER THREE"),
+];
+
+impl Respond for Jobs {
+    fn respond(&self, req: &Request) -> ResponseTemplate {
+        let body = String::from_utf8_lossy(&req.body).to_string();
+        self.seen
+            .lock()
+            .expect("seen lock")
+            .push((body.clone(), std::time::Instant::now()));
+        let n = self.step.fetch_add(1, Ordering::SeqCst);
+
+        let answer = if n == 0 {
+            // The parent, asking for the fan-out.
+            tool_call(
+                "tasks",
+                r#"{"tasks":[{"prompt":"job one"},{"prompt":"job two"},{"prompt":"job three"}]}"#,
+            )
+        } else if let Some((_, answer)) = JOBS.iter().find(|(prompt, _)| body.contains(prompt)) {
+            // A child, held for a while -- asynchronously, through the response rather than by
+            // sleeping in this handler. A handler that slept would hold the stub's single thread and
+            // serialize the very requests this test exists to time, which is exactly what happened
+            // the first time this test was written.
+            return ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_delay(self.delay)
+                .set_body_string(prose(answer));
+        } else {
+            // The parent, having read the tool result.
+            prose("PARENT DONE")
+        };
+        ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(answer)
+    }
+}
+
+#[tokio::test]
+async fn a_fan_out_runs_the_jobs_at_the_same_time_and_labels_every_answer() {
+    let step = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(Jobs {
+            step: step.clone(),
+            seen: seen.clone(),
+            delay: std::time::Duration::from_millis(2000),
+        })
+        .mount(&server)
+        .await;
+
+    let home = scratch("fanout", &server.uri());
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("work dir");
+
+    let started = std::time::Instant::now();
+    let (code, stdout, stderr) = run_flint(&home, &work, &[]);
+    let elapsed = started.elapsed();
+    assert_eq!(code, 0, "flint failed: {stderr}");
+    let text = transcript(&session_of(&stdout));
+
+    // Every answer is there, under the job it belongs to. Split on the headers rather than searching
+    // the whole text, because "the right answer came back" is not the same as "the right answer came
+    // back under the right question".
+    let blocks: Vec<&str> = text.split("--- task ").skip(1).collect();
+    assert_eq!(blocks.len(), 3, "expected three blocks: {text}");
+    for (index, (block, answer)) in blocks
+        .iter()
+        .zip(["ANSWER ONE", "ANSWER TWO", "ANSWER THREE"])
+        .enumerate()
+    {
+        assert!(
+            block.starts_with(&format!("{} ---", index + 1)),
+            "block {index} is not labelled {}: {block}",
+            index + 1
+        );
+        assert!(
+            block.contains(answer),
+            "block {} does not hold {answer}, so the answers are not in the order the jobs were \
+             asked for: {block}",
+            index + 1
+        );
+        assert!(
+            block.contains("session: "),
+            "block {} names no session, so its answer cannot be traced: {block}",
+            index + 1
+        );
+    }
+    assert!(
+        text.contains("3 children ran,"),
+        "the header does not say what ran: {text}"
+    );
+
+    // When each request arrived. Nothing else in this test can see whether the children overlapped.
+    let requests = seen.lock().expect("seen lock").clone();
+    assert_eq!(requests.len(), 5, "expected five requests, got {}", requests.len());
+    let child_arrivals: Vec<std::time::Instant> = requests
+        .iter()
+        // Exactly one job prompt: a child's request holds the job it was asked, while the parent's
+        // follow-up turn holds all three inside the tool call it made, and counting that one would
+        // make this a count of four children.
+        .filter(|(body, _)| {
+            JOBS.iter()
+                .filter(|(prompt, _)| body.contains(prompt))
+                .count()
+                == 1
+        })
+        .map(|(_, at)| *at)
+        .collect();
+    assert_eq!(child_arrivals.len(), 3, "the children's requests were not found");
+    let spread = child_arrivals
+        .iter()
+        .max()
+        .expect("three arrivals")
+        .duration_since(*child_arrivals.iter().min().expect("three arrivals"));
+    assert!(
+        spread < std::time::Duration::from_millis(600),
+        "the children did not start together: their requests arrived {spread:?} apart, and three \
+         children one after another would be about 2 s apart"
+    );
+    // And the whole run is faster than three children in a row, which is the point of the tool: one
+    // held parent turn, one held round of children, not three.
+    assert!(
+        elapsed < std::time::Duration::from_millis(5000),
+        "the fan-out did not overlap: it took {elapsed:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[tokio::test]
+async fn a_fan_out_that_is_already_deep_is_refused_before_any_child_starts() {
+    let step = Arc::new(AtomicUsize::new(0));
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(Scripted {
+            step: step.clone(),
+            bodies: vec![
+                tool_call("tasks", r#"{"tasks":[{"prompt":"one"},{"prompt":"two"}]}"#),
+                prose("PARENT DONE"),
+            ],
+        })
+        .mount(&server)
+        .await;
+
+    let home = scratch("fanout-depth", &server.uri());
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("work dir");
+
+    let out = binary()
+        .args([
+            "-p",
+            "ask the children",
+            "--json",
+            "--cwd",
+            &work.display().to_string(),
+        ])
+        .env("FLINT_HOME", &home)
+        .env("FLINT_DEPTH", "2")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("failed to run flint");
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let text = transcript(&session_of(&stdout));
+
+    assert!(text.contains("does not go deeper than 2"), "{text}");
+    assert_eq!(
+        step.load(Ordering::SeqCst),
+        2,
+        "two children were started despite the depth limit"
     );
 
     let _ = std::fs::remove_dir_all(&home);

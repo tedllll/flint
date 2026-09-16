@@ -30,10 +30,13 @@ pub trait Tool: Send + Sync {
     /// asked for, because a tool is built before the session it belongs to names itself.
     fn use_spill_dir(&mut self, _dir: &Path) {}
 
-    /// This tool as the `task` tool, for the one thing that has to be told later: which endpoint to
-    /// hand a child. `None` for every other tool, which is what makes the caller a two-line loop
-    /// rather than a downcast.
-    fn as_task(&mut self) -> Option<&mut TaskTool> {
+    /// The configuration this tool hands to the children it starts, for the facts that can only be
+    /// known later: which endpoint "same as here" means. `None` for every other tool, which is what
+    /// makes the caller a two-line loop rather than a downcast.
+    ///
+    /// One method for both tools that start children, because they hold the same `TaskConfig`: a
+    /// fact filled in here cannot reach `task` and miss `tasks`.
+    fn task_config(&mut self) -> Option<&mut TaskConfig> {
         None
     }
 }
@@ -98,10 +101,26 @@ impl ToolBox {
             // knows it. A `task` that cannot reach an endpoint fails with a classified cause rather
             // than mysteriously, which is worth one schema in the request.
             Box::new(TaskTool {
-                cwd: cwd.clone(),
-                readonly,
-                provider: String::new(),
-                model: String::new(),
+                config: TaskConfig {
+                    cwd: cwd.clone(),
+                    readonly,
+                    provider: String::new(),
+                    model: String::new(),
+                    agents: skill_dirs.agents.clone(),
+                },
+            }),
+            // The fan-out, offered under the same conditions and with the same configuration: it is
+            // the same child started more than once, so it costs no extra argument to keep in step.
+            // Offered always, like `task`: two jobs of the same shape is an ordinary thing to want,
+            // and a tool that appears and disappears is one a model cannot plan around.
+            Box::new(TasksTool {
+                config: TaskConfig {
+                    cwd: cwd.clone(),
+                    readonly,
+                    provider: String::new(),
+                    model: String::new(),
+                    agents: skill_dirs.agents.clone(),
+                },
             }),
         ];
         // Always offered: reading a URL needs no credential, and this is the safe path to
@@ -165,9 +184,9 @@ impl ToolBox {
     /// model than the one the caller is talking to.
     pub fn with_task_endpoint(mut self, provider: &str, model: &str) -> Self {
         for tool in &mut self.tools {
-            if let Some(task) = tool.as_task() {
-                task.provider = provider.to_string();
-                task.model = model.to_string();
+            if let Some(config) = tool.task_config() {
+                config.provider = provider.to_string();
+                config.model = model.to_string();
             }
         }
         self
@@ -3018,6 +3037,59 @@ impl Tool for GrepTool {
     }
 }
 
+/// Everything a child run needs, resolved once: where it works, what endpoint it talks to, whether
+/// it may write, and which agent profiles this directory offers.
+///
+/// Shared by the two tools that start children, because a fan-out is not a second feature. It is the
+/// same child, started more than once, and two copies of this would be two places for "same as here"
+/// to stop being true.
+#[derive(Clone, Default)]
+pub struct TaskConfig {
+    /// Where the child works unless the call names another directory.
+    cwd: PathBuf,
+    /// Whether *this* run is readonly. A readonly run may not spawn a writing child: the flag is
+    /// monotonic, or `readonly` would stop meaning anything the moment a model could call `task`.
+    readonly: bool,
+    /// The endpoint handed to the child, so that "same as here" stays true even when this run was
+    /// started with `--provider`/`--model` flags that appear nowhere in the config.
+    provider: String,
+    model: String,
+    /// What `.flint/agents/*.md` offered here, for a call that names one. Each carries the path it
+    /// was found at, which is how its body is read when it is used -- the name is never turned back
+    /// into a path.
+    agents: Vec<context::AgentProfile>,
+}
+
+/// A child that is ready to start.
+struct Child {
+    argv: Vec<String>,
+    /// The depth it will run at, which is this run's depth plus one.
+    depth: u32,
+    timeout_secs: u64,
+    readonly: bool,
+    /// The profile that shaped it, if one did.
+    agent: Option<String>,
+    /// Where its job sits in a fan-out, for the header of its block.
+    index: usize,
+    /// The schema handed to it through a file, to delete when it is done.
+    schema_file: Option<PathBuf>,
+}
+
+/// One call, several children, at the same time.
+///
+/// This is the shape "run N of these" actually has: not N model calls in one conversation, but N
+/// conversations. Each child is a whole run with its own context, its own session file and its own
+/// bill, and the answers come back labelled in the order they were asked for -- so a model reading
+/// the result can tell which answer belongs to which question without parsing prose.
+///
+/// What this deliberately is not: a shared context. The children cannot see this conversation or
+/// each other, so nothing is learned by one that helps another. If the jobs depend on each other,
+/// they are not jobs for this tool, and running them anyway is how a fan-out turns into N confident
+/// wrong answers.
+pub struct TasksTool {
+    config: TaskConfig,
+}
+
 /// Ask another flint to do something, in its own context.
 ///
 /// The same door a Python caller or an MCP client opens, opened from inside: it runs another flint
@@ -3038,15 +3110,7 @@ impl Tool for GrepTool {
 /// a permission boundary: the child runs as the same user, with the same tools, and `readonly` is the
 /// only switch either of them has.
 pub struct TaskTool {
-    /// Where the child works unless the call names another directory.
-    cwd: PathBuf,
-    /// Whether *this* run is readonly. A readonly run may not spawn a writing child: the flag is
-    /// monotonic, or `readonly` would stop meaning anything the moment a model could call `task`.
-    readonly: bool,
-    /// The endpoint handed to the child, so that "same as here" stays true even when this run was
-    /// started with `--provider`/`--model` flags that appear nowhere in the config.
-    provider: String,
-    model: String,
+    config: TaskConfig,
 }
 
 /// How deep a chain of flint runs may go.
@@ -3120,6 +3184,146 @@ fn task_exit_meaning(code: i32) -> &'static str {
     }
 }
 
+/// How many children one `tasks` call may start, and how many of them may run at once.
+///
+/// Eight in the list and four at a time: the limit is not about the machine, it is that every child
+/// is a billed run. A model that wants twenty answers asks twice, and each answer it already has is
+/// in front of it when it asks the second time.
+pub const MAX_FAN_OUT: usize = 8;
+const DEFAULT_PARALLEL: usize = 4;
+
+/// The sentence to hand back when this run is already as deep as the chain goes.
+///
+/// A *result* rather than an error: "not started, and here is why" is an answer the model can act on,
+/// while an error invites a retry that cannot succeed.
+fn depth_refusal() -> Option<String> {
+    let depth = task_depth();
+    (depth + 1 > MAX_TASK_DEPTH).then(|| {
+        format!(
+            "not started: this is already a flint run at depth {depth}, and flint does not go \
+             deeper than {MAX_TASK_DEPTH}. Do this work here, or ask for it in a run that was \
+             started at the top."
+        )
+    })
+}
+
+/// The schema, handed to the child through a file: a schema inline has to survive a command line,
+/// and a path always does. Named for this process and this job, because a fan-out prepares several
+/// children inside the same nanosecond.
+fn write_schema_file(args: &Value, index: usize) -> Result<Option<PathBuf>> {
+    let Some(schema) = args.get("schema") else {
+        return Ok(None);
+    };
+    if !schema.is_object() {
+        return Err(anyhow!(
+            "task `schema` must be a JSON Schema object, not {}",
+            schema
+        ));
+    }
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "flint-task-schema-{}-{}-{}.json",
+        std::process::id(),
+        index,
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::write(&path, serde_json::to_string(schema)?)
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(Some(path))
+}
+
+/// Turn one call into a child that is ready to start, or say why it cannot be.
+///
+/// Everything that decides how a child runs is resolved here, in one place, so that `task` and
+/// `tasks` cannot drift: the profile, the endpoint, the flag that cannot be loosened, the depth it
+/// will run at, and the prompt it will be given.
+fn prepare_child(config: &TaskConfig, args: &Value, prompt: &str, index: usize) -> Result<Child> {
+    let cwd = match optional_str(args, "cwd")? {
+        Some(dir) => {
+            let path = resolve_path(&config.cwd, dir);
+            if !path.is_dir() {
+                return Err(anyhow!("task cwd is not a directory: {}", path.display()));
+            }
+            path
+        }
+        None => config.cwd.clone(),
+    };
+
+    // A profile is *defaults*, not orders: an argument on the call still wins -- except for
+    // `readonly`, which a profile can only add. Otherwise a profile would be a way to talk a
+    // readonly run into a writing child, which is the one property this whole path exists to keep.
+    let agent = optional_str(args, "agent")?.map(str::to_string);
+    let (body, profile_readonly, profile_model, profile_provider) = match &agent {
+        Some(name) => {
+            let profile = config
+                .agents
+                .iter()
+                .find(|a| &a.name == name)
+                .cloned()
+                .ok_or_else(|| context::unknown_agent_error(name, &config.agents))?;
+            (
+                context::agent_body(&profile)?,
+                profile.readonly,
+                profile.model.clone(),
+                profile.provider.clone(),
+            )
+        }
+        None => (String::new(), false, None, None),
+    };
+
+    let requested_readonly = optional_bool(args, "readonly")?;
+    let readonly = config.readonly || requested_readonly || profile_readonly;
+    let provider = optional_str(args, "provider")?
+        .map(str::to_string)
+        .or(profile_provider)
+        .unwrap_or_else(|| config.provider.clone());
+    let model = optional_str(args, "model")?
+        .map(str::to_string)
+        .or(profile_model)
+        .unwrap_or_else(|| config.model.clone());
+    let timeout_secs = args
+        .get("timeout_secs")
+        .and_then(|v| v.as_u64())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(600);
+
+    // The profile's words come first and are separated from the job, because they say different
+    // things: one is how to work, the other is what to do. The child has no flag for "system
+    // prompt", so this is where a profile's instructions enter its conversation.
+    let prompt_text = if body.is_empty() {
+        prompt.to_string()
+    } else {
+        format!("{body}\n\n---\n\n{prompt}")
+    };
+
+    let schema_file = write_schema_file(args, index)?;
+    let exe = match std::env::var("FLINT_BIN") {
+        Ok(value) if !value.trim().is_empty() => PathBuf::from(value),
+        // The same binary as this one: a child built from anything else would be a different
+        // flint than the one the caller is talking to. `FLINT_BIN` is for a wrapper that wants
+        // to point at a specific build, and for the tests, which live outside the binary.
+        _ => std::env::current_exe().context("cannot find the flint binary to run")?,
+    };
+    let argv = task_argv(
+        &exe,
+        &prompt_text,
+        &cwd,
+        readonly,
+        &provider,
+        &model,
+        schema_file.as_deref(),
+    );
+    Ok(Child {
+        argv,
+        depth: task_depth() + 1,
+        timeout_secs,
+        readonly,
+        agent,
+        index,
+        schema_file,
+    })
+}
+
 #[async_trait::async_trait]
 impl Tool for TaskTool {
     fn name(&self) -> &str {
@@ -3130,41 +3334,60 @@ impl Tool for TaskTool {
         "Ask another flint to do a job in its own context and give back its answer. Use it for \
          work that is large or self-contained -- a wide search, reading a lot of files, a question \
          whose transcript you do not want in this conversation. The other flint starts fresh: it \
-         cannot see this conversation, so the prompt has to stand alone. It is a whole model run, \
-         so it costs what a run costs, and this tool waits for it. `readonly` here forces it there."
+         cannot see this conversation, so the prompt has to stand alone. `agent` names a profile \
+         from this directory's `.flint/agents/`, which decides the instructions, the model and \
+         whether the child may write. It is a whole model run, so it costs what a run costs, and \
+         this tool waits for it. `readonly` here forces it there."
     }
 
-    fn as_task(&mut self) -> Option<&mut TaskTool> {
-        Some(self)
+    fn task_config(&mut self) -> Option<&mut TaskConfig> {
+        Some(&mut self.config)
     }
 
     fn schema(&self) -> Value {
+        let mut properties = json!({
+            "prompt": {
+                "type": "string",
+                "description": "What to ask, complete enough to stand alone: the other flint has no history from here."
+            },
+            "cwd": {
+                "type": "string",
+                "description": "Directory for the other flint to work in (default: this run's directory)."
+            },
+            "readonly": {
+                "type": "boolean",
+                "description": "Refuse writes and mutating commands there. Always true when this run is readonly."
+            },
+            "provider": { "type": "string", "description": "Another provider for this child (default: this run's)." },
+            "model": { "type": "string", "description": "Another model for this child (default: this run's)." },
+            "schema": {
+                "type": "object",
+                "description": "A JSON Schema for the answer; the validated object comes back beside the prose."
+            },
+            "timeout_secs": {
+                "type": "number",
+                "description": "Stop the child after this long (default 600). Stopping is `/stop`, so half an answer survives."
+            }
+        });
+        // Only offered when this directory actually has profiles, and only the names that exist: an
+        // `agent` property with nothing behind it is a schema's worth of tokens teaching the model
+        // that a tool lies. The catalog is in the description, because a model chooses by reading it.
+        if !self.config.agents.is_empty() {
+            let names: Vec<&str> = self.config.agents.iter().map(|a| a.name.as_str()).collect();
+            let catalog: Vec<String> = self.config.agents.iter().map(|a| a.summary()).collect();
+            properties["agent"] = json!({
+                "type": "string",
+                "enum": names,
+                "description": format!(
+                    "A profile from this directory's .flint/agents/, which brings its own instructions, \
+                     model and readonly. Available here: {}",
+                    catalog.join("; ")
+                )
+            });
+        }
         json!({
             "type": "object",
-            "properties": {
-                "prompt": {
-                    "type": "string",
-                    "description": "What to ask, complete enough to stand alone: the other flint has no history from here."
-                },
-                "cwd": {
-                    "type": "string",
-                    "description": "Directory for the other flint to work in (default: this run's directory)."
-                },
-                "readonly": {
-                    "type": "boolean",
-                    "description": "Refuse writes and mutating commands there. Always true when this run is readonly."
-                },
-                "provider": { "type": "string", "description": "Another provider for this child (default: this run's)." },
-                "model": { "type": "string", "description": "Another model for this child (default: this run's)." },
-                "schema": {
-                    "type": "object",
-                    "description": "A JSON Schema for the answer; the validated object comes back beside the prose."
-                },
-                "timeout_secs": {
-                    "type": "number",
-                    "description": "Stop the child after this long (default 600). Stopping is `/stop`, so half an answer survives."
-                }
-            },
+            "properties": properties,
             "required": ["prompt"]
         })
     }
@@ -3174,216 +3397,294 @@ impl Tool for TaskTool {
         if prompt.trim().is_empty() {
             return Err(anyhow!("task requires a non-empty `prompt`"));
         }
-
         // Refused rather than truncated: a run that silently stopped descending and answered anyway
         // would be telling the model its child had done something it never did.
-        let depth = task_depth();
-        if depth + 1 > MAX_TASK_DEPTH {
-            return Ok(format!(
-                "not started: this is already a flint run at depth {depth}, and flint does not go \
-                 deeper than {MAX_TASK_DEPTH}. Do this work here, or ask for it in a run that was \
-                 started at the top."
-            ));
+        if let Some(refusal) = depth_refusal() {
+            return Ok(refusal);
         }
-
-        let cwd = match optional_str(args, "cwd")? {
-            Some(dir) => {
-                let path = resolve_path(&self.cwd, dir);
-                if !path.is_dir() {
-                    return Err(anyhow!("task cwd is not a directory: {}", path.display()));
-                }
-                path
-            }
-            None => self.cwd.clone(),
-        };
-        // An absent `readonly` is false, which is what the schema promises.
-        let requested_readonly = optional_bool(args, "readonly")?;
-        // Monotonic: a readonly run cannot be talked into a writing child by its own model.
-        let readonly = self.readonly || requested_readonly;
-        let provider = optional_str(args, "provider")?
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| self.provider.clone());
-        let model = optional_str(args, "model")?
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| self.model.clone());
-        let timeout_secs = args
-            .get("timeout_secs")
-            .and_then(|v| v.as_u64())
-            .filter(|secs| *secs > 0)
-            .unwrap_or(600);
-
-        // Through a file, for the same reason the Python caller does it: a schema inline has to
-        // survive a command line, and a path always does.
-        let schema_file = match args.get("schema") {
-            Some(schema) if schema.is_object() => {
-                let path = std::env::temp_dir().join(format!(
-                    "flint-task-schema-{}-{}.json",
-                    std::process::id(),
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_nanos())
-                        .unwrap_or(0)
-                ));
-                std::fs::write(&path, serde_json::to_string(schema)?)
-                    .with_context(|| format!("writing {}", path.display()))?;
-                Some(path)
-            }
-            Some(other) => {
-                return Err(anyhow!(
-                    "task `schema` must be a JSON Schema object, not {}",
-                    other
-                ))
-            }
-            None => None,
-        };
-
-        let exe = match std::env::var("FLINT_BIN") {
-            Ok(value) if !value.trim().is_empty() => PathBuf::from(value),
-            // The same binary as this one: a child built from anything else would be a different
-            // flint than the one the caller is talking to. `FLINT_BIN` is for a wrapper that wants
-            // to point at a specific build, and for the tests, which live outside the binary.
-            _ => std::env::current_exe().context("cannot find the flint binary to run")?,
-        };
-        let argv = task_argv(
-            &exe,
-            prompt,
-            &cwd,
-            readonly,
-            &provider,
-            &model,
-            schema_file.as_deref(),
-        );
-
-        let started = std::time::Instant::now();
-        let outcome = self.run_child(&argv, depth + 1, timeout_secs).await;
-        if let Some(path) = &schema_file {
-            let _ = std::fs::remove_file(path);
-        }
-        let (mut text, session) = outcome?;
-        text.push_str(&format!(
-            "\n\ndepth: {} (this run is {depth}), readonly: {}, waited: {:.0}s",
-            depth + 1,
-            readonly,
-            started.elapsed().as_secs_f64()
-        ));
-        if let Some(session) = session {
-            text.push_str(&format!("\nsession: {session}"));
-        }
-        Ok(text)
+        let child = prepare_child(&self.config, args, prompt, 0)?;
+        run_child(child).await
     }
 }
 
-impl TaskTool {
-    /// Run the child, read its stream, and turn it into the one piece of text the model gets back.
-    ///
-    /// The stream is read as it arrives rather than through `output()`, for one reason: a child that
-    /// has to be stopped should be stopped the way a person stops one -- `/stop` on its stdin, which
-    /// leaves the half-answer it had drawn in its session file -- and killing it is the fallback, not
-    /// the first move. The answer is formatted answer-first, then the facts a caller needs to decide
-    /// what to do with it, so a model that reads only the top still gets the reason.
-    async fn run_child(
-        &self,
-        argv: &[String],
-        depth: u32,
-        timeout_secs: u64,
-    ) -> Result<(String, Option<String>)> {
-        use tokio::io::{AsyncBufReadExt, AsyncReadExt};
-
-        let mut child = tokio::process::Command::new(&argv[0])
-            .args(&argv[1..])
-            .env("FLINT_DEPTH", depth.to_string())
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .with_context(|| format!("running {}", argv[0]))?;
-
-        let stdout = child.stdout.take().expect("stdout was piped");
-        let stderr = child.stderr.take().expect("stderr was piped");
-        let reader = tokio::spawn(async move {
-            let lines = tokio::io::BufReader::new(stdout).lines();
-            let mut collected = Collected::default();
-            let mut lines = Box::pin(lines);
-            while let Ok(Some(line)) = lines.next_line().await {
-                collected.absorb(&line);
-            }
-            collected
-        });
-        let complaints = tokio::spawn(async move {
-            let mut text = String::new();
-            let mut stderr = stderr;
-            let _ = stderr.read_to_string(&mut text).await;
-            text
-        });
-
-        let stopped = tokio::time::timeout(
-            std::time::Duration::from_secs(timeout_secs),
-            child.wait(),
-        )
-        .await;
-        let mut note = String::new();
-        let status = match stopped {
-            Ok(status) => status?,
-            Err(_) => {
-                // Graceful first. `/stop` is the word the terminal takes, and the child keeps what it
-                // had drawn; `kill` is only for a child that ignores it.
-                if let Some(stdin) = child.stdin.as_mut() {
-                    use tokio::io::AsyncWriteExt;
-                    let _ = stdin.write_all(b"/stop\n").await;
-                    let _ = stdin.flush().await;
-                }
-                match tokio::time::timeout(std::time::Duration::from_secs(20), child.wait()).await {
-                    Ok(status) => {
-                        note = format!("\nstopped after {timeout_secs}s: the child was told to stop\n");
-                        status?
-                    }
-                    Err(_) => {
-                        let _ = child.kill().await;
-                        note = format!("\nkilled after {timeout_secs}s: the child did not stop when asked\n");
-                        child.wait().await?
-                    }
-                }
-            }
-        };
-
-        let collected = reader.await.unwrap_or_default();
-        let stderr_text = complaints.await.unwrap_or_default();
-        let code = status.code().unwrap_or(-1);
-
-        let mut text = match collected.answer() {
-            Some(answer) => answer,
-            // Nothing on the stream at all: the reason is on stderr, and passing it on is the
-            // difference between "the child failed" and "the child refused before it started".
-            None => stderr_text.trim().to_string(),
-        };
-        if text.trim().is_empty() {
-            text = "(the child said nothing)".to_string();
-        }
-        text.push_str(&format!(
-            "\n\nexit code: {code} ({})",
-            task_exit_meaning(code)
-        ));
-        if let Some(outcome) = &collected.outcome {
-            text.push_str(&format!("\noutcome: {outcome}"));
-        }
-        if let Some(cause) = &collected.error_code {
-            text.push_str(&format!("\ncause: {cause}"));
-        }
-        if let Some(error) = &collected.error {
-            let first = error.lines().next().unwrap_or("").trim();
-            text.push_str(&format!("\nerror: {first}"));
-        }
-        if let Some(result) = &collected.result {
-            // The validated object, on one line: this is the half of "structured" that a shell
-            // pipeline cannot give back.
-            text.push_str(&format!("\nresult: {result}"));
-        }
-        for warning in collected.warnings.iter().take(3) {
-            text.push_str(&format!("\nwarning: {warning}"));
-        }
-        text.push_str(&note);
-        Ok((text, collected.session))
+#[async_trait::async_trait]
+impl Tool for TasksTool {
+    fn name(&self) -> &str {
+        "tasks"
     }
+
+    fn description(&self) -> &str {
+        "Run several separate flint runs at the same time, one per job, and give back every answer \
+         labelled in the order asked. Use it when the jobs are genuinely independent -- the same \
+         question about N things, N parts of a tree, N options to try -- because that is when running \
+         them at once is worth more than running them in a row. The children cannot see this \
+         conversation or each other, so every job has to stand alone, and nothing learned by one \
+         helps another. Each job is a whole model run: this spends N runs at once."
+    }
+
+    fn task_config(&mut self) -> Option<&mut TaskConfig> {
+        Some(&mut self.config)
+    }
+
+    fn schema(&self) -> Value {
+        let job = json!({
+            "type": "object",
+            "properties": {
+                "prompt": { "type": "string", "description": "What to ask this child; it stands alone." },
+                "agent": { "type": "string", "description": "A .flint/agents/ profile for this child." },
+                "readonly": { "type": "boolean", "description": "Refuse writes in this child." },
+                "schema": { "type": "object", "description": "A JSON Schema for this child's answer." }
+            },
+            "required": ["prompt"]
+        });
+        json!({
+            "type": "object",
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": MAX_FAN_OUT,
+                    "items": job,
+                    "description": "The jobs, each complete on its own. They run at the same time and cannot see each other."
+                },
+                "cwd": { "type": "string", "description": "Directory for every child (default: this run's)." },
+                "timeout_secs": { "type": "number", "description": "Stop each child after this long (default 600)." },
+                "max_parallel": {
+                    "type": "number",
+                    "description": format!("How many may run at once (default {DEFAULT_PARALLEL}, at most {MAX_FAN_OUT}).")
+                }
+            },
+            "required": ["tasks"]
+        })
+    }
+
+    async fn call(&self, args: &Value) -> Result<String> {
+        if let Some(refusal) = depth_refusal() {
+            return Ok(refusal);
+        }
+        let jobs = args
+            .get("tasks")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if jobs.is_empty() {
+            return Err(anyhow!("tasks requires a non-empty `tasks` array"));
+        }
+        if jobs.len() > MAX_FAN_OUT {
+            return Err(anyhow!(
+                "tasks takes at most {MAX_FAN_OUT} jobs at once; {} were given. Ask twice.",
+                jobs.len()
+            ));
+        }
+        let max_parallel = args
+            .get("max_parallel")
+            .and_then(|value| value.as_u64())
+            .map(|n| (n as usize).clamp(1, MAX_FAN_OUT))
+            .unwrap_or(DEFAULT_PARALLEL);
+
+        // Every child is prepared *before* any of them starts. A bad argument in job three must not
+        // leave jobs one and two already spending money on work nobody is waiting for.
+        let mut queue: std::collections::VecDeque<Child> = std::collections::VecDeque::new();
+        for (position, job) in jobs.iter().enumerate() {
+            let mut job = job.clone();
+            if !job.is_object() {
+                return Err(anyhow!("tasks[{position}] is not an object"));
+            }
+            // The call's own `cwd` and `timeout_secs` apply to every job that does not name its own.
+            for key in ["cwd", "timeout_secs"] {
+                if job.get(key).is_none() {
+                    if let Some(value) = args.get(key) {
+                        job[key] = value.clone();
+                    }
+                }
+            }
+            let prompt = job
+                .get("prompt")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string();
+            if prompt.trim().is_empty() {
+                return Err(anyhow!("tasks[{position}] has no `prompt`"));
+            }
+            match prepare_child(&self.config, &job, &prompt, position + 1) {
+                Ok(child) => queue.push_back(child),
+                Err(error) => {
+                    // Leave nothing behind: a schema written for a child that will not run is a file
+                    // in the temp directory with nothing to delete it.
+                    for child in &queue {
+                        if let Some(path) = &child.schema_file {
+                            let _ = std::fs::remove_file(path);
+                        }
+                    }
+                    return Err(error.context(format!("tasks[{position}]")));
+                }
+            }
+        }
+
+        let total = queue.len();
+        let started = std::time::Instant::now();
+        let mut blocks: Vec<(usize, Option<String>, String)> = Vec::new();
+        while !queue.is_empty() {
+            let batch: Vec<Child> = queue.drain(..max_parallel.min(queue.len())).collect();
+            let mut handles = Vec::new();
+            for child in batch {
+                let index = child.index;
+                let agent = child.agent.clone();
+                handles.push((index, agent, tokio::spawn(run_child(child))));
+            }
+            for (index, agent, handle) in handles {
+                // A child that panicked is reported as a block of its own rather than dropped: an
+                // answer that quietly lost one of three questions is worse than a visible failure.
+                let text = match handle.await {
+                    Ok(Ok(text)) => text,
+                    Ok(Err(error)) => format!("the child could not be run: {error:#}"),
+                    Err(error) => format!("the child did not finish: {error}"),
+                };
+                blocks.push((index, agent, text));
+            }
+        }
+        blocks.sort_by_key(|(index, _, _)| *index);
+
+        let mut out = format!(
+            "{total} children ran, {max_parallel} at a time, {:.0}s in total. Each answer is \
+             labelled with the job it belongs to.\n",
+            started.elapsed().as_secs_f64()
+        );
+        for (index, agent, text) in blocks {
+            out.push_str(&format!(
+                "\n--- task {index}{} ---\n{text}\n",
+                agent.map(|name| format!(" ({name})")).unwrap_or_default()
+            ));
+        }
+        Ok(out)
+    }
+}
+
+/// Run the child, read its stream, and turn it into the one piece of text the model gets back.
+///
+/// The stream is read as it arrives rather than through `output()`, for one reason: a child that
+/// has to be stopped should be stopped the way a person stops one -- `/stop` on its stdin, which
+/// leaves the half-answer it had drawn in its session file -- and killing it is the fallback, not
+/// the first move. The answer is formatted answer-first, then the facts a caller needs to decide
+/// what to do with it, so a model that reads only the top still gets the reason.
+///
+/// Takes the child by value so that it can be `tokio::spawn`ed: a fan-out runs these at the same
+/// time, and a borrow of the tool would tie them all to one call frame.
+async fn run_child(child: Child) -> Result<String> {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+
+    let started = std::time::Instant::now();
+    let argv = child.argv;
+    let mut process = tokio::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .env("FLINT_DEPTH", child.depth.to_string())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| format!("running {}", argv[0]))?;
+
+    let stdout = process.stdout.take().expect("stdout was piped");
+    let stderr = process.stderr.take().expect("stderr was piped");
+    let reader = tokio::spawn(async move {
+        let lines = tokio::io::BufReader::new(stdout).lines();
+        let mut collected = Collected::default();
+        let mut lines = Box::pin(lines);
+        while let Ok(Some(line)) = lines.next_line().await {
+            collected.absorb(&line);
+        }
+        collected
+    });
+    let complaints = tokio::spawn(async move {
+        let mut text = String::new();
+        let mut stderr = stderr;
+        let _ = stderr.read_to_string(&mut text).await;
+        text
+    });
+
+    let stopped = tokio::time::timeout(
+        std::time::Duration::from_secs(child.timeout_secs),
+        process.wait(),
+    )
+    .await;
+    let mut note = String::new();
+    let status = match stopped {
+        Ok(status) => status?,
+        Err(_) => {
+            // Graceful first. `/stop` is the word the terminal takes, and the child keeps what it
+            // had drawn; `kill` is only for a child that ignores it.
+            if let Some(stdin) = process.stdin.as_mut() {
+                use tokio::io::AsyncWriteExt;
+                let _ = stdin.write_all(b"/stop\n").await;
+                let _ = stdin.flush().await;
+            }
+            let timeout_secs = child.timeout_secs;
+            match tokio::time::timeout(std::time::Duration::from_secs(20), process.wait()).await {
+                Ok(status) => {
+                    note = format!("\nstopped after {timeout_secs}s: the child was told to stop\n");
+                    status?
+                }
+                Err(_) => {
+                    let _ = process.kill().await;
+                    note = format!(
+                        "\nkilled after {timeout_secs}s: the child did not stop when asked\n"
+                    );
+                    process.wait().await?
+                }
+            }
+        }
+    };
+
+    let collected = reader.await.unwrap_or_default();
+    let stderr_text = complaints.await.unwrap_or_default();
+    let code = status.code().unwrap_or(-1);
+
+    let mut text = match collected.answer() {
+        Some(answer) => answer,
+        // Nothing on the stream at all: the reason is on stderr, and passing it on is the
+        // difference between "the child failed" and "the child refused before it started".
+        None => stderr_text.trim().to_string(),
+    };
+    if text.trim().is_empty() {
+        text = "(the child said nothing)".to_string();
+    }
+    text.push_str(&format!(
+        "\n\nexit code: {code} ({})",
+        task_exit_meaning(code)
+    ));
+    if let Some(outcome) = &collected.outcome {
+        text.push_str(&format!("\noutcome: {outcome}"));
+    }
+    if let Some(cause) = &collected.error_code {
+        text.push_str(&format!("\ncause: {cause}"));
+    }
+    if let Some(error) = &collected.error {
+        let first = error.lines().next().unwrap_or("").trim();
+        text.push_str(&format!("\nerror: {first}"));
+    }
+    if let Some(result) = &collected.result {
+        // The validated object, on one line: this is the half of "structured" that a shell
+        // pipeline cannot give back.
+        text.push_str(&format!("\nresult: {result}"));
+    }
+    for warning in collected.warnings.iter().take(3) {
+        text.push_str(&format!("\nwarning: {warning}"));
+    }
+    text.push_str(&note);
+    text.push_str(&format!(
+        "\ndepth: {} (this run is {}), readonly: {}, waited: {:.0}s",
+        child.depth,
+        child.depth - 1,
+        child.readonly,
+        started.elapsed().as_secs_f64()
+    ));
+    if let Some(session) = collected.session {
+        text.push_str(&format!("\nsession: {session}"));
+    }
+    if let Some(path) = &child.schema_file {
+        let _ = std::fs::remove_file(path);
+    }
+    Ok(text)
 }
 
 /// The frames worth keeping from a child's stream, gathered in one place.

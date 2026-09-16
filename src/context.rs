@@ -76,6 +76,55 @@ pub struct Skill {
     pub path: PathBuf,
 }
 
+/// One agent profile: a named way to start another run.
+///
+/// A profile is not a new kind of thing. It is the arguments `flint -p … --json` already takes --
+/// a model, a provider, `readonly`, and the words to start from -- written down once, in a file, so
+/// that "the explorer" means the same thing to a person typing it and to a model naming it. That is
+/// the whole feature: the alternative is a model composing a command line, which is where a wrong
+/// flag becomes somebody's bill.
+///
+/// The body is deliberately *not* carried here. Discovery reads only the front matter, the way the
+/// skill catalog does, so a directory of long profiles costs a few lines of prompt rather than all
+/// of their text; the body is read when the profile is used.
+#[derive(Debug, Clone)]
+pub struct AgentProfile {
+    pub name: String,
+    pub description: String,
+    /// A model for the child. `None` means "whatever this run is using".
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    /// Whether the child may write. A profile can *add* `readonly`, never remove it: the run that
+    /// spawns decides the floor, the same way the `task` tool does.
+    pub readonly: bool,
+    pub path: PathBuf,
+}
+
+impl AgentProfile {
+    /// One line for a catalog: the name, what it is for, and the two facts that change behaviour.
+    pub fn summary(&self) -> String {
+        let mut out = self.name.clone();
+        if !self.description.is_empty() {
+            out.push_str(" — ");
+            out.push_str(&self.description);
+        }
+        let mut facts: Vec<String> = Vec::new();
+        if self.readonly {
+            facts.push("readonly".to_string());
+        }
+        if let Some(model) = &self.model {
+            facts.push(format!("model {model}"));
+        }
+        if let Some(provider) = &self.provider {
+            facts.push(format!("provider {provider}"));
+        }
+        if !facts.is_empty() {
+            out.push_str(&format!(" [{}]", facts.join(", ")));
+        }
+        out
+    }
+}
+
 /// What was found around a working directory.
 #[derive(Debug, Clone, Default)]
 pub struct Workspace {
@@ -88,6 +137,10 @@ pub struct Workspace {
     /// caller that wants to load one -- the `skill` tool, `/skills` -- searches exactly
     /// what the prompt's catalog was built from.
     pub skill_dirs: Vec<PathBuf>,
+    /// Agent profiles, by name, nearest directory first.
+    pub agents: Vec<AgentProfile>,
+    /// The directories those profiles were found in, for the same reason as `skill_dirs`.
+    pub agent_dirs: Vec<PathBuf>,
 }
 
 impl Workspace {
@@ -107,6 +160,26 @@ impl Workspace {
     /// is what the model would receive.
     pub fn load(&self, name: &str) -> Result<String> {
         load_skill(&self.skill_dirs, name)
+    }
+
+    /// Load one agent profile's body by name, re-read from disk.
+    ///
+    /// The profile itself comes from what was already discovered -- a name is looked up in a list,
+    /// never turned into a path -- and only the body is read again, so that editing a profile's
+    /// instructions takes effect in the next child without restarting the run.
+    pub fn load_agent(&self, name: &str) -> Result<(AgentProfile, String)> {
+        let profile = self.agent(name)?;
+        let body = load_agent_body(&self.agent_dirs, name)?;
+        Ok((profile, body))
+    }
+
+    /// One profile by name, or an error listing the ones that exist.
+    pub fn agent(&self, name: &str) -> Result<AgentProfile> {
+        self.agents
+            .iter()
+            .find(|agent| agent.name == name)
+            .cloned()
+            .ok_or_else(|| unknown_agent_error(name, &self.agents))
     }
 
     /// The skill names, in the order the model is given them.
@@ -277,11 +350,14 @@ pub fn discover_with(
     }
 
     let dirs = skill_dirs_for(cwd, config_dir, root.as_deref(), extra_skill_dirs);
+    let agent_dirs = agent_dirs_for(cwd, config_dir, root.as_deref());
     Workspace {
         root,
         instruction_files,
         skills: skills_in(&dirs),
         skill_dirs: dirs,
+        agents: agents_in(&agent_dirs),
+        agent_dirs,
     }
 }
 
@@ -347,11 +423,25 @@ pub fn skills_in(dirs: &[PathBuf]) -> Vec<Skill> {
                 continue;
             };
             let (front, body) = split_front_matter(&text);
+            let field = |key: &str| {
+                front
+                    .as_ref()
+                    .and_then(|fields| fields.iter().find(|(k, _)| k == key))
+                    .map(|(_, v)| v.trim().to_string())
+                    .unwrap_or_default()
+            };
             let (name, description) = match front {
-                Some((n, d)) => (
-                    if n.trim().is_empty() { name } else { n.trim().to_string() },
-                    d.trim().to_string(),
-                ),
+                Some(_) => {
+                    let declared = field("name");
+                    let description = {
+                        let d = field("description");
+                        if d.is_empty() { field("summary") } else { d }
+                    };
+                    (
+                        if declared.is_empty() { name } else { declared },
+                        description,
+                    )
+                }
                 None => (name, first_line(body)),
             };
             if name.trim().is_empty() {
@@ -399,14 +489,142 @@ pub fn load_skill(dirs: &[PathBuf], name: &str) -> Result<String> {
     Ok(split_front_matter(&text).1.trim().to_string())
 }
 
-/// Split `---` front matter from the body.
+/// Which directories are searched for agent profiles, in the order that decides name conflicts.
 ///
-/// Hand-written rather than pulled from a YAML crate. The format is two known keys, the
-/// dependency would exist for ten lines of code, and a parser that cannot be surprised
-/// by anchors, tags or multi-document streams is one less thing between a person and
-/// their own file. An unrecognised key is ignored; a missing one falls back to the
-/// directory name and the first line of the body.
-fn split_front_matter(text: &str) -> (Option<(String, String)>, &str) {
+/// The same order and the same reasoning as `skill_dirs_for`: the project's own profiles win, then
+/// the working directory's, then the user's. A profile is a way to spend money on a model, so a
+/// project that ships one means it.
+pub fn agent_dirs_for(cwd: &Path, config_dir: &Path, root: Option<&Path>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut push = |dir: PathBuf| {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    };
+    if let Some(root) = root {
+        push(root.join(".flint").join("agents"));
+    }
+    push(cwd.join(".flint").join("agents"));
+    push(config_dir.join("agents"));
+    dirs
+}
+
+/// Every profile these directories hold, first directory first, then by name.
+///
+/// One level deep, like the skills: `<dir>/<name>.md` and nothing nested, so a fixture or a draft
+/// in a subdirectory is not offered as a way to start a run. A file whose name is `.md` and whose
+/// first line is not a fence still counts -- the body is the instructions and the file name is the
+/// name -- because a person who writes `explorer.md` with no front matter has written a profile.
+pub fn agents_in(dirs: &[PathBuf]) -> Vec<AgentProfile> {
+    let mut out: Vec<AgentProfile> = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        let mut found: Vec<AgentProfile> = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() || path.extension().is_none_or(|e| e != "md") {
+                continue;
+            }
+            let stem = path
+                .file_stem()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let (front, body) = split_front_matter(&text);
+            let mut profile = AgentProfile {
+                name: stem,
+                description: first_line(body),
+                model: None,
+                provider: None,
+                readonly: false,
+                path: path.clone(),
+            };
+            if let Some(front) = front {
+                for (key, value) in front {
+                    match key.as_str() {
+                        "name" if !value.is_empty() => profile.name = value,
+                        "description" | "summary" => profile.description = value,
+                        "model" if !value.is_empty() => profile.model = Some(value),
+                        "provider" if !value.is_empty() => profile.provider = Some(value),
+                        // Only `true` turns it on: an unreadable value must not decide that a child
+                        // may write, and the safe reading of "can this write?" is never.
+                        "readonly" => profile.readonly = value.eq_ignore_ascii_case("true"),
+                        _ => {}
+                    }
+                }
+            }
+            if profile.name.trim().is_empty() {
+                continue;
+            }
+            found.push(profile);
+        }
+        // A catalog that reshuffles between requests is one the model cannot learn, and `read_dir`
+        // order is arbitrary.
+        found.sort_by(|a, b| a.name.cmp(&b.name));
+        for profile in found {
+            // First directory wins, so a project's `explorer` is *the* explorer.
+            if !out.iter().any(|p| p.name == profile.name) {
+                out.push(profile);
+            }
+        }
+    }
+    out
+}
+
+/// Load one profile's body, by name, from disk.
+///
+/// Against the discovered names rather than a path built from the argument, for the same reason as
+/// `load_skill`: a name that is not a profile is an error listing the ones that are, not a path.
+pub fn load_agent_body(dirs: &[PathBuf], name: &str) -> Result<String> {
+    let agents = agents_in(dirs);
+    let profile = agents
+        .iter()
+        .find(|a| a.name == name)
+        .ok_or_else(|| unknown_agent_error(name, &agents))?;
+    agent_body(profile)
+}
+
+/// One profile's body, read from the path discovery already found.
+///
+/// Separate from the lookup so that a caller holding a profile -- the `task` tool does -- reads the
+/// file without searching for it again: a name is resolved against a list once, and a file that
+/// appeared between the search and the use cannot turn a name into a path.
+pub fn agent_body(profile: &AgentProfile) -> Result<String> {
+    let text = std::fs::read_to_string(&profile.path)
+        .with_context(|| format!("cannot read agent profile {}", profile.path.display()))?;
+    Ok(split_front_matter(&text).1.trim().to_string())
+}
+
+/// "there is no such profile" -- with the ones there are, because that is what makes it fixable.
+pub fn unknown_agent_error(name: &str, agents: &[AgentProfile]) -> anyhow::Error {
+    let known: Vec<&str> = agents.iter().map(|a| a.name.as_str()).collect();
+    anyhow::anyhow!(
+        "unknown agent '{}'. Available: {}. A profile is a file: <project>/.flint/agents/{}.md",
+        name,
+        if known.is_empty() {
+            "(none)".to_string()
+        } else {
+            known.join(", ")
+        },
+        name
+    )
+}
+
+/// Split `---` front matter from the body, as key/value pairs.
+///
+/// Hand-written rather than pulled from a YAML crate. The format is a handful of known keys, the
+/// dependency would exist for ten lines of code, and a parser that cannot be surprised by anchors,
+/// tags or multi-document streams is one less thing between a person and their own file.
+///
+/// Keys are lower-cased and every one is returned, because skills and agent profiles want different
+/// ones from the same syntax and a parser per kind of file would be two places to fix. An
+/// unrecognised key is ignored by the caller; quoting is trimmed, so `model: "x"` and `model: x`
+/// mean the same thing.
+fn split_front_matter(text: &str) -> (Option<Vec<(String, String)>>, &str) {
     let mut lines = text.lines();
     let Some(first) = lines.next() else {
         return (None, text);
@@ -415,8 +633,7 @@ fn split_front_matter(text: &str) -> (Option<(String, String)>, &str) {
         return (None, text);
     }
 
-    let mut name = String::new();
-    let mut description = String::new();
+    let mut fields: Vec<(String, String)> = Vec::new();
     let mut consumed = first.len() + 1;
     let mut closed = false;
     for line in lines {
@@ -429,10 +646,14 @@ fn split_front_matter(text: &str) -> (Option<(String, String)>, &str) {
             continue;
         };
         let value = value.trim().trim_matches('"').trim_matches('\'').to_string();
-        match key.trim().to_ascii_lowercase().as_str() {
-            "name" => name = value,
-            "description" | "summary" => description = value,
-            _ => {}
+        let key = key.trim().to_ascii_lowercase();
+        if key.is_empty() {
+            continue;
+        }
+        // Last one wins, which is what a person editing a file by hand expects.
+        match fields.iter_mut().find(|(k, _)| *k == key) {
+            Some(slot) => slot.1 = value,
+            None => fields.push((key, value)),
         }
     }
     if !closed {
@@ -440,7 +661,7 @@ fn split_front_matter(text: &str) -> (Option<(String, String)>, &str) {
         return (None, text);
     }
     let body = text.get(consumed..).unwrap_or("");
-    (Some((name, description)), body)
+    (Some(fields), body)
 }
 
 /// First non-empty, non-heading line: the fallback description for a skill with no
@@ -701,5 +922,123 @@ mod tests {
         for mode in [Instructions::Off, Instructions::Hint, Instructions::Paste] {
             assert_eq!(Instructions::parse(mode.name()), Some(mode));
         }
+    }
+
+    #[test]
+    fn an_agent_profile_carries_the_model_readonly_and_provider_it_declares() {
+        let tree = Tree::new("agents");
+        let cwd = tree.dir("work");
+        let config_dir = tree.dir("config");
+        tree.file(
+            "work/.flint/agents/explorer.md",
+            "---\nname: explorer\ndescription: Reads the tree and reports.\nmodel: \"cheap-model\"\n\
+             provider: local\nreadonly: true\n---\n\nYou only read. Never write.\n",
+        );
+        let found = discover_with(&cwd, &config_dir, &tree.0.join("home"), &[]);
+        assert_eq!(found.agents.len(), 1, "{:?}", found.agents);
+        let profile = &found.agents[0];
+        assert_eq!(profile.name, "explorer");
+        assert_eq!(profile.description, "Reads the tree and reports.");
+        assert_eq!(profile.model.as_deref(), Some("cheap-model"));
+        assert_eq!(profile.provider.as_deref(), Some("local"));
+        assert!(profile.readonly);
+        // The body is read when the profile is used, not when the catalog is built: a directory of
+        // long profiles must not put all of their text in every request.
+        let (_, body) = found.load_agent("explorer").expect("load");
+        assert_eq!(body, "You only read. Never write.");
+    }
+
+    #[test]
+    fn a_profile_with_no_front_matter_is_named_after_its_file_and_summarised_by_its_first_line() {
+        let tree = Tree::new("agents-bare");
+        let cwd = tree.dir("work");
+        let config_dir = tree.dir("config");
+        tree.file(
+            "work/.flint/agents/sweeper.md",
+            "# Sweeper\n\nTidy the tree and say what moved.\n",
+        );
+        let found = discover_with(&cwd, &config_dir, &tree.0.join("home"), &[]);
+        assert_eq!(found.agents.len(), 1);
+        assert_eq!(found.agents[0].name, "sweeper");
+        assert_eq!(
+            found.agents[0].description,
+            "Tidy the tree and say what moved."
+        );
+        assert!(!found.agents[0].readonly);
+        assert!(found.agents[0].model.is_none());
+    }
+
+    #[test]
+    fn readonly_is_turned_on_only_by_saying_true() {
+        // The safe reading of "may this child write?" is never, so an unreadable value cannot
+        // decide it. `yes` is a reasonable thing to write and is not a word this parser knows.
+        let tree = Tree::new("agents-readonly");
+        let cwd = tree.dir("work");
+        let config_dir = tree.dir("config");
+        tree.file("work/.flint/agents/yes.md", "---\nreadonly: yes\n---\nbody\n");
+        tree.file("work/.flint/agents/on.md", "---\nreadonly: TRUE\n---\nbody\n");
+        let found = discover_with(&cwd, &config_dir, &tree.0.join("home"), &[]);
+        let by_name = |name: &str| {
+            found
+                .agents
+                .iter()
+                .find(|a| a.name == name)
+                .expect("profile")
+                .readonly
+        };
+        assert!(!by_name("yes"));
+        assert!(by_name("on"));
+    }
+
+    #[test]
+    fn the_projects_profile_wins_over_the_users_and_a_name_is_never_a_path() {
+        let tree = Tree::new("agents-order");
+        let project = tree.git("project");
+        let config_dir = tree.dir("config");
+        tree.file(
+            "config/agents/explorer.md",
+            "---\ndescription: user version\n---\nUser body.\n",
+        );
+        tree.file(
+            "project/.flint/agents/explorer.md",
+            "---\ndescription: project version\n---\nProject body.\n",
+        );
+        let found = discover_with(&project, &config_dir, &tree.0.join("home"), &[]);
+        assert_eq!(found.agents.len(), 1, "{:?}", found.agents);
+        assert_eq!(found.agents[0].description, "project version");
+
+        let dirs = agent_dirs_for(&project, &config_dir, found.root.as_deref());
+        let (profile, body) = found.load_agent("explorer").expect("load");
+        assert_eq!(profile.description, "project version");
+        assert_eq!(body, "Project body.");
+        assert!(load_agent_body(&dirs, "explorer").is_ok());
+
+        let err = format!("{:#}", load_agent_body(&dirs, "../../etc/passwd").unwrap_err());
+        assert!(err.contains("unknown agent"), "{err}");
+        assert!(err.contains("explorer"), "the error does not say what exists: {err}");
+    }
+
+    #[test]
+    fn a_profile_summary_says_what_changes_behaviour_and_nothing_else() {
+        let plain = AgentProfile {
+            name: "reader".to_string(),
+            description: String::new(),
+            model: None,
+            provider: None,
+            readonly: false,
+            path: PathBuf::from("x.md"),
+        };
+        assert_eq!(plain.summary(), "reader");
+        let loud = AgentProfile {
+            description: "Looks, does not touch.".to_string(),
+            model: Some("cheap".to_string()),
+            provider: Some("local".to_string()),
+            readonly: true,
+            ..plain
+        };
+        assert_eq!(
+            loud.summary(),
+            "reader — Looks, does not touch. [readonly, model cheap, provider local]"
+        );
     }
 }
