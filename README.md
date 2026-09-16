@@ -100,6 +100,7 @@ flint -p "why is my dsh broken"  # one-shot
 flint why is my dsh broken       # same thing
 flint -p "apply @rules.csv"      # @file is replaced by that file's contents (for anything too
                                  # big to fit on a command line)
+flint -p "why?" --max-seconds 30 # bound the whole run; over budget it ends `incomplete` (exit 65)
 flint --continue                 # resume the last session here
 flint --resume 3                 # resume a particular one (see the list)
 flint --resume 1789116592        # ...by id prefix, or by path to the .jsonl
@@ -194,7 +195,7 @@ empty. Ctrl-D quits.
 
 Flags: `--provider`, `--model`, `--readonly`, `--cwd`, `--no-color` (or
 `NO_COLOR`), `--continue`, `--resume`, `--fork`, `--name`, `--archive`, `--delete`,
-`--json`, `--schema`, `--result-file`, `--list-sessions`.
+`--json`, `--schema`, `--result-file`, `--list-sessions`, `--max-seconds`.
 
 ### Reading a run from a program
 
@@ -265,9 +266,19 @@ The vocabulary is closed and small: `session.started`, `turn.started`, `message.
   about a path. Whole-prompt inlining is capped at 256 KB, refused by name before anything is sent —
   a silent truncation at the endpoint would be a wrong answer that looks complete. The session file
   records the expanded prompt (what the model was given); the stream keeps your words.
+- **A call can be given a budget.** `--max-seconds 30` is a wall-clock bound on the whole run —
+  including the repair attempts after a schema miss — and when it runs out the turn is dropped where
+  it stands, whatever had been drawn is kept, and the run ends `incomplete` with
+  `"reason":"seconds"` and exit **65**. That is the flag's whole point: `max_steps` cannot cut a
+  request that never comes back, and a caller asking over a flaky link needs "something in a minute,
+  or tell me you could not" rather than a process that is still going. It needs a prompt (a budget
+  bounds a call, and an interactive session is bounded by whoever is typing at it). A run that
+  finishes inside its budget is unaffected and carries no `reason`.
 - **The end of a turn says what the answer is worth.** `turn.completed` carries an `outcome`:
-  `complete` (the model finished), `incomplete` (flint stopped asking at the `max_steps` limit, so
-  the text above is half of what it had) or `stopped` (the caller cut it short, below). A caller that
+  `complete` (the model finished), `incomplete` (flint stopped asking at a limit, so
+  the text above is half of what it had — `"reason":"steps"` for the `max_steps` guard and
+  `"reason":"seconds"` for a `--max-seconds` budget, which are raised in two different places) or
+  `stopped` (the caller cut it short, below). A caller that
   acts on the answer reads this before it acts, because the type it validated says nothing about
   whether the model was finished. The exit code says the same thing to a shell:
 

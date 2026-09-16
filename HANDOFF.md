@@ -41,8 +41,15 @@ raises `WinError 206` in `subprocess` before flint even starts. The rule is deli
 name is inlined only when it is a readable text file; prose is left alone; `turn.started`'s
 `attachments` says what went in, so a mistyped name is a visible empty list), the cap is 256 KB
 refused before anything is sent, and the stream keeps the caller's own words while the request and
-the session hold the expanded prompt. Next in the queue: step 5 (`--max-seconds`), then the
-stream-integrity test, then the Python side.
+the session hold the expanded prompt. **Step 5 is built too**: `--max-seconds N` bounds the whole run
+(one absolute instant, so a repair attempt does not get a fresh budget), and when it runs out the turn
+is dropped where it stands with the drawn half kept — the same machinery as `/stop` — reporting
+`outcome:"incomplete"` with `"reason":"seconds"` and exit 65 rather than `stopped`, because nobody
+changed their mind: a limit the caller set was reached, which is what the step limit already meant.
+That added `reason` to `turn.completed` (`steps` or `seconds`), since the two budgets are raised in
+two different places. The plain path got the same bound and its exit code now carries the outcome
+(65 unfinished, 130 stopped, where it used to say 0 for both). Next in the queue: step 6 (the
+stream-integrity test on raw bytes), then the Python side.
 Read it before touching `src/main.rs`'s argument handling. In short: DeepSeek says it with
 **402**, OpenAI-shaped endpoints say it with **429 `insufficient_quota`** — the same status as a rate
 limit — and Anthropic with a 400 and a sentence. flint decides "transient" from the status **and** the
@@ -77,9 +84,9 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 493 passing, 1 ignored (301 lib, 3 in
-the binary's own tests, 33 `agent_loop`, 59 `cli_output`, 30 `json_output` (7 structured
-output, 1 the heartbeat, 2 the stop channel, 5 the exit codes and the turn's outcome, 2 the
+As of the commit that carries this file, `cargo test` is 498 passing, 1 ignored (301 lib, 3 in
+the binary's own tests, 33 `agent_loop`, 61 `cli_output`, 33 `json_output` (7 structured
+output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
 be able to read, 4 the answer written where the caller asked, 3 the file inlined into the prompt),
 7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 6 `who`, 6 `task`, 2 `say`), `cargo clippy
@@ -277,7 +284,7 @@ open, so the copy needs every flint window closed first — measured twice.
 
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
-cargo test                                        # 493 passing, 1 ignored
+cargo test                                        # 498 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed

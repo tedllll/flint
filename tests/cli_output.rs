@@ -93,6 +93,88 @@ fn no_color_is_honoured() {
 /// own input read as a person interrupting, so the answer was cancelled before it
 /// started and the transcript said `interrupted`. Piping into a one-shot run is
 /// ordinary, and it must never change what is asked.
+/// A one-shot run with a budget stops when the budget is gone, not when the provider answers.
+///
+/// The plain path, not `--json`: a shell caller with no stream to read still needs the bound and gets
+/// only the exit code, so the code has to carry it. This is the case the flag exists for -- a request
+/// that never comes back, which no step limit can cut and whose wait is not flint's to sit out.
+#[tokio::test]
+async fn a_one_shot_run_stops_when_its_budget_is_gone() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(&[
+                    r#"data: {"choices":[{"delta":{"content":"TOO LATE"}}]}"#,
+                    "data: [DONE]",
+                ]))
+                .set_delay(std::time::Duration::from_secs(30)),
+        )
+        .mount(&server)
+        .await;
+
+    let dir = std::env::temp_dir().join(format!("flint-cli-budget-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    std::fs::write(
+        dir.join("config.toml"),
+        format!(
+            "default_provider = \"stub\"\n\n\
+             [[providers]]\n\
+             name = \"stub\"\n\
+             base_url = \"{}\"\n\
+             model = \"stub-model\"\n\
+             api_key = \"not-a-real-key\"\n",
+            server.uri()
+        ),
+    )
+    .expect("failed to write the test config");
+
+    let began = std::time::Instant::now();
+    let out = binary()
+        .args(["-p", "think about it", "--max-seconds", "1"])
+        .env("FLINT_HOME", &dir)
+        .env_remove("NO_COLOR")
+        .output()
+        .expect("failed to run flint");
+    let waited = began.elapsed();
+    let _ = std::fs::remove_dir_all(&dir);
+    let printed = String::from_utf8_lossy(&out.stdout).to_string();
+    // The reason goes to stderr on the plain path, which is where a non-interactive run's notices
+    // have always gone: stdout is the answer, and nothing else may be on it.
+    let noted = String::from_utf8_lossy(&out.stderr).to_string();
+
+    assert!(
+        waited < std::time::Duration::from_secs(15),
+        "the run waited {waited:?} for an answer the caller had already given up on"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(65),
+        "a run cut short by its budget exited as though it had answered: {printed} / {noted}"
+    );
+    assert!(
+        noted.contains("1-second budget"),
+        "nothing said what ended the run: {noted}"
+    );
+    assert!(
+        !printed.contains("TOO LATE"),
+        "an answer that arrived after the deadline was printed as though it were in time"
+    );
+}
+
+/// The same flag on a run with no prompt: there is no call to bound, and a budget is not a setting.
+#[test]
+fn a_budget_without_a_prompt_is_refused() {
+    let (code, out) = run(&["--max-seconds", "5"]);
+    assert_eq!(code, 2, "{}", String::from_utf8_lossy(&out));
+    assert!(
+        String::from_utf8_lossy(&out).contains("--max-seconds"),
+        "the refusal does not name the flag: {}",
+        String::from_utf8_lossy(&out)
+    );
+}
+
 #[tokio::test]
 async fn a_piped_one_shot_run_ignores_its_stdin() {
     let server = MockServer::start().await;

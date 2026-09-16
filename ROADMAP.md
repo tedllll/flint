@@ -1156,7 +1156,7 @@ line no longer crosses the composer; **the page's own log, written by default** 
 the hand's code made the boot's first paint throw, taking the sidebar, the sessions and the feed
 with it; and `/stop`, the interrupt as a short word, reachable from the composer today.
 
-### 10. flint as a function a program can call — **in progress: steps 1–4 landed (B7 included), 5–7 queued**
+### 10. flint as a function a program can call — **in progress: steps 1–5 landed (B7 included), 6–7 queued**
 
 flint answers; it cannot yet be *trusted as a function*. A caller that acts on the result — writes a
 config, queues a job, retries a batch, feeds it data it did not author — has to know four things
@@ -1189,11 +1189,12 @@ missing is the one about money — what a run *cost* rather than what it answere
    a diff had no way in at all; now it names the file — `flint -p "apply @rules.csv"` — and flint
    puts the contents in the prompt. The same measurement is a check in `examples/python/test_call.py`:
    a 247 KB document goes through four characters of command line.
-2. **A budget for one call.** `max_steps` is a runaway guard, and exhausting it emits a `warning`
-   string. Nothing bounds wall-clock time or spend from flint's side, so a caller cannot ask for
-   "something in thirty seconds, or tell me you could not" and cannot cap what one call costs.
-   Claude Code's `error_max_budget_usd` is evidence that "the budget ran out" is a first-class
-   outcome rather than an error string.
+2. **A budget for one call.** *Solved by `--max-seconds`, in step 5.* `max_steps` was a runaway
+   guard, and exhausting it emitted a `warning` string. A caller can now ask for "something in thirty
+   seconds, or tell me you could not" and get `outcome:"incomplete"` with `"reason":"seconds"` and exit
+   65 — and a `turn.completed` that says which limit ran out, which is the first-class outcome rather
+   than an error string. Claude Code's `error_max_budget_usd` is the same shape of evidence; what is
+   *not* done is the money half — nothing caps spend, only time.
 3. **The answer in a file.** Only a schema run has a `result` line to read. Everything else is prose
    the caller must reassemble from deltas or `message.completed` — so every caller writes the same
    parser, and each one can get it subtly wrong.
@@ -1429,7 +1430,23 @@ What to build for it, in step 2:
    for the rare case of editing a file that was also attached, and the cost of leaving it is one
    `read` in that case, which also hands the model line numbers. Worth revisiting if it bites.
 5. **`--max-seconds`**, so a caller can ask for a bounded run and get `incomplete` rather than a
-   process that is still going.
+   process that is still going. — **Built.** The bound is wall-clock over the *whole run*, including
+   the repair attempts after a schema miss (one absolute instant, so a retry does not get a fresh
+   budget), because the thing it protects a caller from is a process that is still going: `max_steps`
+   cannot cut a request that never comes back, and a provider's own timeout is the provider's. What it
+   does is drop the turn where it stands — the same machinery as `/stop`, which is also how the drawn
+   half-answer gets committed to the session. What it reports is `outcome:"incomplete"` with
+   `"reason":"seconds"` and exit **65**, *not* `stopped`: nobody changed their mind, a limit the caller
+   itself set was reached, and a caller reading `stopped` would go looking for the person who pressed
+   the key — while `incomplete` is the same word the step limit uses, which is what it is. That needed
+   `reason` on `turn.completed` (`"steps"` for the `max_steps` guard), because the two budgets are
+   raised in two different places and "unfinished" alone does not say which one to change; the key is
+   absent on a finished run, so its presence is the fact. It requires a prompt: a budget bounds a
+   *call*, and an interactive session is bounded by whoever is typing at it. The plain path (no
+   `--json`) got the same bound, checked by the tick its loop already runs, and its exit code now
+   carries the outcome — 65 for unfinished, 130 for stopped — where it used to return 0 for both,
+   which was invisible only because a one-shot run with no stream has no way to be stopped but a
+   signal.
 6. **A stream-integrity test** — the thing C2 says does not exist: a run's stdout contains nothing
    but parseable frames, asserted on raw bytes.
 7. **The Python side, once flint can be told apart.** `Chat`, which pins the session path

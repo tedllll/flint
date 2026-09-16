@@ -1218,6 +1218,133 @@ mod exit_codes {
             code, DATAERR,
             "an unfinished answer exited as if it were a usable one: {lines:?}"
         );
+        // Which limit ran out, as a field rather than as a sentence: raising a step budget and
+        // raising a time budget are different repairs, and a caller that has to match on warning
+        // text to tell them apart has the fault `outcome` was added to remove.
+        assert_eq!(
+            line_of(&lines, "turn.completed")["reason"],
+            "steps",
+            "the turn does not say which limit stopped it: {lines:?}"
+        );
+    }
+
+    /// A run whose time budget runs out is unfinished, and it is unfinished *now* -- not when the
+    /// endpoint finally gets round to answering.
+    ///
+    /// This is the case a caller cannot otherwise cover: the request is in flight and nothing is
+    /// coming back, so the process would sit there for as long as the provider's own timeout allows.
+    /// The deadline cuts the turn where it stands, keeps whatever had been drawn, and says which
+    /// limit did it.
+    #[tokio::test]
+    async fn a_run_that_ran_out_of_time_is_unfinished_and_stops_waiting() {
+        let server = MockServer::start().await;
+        let cwd = cwd_for("code-seconds");
+        // Far longer than the budget, and longer than the assertion below is willing to wait: if the
+        // deadline did not cut the turn, this test would sit here for half a minute and then fail.
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse_text("too late"))
+                    .set_delay(std::time::Duration::from_secs(30)),
+            )
+            .mount(&server)
+            .await;
+        let home = home_for("code-seconds", &server.uri(), &cwd);
+
+        let began = std::time::Instant::now();
+        let (code, lines, stderr) = run_json(
+            &home,
+            &cwd,
+            &["-p", "think about it", "--json", "--max-seconds", "1"],
+        );
+        let waited = began.elapsed();
+        let _ = std::fs::remove_dir_all(&home);
+
+        assert!(
+            waited < std::time::Duration::from_secs(15),
+            "the run waited {waited:?} for an answer the caller had already given up on"
+        );
+        assert_eq!(
+            line_of(&lines, "turn.completed")["outcome"],
+            "incomplete",
+            "a run cut short by its budget claimed to have finished: {stderr} {lines:?}"
+        );
+        assert_eq!(
+            line_of(&lines, "turn.completed")["reason"],
+            "seconds",
+            "the turn does not say which limit stopped it: {lines:?}"
+        );
+        assert_eq!(
+            code, DATAERR,
+            "an unfinished answer exited as if it were a usable one: {lines:?}"
+        );
+        // Said out loud: a caller that reads only the stream has to be able to tell "your budget ran
+        // out" from "the model stopped talking".
+        let warnings: Vec<String> = lines
+            .iter()
+            .filter(|line| line["type"] == "warning")
+            .map(|line| line["message"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert!(
+            warnings.iter().any(|w| w.contains("1-second budget")),
+            "nothing on the stream says the budget is what ended it: {warnings:?}"
+        );
+    }
+
+    /// A budget nobody reaches changes nothing: the run ends complete, and says no reason.
+    #[tokio::test]
+    async fn a_budget_that_is_not_reached_leaves_the_run_alone() {
+        let server = MockServer::start().await;
+        let cwd = cwd_for("code-seconds-ok");
+        Mock::given(method("POST"))
+            .respond_with(SseFixture {
+                body: answers_in_two_fragments(),
+            })
+            .mount(&server)
+            .await;
+        let home = home_for("code-seconds-ok", &server.uri(), &cwd);
+
+        let (code, lines, stderr) = run_json(
+            &home,
+            &cwd,
+            &["-p", "say hello", "--json", "--max-seconds", "30"],
+        );
+        let _ = std::fs::remove_dir_all(&home);
+
+        assert_eq!(code, 0, "the run failed: {stderr} {lines:?}");
+        let ended = line_of(&lines, "turn.completed");
+        assert_eq!(ended["outcome"], "complete", "{lines:?}");
+        assert!(
+            ended.get("reason").is_none(),
+            "a finished run carries a reason for stopping: {ended}"
+        );
+    }
+
+    /// `--max-seconds` is a budget for a call, and a call is a prompt: without one there is nothing
+    /// to bound, and a value of zero would mean "no time at all" rather than "no limit".
+    #[tokio::test]
+    async fn a_budget_without_a_prompt_or_of_zero_is_refused() {
+        let server = MockServer::start().await;
+        let cwd = cwd_for("code-seconds-usage");
+        let home = home_for("code-seconds-usage", &server.uri(), &cwd);
+
+        for args in [
+            vec!["--max-seconds", "5", "--json"],
+            vec!["-p", "hello", "--json", "--max-seconds", "0"],
+            vec!["-p", "hello", "--json", "--max-seconds", "soon"],
+        ] {
+            let (code, lines, _stderr) = run_json(&home, &cwd, &args);
+            assert_eq!(
+                code, USAGE,
+                "{args:?} was not refused as a command line: {lines:?}"
+            );
+            assert_eq!(
+                kinds(&lines),
+                vec!["error"],
+                "{args:?} put half a run on the stream: {lines:?}"
+            );
+        }
     }
 
     /// A provider that cannot be used is not a generic failure: nothing was asked of the model, and

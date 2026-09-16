@@ -191,9 +191,10 @@ pub fn result(json: &serde_json::Value, attempts: usize) -> String {
 /// answer that is unfinished because flint stopped asking, and a run the caller itself cut short.
 /// Before this existed, the step limit was a `warning` string and nothing else -- so an unfinished
 /// answer and a finished one were the same shape to a program, which is the kind of fault that shows
-/// up as a wrong value rather than as an error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// up as a wrong value rather than as an error. Which limit was reached is `Limit`, beside this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Outcome {
+    #[default]
     Complete,
     Incomplete,
     Stopped,
@@ -209,16 +210,45 @@ impl Outcome {
     }
 }
 
+/// Which of flint's limits ended an unfinished turn.
+///
+/// `Outcome::Incomplete` says the answer is unfinished; this says *whose* budget ran out, and that is
+/// the next question a caller has, because the two are fixed in different places: one is `max_steps`
+/// in a config file, the other is `--max-seconds` on the command line. Without it the only difference
+/// between them was the wording of a `warning`, which is the fault `outcome` itself was added to
+/// remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Limit {
+    Steps,
+    Seconds,
+}
+
+impl Limit {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Limit::Steps => "steps",
+            Limit::Seconds => "seconds",
+        }
+    }
+}
+
 /// The end of a turn: what it cost, and what the answer is worth.
-pub fn turn_completed(usage: Option<Usage>, outcome: Outcome) -> String {
-    frame(
-        "turn.completed",
-        json!({
-            "prompt_tokens": usage.map_or(0, |u| u.prompt_tokens),
-            "completion_tokens": usage.map_or(0, |u| u.completion_tokens),
-            "outcome": outcome.as_str(),
-        }),
-    )
+///
+/// `limit` is carried only for an unfinished turn, and only when flint knows which budget ran out:
+/// the key is absent rather than null everywhere else, so a caller reads its presence as the fact it
+/// is.
+pub fn turn_completed(usage: Option<Usage>, outcome: Outcome, limit: Option<Limit>) -> String {
+    let mut body = json!({
+        "prompt_tokens": usage.map_or(0, |u| u.prompt_tokens),
+        "completion_tokens": usage.map_or(0, |u| u.completion_tokens),
+        "outcome": outcome.as_str(),
+    });
+    if outcome == Outcome::Incomplete {
+        if let (Some(limit), Some(object)) = (limit, body.as_object_mut()) {
+            object.insert("reason".to_string(), json!(limit.as_str()));
+        }
+    }
+    frame("turn.completed", body)
 }
 
 pub fn error(message: &str) -> String {
@@ -487,6 +517,7 @@ mod tests {
                 completion_tokens: 3,
             }),
             Outcome::Complete,
+            None,
         ))
         .unwrap();
         assert_eq!(usage["type"], "turn.completed");
@@ -497,6 +528,26 @@ mod tests {
         assert_eq!(usage["outcome"], "complete");
         assert_eq!(Outcome::Incomplete.as_str(), "incomplete");
         assert_eq!(Outcome::Stopped.as_str(), "stopped");
+        // Which limit ran out is only said when one did: `reason` on an unfinished turn, and no key
+        // at all on a finished one, so a caller reads its presence rather than a null.
+        assert!(usage.get("reason").is_none(), "{usage}");
+        let step_limited: Value = serde_json::from_str(&turn_completed(
+            None,
+            Outcome::Incomplete,
+            Some(Limit::Steps),
+        ))
+        .unwrap();
+        assert_eq!(step_limited["reason"], "steps");
+        let timed_out: Value = serde_json::from_str(&turn_completed(
+            None,
+            Outcome::Incomplete,
+            Some(Limit::Seconds),
+        ))
+        .unwrap();
+        assert_eq!(timed_out["reason"], "seconds");
+        let stopped: Value =
+            serde_json::from_str(&turn_completed(None, Outcome::Stopped, None)).unwrap();
+        assert!(stopped.get("reason").is_none(), "{stopped}");
 
         let failed: Value = serde_json::from_str(&error("no model configured")).unwrap();
         assert_eq!(failed["type"], "error");

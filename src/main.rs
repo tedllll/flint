@@ -67,6 +67,14 @@ struct Args {
     /// earlier run's answer that looks like this one's. `--json` only: a run with no stream has
     /// already put nothing but the answer on stdout, and redirecting it is the same thing.
     result_file: Option<String>,
+    /// How long this run may take, in seconds, before flint stops asking and says so.
+    ///
+    /// A caller asking a question over a flaky link has no way to say "something in a minute, or tell
+    /// me you could not" -- `max_steps` is a runaway guard, and a provider's own timeout is the
+    /// provider's. This is the wall-clock budget, and the deadline is on the whole run rather than on
+    /// one step, because the thing it is protecting the caller from is a process that is *still
+    /// going*: a step limit cannot cut a request that never comes back.
+    max_seconds: Option<u64>,
     list_sessions: bool,
     /// Ask the provider whether it can be used, and what is left in the account, then stop.
     ///
@@ -438,6 +446,22 @@ async fn real_main(args: Args) -> Result<i32> {
         std::fs::File::create(&path)
             .with_context(|| format!("--result-file {path}: cannot be written"))
             .map_err(|e| -> anyhow::Error { Usage(format!("{e:#}")).into() })?;
+    }
+
+    // ---- the budget, if the caller set one ----
+    //
+    // A prompt is required, and for the same reason `--json` requires one: a budget bounds a *call*,
+    // and an interactive session is bounded by the person at the keyboard, who can type `/stop`. A
+    // deadline on each turn of a conversation would be a different feature wearing this flag's name.
+    //
+    // The clock itself starts inside the turn driver, before its own loop: one absolute instant for
+    // the whole run, so that a repair attempt after a schema miss -- which is still the same call --
+    // does not get a second budget.
+    if args.max_seconds.is_some() && args.prompt.is_none() {
+        return usage(
+            "--max-seconds bounds a call, and a call is a prompt: give one with -p, or leave the flag \
+             off. An interactive session is bounded by whoever is typing at it.",
+        );
     }
 
     // The directory this run works in, resolved once and absolutely.
@@ -833,6 +857,7 @@ async fn real_main(args: Args) -> Result<i32> {
             asked,
             &shaping,
             args.result_file.as_deref().map(std::path::Path::new),
+            args.max_seconds,
         )
         .await;
     }
@@ -970,7 +995,7 @@ async fn real_main(args: Args) -> Result<i32> {
                 .term()
                 .line(format_args!("{}", printer.dim(&format!("  inlined {}", file.describe()))));
         }
-        run_turn(
+        let ended = run_turn(
             &mut agent,
             &provider_cfg,
             &asked.sent,
@@ -978,10 +1003,20 @@ async fn real_main(args: Args) -> Result<i32> {
             &mut input_rx,
             false,
             viewer.as_ref().map(web::Viewer::live),
+            args.max_seconds,
         )
         .await?;
         println!();
-        return Ok(0);
+        // The exit code is the outcome, for the same reason the stream carries it: a shell that
+        // branches on the code must not take half an answer for a finished one. `incomplete` is 65
+        // (the answer is not usable as it stands) and a stopped run is 130, which is what the `--json`
+        // path has always said; the plain path used to say 0 for both, which was only invisible
+        // because a one-shot with no `--json` has no way to be stopped but a signal.
+        return Ok(match ended.outcome {
+            ndjson::Outcome::Complete => EXIT_OK,
+            ndjson::Outcome::Incomplete => EXIT_DATAERR,
+            ndjson::Outcome::Stopped => EXIT_INTERRUPTED,
+        });
     }
 
     // ---- interactive ----
@@ -1462,6 +1497,9 @@ async fn interactive(
             input_rx,
             true,
             viewer.as_ref().map(web::Viewer::live),
+            // No budget in the REPL: a person at the keyboard is the budget. `--max-seconds` without
+            // a prompt is refused before this point.
+            None,
         )
         .await {
             // A command that arrived mid-turn, and any reports the page asked for: both are handled
@@ -3524,7 +3562,11 @@ async fn run_json_turn(
     asked: &attach::Prompt,
     shaping: &Shaping,
     result_file: Option<&std::path::Path>,
+    max_seconds: Option<u64>,
 ) -> Result<i32> {
+    // One absolute instant for the whole run: every attempt below shares it, because a repair after a
+    // schema miss is the same call to the same caller, not a new one with a new budget.
+    let deadline = max_seconds.map(|s| std::time::Instant::now() + std::time::Duration::from_secs(s));
     // What the session and the request are built from. The stream's opening line carries the words
     // the caller typed plus what was inlined into them, because the frame is a *view*: putting a
     // whole attached document on the stream would pay for it twice, and a caller that wants to be
@@ -3616,6 +3658,20 @@ async fn run_json_turn(
         // line deserves to know it did nothing, without flint repeating what it wrote.
         let mut ignored = 0usize;
         let mut listening = true;
+        // Whether the budget is what ended this turn, rather than the caller or the model. The
+        // deadline is a third reason for the turn's future to be dropped, and the code below has to
+        // tell it apart from `/stop`: one is a caller changing its mind, the other is a limit the
+        // caller itself set being reached, and a caller acts differently on each.
+        let mut expired = false;
+        // The budget as a future. Built per attempt from one absolute instant -- a repair attempt
+        // after a schema miss is still the same run, and must not get a fresh budget -- and, when no
+        // budget was asked for, a future that never finishes rather than an `Option` and a guard: a
+        // `None` arm in a `select!` would be ready immediately and end every run at once.
+        let mut budget: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+            match deadline {
+                Some(at) => Box::pin(tokio::time::sleep_until(at.into())),
+                None => Box::pin(std::future::pending()),
+            };
         let outcome = {
             let mut run = std::pin::pin!(agent.run(&asked, |event| {
                 if matches!(event, event::Event::Done) {
@@ -3641,6 +3697,14 @@ async fn run_json_turn(
                         Some(_) => ignored += 1,
                         None => listening = false,
                     },
+                    // The budget. Dropping the turn is the whole point of the flag: a run stuck in a
+                    // request that never comes back has to *stop* being stuck, and there is no step
+                    // boundary to check a clock at when the one step is an HTTP call that has not
+                    // returned.
+                    _ = &mut budget => {
+                        expired = true;
+                        break None;
+                    }
                 }
             }
         };
@@ -3667,6 +3731,30 @@ async fn run_json_turn(
             // anywhere. Committed here, by the code that did the dropping, because the agent cannot
             // do it for itself after its future is gone. Same fault and same fix as the REPL's.
             agent.commit_drawn_answer();
+            // A dropped turn with a budget on it is the budget's doing: the caller asked for
+            // "something in N seconds or tell me you could not", and this is the telling. It is
+            // *unfinished* rather than stopped, because nobody changed their mind -- a limit the
+            // caller set was reached, exactly as with `max_steps`, and a caller that reads `stopped`
+            // would go looking for the person who pressed the key.
+            if expired {
+                let seconds = max_seconds.unwrap_or_default();
+                emit(ndjson::warning(&format!(
+                    "the {seconds}-second budget for this run ran out -- the model is not running any \
+                     more, and the answer above is what had been written"
+                )));
+                emit(ndjson::turn_completed(
+                    agent.last_usage(),
+                    ndjson::Outcome::Incomplete,
+                    Some(ndjson::Limit::Seconds),
+                ));
+                // Same terms as the stream, and the same meaning as a schema that never matched: an
+                // unfinished answer is not a usable one, so the code says so as well as the stream.
+                if let Some(path) = result_file {
+                    let drawn = sink.answer_so_far().to_string();
+                    write_result_file(path, &drawn, &mut emit);
+                }
+                return Ok(EXIT_DATAERR);
+            }
             // Said out loud, and before the turn's end: a caller that asked for the stop knows it
             // asked, but a log read afterwards has to be able to tell this from a turn that finished
             // with nothing to say.
@@ -3677,6 +3765,7 @@ async fn run_json_turn(
             emit(ndjson::turn_completed(
                 agent.last_usage(),
                 ndjson::Outcome::Stopped,
+                None,
             ));
             // The half-answer goes where the caller asked for it too, on the same terms as the
             // stream: the code (130) and the outcome say what it is worth, and a stopped run that
@@ -3705,6 +3794,9 @@ async fn run_json_turn(
         } else {
             ndjson::Outcome::Complete
         };
+        // Which limit ran out, when one did: the two budgets a caller can raise are set in two
+        // different places, so "unfinished" alone is not enough for the caller to know what to change.
+        let limit = (outcome == ndjson::Outcome::Incomplete).then_some(ndjson::Limit::Steps);
         let code = if outcome == ndjson::Outcome::Incomplete {
             EXIT_DATAERR
         } else {
@@ -3712,7 +3804,7 @@ async fn run_json_turn(
         };
         match result {
             Ok(()) => {
-                emit(ndjson::turn_completed(agent.last_usage(), outcome));
+                emit(ndjson::turn_completed(agent.last_usage(), outcome, limit));
                 // With no schema the answer *is* the text, and this is where it goes where the
                 // caller asked. With one, the answer is the validated object further down, and
                 // writing the prose here would put a shape in the file that the caller never asked
@@ -4153,13 +4245,20 @@ fn turn_over(
     live: Option<&web::Live>,
     agent: &agent::Agent,
     outcome: ndjson::Outcome,
+    limit: Option<ndjson::Limit>,
 ) {
     status_done(printer, live);
     if let Some(live) = live {
-        live.line(ndjson::turn_completed(agent.last_usage(), outcome));
+        live.line(ndjson::turn_completed(agent.last_usage(), outcome, limit));
     }
 }
 
+// Eight arguments, and the lint is not wrong -- the same judgement as `interactive` above: these are
+// the turn's collaborators, not a data structure. The three that say *how* the turn runs -- whether a
+// line interrupts it, where its feed goes, and how long it may take -- are read in three different
+// places inside, and the third is absent on almost every run, so a struct holding them would exist to
+// satisfy the lint rather than a reader.
+#[allow(clippy::too_many_arguments)]
 async fn run_turn(
     agent: &mut agent::Agent,
     provider_cfg: &config::ProviderConfig,
@@ -4174,7 +4273,12 @@ async fn run_turn(
     // The browser's feed, when `--web` is running. Everything the turn produces is copied
     // here as well as drawn on the terminal, so the two cannot describe different runs.
     live: Option<&web::Live>,
+    // The caller's budget in seconds, if it set one. Checked by the tick this loop already runs
+    // rather than by a timer: the loop wakes every couple of milliseconds to move the status clock,
+    // so a budget measured in seconds costs one comparison per tick and nothing else.
+    max_seconds: Option<u64>,
 ) -> Result<Handover> {
+    let deadline = max_seconds.map(|s| std::time::Instant::now() + std::time::Duration::from_secs(s));
     #[allow(unused_variables)]
     let Palette { dim, bold, red, green, cyan, yellow, reset } = printer.pal;
     ensure_usable(provider_cfg)?;
@@ -4219,7 +4323,10 @@ async fn run_turn(
     // runs the loop again and has to carry them to the end either way.
     let mut reports: Vec<String> = Vec::new();
 
-    loop {
+    // How the last turn ended, which is what a one-shot caller turns into an exit code: a steered
+    // turn runs the loop again, and what the caller is holding at the end is the last turn's answer.
+    // The loop is the expression, so there is no path that reaches the end without having decided.
+    let ended = loop {
         // A tool round is another wait: the step starts by asking the model again, and the clock has
         // to be running for it or the pause after every tool call looks like the turn is over. The
         // round's own state -- which tools are in flight, which are being waited for, the answer so
@@ -4229,7 +4336,7 @@ async fn run_turn(
         // The turn and its output closure are confined to this scope: the future holds a mutable
         // borrow of the sink, and that borrow has to end before the code below can read it to decide
         // what to flush.
-        let (result, steering, hand_back) = {
+        let (result, steering, hand_back, expired) = {
             let mut turn = Box::pin(agent.run(&current, |event| sink.event(event)));
 
             // Whichever happens first: the model finishes this turn, or the user
@@ -4244,6 +4351,9 @@ async fn run_turn(
             // model is about to be asked: one of them becomes a prompt and the other must not.
             let mut hand_back = None;
             let mut interrupted = false;
+            // Whether the caller's own budget is what ended this turn, which is a different thing
+            // from a person stopping it: nobody changed their mind, a limit was reached.
+            let mut expired = false;
             // The turn's future is polled once *before* the channel is read, and that ordering is the
             // whole of this fix. `Agent::run` pushes the user's message on its first poll, so a line
             // already waiting in the channel used to be taken first -- and taken as an interrupt, which
@@ -4307,6 +4417,14 @@ async fn run_turn(
                         break;
                     }
                     _ = tokio::time::sleep(std::time::Duration::from_millis(2)) => {
+                        // The budget, checked where this loop already looks at the clock. Dropping
+                        // the turn is the point: a request that never comes back is exactly what a
+                        // caller sets a budget against, and there is no step boundary to check at
+                        // while one HTTP call is in flight.
+                        if deadline.is_some_and(|at| std::time::Instant::now() >= at) {
+                            expired = true;
+                            break;
+                        }
                         // Keep the running-status line moving. This loop is already
                         // waiting, so the clock costs one comparison per tick and only
                         // repaints when its number changes.
@@ -4329,7 +4447,14 @@ async fn run_turn(
                     .term()
                     .notice("stopped -- the model is not running any more");
             }
-            (result, steering, hand_back)
+            if expired {
+                printer.term().notice(&format!(
+                    "the {}-second budget for this run ran out -- the answer above is what had been \
+                     written",
+                    max_seconds.unwrap_or_default()
+                ));
+            }
+            (result, steering, hand_back, expired)
         };
 
         // Whatever this turn drew and never committed belongs to the conversation.
@@ -4353,24 +4478,37 @@ async fn run_turn(
         // The same three values as the `--json` path, decided the same way and from the same facts:
         // a dropped turn is a stopped one (that is what `None` means here), a turn that ran out of
         // steps is unfinished, and anything else finished. The page reads this, so a browser and a
-        // program are told the same thing about the same run.
-        let outcome = match (&result, agent.ran_out_of_steps()) {
-            (None, _) => ndjson::Outcome::Stopped,
-            (_, true) => ndjson::Outcome::Incomplete,
-            _ => ndjson::Outcome::Complete,
+        // program are told the same thing about the same run. A budget running out is the fourth
+        // case, and it is *unfinished* rather than stopped: nobody changed their mind, a limit the
+        // caller set was reached.
+        let (outcome, limit) = if expired {
+            (
+                ndjson::Outcome::Incomplete,
+                Some(ndjson::Limit::Seconds),
+            )
+        } else {
+            match (&result, agent.ran_out_of_steps()) {
+                (None, _) => (ndjson::Outcome::Stopped, None),
+                (_, true) => (ndjson::Outcome::Incomplete, Some(ndjson::Limit::Steps)),
+                _ => (ndjson::Outcome::Complete, None),
+            }
         };
 
         // The line was not for the model, so the turn stops here rather than answering it. The
         // request in flight is dropped, which is what `Interrupt` does too -- a command is not a
         // reason to keep paying for an answer nobody is waiting for any more.
         if let Some(line) = hand_back {
-            turn_over(printer, live, agent, outcome);
-            return Ok(Handover { line: Some(line), reports });
+            turn_over(printer, live, agent, outcome, limit);
+            return Ok(Handover {
+                line: Some(line),
+                reports,
+                outcome,
+            });
         }
 
         // Whatever happened, nothing is running now: leaving a stale clock on the strip
         // would be worse than showing none.
-        turn_over(printer, live, agent, outcome);
+        turn_over(printer, live, agent, outcome, limit);
 
         match steering {
             None => {
@@ -4383,7 +4521,7 @@ async fn run_turn(
                 if let Some(r) = result {
                     r?;
                 }
-                break;
+                break (outcome, limit);
             }
             Some(text) => {
                 if text.trim().is_empty() {
@@ -4401,7 +4539,7 @@ async fn run_turn(
                 current = text;
             }
         }
-    }
+    };
 
     if let Some(u) = agent.last_usage() {
         printer.term().line(format_args!(
@@ -4419,19 +4557,25 @@ async fn run_turn(
     }
     // Nothing handed back: everything the turn was given, it used. Reports can still be here -- the
     // page can ask for one at any moment, including the last moment of a turn.
-    Ok(Handover { line: None, reports })
+    Ok(Handover {
+        line: None,
+        reports,
+        outcome: ended.0,
+    })
 }
 
 /// What a turn left for the REPL.
 ///
-/// Two things, and neither is part of the conversation: a line the turn could not use, and the
-/// reports the page asked for while it was working. They are separate fields rather than one queue
-/// because they are handled differently and in this order -- the line is what a person typed and
-/// goes first, and a report is a read that waits until the person has been answered.
+/// Two things that are not part of the conversation -- a line the turn could not use, and the reports
+/// the page asked for while it was working -- and how the turn ended. They are separate fields rather
+/// than one queue because they are handled differently and in this order: the line is what a person
+/// typed and goes first, a report is a read that waits until the person has been answered, and the
+/// outcome is what a one-shot caller turns into an exit code.
 #[derive(Default)]
 struct Handover {
     line: Option<String>,
     reports: Vec<String>,
+    outcome: ndjson::Outcome,
 }
 
 /// `!cmd` escape inside the REPL and the `exec` subcommand.
@@ -4608,6 +4752,22 @@ fn parse_args(argv: Vec<String>, stream_seen: &mut bool) -> Result<Args> {
                         .ok_or_else(|| anyhow!("--result-file requires a path"))?,
                 )
             }
+            "--max-seconds" => {
+                let value = iter
+                    .next()
+                    .ok_or_else(|| anyhow!("--max-seconds requires a number of seconds"))?;
+                // A whole number of seconds, and not zero: zero is the one value that cannot mean
+                // what it looks like ("no time at all" -- not "no limit", which is the default).
+                let seconds: u64 = value.parse().map_err(|_| {
+                    anyhow!("--max-seconds takes a whole number of seconds, not '{value}'")
+                })?;
+                if seconds == 0 {
+                    return Err(anyhow!(
+                        "--max-seconds 0 would mean no time at all. Leave it out for no limit."
+                    ));
+                }
+                args.max_seconds = Some(seconds);
+            }
             "--web" => args.web = true,
             "--port" => {
                 let value = iter
@@ -4779,6 +4939,8 @@ flint who [--all] [--json]       who else is working in this directory (flint on
                       for the schema itself. Recorded in the session, so --resume
                       holds the conversation to the same shape without repeating it
   --no-schema         answer in prose even if this session's file says otherwise
+  --max-seconds <n>   with -p: stop asking once n seconds have passed and report the answer
+                      as `incomplete` (exit 65) rather than going on. Bounds the whole run
   --result-file <path>  with -p --json: write the answer there as well as on the stream --
                       the answer text, or the validated object when --schema was given.
                       The file is emptied when the run starts, so it never holds an
@@ -5357,6 +5519,7 @@ mod tests {
             &printer,
             &mut rx,
             true,
+            None,
             None,
         )
         .await;
