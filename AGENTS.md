@@ -220,6 +220,11 @@ cargo clippy --all-targets      # expected to be silent, and worth keeping that 
 node scripts/term-layout-test.js
 ```
 
+A push runs the first two on Linux and Windows (`.github/workflows/ci.yml`). The runner's log
+cannot be downloaded without a token, so a failing job re-emits the failing test's name and its
+panic as check annotations — `GET /repos/tedllll/flint/actions/runs/<run>/jobs` for the job ids,
+then `/check-runs/<id>/annotations` for the reason. Read that before guessing from the tree.
+
 `flint debug prompt-input` prints the request body that would be sent — system prompt,
 history, tool schemas — without sending it or needing a key. It is built by the same
 `provider::request_body` the client posts, so it is the honest way to check what the model is

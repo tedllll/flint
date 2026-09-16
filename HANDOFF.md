@@ -1811,10 +1811,41 @@ the source's modification time, so `cargo` can decide nothing changed and run th
 `flint.exe` (`unknown flag '--archive'`). Touch the restored files, or check the
 `Compiling`/`Finished` line before believing a result.
 
-**CI does not run on push** — `.github/workflows/release.yml` triggers only on `v*` tags
-and `workflow_dispatch`, so a push to `main` checks nothing on any platform. The
-cross-compile cannot even be type-checked from a Mac: `aws-lc-sys` (rustls's crypto backend)
-needs a Windows C toolchain, not just `rustup target add`.
+**CI runs the tests now, on every push, on two platforms — and the first red build it produced was
+the point of building it.** The paragraph that used to sit here was wrong in both halves:
+`.github/workflows/release.yml` triggers on *every* push (`on: push:` with no filter), not only on
+tags and `workflow_dispatch`, and the ten most recent runs are green — so a push to `main` has been
+building four targets all along. What no workflow did was run a single test, and a binary that links
+and a program that works are different claims. `.github/workflows/ci.yml` is `cargo test` plus
+`cargo clippy --all-targets -- -D warnings`, on `ubuntu-latest` and `windows-latest`, on push,
+`pull_request` and `workflow_dispatch`. Linux was green from its first run (143 s including a cold
+build); Windows was red twice before it was green.
+
+Reading a red build from *this* machine is the part worth writing down, because the obvious route
+does not work. A step's own output is behind the log-download endpoint, which wants a token with
+write access, and this repository is pushed over a deploy key and has none — so the first Windows
+failure arrived as nothing but "Process completed with exit code 1". A workflow can say more than
+the runner does: `check-runs/{id}/annotations` answers an *anonymous* request, so the job re-emits
+the failing test's name and its panic through `::error::` and the reason is readable from the same
+place as the conclusion. Two bugs in that step were caught by its own first run — recent Rust prints
+`thread 'x' (1234) panicked at`, so an anchored pattern matched nothing, and a `grep` that matches
+nothing exits 1, which turned the reporter red and added a failure that was the report's own.
+
+**The Windows failure was a wall-clock bound, not the tool.** Named by that annotation:
+`a_fan_out_runs_the_jobs_at_the_same_time_and_labels_every_answer` at `tests/task.rs:718`, "the
+fan-out did not overlap: it took 5.0782874s" against `elapsed < 5000ms`. The assertion that actually
+measures concurrency — the children's requests arriving within 600 ms of each other — passed. The
+failing one was a stopwatch guess that this machine wins every time; measured while fixing it, six
+busy loops saturating this machine still left the test passing at 4.59 s of its 5 s, so the margin
+was under half a second on a machine that is not the slow one. The bounds are written in the test's
+own unit now: the stub holds each child's answer for `JOBS_DELAY` (3 s), so three children one after
+another *cannot* finish in less than 9 s, and the assertion is that the fan-out beats that floor;
+the spread bound is a third of the hold. A tighter number than the serial floor would be measuring
+the runner.
+
+The cross-compile still cannot be type-checked from a Mac: `aws-lc-sys` (rustls's crypto backend)
+needs a Windows C toolchain, not just `rustup target add` — which is an argument for this CI leg
+rather than against it.
 
 **The `eprintln!` sites that could fire inside the strip are fixed, and there were four rather
 than three.** The list named `agent.rs` (a session event that could not be persisted), `config.rs`
