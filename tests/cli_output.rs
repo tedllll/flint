@@ -4389,9 +4389,21 @@ async fn a_provider_can_be_added_from_the_page() {
 
     // A second add of the same name, typed by hand: one command, two ways to reach it, and the mistake
     // a page makes by pressing twice is refused rather than quietly overwriting the entry.
+    //
+    // Each posted line is waited for before the next one goes, and that is not tidiness: a line from the
+    // page is *queued* for the loop that owns the commands, and closing the input is what ends the run.
+    // Closing it while a line is still in the queue drops that line, and the test then reads a config
+    // file the command never reached -- which is how this assertion failed on the Linux runner only,
+    // where the queue lost the race that a faster machine wins.
     post_message(port, &token, "/provider add claw http://127.0.0.1:9/v1");
+    let refused = read_until(
+        &mut watching,
+        "\"input\":\"/provider add claw http://127.0.0.1:9/v1\"",
+        20,
+    );
     // And the model, which the first line left off, is the wizard's own default rather than nothing.
     post_message(port, &token, "/provider add second http://127.0.0.1:9/v1 second-model");
+    let added = read_until(&mut watching, "\"provider\":\"second\"", 20);
 
     drop(watching);
     drop(child.stdin.take());
@@ -4401,6 +4413,16 @@ async fn a_provider_can_be_added_from_the_page() {
     let _ = std::fs::remove_dir_all(&home);
 
     assert!(exited, "flint did not exit");
+    assert!(
+        refused.contains("already"),
+        "adding the same provider twice was not refused, so a second press of the page's own button \
+         quietly rewrote the entry: {refused:?} Terminal: {transcript:?}"
+    );
+    assert!(
+        added.contains("\"provider\":\"second\""),
+        "the second provider was never switched to, so the line the page composed did not reach the \
+         loop that owns the commands: {added:?} Terminal: {transcript:?}"
+    );
     assert!(
         told.contains("\"provider\":\"claw\""),
         "adding a provider did not switch to it, so the key row would go on naming the old one: \
