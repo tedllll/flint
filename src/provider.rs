@@ -292,6 +292,42 @@ pub fn request_body(
     body
 }
 
+/// What a provider can be asked about itself, cheaply and without spending anything.
+///
+/// `usable` is an `Option` because the honest answer is sometimes "cannot tell", and a preflight whose
+/// point is to be trusted before a batch must not report a verdict it did not establish. A local
+/// engine that does not implement `GET /models` is reachable and may be perfectly usable, and calling
+/// that "not usable" would make the command wrong in the direction that costs a caller real work.
+#[derive(Debug, Clone)]
+pub struct Balance {
+    /// `Some(true)` when the provider says it will serve requests, `Some(false)` when it says it will
+    /// not, `None` when the check could not decide.
+    pub usable: Option<bool>,
+    /// What answered the question, so the caller knows what was actually checked: `balance` (the
+    /// provider's own balance endpoint), `models` (key and reachability, nothing about money), or
+    /// `none` (the endpoint was reached but answered neither).
+    pub checked: &'static str,
+    /// The currency and the three amounts, when the provider publishes them and only then.
+    pub currency: Option<String>,
+    pub total: Option<String>,
+    pub granted: Option<String>,
+    pub topped_up: Option<String>,
+}
+
+impl Balance {
+    /// A verdict with no figures, which is what every check but DeepSeek's produces.
+    fn verdict(usable: Option<bool>, checked: &'static str) -> Self {
+        Self {
+            usable,
+            checked,
+            currency: None,
+            total: None,
+            granted: None,
+            topped_up: None,
+        }
+    }
+}
+
 impl Provider {
     /// A client that is valid but points nowhere, for when the real one cannot be built.
     ///
@@ -311,6 +347,132 @@ impl Provider {
             start_timeout_secs: 0,
             proxy: None,
         }
+    }
+
+    /// Ask whether this provider can be used, without spending a token.
+    ///
+    /// Two questions, and which one can be answered depends on the provider. DeepSeek publishes
+    /// `GET /user/balance`, whose `is_available` its own documentation defines as "whether the user's
+    /// balance is sufficient for API calls" -- the cause that `classify` names when a run fails with
+    /// `insufficient_balance`, asked *before* a batch instead of after. Everything else that speaks
+    /// this protocol exposes `GET /models`, which proves the key and the route and says nothing about
+    /// money; flint asks the money question only where it can be answered, because a wrong balance is
+    /// worse than no balance.
+    pub async fn balance(&self) -> std::result::Result<Balance, ProviderFailure> {
+        let key = self.config.resolved_key();
+        if key.trim().is_empty() {
+            // The same code `main` gives a run with no key, and the same advice: this is the one
+            // failure a preflight is most useful for, because it costs nothing to find out.
+            return Err(ProviderFailure {
+                code: "no_key",
+                retryable: false,
+                message: format!(
+                    "provider '{}' has no API key. Set `api_key` or `api_key_env` for it.",
+                    self.config.name
+                ),
+            });
+        }
+
+        let root = self.config.api_root();
+        // The money question is asked first and by *behaviour*, not by provider name: an endpoint that
+        // answers `/user/balance` has one, and one that answers 404 does not. Asking DeepSeek's name
+        // would have been a guess that misses a DeepSeek-compatible gateway, a proxy in front of it,
+        // and every test -- and it would have made "no balance API" and "not DeepSeek" the same fact.
+        let (status, body) = self.get(&format!("{root}/user/balance"), &key).await?;
+        if status.is_success() {
+            // A body without `is_available` is not a balance flint can read, and it is not a pass
+            // either: `checked` says the balance endpoint answered, `usable` says flint did not learn
+            // the verdict from it.
+            let value = serde_json::from_str::<Value>(&body).ok();
+            let available = value
+                .as_ref()
+                .and_then(|v| v.get("is_available"))
+                .and_then(|v| v.as_bool());
+            let Some(available) = available else {
+                return Ok(Balance::verdict(None, "none"));
+            };
+            let mut balance = Balance::verdict(Some(available), "balance");
+            // The first entry, which is the one DeepSeek documents: a multi-currency account is not
+            // something flint sums up, because adding CNY to USD would be a number nobody can act on.
+            if let Some(info) = value
+                .as_ref()
+                .and_then(|v| v.get("balance_infos"))
+                .and_then(|v| v.as_array())
+                .and_then(|all| all.first())
+            {
+                let text = |key: &str| {
+                    info.get(key)
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                };
+                balance.currency = text("currency");
+                balance.total = text("total_balance");
+                balance.granted = text("granted_balance");
+                balance.topped_up = text("topped_up_balance");
+            }
+            return Ok(balance);
+        }
+        if status != reqwest::StatusCode::NOT_FOUND && status != reqwest::StatusCode::METHOD_NOT_ALLOWED
+        {
+            // A 402 here is the account being empty, classified by the same function that classifies a
+            // failed turn -- which is the point: one table, one vocabulary.
+            return Err(ProviderFailure::from_response(&self.config.name, status, &body));
+        }
+        // No balance endpoint. `GET /models` is the other question this protocol answers everywhere:
+        // it proves the key and the route, and says nothing about money.
+        let (status, _) = self.get(&format!("{root}/models"), &key).await?;
+        if status.is_success() {
+            return Ok(Balance::verdict(Some(true), "models"));
+        }
+        if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+        {
+            // Reached, answered, and answered nothing flint can use. Not a failure of the provider and
+            // not a pass: a local engine that serves only `/chat/completions` lands here, and saying
+            // "usable" would be a claim nothing checked.
+            return Ok(Balance::verdict(None, "none"));
+        }
+        Err(ProviderFailure::from_response(
+            &self.config.name,
+            status,
+            "",
+        ))
+    }
+
+    /// One GET, with the same proxy and timeout treatment as a completion.
+    ///
+    /// Not retried: a preflight is a question asked *before* spending anything, and a caller that
+    /// wants to wait has the retry ladder of the real call. A transport failure is still classified,
+    /// so `75` reaches the shell and a batch knows to try later rather than to give up.
+    async fn get(
+        &self,
+        url: &str,
+        key: &str,
+    ) -> std::result::Result<(reqwest::StatusCode, String), ProviderFailure> {
+        let resp = match tokio::time::timeout(
+            Duration::from_secs(30),
+            self.client.get(url).bearer_auth(key).send(),
+        )
+        .await
+        {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(e)) => {
+                return Err(ProviderFailure::network(format!(
+                    "no network -- the check of {url} did not get out.{}{e:#}",
+                    self.proxy_note()
+                        .map(|n| format!("\n{n}\n  "))
+                        .unwrap_or_default()
+                )))
+            }
+            Err(_) => {
+                return Err(ProviderFailure::network(format!(
+                    "no response from {url} after 30s -- the check is not worth waiting longer for.{}",
+                    self.proxy_note().map(|n| format!("\n{n}")).unwrap_or_default()
+                )))
+            }
+        };
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        Ok((status, body))
     }
 
     /// One line naming the proxy in force, for an error message.

@@ -18,8 +18,9 @@ run exited 0 while carrying a truncated answer — now 130).
 bug fix as much as a classification. `provider::ProviderFailure` now carries `code` and `retryable`
 out of the code that read the response, `classify` reads the body as well as the status, the `error`
 frame names the cause, and the exit code follows the cause (`69` for money or credentials, `75` for a
-failure the retries could not outlast). **Still open in B6**: `flint balance` (the preflight) and the
-`map_calls` circuit breaker, which belongs to step 7. Next in the queue after that: **B7** (a refusal
+failure the retries could not outlast). **Still open in B6**: only the `map_calls` circuit breaker, which belongs to step 7.
+`flint balance` is built (a preflight that asks `/user/balance`, falls back to `/models`, and says
+"cannot tell" rather than "usable" when neither answers). Next in the queue after that: **B7** (a refusal
 made before the stream opens reaches only stderr) and then step 3 (`--result-file`,
 `--list-sessions --json`). Read it before touching `src/provider.rs`. In short: DeepSeek says it with
 **402**, OpenAI-shaped endpoints say it with **429 `insufficient_quota`** — the same status as a rate
@@ -36,10 +37,10 @@ things it settled: the `error`-and-`outcome` combination that needs documenting 
 `duration_ms` on `turn.completed`.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 442 passing, 1 ignored (280 lib, 3 in
+As of the commit that carries this file, `cargo test` is 449 passing, 1 ignored (280 lib, 3 in
 the binary's own tests, 33 `agent_loop`, 58 `cli_output`, 22 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 5 the exit codes and the turn's outcome, 2 the
-balance, 1 what a caller's pipe must not come back out of), 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`), `cargo clippy
+balance, 1 what a caller's pipe must not come back out of), 7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`), `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
 pass, and `python examples/python/test_call.py` is 41 checks, all passing (one of them now waits
 out the fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from).

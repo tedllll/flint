@@ -59,6 +59,12 @@ struct Args {
     /// `exec` is plain by contract because its output is the child's own bytes.
     json: bool,
     list_sessions: bool,
+    /// Ask the provider whether it can be used, and what is left in the account, then stop.
+    ///
+    /// A preflight: the same `insufficient_balance` a failed run reports, asked before a batch instead
+    /// of after it. Cheap by construction -- it never sends a completion -- and `--json` gives it a
+    /// shape a program can read.
+    balance: bool,
     exec: Option<String>,
     /// Serve a browser view of *this* run on loopback.
     ///
@@ -453,6 +459,15 @@ async fn real_main() -> Result<i32> {
     // usable -- refusing to start would lock the user out of the very command
     // that fixes the problem. The check happens when a message is actually sent.
     let key_missing = key.trim().is_empty() && !is_local_endpoint(&provider_cfg.base_url);
+
+    // ---- the preflight, before anything is spent or opened ----
+    //
+    // Here rather than beside `--list-sessions`, because it needs the provider that was just resolved
+    // and nothing else: no session, no terminal, no prompt. That is also why it can answer the two
+    // questions a batch has -- "is this usable" and "how much is left" -- at a cost of one request.
+    if args.balance {
+        return balance_and_stop(provider_cfg.clone(), args.json).await;
+    }
 
     // ---- resume a session, if asked ----
     //
@@ -4272,6 +4287,12 @@ fn parse_args(argv: Vec<String>) -> Result<Args> {
                 }
                 args.exec = Some(rest.join(" "));
             }
+            "balance" => {
+                // A command rather than a flag: it is a question with an answer, and it may well want
+                // arguments of its own later. The word is taken before the bare-word fallback below,
+                // which would otherwise turn `flint balance` into a prompt asking the model to guess.
+                args.balance = true;
+            }
             "debug" => {
                 let rest: Vec<String> = iter.by_ref().collect();
                 if rest.is_empty() {
@@ -4332,6 +4353,7 @@ fn print_help(color: bool, term: &Term) {
   flint --resume <n|id>            resume a particular session
   flint --fork [<n|id>]            copy a session and continue the copy, leaving the original alone
   flint exec <command>             run a command directly (no model, no network)
+  flint balance [--json]           ask the provider whether it can be used, and what is left
   flint debug prompt-input [msg]   print the request that would be sent, and send nothing
   flint --list-sessions            list saved sessions, numbered for --resume
   flint --name <text>              name this conversation (also: /name)
@@ -4407,6 +4429,99 @@ fn exit_code_for(failure: Option<&provider::ProviderFailure>, provider_was_unusa
     match failure.code {
         "insufficient_balance" | "auth" | "no_key" => EXIT_UNAVAILABLE,
         _ => EXIT_FAILURE,
+    }
+}
+
+/// One line about a provider, for a person: what was checked, and what it said.
+///
+/// Three answers, not two, and the third is the point: "cannot tell" is what an endpoint that serves
+/// only `/chat/completions` gives, and printing it as usable would be a claim nothing checked. The
+/// check that produced the answer is named for the same reason -- "usable" from a `/models` probe is a
+/// different statement from "usable" from a balance endpoint, and only one of them is about money.
+fn human_balance(name: &str, balance: &provider::Balance) -> String {
+    let money = match (&balance.total, &balance.currency) {
+        (Some(total), Some(currency)) => format!("{total} {currency}"),
+        (Some(total), None) => total.clone(),
+        _ => String::new(),
+    };
+    let parts = match (&balance.granted, &balance.topped_up) {
+        (Some(granted), Some(topped)) => format!(" ({granted} granted, {topped} topped up)"),
+        _ => String::new(),
+    };
+    match balance.usable {
+        Some(true) if money.is_empty() => format!(
+            "{name}: usable -- /models answered. This provider publishes no balance, so the account \
+             was not asked about"
+        ),
+        Some(true) => format!("{name}: usable -- {money} left{parts}"),
+        Some(false) if money.is_empty() => format!(
+            "{name}: not usable -- the provider will not serve requests as things are (no balance, or \
+             credentials it rejects)"
+        ),
+        Some(false) => format!("{name}: not usable -- {money} left{parts}"),
+        None => format!(
+            "{name}: cannot tell -- the endpoint answered neither its balance nor /models, so neither \
+             the key nor the account was checked. A provider that serves only /chat/completions is \
+             normal here"
+        ),
+    }
+}
+
+/// The preflight: ask the provider about itself, print the answer, and pick the exit code from the same
+/// table a failed run uses.
+///
+/// The codes are the vocabulary already shipped rather than a private one: `0` usable, `69` a person
+/// must act (no key, rejected credentials, an empty account), `75` the check could not get out and is
+/// worth repeating, `1` reached but not decidable. A batch can therefore branch on `flint balance`
+/// exactly as it branches on a run that failed -- which is the point of asking before spending.
+async fn balance_and_stop(cfg: config::ProviderConfig, json: bool) -> Result<i32> {
+    let name = cfg.name.clone();
+    let provider = provider::Provider::new(cfg)?;
+    match provider.balance().await {
+        Ok(balance) => {
+            let code = match balance.usable {
+                Some(true) => EXIT_OK,
+                Some(false) => EXIT_UNAVAILABLE,
+                None => EXIT_FAILURE,
+            };
+            if json {
+                let mut object = serde_json::Map::new();
+                object.insert("type".to_string(), serde_json::json!("balance"));
+                object.insert("provider".to_string(), serde_json::json!(name));
+                object.insert("checked".to_string(), serde_json::json!(balance.checked));
+                // `null` rather than absent for the verdict: the field is always there to read, and
+                // `null` is exactly "no verdict", which is what an absent field cannot say.
+                object.insert("usable".to_string(), serde_json::json!(balance.usable));
+                // The figures are absent when the provider did not publish them -- a wrong balance is
+                // worse than no balance, and a caller can tell "not asked" from "asked, and it said
+                // nothing" by reading `checked`.
+                for (field, value) in [
+                    ("currency", &balance.currency),
+                    ("total_balance", &balance.total),
+                    ("granted_balance", &balance.granted),
+                    ("topped_up_balance", &balance.topped_up),
+                ] {
+                    if let Some(value) = value {
+                        object.insert(field.to_string(), serde_json::json!(value));
+                    }
+                }
+                println!("{}", serde_json::Value::Object(object));
+            } else {
+                println!("{}", human_balance(&name, &balance));
+            }
+            Ok(code)
+        }
+        Err(failure) => {
+            if json {
+                println!(
+                    "{}",
+                    ndjson::error_coded(&failure.message, failure.code, failure.retryable)
+                );
+            } else {
+                eprintln!("flint: {}", failure.message);
+            }
+            Ok(exit_code_for(Some(&failure), false))
+        }
     }
 }
 

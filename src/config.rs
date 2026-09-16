@@ -369,6 +369,18 @@ impl ProviderConfig {
             format!("{base}/chat/completions")
         }
     }
+
+    /// The root the API hangs off, whatever shape `base_url` was written in.
+    ///
+    /// `endpoint()` appends `/chat/completions` to this, and a preflight appends its own path, so the
+    /// stripping has to live in one place: a `base_url` that already names the chat endpoint would
+    /// otherwise ask for `/chat/completions/user/balance`, and the answer would be a 404 that reads
+    /// like a provider with no balance API.
+    pub fn api_root(&self) -> String {
+        let base = self.base_url.trim_end_matches('/');
+        let root = base.strip_suffix("/chat/completions").unwrap_or(base);
+        root.trim_end_matches('/').to_string()
+    }
 }
 
 impl Default for Config {

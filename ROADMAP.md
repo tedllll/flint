@@ -1195,9 +1195,10 @@ missing is the one about money — what a run *cost* rather than what it answere
 3. **The answer in a file.** Only a schema run has a `result` line to read. Everything else is prose
    the caller must reassemble from deltas or `message.completed` — so every caller writes the same
    parser, and each one can get it subtly wrong.
-4. **A preflight.** There is no cheap "is this provider usable right now" — a missing key or an
-   unreachable endpoint is discovered by a real call failing, after it may have spent money or run a
-   tool. `debug prompt-input` answers a different question (what would be sent) without needing a key.
+4. **A preflight.** *Built, as `flint balance`.* There is no cheap "is this provider usable right now"
+   — a missing key or an unreachable endpoint is discovered by a real call failing, after it may have
+   spent money or run a tool. `debug prompt-input` answers a different question (what would be sent)
+   without needing a key.
 5. **Retry safety.** Nothing identifies a request. A caller that times out and retries may repeat the
    tools the first attempt already ran. The tool events are in the stream, so the information exists,
    but nothing states it as a contract and nothing tests it.
@@ -1281,8 +1282,9 @@ stopped run, because it was true before — that was the bug). B7 above is what 
 2. **`error.code`**, produced where the cause is known — in `provider` for no key, network and status
    codes; in `agent` for a schema that never matched; in `main` for arguments. Classified by matching
    on the error's text at the edge would be the same fragility this is meant to remove. **Done**,
-   except for two things the work turned up rather than planned: `flint balance` (below, and it is the
-   preflight in A4) and **B7** (a refusal made before the stream opens still reaches only stderr).
+   except for one thing the work turned up rather than planned: **B7** (a refusal made before the
+   stream opens still reaches only stderr). `flint balance` -- the preflight A4 asked for -- is built
+   too (below).
    **Its first job was the balance/quota cause below**, which was a bug fix as much as a
    classification: an OpenAI-shaped `429 insufficient_quota` used to be retried four times with
    backoff (see §10 B6), and the only way a caller could recognise "there is no money" was to match
@@ -1332,8 +1334,16 @@ What to build for it, in step 2:
   DeepSeek's [`GET /user/balance`](https://api-docs.deepseek.com/api/get-user-balance) returns
   `is_available` — defined as "whether the user's balance is sufficient for API calls" — plus
   `total_balance`, `granted_balance` and `topped_up_balance`. A batch can then be told before it
-  starts, and a strategy that only has a few calls left can be told how many. **Not built**: it is a
-  new command and a new request shape, so it belongs in a commit of its own.
+  starts, and a strategy that only has a few calls left can be told how many. **Built**, and the
+  build changed the design in one place worth recording: the money question is asked by *behaviour*
+  rather than by provider name. The first cut asked DeepSeek's host, which misses a
+  DeepSeek-compatible gateway, a proxy in front of it, and every stub -- and it makes "this endpoint
+  has no balance API" and "this is not DeepSeek" the same fact, when only the first one is
+  established. So `flint balance` asks `/user/balance`, falls back to `/models` on a 404, and says
+  **"cannot tell"** (exit `1`) when the endpoint answers neither rather than claiming "usable":
+  a local engine that serves only `/chat/completions` is normal, and a verdict nothing established
+  is the one thing a preflight must never report. The exit codes are the run's own vocabulary
+  (`0`, `69`, `75`, `1`) so a caller branches once, and the check never sends a completion.
 - **the batch-level circuit breaker is the caller's**, and that is a feature of step 7 rather than of
   flint: the first `insufficient_balance` should cancel the rest of the batch and raise, because flint
   cannot know that twenty other calls are queued behind this one. flint's whole job is to make the

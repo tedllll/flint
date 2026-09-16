@@ -41,7 +41,7 @@ whoever is changing the code — a person or a model driving it.
 | `src/config.rs` | config load/save and the paths under `FLINT_HOME` |
 | `src/search.rs` | web search: where the credential comes from, and DeepSeek's search endpoint |
 | `src/web.rs` | `--web`: the embedded viewer and the loopback listener that serves it |
-| `tests/` | `agent_loop` (stub provider), `cli_output` (real binary, raw bytes), `term_capture` (byte-exact terminal), `search_tool` (stub search endpoint), `web_view` (the page's policy) |
+| `tests/` | `agent_loop` (stub provider), `cli_output` (real binary, raw bytes), `term_capture` (byte-exact terminal), `search_tool` (stub search endpoint), `balance` (the preflight, stub provider), `web_view` (the page's policy) |
 | `scripts/` | Node replay tools: `vtscreen.js`, `term-layout-test.js`, `layout-trace.js` |
 | `examples/python/` | the Python caller: `flint_call.py` (ask/ask_json, no dependencies), its stub and its checks |
 | `docs/windows.md` | field notes on Windows terminal behaviour; read before touching layout |

@@ -104,6 +104,8 @@ flint --resume 1789116592        # ...by id prefix, or by path to the .jsonl
 flint --fork 3                   # copy that session and carry on in the copy
 flint --fork                     # ...the most recent one, when a branch is the point
 flint exec "npm i -g @deepseek-ai/dsh"   # no model involved
+flint balance                    # is this provider usable, and what is left in the account?
+flint balance --json             # the same answer for a program
 flint --list-sessions            # numbered, so --resume N works
 flint --name "codex config"      # name the conversation you are in
 flint --archive 3                # file it away, out of the list
@@ -117,6 +119,18 @@ moment the network is what is broken. Archiving moves the file into
 the same operation backwards. The file itself — every event, the rules a reader keeps, and
 what can safely be edited by hand — is documented in
 [`docs/session-format.md`](docs/session-format.md).
+
+`flint balance` is the preflight, and it never sends a completion. It asks the provider
+`GET /user/balance` — DeepSeek publishes one, with `is_available` (its docs: "whether the user's
+balance is sufficient for API calls") and the granted, topped-up and total amounts — and falls back to
+`GET /models`, which proves the key and the route and says nothing about money. When the endpoint
+answers neither it says **"cannot tell"** rather than "usable": a local engine that serves only
+`/chat/completions` is normal, and a preflight that reports a verdict nothing established is worse
+than one that reports none. The exit code is the vocabulary a run already uses — `0` usable, `69` a
+person must act, `75` the check could not get out and is worth repeating, `1` reached but
+undecidable — so a batch that begins with `flint balance` learns about an empty account once instead
+of on its hundredth call. `--json` gives the same answer as one object, with the figures absent when
+the provider did not publish them.
 
 Resuming prints the tail of the transcript, so "did it load?" is answerable at a
 glance. Loading also happens when there is no network: an unreachable provider is
