@@ -126,6 +126,15 @@ the same operation backwards. The file itself — every event, the rules a reade
 what can safely be edited by hand — is documented in
 [`docs/session-format.md`](docs/session-format.md).
 
+**The list is your conversations, not every conversation on the machine.** A run that
+another run started — a `task`/`tasks` child, or the same thing through Python or MCP — writes
+its session under `~/.flint/sessions/<dir>/children/`, and nothing lists that directory. So
+`/sessions`, `flint --list-sessions`, the page's sidebar and `--continue` all mean "mine",
+which they did not before: a child is newer than the parent that started it, and
+`--continue` would happily resume the child's conversation instead of yours. The child's file
+is a session like any other — same format, readable, `--resume <path>` opens it — and its
+`meta` line names the conversation that asked for it. `mv` it up a level to adopt it.
+
 `flint balance` is the preflight, and it never sends a completion. It asks the provider
 `GET /user/balance` — DeepSeek publishes one, with `is_available` (its docs: "whether the user's
 balance is sufficient for API calls") and the granted, topped-up and total amounts — and falls back to
@@ -448,7 +457,8 @@ flint can start another flint. Not a mode, not a second kind of process: the `ta
 binary with `-p … --json` — the same door a Python caller or an MCP client opens — and gives the answer
 back with `exit code: N (meaning)`, the outcome, the cause, and the child's session path. The model gets
 one block of text; a person can read the child's conversation afterwards, because it is a session file
-like any other.
+like any other — it lives under `children/` so it does not join your own list of conversations, and its
+`meta` line says which conversation asked for it.
 
 ```jsonc
 // what the tool takes
@@ -950,6 +960,10 @@ on disk and not by a filter that has to read every file to decide whose it is. T
 file's `meta` line records that directory too, and that is what `--continue` believes, so
 moving a file (or the project) does not change which conversation is "the one I was just
 in". Sessions written before this layout sit directly in `sessions/` and are still found.
+A conversation another run started goes one level deeper, in `<dir>/children/`, which is the
+same idea used a second time: the level that is read is the level that is listed, so a
+child's conversation is out of every person-facing list without a filter anywhere — and the
+`meta` line of one names its parent, so the provenance runs both ways.
 `--resume` names any session outright, anywhere.
 
 Point `FLINT_HOME` at a project (`FLINT_HOME=/path/to/project/.flint`) to give it its own

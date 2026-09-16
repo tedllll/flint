@@ -87,13 +87,13 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 502 passing, 1 ignored (302 lib, 3 in
+As of the commit that carries this file, `cargo test` is 505 passing, 1 ignored (303 lib, 3 in
 the binary's own tests, 33 `agent_loop`, 61 `cli_output`, 34 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
 be able to read, 4 the answer written where the caller asked, 3 the file inlined into the prompt,
 1 the stream checked on its bytes),
-7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 6 `who`, 8 `task`, 2 `say`), `cargo clippy
+7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 6 `who`, 10 `task`, 2 `say`), `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
 pass, and `python examples/python/test_call.py` is 75 checks, all passing (one of them waits
 out the fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from),
@@ -117,6 +117,25 @@ parent's own session and stops the child by the pid the parent named), `a_childs
 in `src/tools.rs`, and the stream test's budget shape in `tests/json_output.rs`. What is *still* missing
 is the handle itself — `task_status`, `task_wait`, `task_stop` — so collecting a child means reading the
 session the note names.
+
+**And a child's conversation no longer joins the person's list of conversations — the second report of
+that same evening.** "子代理的会话窗口居然可以被会话历史栏看到": a `task` child's session file was in
+`/sessions`, in `flint --list-sessions` and in the page's sidebar exactly like a conversation the person
+had — same directory, same shape, nothing to tell them apart — and the sharp edge was `--continue`,
+because a child is *newer* than the parent that started it, so "the newest conversation in this
+directory" answered with the child's. One fact fixes both: the tool sets `FLINT_PARENT` on the child (an
+environment variable, for `FLINT_DEPTH`'s reason — the model driving the call does not choose or omit
+where its child came from), and `main` uses it twice. The child's `meta` line gains `parent` (absent,
+not `null`, on an ordinary session, so the first line of one is byte for byte what it was), and the file
+is written under `sessions/<dir>/children/`, which **no listing reads** — the same argument the archive
+makes, so `/sessions`, `--list-sessions`, the sidebar and `--continue` agree without a filter to drift.
+The child's conversation is unchanged in every other way: same format, resumable by path, named in the
+result, and `mv` out of `children/` is how a person adopts one. Three tests, each watched red first:
+`a_childs_conversation_is_not_in_the_persons_list_of_conversations` in `tests/task.rs` (a real parent and
+child, then the child's path, its `meta`, and `--list-sessions --json` asserting **one** row),
+`a_childs_session_is_kept_out_of_the_listing_by_where_it_lives` in `src/session.rs` (the layout rule and
+`latest_for`, which is `--continue`), and one more fixture in `src/web.rs`'s sidebar test (the reported
+surface).
 
 **`flint who` is built — stage 1 of `docs/agents.md`.** A running flint writes one record per run
 under `<FLINT_HOME>/live/` (`src/live.rs`), refreshed every five seconds by a thread that waits on a

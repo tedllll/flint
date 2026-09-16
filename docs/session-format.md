@@ -13,7 +13,9 @@ share one. The directory itself does not move when a project does: a session rec
 working directory it was held in on its `meta` line, and that recorded path — not the name of
 the directory it sits in — is what `--continue` believes. Sessions written before this
 subdirectory existed sit directly in `sessions/` and are still found, which is why the reader
-looks in both places.
+looks in both places. A conversation another run started is one level further down, in
+`sessions/<dir>/children/`, and the reader looks there for nothing: that is what keeps a
+child's conversation out of everybody's list of their own. See `parent` under `meta` below.
 
 The id is the file name: a Unix timestamp and a counter, `1789290356-957.jsonl`. Nothing
 else identifies a session, so `cp` is how you fork one and `mv` is how you rename the file.
@@ -31,7 +33,7 @@ Every line is a JSON object with a `type`. This build understands six:
 
 | `type` | Written when | Fields |
 |---|---|---|
-| `meta` | once, as the first line | `v`, `id`, `created`, `cwd`, `provider`, `model` |
+| `meta` | once, as the first line | `v`, `id`, `created`, `cwd`, `provider`, `model`, `parent` (only when another run started this one) |
 | `chat` | a message is added to the conversation | `message` |
 | `usage` | the provider reports token counts | `usage` |
 | `title` | the conversation is named | `name` |
@@ -75,6 +77,35 @@ now: `/model`, `/provider` and `/reload` append a `switch` when they move a conv
 to another model, and the last `switch` in the file is the one in force (`--resume` reads
 it). Editing the first line to change a session's model would be a lie about where it
 began; appending a `switch` is how you say it moved.
+
+`parent` appears on a conversation **another run started** — a `task`/`tasks` child, or the
+same thing reached from Python or MCP — and holds the parent's session id:
+
+```json
+{"type":"meta","v":2,"id":"1789540741-220","created":"epoch:1789540741","cwd":"C:\\work","provider":"deepseek","model":"deepseek-chat","parent":"1789456770-557"}
+```
+
+It is absent (not `null`) on a conversation a person started, so the first line of an
+ordinary session is unchanged, and a reader that does not know the key sees a normal file.
+It is written from `FLINT_PARENT`, which the `task` tool sets on the child it starts and
+which nothing else sets; a person who exports it by hand gets a session filed as somebody's
+child.
+
+**Where such a file lives is the other half, and it is the part a person notices.** A
+child's conversation goes under `sessions/<dir>/children/` rather than beside its parent's.
+It is a session file like any other — same format, readable, resumable by path — and no
+listing reads that directory, so `/sessions`, `flint --list-sessions`, the page's sidebar
+and `--continue` all show the person their own conversations and nothing else. That is the
+same argument the archive makes: the layout does the filtering, so there is no flag to
+honour and no filter to keep in step. It matters because a child is *newer* than the parent
+that started it, which is enough for "the newest conversation in this directory" to mean the
+child's — measured, before this existed: `--continue` resumed a child's session while the
+parent was still open. To read a child's conversation, use the path its result named, or the
+path in `parent` the other way round:
+
+```
+flint --resume "$FLINT_HOME/sessions/<dir>/children/1789540741-220.jsonl"
+```
 
 ### `chat`
 
@@ -186,5 +217,7 @@ Archiving is `mv` beside the file it came from, into that directory's `archive/`
 (`sessions/archive/` for a root session, `sessions/<dir>/archive/` for a project's), which is
 why `/archive` is instant and why undoing it by hand is the same command backwards. `--resume`
 searches every archive as well as every live directory, so filing a conversation away — or
-moving it by hand — does not make it unreachable. `/delete` removes the file, and nothing
-else knows it existed.
+moving it by hand — does not make it unreachable. A child's conversation is the same
+operation in reverse: `mv` it out of `children/` and it becomes one of your own
+conversations, listed and reachable by number, which is the honest way to adopt one you want
+to keep. `/delete` removes the file, and nothing else knows it existed.

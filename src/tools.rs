@@ -107,6 +107,7 @@ impl ToolBox {
                     provider: String::new(),
                     model: String::new(),
                     agents: skill_dirs.agents.clone(),
+                    parent: None,
                 },
             }),
             // The fan-out, offered under the same conditions and with the same configuration: it is
@@ -120,6 +121,7 @@ impl ToolBox {
                     provider: String::new(),
                     model: String::new(),
                     agents: skill_dirs.agents.clone(),
+                    parent: None,
                 },
             }),
         ];
@@ -187,6 +189,22 @@ impl ToolBox {
             if let Some(config) = tool.task_config() {
                 config.provider = provider.to_string();
                 config.model = model.to_string();
+            }
+        }
+        self
+    }
+
+    /// Tell the children this run starts which conversation asked for them.
+    ///
+    /// Separate from the endpoint because it is a different fact: the endpoint is *how* a child talks,
+    /// and this is *where it came from*. It reaches the child as `FLINT_PARENT`, which `main` reads to
+    /// name the parent in the child's `meta` line and to file the child's session under `children/`,
+    /// out of the person's list of their own conversations. `None` for a run with no session -- a
+    /// one-shot `--json` run has no conversation of its own to be the parent of.
+    pub fn with_task_parent(mut self, parent: Option<String>) -> Self {
+        for tool in &mut self.tools {
+            if let Some(config) = tool.task_config() {
+                config.parent = parent.clone();
             }
         }
         self
@@ -3138,6 +3156,11 @@ pub struct TaskConfig {
     /// was found at, which is how its body is read when it is used -- the name is never turned back
     /// into a path.
     agents: Vec<context::AgentProfile>,
+    /// The session this run is having, which is what its children are told started them.
+    ///
+    /// `None` only for a run with no session to hand down, which is the one-shot `--json` run: it
+    /// still writes a session file of its own, so this is empty only where there is nothing true to say.
+    parent: Option<String>,
 }
 
 /// A child that is ready to start.
@@ -3145,6 +3168,12 @@ struct Child {
     argv: Vec<String>,
     /// The depth it will run at, which is this run's depth plus one.
     depth: u32,
+    /// The session that started it, passed as `FLINT_PARENT` rather than as an argument.
+    ///
+    /// Not an argument on purpose: the child's own record of where it came from is not something the
+    /// model driving the call gets to choose or leave out, and a flag would also be visible to the
+    /// child's model in its own command line -- `flint who` prints command lines.
+    parent: Option<String>,
     timeout_secs: u64,
     readonly: bool,
     /// The profile that shaped it, if one did.
@@ -3396,6 +3425,7 @@ fn prepare_child(config: &TaskConfig, args: &Value, prompt: &str, index: usize) 
     Ok(Child {
         argv,
         depth: task_depth() + 1,
+        parent: config.parent.clone(),
         timeout_secs,
         readonly,
         agent,
@@ -3657,9 +3687,17 @@ async fn run_child(child: Child) -> Result<String> {
     // Before `argv` is moved out: the name this child is known by while it runs.
     let label = child.label();
     let argv = child.argv;
-    let mut process = tokio::process::Command::new(&argv[0])
-        .args(&argv[1..])
-        .env("FLINT_DEPTH", child.depth.to_string())
+    let mut command = tokio::process::Command::new(&argv[0]);
+    command.args(&argv[1..]).env("FLINT_DEPTH", child.depth.to_string());
+    // Where the child's conversation came from. An environment variable rather than an argument, for
+    // `FLINT_DEPTH`'s reason: the parent's id is not the model's to choose, and `flint who` prints the
+    // command lines of runs on this machine -- a flag here would put one session's id in another
+    // model's context for no reason. `main` reads it to name the parent in the child's `meta` line and
+    // to file the child's session under `children/`, which is what keeps it out of the person's list.
+    if let Some(parent) = &child.parent {
+        command.env("FLINT_PARENT", parent);
+    }
+    let mut process = command
         // A child is not drawing on this terminal: its stdout is a pipe. The capture variables are
         // the debug build's way of pretending there *is* a terminal, and a child that inherits them
         // opens the same capture file as its parent and truncates it -- measured: the parent's

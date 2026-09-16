@@ -1792,8 +1792,27 @@ mod tests {
         set_modified(&older, now - std::time::Duration::from_secs(60));
         set_modified(&newer, now);
 
+        // A child run's conversation, written by the real writer so the fixture cannot disagree with
+        // the layout. It is a session like any other and it is not one of the person's: reported from a
+        // real session, where a `task` child's conversation was in this sidebar beside the parent's,
+        // with nothing to say which was which.
+        let child = crate::session::SessionWriter::create(
+            &dir,
+            std::path::Path::new("/tmp"),
+            "p",
+            "m",
+            Some("100-1"),
+        )
+        .expect("a child session");
+        child.title("the child's conversation").expect("title");
+        assert!(child.path().exists(), "the child's file was not written");
+
         let expected = crate::session::list(&dir).expect("list");
-        assert_eq!(expected.len(), 2, "the fixture did not produce two sessions");
+        assert_eq!(
+            expected.len(),
+            2,
+            "the sidebar is not just the person's conversations: {expected:?}"
+        );
         assert_eq!(expected[0].0, "200-2", "newest first");
 
         let response = serve_sessions_in(&dir, &state());

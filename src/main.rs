@@ -356,6 +356,26 @@ fn resolve_session(target: &str) -> Result<PathBuf> {
     ))
 }
 
+/// Which session started this run, when another run did.
+///
+/// `FLINT_PARENT` is set by the `task` tool on the child it starts, and by nothing else -- the same
+/// argument as `FLINT_DEPTH`: a fact a model can edit out of its own command line is not a fact. It
+/// carries the parent's session id and has exactly two uses, which are the same fact seen from two
+/// sides: the child's `meta` line names the conversation that asked for it, and its file is put under
+/// `children/`, which is what keeps it out of the person's list of conversations.
+///
+/// The reason that matters is measured rather than theoretical: a child is *newer* than its parent, so
+/// `--continue` in that directory resumed the child's conversation minutes after the parent was
+/// interrupted, and `/sessions` showed both with nothing to tell them apart. A person who exports this
+/// by hand gets a session filed as somebody's child, which is the same self-inflicted wound as setting
+/// `FLINT_DEPTH`; both are written down in `docs/agents.md`.
+fn parent_session() -> Option<String> {
+    std::env::var("FLINT_PARENT")
+        .ok()
+        .map(|parent| parent.trim().to_string())
+        .filter(|parent| !parent.is_empty())
+}
+
 /// Replay a loaded conversation onto the screen.
 ///
 /// Short on purpose. The point is to show that the history arrived and which
@@ -761,12 +781,14 @@ async fn real_main(args: Args) -> Result<i32> {
             &provider_cfg.model,
             messages,
             title.as_deref(),
+            parent_session().as_deref(),
         )?),
         (None, None) => Some(session::SessionWriter::create(
             &config::sessions_dir(),
             &cwd,
             &provider_cfg.name,
             &provider_cfg.model,
+            parent_session().as_deref(),
         )?),
     };
     // A fork writes a file the run has just made, and until it has a name the two sessions are
@@ -1975,6 +1997,7 @@ fn continue_conversation(
             &cwd,
             &target.name,
             &target.model,
+            parent_session().as_deref(),
         )?,
     };
     // The move is recorded either way, and on a session with no file yet this is the write that
@@ -3343,6 +3366,7 @@ async fn handle_command(
                 agent.cwd(),
                 &provider_cfg.name,
                 &provider_cfg.model,
+                parent_session().as_deref(),
             )?);
             let new_agent =
                 agent::Agent::new(cfg, provider, agent.readonly(), agent.cwd().clone(), writer);

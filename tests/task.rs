@@ -290,6 +290,84 @@ async fn a_child_run_is_a_real_run_and_its_answer_comes_back_with_its_provenance
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// A child's conversation is not one of the person's, wherever the person looks for theirs.
+///
+/// Reported from a real session, and the sharp edge is `--continue`: a child is *newer* than the parent
+/// that started it, so "the newest conversation in this directory" answered with the child's. The same
+/// listing stands behind `/sessions`, `flint --list-sessions` and the page's sidebar, and behind the
+/// numbers `--resume N` takes, so there is one rule for all of them: a child's file lives under
+/// `children/`, which none of them read. The conversation itself is unchanged -- same format, same
+/// readability -- which is what the first test in this file asserts.
+#[tokio::test]
+async fn a_childs_conversation_is_not_in_the_persons_list_of_conversations() {
+    let step = Arc::new(AtomicUsize::new(0));
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(Scripted {
+            step: step.clone(),
+            bodies: vec![
+                tool_call("task", r#"{"prompt":"what is in the box?"}"#),
+                prose("CHILD FOUND THE ANSWER"),
+                prose("PARENT DONE"),
+            ],
+        })
+        .mount(&server)
+        .await;
+
+    let home = scratch("children", &server.uri());
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("work dir");
+    let (code, stdout, stderr) = run_flint(&home, &work, &[]);
+    assert_eq!(code, 0, "flint failed: {stderr}");
+
+    let parent = session_of(&stdout);
+    let child = sessions_named(&transcript(&parent))
+        .into_iter()
+        .next()
+        .expect("the result names the child's session");
+    assert_eq!(
+        child
+            .parent()
+            .and_then(|dir| dir.file_name())
+            .and_then(|name| name.to_str()),
+        Some("children"),
+        "the child's conversation is not filed where the listing cannot reach it: {}",
+        child.display()
+    );
+    // And the file says so itself, for anyone reading it by hand.
+    let raw = std::fs::read_to_string(&child).expect("read the child's session");
+    let meta = raw.lines().next().expect("a meta line");
+    let parent_id = parent
+        .file_stem()
+        .expect("the parent's id")
+        .to_string_lossy()
+        .to_string();
+    assert!(
+        meta.contains(&format!(r#""parent":"{parent_id}""#)),
+        "the child's record does not name the conversation that asked for it: {meta}"
+    );
+
+    // The person's list, as a program reads it: one row, and it is theirs.
+    let listing = binary()
+        .args(["--list-sessions", "--json"])
+        .env("FLINT_HOME", &home)
+        .output()
+        .expect("failed to list sessions");
+    let listing = String::from_utf8_lossy(&listing.stdout).to_string();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&listing).expect("the listing is one JSON object");
+    let rows = parsed["sessions"].as_array().expect("a sessions array");
+    assert_eq!(
+        rows.len(),
+        1,
+        "the person's list is not just the person's conversations: {listing}"
+    );
+    assert_eq!(rows[0]["id"].as_str(), Some(parent_id.as_str()));
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 #[tokio::test]
 async fn a_readonly_run_cannot_be_talked_into_a_writing_child() {
     let step = Arc::new(AtomicUsize::new(0));

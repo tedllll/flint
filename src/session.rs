@@ -51,6 +51,16 @@ pub enum SessionEvent {
         cwd: String,
         provider: String,
         model: String,
+        /// The session that started this run, when another run did.
+        ///
+        /// Absent for a conversation a person started, and skipped rather than written as `null`, so
+        /// the first line of an ordinary session is byte for byte what it always was. Recorded because
+        /// a reader who opens a child's file by hand -- the tool result names the path, and reading it
+        /// is how a person checks what a child did -- should not have to guess which conversation
+        /// asked for it. See `SessionWriter::create` for where such a file is *put*, which is the part
+        /// that keeps it out of the person's list.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<String>,
     },
     Chat {
         message: Message,
@@ -130,13 +140,39 @@ pub struct SessionWriter {
 }
 
 impl SessionWriter {
-    pub fn create(dir: &Path, cwd: &Path, provider: &str, model: &str) -> Result<Self> {
+    /// Start a session for this run.
+    ///
+    /// `parent` names the session that started *this* run, when another run did: `None` for a
+    /// conversation a person started, and `main` passes what `FLINT_PARENT` said.
+    ///
+    /// A child's conversation is a session file like any other -- same format, same readability, and
+    /// the checks in this file treat it the same -- and it is **put** somewhere else, exactly as the
+    /// archive is: under `children/`, in the directory belonging to the working directory its work was
+    /// held in. That is the whole mechanism: `list_detailed` reads the root and one level of project
+    /// directories, so a file in there is in no listing -- `/sessions`, `flint --list-sessions`, the
+    /// page's sidebar, and the numbers `--resume N` takes all agree without one filter that could
+    /// drift -- and `mv` is the whole operation for a person who wants one at the top level.
+    ///
+    /// The reason it has to be somewhere is measured, not aesthetic: a child is *newer* than the
+    /// parent that started it, so `latest_for` -- `--continue` -- answered with the child's
+    /// conversation, which is a different conversation with the same prompt in it and no way to tell.
+    pub fn create(
+        dir: &Path,
+        cwd: &Path,
+        provider: &str,
+        model: &str,
+        parent: Option<&str>,
+    ) -> Result<Self> {
         // `dir` is the sessions root; the file goes in the subdirectory that belongs to this
         // working directory. The *layout* is the separation: a caller never has to read `meta` to
         // find its own conversations, and two projects sharing one home cannot be handed each
         // other's history by anything that walks the listing. Sessions written before this live
         // directly in the root and are still found -- see `latest_for`.
-        let dir = dir.join(dir_key(cwd));
+        let mut dir = dir.join(dir_key(cwd));
+        // A child's conversation goes one level deeper, which is the level no listing reads.
+        if parent.is_some() {
+            dir = dir.join(CHILDREN);
+        }
         let id = new_id();
         let path = dir.join(format!("{id}.jsonl"));
         let meta = SessionEvent::Meta {
@@ -146,6 +182,7 @@ impl SessionWriter {
             cwd: cwd.display().to_string(),
             provider: provider.to_string(),
             model: model.to_string(),
+            parent: parent.map(str::to_string),
         };
         Ok(SessionWriter {
             path,
@@ -166,6 +203,10 @@ impl SessionWriter {
     /// `title` travels with it, because a name is a line in the file it was given to and a
     /// switch that quietly renamed a conversation would be the same kind of loss this exists
     /// to prevent.
+    ///
+    /// `parent` is `create`'s, and it is passed rather than defaulted because a fork made *by a child*
+    /// is still a child's conversation: a copy that surfaced in the person's list would be the same
+    /// surprise this exists to remove.
     pub fn seed(
         dir: &Path,
         cwd: &Path,
@@ -173,8 +214,9 @@ impl SessionWriter {
         model: &str,
         messages: &[Message],
         title: Option<&str>,
+        parent: Option<&str>,
     ) -> Result<Self> {
-        let writer = Self::create(dir, cwd, provider, model)?;
+        let writer = Self::create(dir, cwd, provider, model, parent)?;
         for message in messages {
             // The system prompt is not part of the conversation: it is rebuilt for every run
             // from the machine flint is on, so a copy written here would come back through
@@ -545,6 +587,15 @@ pub fn scan(path: &Path) -> Result<SessionSummary> {
 
     Ok(out)
 }
+
+/// Where the conversations of runs that another run started live.
+///
+/// One directory per working directory, holding only child conversations -- not to be confused with
+/// `archive`, which is a *decision a person made* about a conversation of their own. This one is not a
+/// decision: a child's conversation is nobody's to file, and it is out of the listing by where it is
+/// rather than by a flag on the file that every reader would have to honour. `SessionWriter::create`
+/// has the argument; `list_detailed` needs no change at all.
+const CHILDREN: &str = "children";
 
 /// Where archived conversations live.
 ///
@@ -975,6 +1026,58 @@ mod tests {
         assert!(dir_key(&root.0).contains('-'), "no hash in the key");
     }
 
+    /// A child's conversation is a session file like any other, and it is not one of yours.
+    ///
+    /// Reported from a real session: a `task` child's conversation appeared in `/sessions` and in the
+    /// page's sidebar exactly like a conversation the person had. Nothing was wrong with the file --
+    /// it is the same format, and reading it is how a person checks what a child did -- but "the
+    /// newest conversation in this directory" stopped meaning "mine" the moment a run could start
+    /// runs, and `--continue` really did resume a child's session two minutes after its parent was
+    /// interrupted.
+    ///
+    /// The location is the whole mechanism, exactly as it is for the archive: the listing reads the
+    /// root and one level of project directories, so a file under `children/` is not in it without any
+    /// filter that could drift -- and `mv` is the whole operation for a person who wants one at the
+    /// top level.
+    #[test]
+    fn a_childs_session_is_kept_out_of_the_listing_by_where_it_lives() {
+        let root = TempDir::new("session-children");
+        let project = TempDir::new("session-children-project");
+
+        let mine = SessionWriter::create(&root.0, &project.0, "p", "m", None).expect("create");
+        mine.title("mine").expect("title");
+        let child = SessionWriter::create(&root.0, &project.0, "p", "m", Some("1789456770-557"))
+            .expect("create");
+        child.title("the child's").expect("title");
+
+        assert_eq!(
+            child.path().parent().and_then(|d| d.file_name()),
+            Some(std::ffi::OsStr::new("children")),
+            "the child's session is not in its own directory: {}",
+            child.path().display()
+        );
+        let meta = std::fs::read_to_string(child.path()).expect("read");
+        let first = meta.lines().next().expect("a meta line");
+        assert!(
+            first.contains(r#""parent":"1789456770-557""#),
+            "the child's own record does not say which conversation asked for it: {first}"
+        );
+
+        // The listing: one conversation, the person's, whatever else is on disk.
+        let listed = list_detailed(&root.0).expect("list");
+        assert_eq!(
+            listed.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec![mine.path().file_stem().unwrap().to_str().unwrap()],
+            "the child's conversation is in the person's list"
+        );
+        // `--continue` is the same question asked by name, and it used to answer with the child.
+        assert_eq!(
+            latest_for(&root.0, &project.0).expect("latest"),
+            Some(mine.path().to_path_buf()),
+            "--continue found something that is not the person's conversation"
+        );
+    }
+
     /// A new session is written into the subdirectory of the run it belongs to.
     ///
     /// The layout *is* the separation, so it is worth asserting where the file lands rather than
@@ -985,7 +1088,7 @@ mod tests {
         let root = TempDir::new("session-layout");
         let project = TempDir::new("session-layout-project");
         let other = TempDir::new("session-layout-other");
-        let writer = SessionWriter::create(&root.0, &project.0, "p", "m").expect("create");
+        let writer = SessionWriter::create(&root.0, &project.0, "p", "m", None).expect("create");
         let path = writer.path().to_path_buf();
         writer.title("a name").expect("title");
         assert_eq!(
@@ -1014,7 +1117,7 @@ mod tests {
     fn a_session_file_appears_when_something_is_said() {
         let root = TempDir::new("lazy-create");
         let project = TempDir::new("lazy-create-project");
-        let writer = SessionWriter::create(&root.0, &project.0, "p", "m").expect("create");
+        let writer = SessionWriter::create(&root.0, &project.0, "p", "m", None).expect("create");
         assert!(
             !writer.path().exists(),
             "a session file was written before anything was said: {}",
@@ -1070,7 +1173,7 @@ mod tests {
         use crate::event::Message;
 
         let dir = TempDir::new("switch");
-        let writer = SessionWriter::create(&dir.0, Path::new("/tmp"), "p", "m").unwrap();
+        let writer = SessionWriter::create(&dir.0, Path::new("/tmp"), "p", "m", None).unwrap();
         writer
             .append(&SessionEvent::Chat {
                 message: Message::User {
@@ -1107,7 +1210,7 @@ mod tests {
     #[test]
     fn the_writer_records_the_current_format_version() {
         let dir = TempDir::new("version");
-        let writer = SessionWriter::create(&dir.0, Path::new("/tmp"), "p", "m").unwrap();
+        let writer = SessionWriter::create(&dir.0, Path::new("/tmp"), "p", "m", None).unwrap();
         // Named, because a session file exists from the first thing said -- see
         // `a_session_file_appears_when_something_is_said`.
         writer.title("a name").unwrap();
@@ -1149,6 +1252,7 @@ mod tests {
             "other-model",
             &messages,
             Some("a name"),
+            None,
         )
         .unwrap();
 

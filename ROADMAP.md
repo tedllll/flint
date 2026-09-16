@@ -1657,7 +1657,14 @@ measured and what was not.
   labelling each answer with the job that produced it; and flint never decides to fan out on its own —
   a model that wants N children asks for N children, and a cap of 8 jobs, 4 at a time, keeps "ask for
   N" from being a way to spend without saying so. The parent's context is still one window, and a
-  child still spends it rather than adding to it.
+  child still spends it rather than adding to it. **A child's conversation is a session file, and it is
+  not one of the person's** — measured before this was fixed: `/sessions` and the page's sidebar showed
+  a child beside its parent with nothing to tell them apart, and `--continue` resumed the *child's*,
+  because a child is newer than the parent that started it. It is written under
+  `sessions/<dir>/children/`, which no listing reads, so "mine" is decided by the layout rather than by
+  a flag every reader would have to honour; the child's `meta` line names the parent (`parent`, set
+  from `FLINT_PARENT`, which the tool writes for the child and nothing else does); and reading the
+  child's conversation is by path, or by `mv`-ing it up a level to adopt it.
 - **MCP** — deferred, not refused: it is a protocol with real weight, and nothing here yet
   needs what it offers. **Being callable over MCP is the other direction and is built**:
   `examples/mcp/flint_server.py`.

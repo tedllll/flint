@@ -228,9 +228,14 @@ impl Agent {
             .and_then(|w| w.path().file_stem())
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "unattached".to_string());
+        // The same id is what a child is told started it, so the child's own session can say where it
+        // came from and stay out of the person's list. `unattached` is not a session and is not passed
+        // on: with no conversation of its own, this run has nothing true to be the parent of.
+        let parent = (tag != "unattached").then(|| tag.clone());
         let tools = ToolBox::new(config, readonly, cwd.clone())
             .with_spill_dir(crate::config::spill_dir().join(tag))
-            .with_task_endpoint(provider.name(), provider.model());
+            .with_task_endpoint(provider.name(), provider.model())
+            .with_task_parent(parent);
         // One walk, two answers: the prompt's note and the page's menu. See `Agent::skills`.
         let workspace = context::Workspace::discover(&cwd, &config.skill_dirs);
         let skills = workspace.skill_names();

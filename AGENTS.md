@@ -36,14 +36,14 @@ whoever is changing the code — a person or a model driving it.
 | `src/patch.rs` | the `apply_patch` format, parsed and applied — pure functions |
 | `src/term.rs` | the inline viewport: scroll region, answer strip, status clock |
 | `src/display.rs` | how a tool call and its result read in the transcript |
-| `src/session.rs` | reading and writing `sessions/*.jsonl`, listing, archiving |
+| `src/session.rs` | reading and writing `sessions/*.jsonl`, listing, archiving, and the `children/` directory a child run's conversation goes in |
 | `src/schema.rs` | the JSON Schema subset flint validates a `--schema` answer against, by hand |
 | `src/context.rs` | `AGENTS.md` discovery, the skill catalog, and the agent profiles in `.flint/agents/*.md` |
 | `src/config.rs` | config load/save and the paths under `FLINT_HOME` |
 | `src/search.rs` | web search: where the credential comes from, and DeepSeek's search endpoint |
 | `src/live.rs` | who else is working here: the presence record a run keeps while it lives, and the recent-changes signal that names no author |
 | `src/web.rs` | `--web`: the embedded viewer and the loopback listener that serves it |
-| `tests/` | `agent_loop` (stub provider), `cli_output` (real binary, raw bytes), `term_capture` (byte-exact terminal), `search_tool` (stub search endpoint), `balance` (the preflight, stub provider), `who` (the presence record and the changes that name no author), `task` (one flint starting another: argv, the child's stream, the depth bound, a readonly parent that cannot be talked into a writing child, a profile deciding the child's instructions and model, a fan-out whose children are shown to have started together, a child's own progress arriving on the parent's status row, and what a dropped turn says about the child it left running -- in a session and on a `--json` stream), `say` (the mailbox, and the assertion that a peer's words never reach a request body), `web_view` (the page's policy) |
+| `tests/` | `agent_loop` (stub provider), `cli_output` (real binary, raw bytes), `term_capture` (byte-exact terminal), `search_tool` (stub search endpoint), `balance` (the preflight, stub provider), `who` (the presence record and the changes that name no author), `task` (one flint starting another: argv, the child's stream, the depth bound, a readonly parent that cannot be talked into a writing child, a profile deciding the child's instructions and model, a fan-out whose children are shown to have started together, a child's own progress arriving on the parent's status row, what a dropped turn says about the child it left running -- in a session and on a `--json` stream, and a child's conversation being kept out of the person's list of conversations), `say` (the mailbox, and the assertion that a peer's words never reach a request body), `web_view` (the page's policy) |
 | `scripts/` | Node replay tools: `vtscreen.js`, `term-layout-test.js`, `layout-trace.js` |
 | `examples/python/` | the Python caller: `flint_call.py` (ask/ask_json, no dependencies), its stub and its checks |
 | `examples/mcp/` | flint as an MCP tool for Codex, Claude Code and Cursor: `flint_server.py` (stdlib only, one tool) and `test_mcp.py`, which speaks the protocol at it |
@@ -69,6 +69,7 @@ in a scratch directory for the same reason.
 |---|---|
 | `<FLINT_HOME>/config.toml` | the configuration; created on first run |
 | `<FLINT_HOME>/sessions/<dir>/<stamp>-<n>.jsonl` | one conversation per file, append-only, in the directory belonging to the working directory it was held in (older sessions sit directly in `sessions/`, and are still found). A file is created by the first thing said in it, so opening flint and typing nothing leaves nothing |
+| `<FLINT_HOME>/sessions/<dir>/children/<stamp>-<n>.jsonl` | the conversation of a run another run started (a `task`/`tasks` child, or the same thing from Python or MCP). A session file like any other — same format, readable, resumable by path — and one level deeper on purpose: no listing reads that directory, so `/sessions`, `--list-sessions`, the page's sidebar and `--continue` show a person their own conversations and nothing else. Its `meta` line names the parent in `parent`. `mv` it up a level to adopt it |
 | `<FLINT_HOME>/sessions/archive/` | conversations filed away with `/archive` (a project's archive is `sessions/<dir>/archive/`) |
 | `<FLINT_HOME>/spill/<session>/<n>.txt` | tool output too long for one request, in full |
 | `<FLINT_HOME>/engines/<provider>.log` | a local engine's output, and the only place a failed start says why |

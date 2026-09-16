@@ -197,6 +197,18 @@ worth reading:
 - **A session id in the presence record is still open.** The stage-1 note above stands: the record has
   no session id, so a `task` child appears in `flint who` as a run in that directory rather than as
   *this* run's child, and a parent cannot point at a handle for it.
+- **A child's conversation is not one of the person's, and it says whose it is.** Reported from a real
+  session: a `task` child's conversation appeared in `/sessions` and in the page's sidebar exactly like
+  one the person had, and `--continue` — "the newest conversation in this directory" — resumed the
+  child's, because a child is newer than the parent that started it. Both are the same fact, so the fix
+  is one fact: the tool sets `FLINT_PARENT` on the child (an environment variable, for `FLINT_DEPTH`'s
+  reason: the model driving the call does not get to choose or omit where its child came from), and
+  `main` uses it twice — the child's `meta` line names the parent, and its session is written under
+  `sessions/<dir>/children/`. The *layout* is what does the excluding, exactly as it does for the
+  archive: no listing reads that directory, so `/sessions`, `--list-sessions`, the sidebar and
+  `--continue` agree without a filter to drift, and `mv` out of it is how a person adopts a child's
+  conversation they want to keep. The file itself is a session like any other — same format, resumable
+  by path — which is what keeps "a run is a run" true rather than a promise about the happy path.
 - **A child's own progress reaches the parent's status row, and a child left running is named.** Both
   were added after a bug report, and both are the price of having no handle yet. A realistic `task`
   runs for minutes; the parent's row said one unchanging word (`task`) for all of it, because the child
