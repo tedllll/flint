@@ -856,7 +856,8 @@ slow enough to ask during, so this residue is closed — and a browser, **half m
 real browser` table was driven over the DevTools protocol against the real page (sidebar listing, row
 click, `+ new`, Enter, the layout at two sizes, three defects found), while the later controls are
 still bytes and not clicks, which §11's `Not yet measured in a browser` lines name one by one. The
-queue below is what comes next.
+fourth residue, the sidebar's rename, is built as well and is recorded below. The queue is what comes
+next.
 
 - **A selector's options come from somewhere the frame already describes** — built: `/model`'s and
   `/provider`'s from `providers` (both controls exist), `/resume`'s and `/archive`'s from the
@@ -889,12 +890,14 @@ the real `applyState` over the stub DOM and reads the options back — including
 `fillSelect` more than three lines, a current value the frame does not list among the
 alternatives, where a `<select>` silently keeps its first option and would then *send* it.
 
-**Renaming a conversation from the sidebar.** Not tried by the person who asked, and the mechanism
-is already there: `/name <text>` appends a `title` line, the page already *renders* titles (its
-header shows one), and `/name` now has a field in the panel — so a rename typed on the page works and
-its answer lands in the transcript, which was the feedback that was missing. What is still missing is
-the *sidebar* affordance (`/resume`'s neighbour), and that is a small drawing job rather than a
-mechanism. It is not worth doing first.
+**Renaming a conversation from the sidebar — built 2026-09-17.** The mechanism had been there since
+`/name` got a panel field (`/name <text>` appends a `title` line, the page already *renders* titles,
+and the answer lands in the transcript), so what was missing was only the *sidebar* affordance —
+`/resume`'s neighbour — and "not worth doing first" was right about the order: it waited until the
+forms class and the row's own menu existed, and then it was the drawing job this line predicted. The
+field lives in that menu, on the open conversation only, and one `list_changed()` call makes the
+sidebar show the name it was just given. The record after the class list above says what the five
+decisions in it were and which test holds each one.
 
 
 ### 9. The page, and the conversations that get thrown away
