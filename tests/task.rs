@@ -628,6 +628,16 @@ async fn alone() -> tokio::sync::MutexGuard<'static, ()> {
     ALONE.lock().await
 }
 
+/// How long the stub holds each child's answer in the fan-out test.
+///
+/// This is the test's *unit* of time, and both bounds below are written in terms of it rather than in
+/// milliseconds, because an absolute bound measures the machine as much as the tool: three seconds
+/// here means a serial fan-out cannot finish in less than 9 s, which leaves room for the process
+/// starts a slow runner adds. The first version of this used 2 s with a 5 s wall-clock bound and went
+/// red on the CI runner at 5.078 s -- the tool was right and the bound was a coin flip. See the
+/// per-step check in `.github/workflows/ci.yml`, which is how that number was read.
+const JOBS_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
+
 #[tokio::test]
 async fn a_fan_out_runs_the_jobs_at_the_same_time_and_labels_every_answer() {
     let _solo = alone().await;
@@ -639,7 +649,7 @@ async fn a_fan_out_runs_the_jobs_at_the_same_time_and_labels_every_answer() {
         .respond_with(Jobs {
             step: step.clone(),
             seen: seen.clone(),
-            delay: std::time::Duration::from_millis(2000),
+            delay: JOBS_DELAY,
         })
         .mount(&server)
         .await;
@@ -708,16 +718,22 @@ async fn a_fan_out_runs_the_jobs_at_the_same_time_and_labels_every_answer() {
         .max()
         .expect("three arrivals")
         .duration_since(*child_arrivals.iter().min().expect("three arrivals"));
+    // A third of the hold, because the two things being told apart are one hold apart: three
+    // children one after another leave that much between arrivals, and a third of it is more room
+    // than a slow machine needs to start three processes.
     assert!(
-        spread < std::time::Duration::from_millis(600),
+        spread < JOBS_DELAY / 3,
         "the children did not start together: their requests arrived {spread:?} apart, and three \
-         children one after another would be about 2 s apart"
+         children one after another would be about {JOBS_DELAY:?} apart"
     );
-    // And the whole run is faster than three children in a row, which is the point of the tool: one
-    // held parent turn, one held round of children, not three.
+    // And the whole run beats the serial floor *by construction*: three children in a row cannot
+    // finish before 3 x the hold, whatever the machine does to process starts, because each answer
+    // waits out the hold in the stub. A tighter bound than that would be measuring the runner.
     assert!(
-        elapsed < std::time::Duration::from_millis(5000),
-        "the fan-out did not overlap: it took {elapsed:?}"
+        elapsed < 3 * JOBS_DELAY,
+        "the fan-out did not overlap: it took {elapsed:?}, and three children one after another \
+         would take at least {:?}",
+        3 * JOBS_DELAY
     );
 
     let _ = std::fs::remove_dir_all(&home);
