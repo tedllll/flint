@@ -1156,7 +1156,7 @@ line no longer crosses the composer; **the page's own log, written by default** 
 the hand's code made the boot's first paint throw, taking the sidebar, the sessions and the feed
 with it; and `/stop`, the interrupt as a short word, reachable from the composer today.
 
-### 10. flint as a function a program can call — **in progress: steps 1–5 landed (B7 included), 6–7 queued**
+### 10. flint as a function a program can call — **in progress: steps 1–6 landed (B7 included), 7 queued**
 
 flint answers; it cannot yet be *trusted as a function*. A caller that acts on the result — writes a
 config, queues a job, retries a batch, feeds it data it did not author — has to know four things
@@ -1239,9 +1239,11 @@ decision, not a gap.
    that branches on the exit code — which is what callers do — treats a truncated answer as a
    finished one. The stream is honest; the exit code lies. This one is flint's own bug and is fixed
    as step 1.
-2. **Stream integrity is a promise with no test.** `--json` means "one object per line on stdout and
-   nothing else". A stray `println!` anywhere on that path, or a child process inheriting stdout,
-   breaks every caller at once. Nothing holds the line today.
+2. **Stream integrity is a promise with no test.** *Done in step 6.* `--json` means "one object per
+   line on stdout and nothing else", and a stray `println!` anywhere on that path, or a child process
+   inheriting stdout, breaks every caller at once. The bytes are now checked in `tests/json_output.rs`
+   for four shapes of run, against a vocabulary list that lives in the test as well as the README --
+   which it turned out the README had already drifted from, by two frame types (`status`, `command`).
 3. **Retrying is not safe** (A5), and a truncated turn makes it worse: the answer says nothing about
    what already happened.
 4. **Injection is action injection.** flint has no permission layer by decision, and it reads data
@@ -1448,7 +1450,15 @@ What to build for it, in step 2:
    which was invisible only because a one-shot run with no stream has no way to be stopped but a
    signal.
 6. **A stream-integrity test** — the thing C2 says does not exist: a run's stdout contains nothing
-   but parseable frames, asserted on raw bytes.
+   but parseable frames, asserted on raw bytes. — **Built.** Four shapes of run (a tool round, a
+   refusal while the command line is being read, a plain answer, and one cut short by its budget) are
+   checked on the bytes that came out of the pipe: stdout decodes as UTF-8 *strictly*, ends in exactly
+   one newline, carries no `\r` and no escape code, and every line is a JSON object whose `type` is in
+   the documented vocabulary — which is now a list in the test as well as in the README, so a new frame
+   type has to be added by hand in both places. The other tests could not see any of this: they read a
+   `from_utf8_lossy` string and call `.lines()`, so a `\r\n` terminator passes every one of them
+   (measured: with the writer emitting `\r`, the parse-based tests stayed green and this one failed),
+   and a line that happens to be valid JSON passed them too.
 7. **The Python side, once flint can be told apart.** `Chat`, which pins the session path
    (`continue_last` re-derives "the latest for this working directory" on every call, which is a race
    the moment there are two workers — and one file has one writer by design); streaming callbacks, so

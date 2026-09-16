@@ -165,6 +165,22 @@ fn run_json(home: &Path, cwd: &Path, args: &[&str]) -> (i32, Vec<Value>, String)
     )
 }
 
+/// Run the real binary and hand back what came out of the pipe, unexamined.
+///
+/// `run_json` above parses the stream, and parsing is what most tests want -- but it is also lossy: a
+/// `from_utf8_lossy` turns a bad byte into `U+FFFD` and a `.lines()` hides a carriage return, so a
+/// test about the *bytes* has to start from the bytes. This is that entry point.
+fn run_bytes(home: &Path, cwd: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_flint"))
+        .args(args)
+        .arg("--cwd")
+        .arg(cwd)
+        .env("FLINT_HOME", home)
+        .env_remove("NO_COLOR")
+        .output()
+        .expect("failed to run flint")
+}
+
 fn kinds(lines: &[Value]) -> Vec<String> {
     lines
         .iter()
@@ -1977,4 +1993,180 @@ fn a_schema_refuses_what_it_cannot_check() {
         refused.is_err(),
         "`format` was accepted, so an answer could be certified against a rule flint does not check"
     );
+}
+
+/// Every frame type `--json` may write, as one list.
+///
+/// The vocabulary is closed, which until now was a sentence in the README and a convention in
+/// `src/ndjson.rs`. This is the copy that fails when it grows: a new frame type has to be added here
+/// by hand, and that is the moment somebody reads the README and notices it is out of date too -- which
+/// it was, by two types (`status`, the heartbeat a silent turn carries, and `command`, the output of a
+/// slash command in the page's feed).
+const VOCABULARY: &[&str] = &[
+    "session.started",
+    "turn.started",
+    "message.delta",
+    "reasoning.delta",
+    "message.completed",
+    "tool.started",
+    "tool.args",
+    "tool.completed",
+    "usage",
+    "status",
+    "command",
+    "warning",
+    "error",
+    "result",
+    "turn.completed",
+];
+
+/// Check one run's bytes against the promise `--json` makes about them.
+///
+/// Everything here is about the pipe, not about the run: what the frames *say* is the other tests'
+/// business. The reasons each line matters are worth keeping together, because a caller's parser is
+/// built on all of them at once -- it splits on `\n`, so a line that is not an object is a crash; it
+/// decodes as UTF-8, so one bad byte is a crash; and it may be reading a terminal's leavings, so an
+/// escape code or a `\r` is a frame that never parses.
+fn assert_only_frames(tag: &str, out: &std::process::Output) {
+    let stdout = std::str::from_utf8(&out.stdout)
+        .unwrap_or_else(|e| panic!("{tag}: stdout is not UTF-8 at byte {} ({e})", e.valid_up_to()));
+
+    assert!(!stdout.is_empty(), "{tag}: a --json run wrote nothing at all");
+    assert!(
+        stdout.ends_with('\n'),
+        "{tag}: the last frame has no newline, so a reader that waits for a line waits for ever"
+    );
+    assert!(
+        !stdout.contains('\r'),
+        "{tag}: a carriage return reached stdout -- a line ending from somewhere that is not the stream"
+    );
+    assert!(
+        !stdout.contains('\u{1b}'),
+        "{tag}: an escape code reached stdout, so a caller that is not a terminal is reading paint"
+    );
+
+    let mut seen: Vec<String> = Vec::new();
+    for (number, line) in stdout.lines().enumerate() {
+        let line = line.trim_end_matches('\n');
+        assert!(
+            !line.trim().is_empty(),
+            "{tag}: line {} is blank; a blank line is not a frame",
+            number + 1
+        );
+        assert_eq!(
+            line,
+            line.trim(),
+            "{tag}: line {} has whitespace around it, which is not how a frame is written",
+            number + 1
+        );
+        let value: Value = serde_json::from_str(line).unwrap_or_else(|e| {
+            panic!("{tag}: line {} is not JSON: {line:?} ({e})", number + 1)
+        });
+        let object = value.as_object().unwrap_or_else(|| {
+            panic!("{tag}: line {} is JSON but not an object: {line:?}", number + 1)
+        });
+        let kind = object
+            .get("type")
+            .and_then(|t| t.as_str())
+            .unwrap_or_else(|| panic!("{tag}: line {} has no type: {line:?}", number + 1));
+        assert!(
+            VOCABULARY.contains(&kind),
+            "{tag}: line {} is a frame type nobody documented: {kind:?} -- if it is new, add it to \
+             VOCABULARY here and to the list in README.md",
+            number + 1
+        );
+        seen.push(kind.to_string());
+    }
+    assert!(
+        !seen.is_empty(),
+        "{tag}: every line was filtered out, so this checked nothing"
+    );
+}
+
+/// The stream is frames and nothing else, byte for byte, in every shape a run can take.
+///
+/// The other tests in this file read the stream through `run_json`, which is lossy in the two ways that
+/// matter (a `from_utf8_lossy` and a `.lines()`): a stray raw byte, a `\r`, or an escape code from the
+/// terminal path would survive all of them. And a stray `println!` reaches whichever shape its author
+/// was working on, so one happy path is not evidence -- the four below are an answer, a tool round, a
+/// refusal that never reached the model, and a run cut short by its own budget.
+#[tokio::test]
+async fn the_stream_is_frames_and_nothing_else_on_the_bytes() {
+    let server = MockServer::start().await;
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let cwd = cwd_for("bytes");
+    // One stub, two answers: a tool call and then the text after it, which is what puts every
+    // `tool.*` frame and the round trip after it into the stream.
+    let note = cwd.join("note.txt");
+    std::fs::write(&note, "the note\n").expect("the fixture file");
+    Mock::given(method("POST"))
+        .respond_with(Scripted {
+            answers: vec![
+                asks_to_read("call_1", note.to_string_lossy().as_ref()),
+                sse_text("read it"),
+            ],
+            seen: std::sync::Arc::clone(&seen),
+        })
+        .mount(&server)
+        .await;
+    let home = home_for("bytes", &server.uri(), &cwd);
+
+    // 1. A tool round and the answer after it: the busiest the stream ever gets.
+    let out = run_bytes(&home, &cwd, &["-p", "read note.txt and tell me", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "the run failed: {:?}", out);
+    assert_only_frames("tool round", &out);
+    assert_eq!(
+        out.stderr,
+        Vec::<u8>::new(),
+        "a --json run wrote to stderr, which is not the channel it promised"
+    );
+    // The tool round has to have happened, or this checked the easy shape four times.
+    assert!(
+        !recorded(&seen).is_empty() && recorded(&seen).len() > 1,
+        "the stub was asked once, so no tool round is in that stream"
+    );
+
+    // 2. A refusal while the command line is being read: no model, no session, one frame.
+    let out = run_bytes(&home, &cwd, &["-p", "hello", "--json", "--nope"]);
+    assert_eq!(out.status.code(), Some(2), "a bad flag is the caller's input");
+    assert_only_frames("refusal", &out);
+
+    // 3. An answer, the ordinary shape: two deltas, the whole text, and the totals.
+    let server2 = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(SseFixture {
+            body: answers_in_two_fragments(),
+        })
+        .mount(&server2)
+        .await;
+    let home2 = home_for("bytes-answer", &server2.uri(), &cwd);
+    let out = run_bytes(&home2, &cwd, &["-p", "say hello", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "the run failed: {:?}", out);
+    assert_only_frames("answer", &out);
+
+    // 4. A run whose budget ran out: a warning, an unfinished turn, and a non-zero code. The half
+    // answer is the interesting one -- text that arrived *after* the deadline must not reach the
+    // stream as though it were in time.
+    let server3 = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(answers_in_two_fragments())
+                .set_delay(std::time::Duration::from_secs(30)),
+        )
+        .mount(&server3)
+        .await;
+    let home3 = home_for("bytes-budget", &server3.uri(), &cwd);
+    let out = run_bytes(
+        &home3,
+        &cwd,
+        &["-p", "say hello", "--json", "--max-seconds", "1"],
+    );
+    assert_eq!(out.status.code(), Some(65), "the budget did not cut the run");
+    assert_only_frames("budget", &out);
+
+    for dir in [home, home2, home3] {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

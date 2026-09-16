@@ -222,7 +222,15 @@ done
 
 The vocabulary is closed and small: `session.started`, `turn.started`, `message.delta`,
 `reasoning.delta`, `message.completed`, `tool.started`, `tool.args`, `tool.completed`,
-`usage`, `warning`, `turn.completed`, `result`, `error`. Four things about it are worth knowing:
+`usage`, `status`, `command`, `warning`, `error`, `result`, `turn.completed`. Four things about it
+are worth knowing:
+
+- **The stream is bytes, and what is promised is about the bytes.** One JSON object per line,
+  nothing else on stdout: no prose, no blank line, no carriage return, no escape code, and every
+  line a `type` from the list above. That is asserted on the raw bytes of a real run
+  (`tests/json_output.rs`), because a parser a caller writes is built on all of it at once — a
+  single stray line breaks every caller there is, and a `\r` or a lost newline breaks the ones
+  that read a pipe on Windows.
 
 - **A line is always a line.** Tool output containing newlines, quotes and escape codes is
   JSON-escaped, never printed raw, so splitting the stream on `\n` cannot cut an object in
