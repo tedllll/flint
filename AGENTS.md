@@ -42,7 +42,7 @@ whoever is changing the code — a person or a model driving it.
 | `src/search.rs` | web search: where the credential comes from, and DeepSeek's search endpoint |
 | `src/live.rs` | who else is working here: the presence record a run keeps while it lives, and the recent-changes signal that names no author |
 | `src/web.rs` | `--web`: the embedded viewer and the loopback listener that serves it |
-| `tests/` | `agent_loop` (stub provider), `cli_output` (real binary, raw bytes), `term_capture` (byte-exact terminal), `search_tool` (stub search endpoint), `balance` (the preflight, stub provider), `who` (the presence record and the changes that name no author), `task` (one flint starting another: argv, the child's stream, the depth bound, and a readonly parent that cannot be talked into a writing child), `web_view` (the page's policy) |
+| `tests/` | `agent_loop` (stub provider), `cli_output` (real binary, raw bytes), `term_capture` (byte-exact terminal), `search_tool` (stub search endpoint), `balance` (the preflight, stub provider), `who` (the presence record and the changes that name no author), `task` (one flint starting another: argv, the child's stream, the depth bound, and a readonly parent that cannot be talked into a writing child), `say` (the mailbox, and the assertion that a peer's words never reach a request body), `web_view` (the page's policy) |
 | `scripts/` | Node replay tools: `vtscreen.js`, `term-layout-test.js`, `layout-trace.js` |
 | `examples/python/` | the Python caller: `flint_call.py` (ask/ask_json, no dependencies), its stub and its checks |
 | `examples/mcp/` | flint as an MCP tool for Codex, Claude Code and Cursor: `flint_server.py` (stdlib only, one tool) and `test_mcp.py`, which speaks the protocol at it |
@@ -53,7 +53,7 @@ whoever is changing the code — a person or a model driving it.
 | `docs/deepseek-search.md` | web search: what was measured about DeepSeek's search, and what it costs |
 | `docs/decisions.md` | why flint is built this way, decision by decision |
 | `docs/sandbox.md` | a plan for replacing permission modes with grants — **not built, and it argues against the "Not doing, and why" entry in `ROADMAP.md` on purpose**; read it as an argument, not as the state of the tree |
-| `docs/agents.md` | the plan for runs that spawn, find and talk to each other (a `task` tool, presence, a mailbox) — stages 1 and 2 are built (`src/live.rs`, the `TaskTool` in `src/tools.rs`) and the "Subagents" entry in `ROADMAP.md` was adopted in the same commit; stages 3–4 are still plans |
+| `docs/agents.md` | the plan for runs that spawn, find and talk to each other (a `task` tool, presence, a mailbox) — stages 1, 2 and the mailbox half of stage 3 are built (`src/live.rs`, the `TaskTool` in `src/tools.rs`, `flint say`); the `.flint/` marker and the opt-in that would let a peer's words reach a model are not, and stage 4 is a plan |
 | `ROADMAP.md` | the plan of record: the ordered queue, and what is deliberately not done |
 | `HANDOFF.md` | state of the project at the end of the last working session |
 
@@ -72,6 +72,7 @@ in a scratch directory for the same reason.
 | `<FLINT_HOME>/spill/<session>/<n>.txt` | tool output too long for one request, in full |
 | `<FLINT_HOME>/engines/<provider>.log` | a local engine's output, and the only place a failed start says why |
 | `<FLINT_HOME>/live/<pid>-<n>.json` | one record per *running* flint, refreshed every 5 s and removed when it exits; what `flint who` reads. A record left behind by a killed process is reported as stale rather than deleted, because a killed process cannot clean up |
+| `<FLINT_HOME>/mailbox/<dir-key>.jsonl` | one append-only file per working directory, where `flint say` leaves a message for whoever is working there. A run reads what arrives *after* it started and shows it to its person; nothing in it is ever sent to a model, which is the rule that makes it a mailbox rather than an injection channel |
 | `<FLINT_HOME>/AGENTS.md` | instructions that apply to every project |
 | `<FLINT_HOME>/skills/<name>/SKILL.md` | skills available everywhere |
 | `<project>/AGENTS.md` | instructions for that project |

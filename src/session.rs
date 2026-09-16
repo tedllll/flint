@@ -55,6 +55,21 @@ pub enum SessionEvent {
     Chat {
         message: Message,
     },
+    /// A peer left a message while this conversation was open.
+    ///
+    /// Its own event, and deliberately **not** a `Chat`: a peer's words are shown to the person and
+    /// written here so the conversation can be read back whole, and they must never be part of the
+    /// history that is sent to a model. Anything that can write a mailbox could otherwise steer a tool
+    /// loop that has no permission layer, which is the fault `docs/agents.md` refuses to build. `load`
+    /// therefore reads this event and keeps it out of `messages`; the transcript shows it at the moment
+    /// it arrived, and `SessionEvent::Peer` is the record that it did.
+    Peer {
+        from: String,
+        text: String,
+        /// When it arrived, as a unix second, or 0 when the sender did not say.
+        #[serde(default)]
+        at: u64,
+    },
     Usage {
         usage: Usage,
     },
@@ -92,7 +107,7 @@ pub enum SessionEvent {
 ///
 /// Used for one decision only: a line that failed to parse but names a type in here is
 /// damage, and a line that names anything else is somebody else's event.
-const KNOWN_TYPES: [&str; 6] = ["meta", "chat", "usage", "title", "switch", "schema"];
+const KNOWN_TYPES: [&str; 7] = ["meta", "chat", "usage", "title", "switch", "schema", "peer"];
 
 /// Whether a line names an event type this build knows.
 fn names_a_known_event(line: &str) -> bool {
@@ -368,6 +383,10 @@ pub fn load(path: &Path) -> Result<LoadedSession> {
             Ok(SessionEvent::Schema { schema }) => {
                 loaded.output_schema = schema.filter(|s| !s.is_null());
             }
+            // Read, and deliberately kept out of `messages`: a peer's words belong to the person
+            // reading the conversation, not to the history a model is sent. That is the whole safety
+            // rule of the mailbox, and this line is where it is enforced on the way back in.
+            Ok(SessionEvent::Peer { .. }) => {}
             // Skipped in silence when the file claims a newer revision -- a type this
             // build knows may have changed shape in it, and that is not damage either.
             Err(_) if loaded.version > FORMAT_VERSION || !names_a_known_event(line) => {}

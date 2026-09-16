@@ -3,7 +3,7 @@
 //! Two agents in one checkout is the accident this exists for: they collide over a file, or one
 //! commits a revision the other is still writing, and neither can see it coming. `ROADMAP.md`'s
 //! "being used by another agent" section records the incident that made it concrete. `docs/agents.md`
-//! is the plan this is stage 1 of.
+//! is the plan this is stages 1 and 3 of.
 //!
 //! It answers with two signals that must never be blended into one sentence, because they have
 //! different authors and different precision:
@@ -12,6 +12,12 @@
 //!   blind to everything that is not flint.
 //! - **recent changes** on disk (`git status`, file mtimes). True of every tool on the machine, and
 //!   unable to name an author.
+//!
+//! Beside them lives the **mailbox**: one append-only JSONL file per directory, where a peer -- a
+//! person at a terminal, another flint, a script -- leaves a message for whoever is working there.
+//! The safety rule that makes it a mailbox rather than an injection channel is in `docs/agents.md`
+//! and is enforced here by what this module does *not* do: it hands the words to the transcript and
+//! to the session file, and nothing in it can put a peer's words into a request to a model.
 //!
 //! "No other agent is here" is the sentence that must never be wrong, so both are reported and both
 //! are labelled: the first names a run, the second names files and says plainly that it does not know
@@ -363,6 +369,158 @@ pub fn newest_session(cwd: &Path) -> Option<(PathBuf, u64)> {
     newest
 }
 
+/// One message a peer left for whoever is working in this directory.
+///
+/// `from` is what the sender *says* it is, and it is worth no more than that: anything that can write
+/// the file can write that field. It is shown as a claim ("`x` says:") rather than as an identity, and
+/// nothing branches on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerMessage {
+    pub from: String,
+    pub text: String,
+    /// A run's pid or session id when it was addressed to one, empty for "whoever is here".
+    pub to: String,
+    pub at: u64,
+}
+
+/// The mailbox for one directory: `<FLINT_HOME>/mailbox/<dir-key>.jsonl`, the same key the sessions
+/// use, so a message reaches the runs working where it was left and not the ones somewhere else.
+pub fn mailbox_path(cwd: &Path) -> PathBuf {
+    crate::config::mailbox_dir().join(format!("{}.jsonl", crate::session::dir_key(cwd)))
+}
+
+/// Leave a message for whoever is working in `cwd`.
+///
+/// Append-only, one JSON object per line, so a person can read it with `type` and a peer can `tail`
+/// it. Written with one `write` call: a mailbox line is small enough that an append is atomic in
+/// practice, and a torn line is reported as unreadable rather than skipped when it is read back.
+pub fn say(cwd: &Path, from: &str, to: &str, text: &str) -> anyhow::Result<PathBuf> {
+    use anyhow::Context;
+    let path = mailbox_path(cwd);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    let record = serde_json::json!({
+        "from": from,
+        "to": to,
+        "at": now_secs(),
+        "cwd": cwd.to_string_lossy(),
+        "text": text,
+    });
+    let mut line = serde_json::to_string(&record)?;
+    line.push('\n');
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    use std::io::Write;
+    file.write_all(line.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(path)
+}
+
+/// A reader that follows one directory's mailbox, showing what arrives *after* it started.
+///
+/// Starting at the end of the file rather than at the beginning is the whole design: a run shows
+/// messages that arrive while it is working, not the archive of everything ever said here. A fresh
+/// run therefore begins quiet, which is the honest default -- and it means the cursor is not state
+/// that has to be persisted, only a byte offset this process remembers.
+#[derive(Debug)]
+pub struct Mailbox {
+    path: PathBuf,
+    /// Byte offset of the first line not yet shown, and the identity of the file it refers to. A file
+    /// that shrank (a hand-edit, a new `FLINT_HOME` directory) is re-read from the start rather than
+    /// skipped: reading from beyond the end would silently lose every message after it.
+    cursor: u64,
+    len: u64,
+}
+
+impl Mailbox {
+    /// Follow the mailbox of `cwd`, from wherever it is now.
+    pub fn following(cwd: &Path) -> Self {
+        let path = mailbox_path(cwd);
+        let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        Mailbox {
+            path,
+            cursor: len,
+            len,
+        }
+    }
+
+    /// Messages addressed to `me` (a pid or a session id) or to nobody in particular.
+    ///
+    /// A line that cannot be parsed is reported as a peer message that says so rather than dropped:
+    /// two agents failing to talk because one wrote a bad line is exactly the silence this is for
+    /// breaking, and the person watching should see it happen.
+    pub fn new_messages(&mut self, me: &str) -> Vec<PeerMessage> {
+        let Ok(text) = std::fs::read_to_string(&self.path) else {
+            return Vec::new();
+        };
+        let len = text.len() as u64;
+        if len < self.cursor {
+            self.cursor = 0;
+        }
+        self.len = len;
+        if len == self.cursor {
+            return Vec::new();
+        }
+        let fresh = &text[self.cursor as usize..];
+        // Only complete lines are consumed: a peer may be mid-write, and the rest of a line read now
+        // would be a message nobody sent. The cursor stops at the last newline.
+        let consumed = fresh.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        if consumed == 0 {
+            return Vec::new();
+        }
+        self.cursor += consumed as u64;
+        fresh[..consumed]
+            .lines()
+            .filter_map(|line| parse_peer(line, me))
+            .collect()
+    }
+}
+
+/// One mailbox line as a message, or `None` when it is not for this run.
+fn parse_peer(line: &str, me: &str) -> Option<PeerMessage> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+        return Some(PeerMessage {
+            from: "an unreadable line".to_string(),
+            text: line.to_string(),
+            to: String::new(),
+            at: 0,
+        });
+    };
+    let field = |key: &str| {
+        value
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let to = field("to");
+    if !to.is_empty() && to != me {
+        return None;
+    }
+    let text = value
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some(PeerMessage {
+        from: field("from"),
+        text,
+        to,
+        at: value.get("at").and_then(|v| v.as_u64()).unwrap_or(0),
+    })
+}
+
 /// The one sentence that says what the "changed" section does and does not know.
 ///
 /// A pure function because its three cases *are* the honesty of the whole signal, and they are easy to
@@ -449,6 +607,76 @@ mod tests {
     fn what_arrives_from_a_hand_edited_record_is_reported_rather_than_guessed() {
         // A record with no `last_seen` cannot answer the only question asked of it, so it is damage.
         assert!(serde_json::from_str::<Presence>("{\"pid\": 1}").is_err());
+    }
+
+    #[test]
+    fn a_mailbox_shows_what_arrives_after_it_started_and_only_what_is_for_this_run() {
+        // A directory of its own for the mailbox, and a *project* directory of its own to key it by.
+        // The mailbox itself lives under `FLINT_HOME` (whatever this test process was given), so the
+        // key is a path nothing else uses and the file is removed at the end.
+        let dir = std::env::temp_dir().join(format!("flint-mailbox-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cwd = dir.join("project");
+        std::fs::create_dir_all(&cwd).expect("project dir");
+        let path = mailbox_path(&cwd);
+        let _ = std::fs::remove_file(&path);
+
+        // Everything already there when a run starts is history, not news: a run that opened onto a
+        // full mailbox and replayed it would report yesterday's conversation as happening now.
+        say(&cwd, "old", "", "said before this run").expect("write");
+        let mut mailbox = Mailbox::following(&cwd);
+        assert!(mailbox.new_messages("1").is_empty());
+
+        say(&cwd, "peer 2", "", "said to whoever is here").expect("write");
+        say(&cwd, "peer 3", "1", "said to me").expect("write");
+        say(&cwd, "peer 4", "999", "said to somebody else").expect("write");
+        let mine = mailbox.new_messages("1");
+        assert_eq!(mine.len(), 2, "expected the broadcast and the one to me: {mine:?}");
+        assert_eq!(mine[0].from, "peer 2");
+        assert_eq!(mine[1].text, "said to me");
+        // Read once, not twice: the cursor is the whole reason a run does not repeat itself.
+        assert!(mailbox.new_messages("1").is_empty());
+
+        // A half-written line is not a message: the rest of it may not exist yet, and showing it would
+        // be showing words nobody sent. It is kept for the next read.
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("open");
+            file.write_all(br#"{"from":"peer 5","text":"not finishe"#)
+                .expect("partial write");
+        }
+        assert!(mailbox.new_messages("1").is_empty());
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("open");
+            file.write_all(b"d yet\"}\n").expect("finish the line");
+        }
+        let finished = mailbox.new_messages("1");
+        assert_eq!(finished.len(), 1);
+        assert_eq!(finished[0].text, "not finished yet");
+
+        // A line somebody broke by hand is reported as a peer message that says so: two agents failing
+        // to talk because of one bad line is the silence this exists to break.
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("open");
+            file.write_all(b"not json at all\n").expect("bad line");
+        }
+        let damaged = mailbox.new_messages("1");
+        assert_eq!(damaged.len(), 1);
+        assert!(damaged[0].from.contains("unreadable"), "{damaged:?}");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

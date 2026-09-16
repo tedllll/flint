@@ -485,6 +485,15 @@ pub fn live_dir() -> PathBuf {
     config_dir().join("live")
 }
 
+/// Where one directory's peers leave each other messages.
+///
+/// Under `FLINT_HOME` for the same reason the presence records are: a `readonly` run must be able to
+/// be spoken to, and a project directory is not always writable. The cost is the same and is said in
+/// the same place: two installations with different homes cannot talk to each other.
+pub fn mailbox_dir() -> PathBuf {
+    config_dir().join("mailbox")
+}
+
 /// Where tool output too long for one request is kept, in full, as plain text.
 ///
 /// Under the session rather than in a single pile, because the only question anyone asks

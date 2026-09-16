@@ -11,7 +11,7 @@
 //! input channel and the future. This is only the part that turns one event into what a reader sees,
 //! which is exactly the part both callers have to agree on.
 
-use crate::display::{Printer, RED};
+use crate::display::{Printer, CYAN, RED};
 use crate::event::Event;
 use crate::web::Live;
 use std::collections::HashMap;
@@ -235,6 +235,20 @@ impl<'a, 'p> EventSink<'a, 'p> {
                 self.printer
                     .term()
                     .line(format_args!("{} {w}", self.printer.style(RED, "warning:")));
+            }
+            // Shown, never sent. Two lines because the second one is the whole safety rule, and a
+            // person reading a message that sounds like an instruction needs to know that the model
+            // has not seen it -- otherwise "the agent ignored me" is the natural, wrong conclusion.
+            Event::Peer { from, text } => {
+                self.printer.term().blank();
+                self.printer.term().line(format_args!(
+                    "{} {} says: {text}",
+                    self.printer.style(CYAN, "peer"),
+                    if from.trim().is_empty() { "someone" } else { from.as_str() }
+                ));
+                self.printer.term().line(format_args!(
+                    "      (shown to you; not sent to the model)"
+                ));
             }
             Event::Done => {}
             // The terminal never receives one of these: the status *is* the terminal's own row, and

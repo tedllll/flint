@@ -413,6 +413,33 @@ impl Agent {
         }
     }
 
+    /// Record that a peer said something, in the session file and nowhere else.
+    ///
+    /// Nowhere else is the point. A peer's words are shown to the person at the terminal and written
+    /// here so the conversation reads back whole, and they are **not** pushed into `history`, which is
+    /// the only thing a request is built from. Anything that can write a mailbox could otherwise steer
+    /// this tool loop, and this run has no permission layer to catch it: `docs/agents.md` calls that
+    /// the widest hole in the system, and this is the method that does not open it.
+    ///
+    /// Returns whether it was written, because a run with no session file (one-shot with no prompt,
+    /// or a test) should not pretend it kept a record.
+    pub fn note_peer(&mut self, from: &str, text: &str) -> bool {
+        let Some(writer) = &mut self.writer else {
+            return false;
+        };
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        writer
+            .append(&SessionEvent::Peer {
+                from: from.to_string(),
+                text: text.to_string(),
+                at,
+            })
+            .is_ok()
+    }
+
     /// Run one user turn to completion, reporting progress through `sink`.
     pub async fn run(&mut self, user_input: &str, mut sink: impl FnMut(Event)) -> Result<()> {
         // Before anything can be sent: if the previous turn was interrupted while it

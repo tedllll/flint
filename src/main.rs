@@ -73,6 +73,14 @@ struct Args {
     /// which is where the collision would happen, so the rest of the machine is opt-in rather than
     /// noise in the answer.
     all: bool,
+    /// `flint say "…"`: leave a message for whoever is working in this directory.
+    ///
+    /// The interjection primitive, and the reason it is a command rather than a tool: a message is
+    /// written by a *person* (or by a script that a person pointed at the directory), and the run that
+    /// receives it shows it to that person rather than handing it to its model. See `docs/agents.md`.
+    say: Option<String>,
+    /// `flint say --to <pid|session>`: address one run instead of whoever is here.
+    say_to: String,
     exec: Option<String>,
     /// Serve a browser view of *this* run on loopback.
     ///
@@ -455,6 +463,13 @@ async fn real_main() -> Result<i32> {
     // often on exactly the machine where the provider is what is in doubt.
     if args.who {
         return who_and_stop(cwd.clone(), args.all, args.json);
+    }
+
+    // Same reasoning as `who`: `say` writes a file and needs neither a key nor a reachable endpoint.
+    // A message is worth leaving on exactly the machine where the provider is in doubt -- "your turn,
+    // mine is out of balance" is the sentence this exists for.
+    if let Some(text) = args.say.clone() {
+        return say_and_stop(cwd.clone(), args.say_to.clone(), text, args.json);
     }
 
     // ---- resolve provider ----
@@ -1097,7 +1112,34 @@ async fn interactive(
     // it was working. See `Handover`.
     let mut pending = Handover::default();
 
+    // The mailbox is followed from here, so a run shows what peers say *while it is working* and not
+    // the history of everything ever said in this directory. `me` is this process's pid, which is what
+    // a message addressed with `--to <pid>` has to match; a message addressed to nobody reaches
+    // everybody here.
+    let mut mailbox = live::Mailbox::following(agent.cwd());
+    let me = std::process::id().to_string();
+
     loop {
+        // Anything a peer left while the last turn ran, before the prompt comes back: shown to the
+        // person and written to the session file, never to the model. This is the one moment in the
+        // REPL where the conversation is between turns, which is exactly where an interjection
+        // belongs -- and it is why a peer's words cannot arrive in the middle of a tool loop.
+        for message in mailbox.new_messages(&me) {
+            let from = if message.from.trim().is_empty() {
+                "someone".to_string()
+            } else {
+                message.from.clone()
+            };
+            let event = event::Event::Peer {
+                from: from.clone(),
+                text: message.text.clone(),
+            };
+            // The same sink a turn's events go through, so the message reaches the transcript, the
+            // page and the `--json` stream in one place instead of three.
+            let mut sink = sink::EventSink::new(printer, viewer.as_ref().map(web::Viewer::live));
+            sink.event(event);
+            agent.note_peer(&from, &message.text);
+        }
         // The prompt lives on the terminal's reserved row, so there is nothing to
         // print here: the key thread redraws it after every keystroke.
         printer.term().prompt();
@@ -4326,6 +4368,28 @@ fn parse_args(argv: Vec<String>) -> Result<Args> {
                 // machine where the provider is exactly what is in doubt.
                 args.who = true;
             }
+            "say" => {
+                // Leave a message for whoever is working in this directory. A word rather than a
+                // flag, like `balance` and `who`, and taken before the bare-word fallback so that
+                // `flint say hello` is a message rather than a prompt asking the model to guess.
+                // It needs no key for the same reason `who` does not: it is not a model call.
+                let rest: Vec<String> = iter.by_ref().collect();
+                let said = split_say(&rest);
+                if said.text.is_empty() {
+                    return Err(anyhow!(
+                        "say requires a message. `flint say \"I am editing src/provider.rs\"`, \
+                         with `--to <pid>` to address one run"
+                    ));
+                }
+                if said.cwd.is_some() {
+                    args.cwd = said.cwd;
+                }
+                if said.json {
+                    args.json = true;
+                }
+                args.say_to = said.to;
+                args.say = Some(said.text.join(" "));
+            }
             "debug" => {
                 let rest: Vec<String> = iter.by_ref().collect();
                 if rest.is_empty() {
@@ -4388,6 +4452,8 @@ fn print_help(color: bool, term: &Term) {
   flint exec <command>             run a command directly (no model, no network)
   flint balance [--json]           ask the provider whether it can be used, and what is left
 flint who [--all] [--json]       who else is working in this directory (flint only), and what changed
+  flint say <text> [--to <pid>]    leave a message for whoever is working here: shown to the person,
+                                   never sent to a model
   flint debug prompt-input [msg]   print the request that would be sent, and send nothing
   flint --list-sessions            list saved sessions, numbered for --resume
   flint --name <text>              name this conversation (also: /name)
@@ -4499,6 +4565,85 @@ fn human_balance(name: &str, balance: &provider::Balance) -> String {
              normal here"
         ),
     }
+}
+
+/// Pull `--to <who>` out of the words after `say`; everything else is the message.
+///
+/// The message is what remains, and it is joined with spaces, so quoting is optional: `flint say I am
+/// still writing docs/sandbox.md` is a sentence rather than an argument error. `--to` is the only
+/// thing treated as a flag, which is why it is named here rather than parsed by the general argv
+/// walker -- after `say`, everything is prose.
+/// What `flint say` was given: the message, who it is for, and the two flags it shares with every
+/// other command.
+struct SayWords {
+    to: String,
+    cwd: Option<String>,
+    json: bool,
+    text: Vec<String>,
+}
+
+/// Pull `--to <who>`, `--cwd <dir>` and `--json` out of the words after `say`; everything else is the
+/// message.
+///
+/// A function of its own because after `say`, everything is prose: `flint say I am still writing
+/// docs/sandbox.md` has to be a sentence rather than an argument error, and a message beginning with a
+/// dash is still a message. That is why the flags this command shares with every other one are taken
+/// out here rather than by the argv walker -- and it is the sort of thing that is wrong the first time.
+/// It was: `--cwd` ended up inside the message, so the words went to the wrong directory's mailbox.
+fn split_say(words: &[String]) -> SayWords {
+    let mut out = SayWords {
+        to: String::new(),
+        cwd: None,
+        json: false,
+        text: Vec::new(),
+    };
+    let mut rest = words.iter();
+    while let Some(word) = rest.next() {
+        if word == "--to" || word == "-t" {
+            out.to = rest.next().cloned().unwrap_or_default();
+        } else if word == "--cwd" {
+            out.cwd = rest.next().cloned();
+        } else if word == "--json" {
+            out.json = true;
+        } else if let Some(value) = word.strip_prefix("--to=") {
+            out.to = value.to_string();
+        } else if let Some(value) = word.strip_prefix("--cwd=") {
+            out.cwd = Some(value.to_string());
+        } else {
+            out.text.push(word.clone());
+        }
+    }
+    out
+}
+
+/// Leave a message in this directory's mailbox, and say where it went.
+///
+/// Printing the path is not decoration: the file is the record, a person may want to read it with
+/// `type`, and a message that silently went somewhere else is worse than one that failed. It exits 0
+/// even when nobody is listening, because "nobody is here right now" is a fact about a mailbox rather
+/// than a failure of the command -- the message is on disk and the next run here will see it.
+fn say_and_stop(cwd: std::path::PathBuf, to: String, text: String, json: bool) -> Result<i32> {
+    let from = format!("pid {}", std::process::id());
+    let path = live::say(&cwd, &from, &to, &text)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "mailbox": path.to_string_lossy(),
+                "from": from,
+                "to": to,
+                "text": text,
+            })
+        );
+    } else {
+        println!("said: {text}");
+        println!("  in: {}", path.display());
+        if !to.is_empty() {
+            println!("  to: {to}");
+        }
+        println!("  (a run working here shows it to its person; it is never sent to a model)");
+    }
+    Ok(EXIT_OK)
 }
 
 /// The preflight: ask the provider about itself, print the answer, and pick the exit code from the same

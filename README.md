@@ -107,6 +107,7 @@ flint exec "npm i -g @deepseek-ai/dsh"   # no model involved
 flint balance                    # is this provider usable, and what is left in the account?
 flint balance --json             # the same answer for a program
 flint who                        # who else is working in this directory, and what changed
+flint say "the tree is yours"    # leave whoever is working here a message (they see it; the model does not)
 flint --list-sessions            # numbered, so --resume N works
 flint --name "codex config"      # name the conversation you are in
 flint --archive 3                # file it away, out of the list
@@ -411,6 +412,21 @@ Three things it is not, said here because each one is a reasonable expectation t
 Two runs working in one directory can see each other: `flint who` prints the live runs flint knows
 about, and, separately, what changed recently — a line that names no author, because a changed file is
 not evidence of who changed it. `flint who --all` lists runs in other directories too.
+
+And they can say something to each other:
+
+```console
+$ flint say "please do not commit docs/sandbox.md, I am still writing it"
+said to whoever is working in C:\work\flint (pid 41288)
+  -> C:\Users\you\.flint\mailbox\flint-9c1f0a3d.jsonl
+     shown to the person reading that run; never sent to a model
+```
+
+The sentence appears in a running flint's transcript, prefixed with who said it — and that is all it
+does. It is written to the session file as its own `peer` event, never as a chat message, so it cannot
+end up in a request body: anything that can write a mailbox could otherwise steer the tool loop of a
+process that has no permission layer. Feeding a peer's words to the model is a decision a *person*
+makes, and that decision is not built. `--to <pid>` addresses one run instead of everyone here.
 
 ### Watching a run in a browser
 

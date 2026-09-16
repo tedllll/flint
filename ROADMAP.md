@@ -1547,9 +1547,12 @@ measured and what was not.
   shared context, no automatic fan-out, no merge step. One run may ask another run one question,
   and the answer comes back with its exit code and its session path attached. The other half
   `docs/agents.md` argues for, two runs in one directory being able to see each other, is built
-  too (`flint who`, `src/live.rs`) and does not contradict this bullet. Stages 3 and 4 of that
-  file — a mailbox, then profiles with parallel fan-out — are still plans, and each has to come
-  back through this list before it is adopted.
+  too (`flint who`, `src/live.rs`) and does not contradict this bullet. **The mailbox is built as
+  well, in the only form this bullet allows**: `flint say` writes a line, a running flint shows it to
+  its person, and it never reaches a request — a peer's words cannot become a second author of this
+  conversation, so the "one conversation, one context window" claim is untouched. Stage 4 of that
+  file — profiles with parallel fan-out — is still a plan and still has to come back through this
+  list, because fan-out is the part the bullet actually feared.
 - **MCP** — deferred, not refused: it is a protocol with real weight, and nothing here yet
   needs what it offers. **Being callable over MCP is the other direction and is built**:
   `examples/mcp/flint_server.py`.

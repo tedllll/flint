@@ -79,6 +79,13 @@ impl Sink {
                 frame("message.delta", json!({ "text": text }))
             }
             Event::Reasoning(text) => frame("reasoning.delta", json!({ "text": text })),
+            // Deliberately nothing. A peer's message arrives between turns, and the stream exists only
+            // for a one-shot `-p` run -- `--json` refuses a prompt-less run on purpose, because the
+            // machine-readable stream is for a caller and a caller has a prompt to give. So there is no
+            // `peer.message` frame to promise, and inventing one here would be a frame that never
+            // appears. The places a peer's words do reach are the transcript, the page's live feed, and
+            // the session file: the three a person looks at.
+            Event::Peer { .. } => return None,
             Event::ToolStart { id, name } => {
                 self.names.insert(id.clone(), name.clone());
                 frame("tool.started", json!({ "id": id, "name": name }))

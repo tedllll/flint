@@ -6,8 +6,9 @@ of it.
 
 ## Where things stand
 
-**The next round is §10 of `ROADMAP.md`: "flint as a function a program can call". Step 1 is done;
-step 2 is next.** The section is an audit in three buckets (what cannot be done at all, what cannot be
+**The next round is §10 of `ROADMAP.md`: "flint as a function a program can call" — the agents work
+landed in front of it, and §10 is still the queue.** Steps 1 and 2 are done; the pieces below them are
+listed in order. The section is an audit in three buckets (what cannot be done at all, what cannot be
 told apart, what is a hole), the reference points it was measured against (Claude Code's
 `-p --output-format json`, `llm`, and the `sysexits.h` convention for exit codes), and the order to
 build it in. Step 1 landed the turn's `outcome` and the exit codes, and fixed the C1 bug (a `/stop`ped
@@ -44,18 +45,20 @@ each other — prompted by three questions asked directly, and by the incident i
 in this checkout at once, one of them mid-write in `docs/sandbox.md`, and the other committing a
 half-written revision of it with `git add -A`). Its claim is that a subagent, a Python call, an MCP call
 and "a background process" are one thing — a run — seen through four doors, and that the MCP and Python
-doors are already built. Stage 1 is presence plus `flint who` (touches no standing decision, and is what
-would have prevented the incident); stage 2 is a `task` tool and **contradicts the "Subagents" entry in
-`ROADMAP.md`**, which now says "under review" and must be edited in the same commit as any code that
-adopts it. Five decisions are waiting on the repository's owner, listed at the end of that file — the
-depth bound, the mailbox default (a peer's words are shown to the human, never fed to the model, unless
-someone opts in), and whether presence is `FLINT_HOME`-only.
+doors are already built. **Stages 1, 2 and the mailbox half of stage 3 are built** (`flint who`, the
+`task` tool, `flint say`), the "Subagents" entry in `ROADMAP.md` was edited in the same commit as the
+code that adopts it, and **the five decisions at the end of that file were answered on 2026-09-16 at
+the recommended values** — the depth bound (`FLINT_DEPTH`, maximum 2), the mailbox default (a peer's
+words are shown to the human and never fed to the model, which is why the opt-in is not built), what
+"another agent is here" may claim (no author, ever), and presence in `FLINT_HOME` only. What stage 3
+still owes: the `.flint/` marker in the project and that opt-in; stage 4 (profiles and fan-out) is the
+part that would have to come back through `ROADMAP.md` before it is adopted.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 465 passing, 1 ignored (287 lib, 3 in
+As of the commit that carries this file, `cargo test` is 468 passing, 1 ignored (288 lib, 3 in
 the binary's own tests, 33 `agent_loop`, 58 `cli_output`, 22 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 5 the exit codes and the turn's outcome, 2 the
-balance, 1 what a caller's pipe must not come back out of), 7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 6 `who`, 3 `task`)), `cargo clippy
+balance, 1 what a caller's pipe must not come back out of), 7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 6 `who`, 3 `task`, 2 `say`)), `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
 pass, and `python examples/python/test_call.py` is 49 checks, all passing (one of them now waits
 out the fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from),
@@ -86,6 +89,23 @@ and the chain is **bounded** by `FLINT_DEPTH` (maximum 2, set by the tool for it
 else, so a model cannot edit it out of its own command line). Not built: the background handle
 (`background: true`, `task_status`, `task_wait`, `task_stop`) and a session id in the presence record,
 so a child appears in `flint who` as a run in that directory rather than as *this* run's child.
+
+**Two runs in one directory can talk — the mailbox half of stage 3 of `docs/agents.md`.** `flint say
+"…" [--to <pid>] [--cwd <dir>] [--json]` appends one JSON line to
+`<FLINT_HOME>/mailbox/<dir-key>.jsonl`, keyed by the same directory key the sessions use, and needs no
+key: it writes a file rather than asking a model anything, like `who`. A running flint follows its
+directory's mailbox from wherever it is when the run starts (so it shows what arrives *while* it works
+rather than replaying yesterday), renders it in the transcript as `peer <who> says: …` followed by
+`(shown to you; not sent to the model)`, and writes it to the session file as its own `peer` event.
+That last part is the safety property this half was allowed to ship on, and it is enforced rather than
+promised: `session::load` reads a `peer` event **without** putting it in `messages`, so the history a
+request is built from cannot contain one; `tests/say.rs` makes a peer speak *during* a turn through the
+real command and then asserts the person saw it, the session file kept it, and **every request body the
+provider received is free of it**. Deliberately not built: the opt-in that would feed a peer's words to
+a model, the `.flint/` presence marker in the project, and a `/say` inside the prompt. One bug worth
+remembering: `flint say` takes everything after it as prose, so `--cwd` and `--json` have to be pulled
+out before the rest is joined — the first version put `--cwd` *inside* the message and sent it to the
+wrong directory's mailbox, which the end-to-end test caught.
 
 **A `--json` run now beats while it works.** `src/main.rs` spawns `beat_while_working` beside the
 turn: every five seconds it emits the `status` frame with the phrase the stream last described, plus
@@ -207,7 +227,7 @@ open, so the copy needs every flint window closed first — measured twice.
 
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
-cargo test                                        # 433 passing, 1 ignored
+cargo test                                        # 468 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed
