@@ -48,8 +48,13 @@ crossterm = "0.29"
 [dev-dependencies]
 wiremock = "0.6"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-# Only for tests/tty_hangup.rs, which needs a pty: `openpty` to give a child a terminal, and
-# `poll` to watch it. Nothing in `std` can make either call.
+
+# Unix only, and not a new crate: `libc` was already a dev-dependency (it is also in the tree
+# under tokio and rustls on Unix), and it is here for the two things `std` cannot do -- `poll`
+# a descriptor for `POLLHUP`, so a terminal that goes away ends the run instead of spinning a
+# core for ever (`watch_for_hangup` in `src/main.rs`), and `openpty`, which is how
+# `tests/tty_hangup.rs` gives a child a terminal to lose.
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [profile.release]

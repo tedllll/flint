@@ -1159,8 +1159,14 @@ impl InputReader {
         // Cloned before the thread takes `tx`: this is the handle the browser writes through,
         // and both producers have to be the same channel for a browser line to *be* a keystroke.
         let line_tx = tx.clone();
+        // And one for the hangup watcher, which ends the run through the same channel an EOF ends
+        // it with. Unix only; see `watch_for_hangup` for why it is not part of the key thread.
+        #[cfg(unix)]
+        let hangup_tx = tx.clone();
         let ended = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let ended_in_thread = std::sync::Arc::clone(&ended);
+        #[cfg(unix)]
+        let ended_in_watcher = std::sync::Arc::clone(&ended);
         let (req_tx, mut req_rx) = tokio::sync::mpsc::unbounded_channel::<InputReq>();
         std::thread::Builder::new()
             .name("flint-keys".to_string())
@@ -1221,6 +1227,15 @@ impl InputReader {
                 }
             })
             .ok();
+
+        // A terminal that goes away must not take a core with it. Outside the key thread because
+        // the call that spins cannot be asked whether it should stop -- see `watch_for_hangup`.
+        #[cfg(unix)]
+        std::thread::Builder::new()
+            .name("flint-tty".to_string())
+            .spawn(move || watch_for_hangup(hangup_tx, ended_in_watcher))
+            .ok();
+
         (
             InputReader {
                 req_tx: Some(req_tx),
@@ -1270,6 +1285,82 @@ impl InputReader {
             },
             rx,
         )
+    }
+}
+
+/// End the run when the terminal it is talking to goes away, because nothing else will.
+///
+/// `crossterm::event::read()` is `try_read(None)` -- its loop condition
+/// (`timeout.leftover().map_or(true, |t| !t.is_zero())`) is true for ever without a deadline -- and
+/// a hung-up descriptor reports `POLLHUP` without `POLLIN`, which none of its three branches
+/// consumes. So `poll` returns at once, nothing is read, and the key thread in `from_terminal`
+/// spins at 100% of a core for ever: measured at 100.3% with the master of flint's pty closed from
+/// the other end, on this build and on the one before it. Nothing inside that call can see the
+/// hangup, and the call is the only way to get a key event out of crossterm, so the terminal is
+/// watched from here instead -- on the descriptor crossterm itself reads, which is stdin when stdin
+/// is a terminal and `/dev/tty` otherwise (`tty_fd` in crossterm 0.29).
+///
+/// A hangup ends the run exactly the way an EOF on a pipe does: `Quit` on the input channel, which
+/// is what the REPL already knows how to leave through. Nothing is drawn and nothing is saved,
+/// because the terminal that would have shown it is gone; the spinning thread dies with the
+/// process, which is the point.
+///
+/// Unix only, and deliberately: Windows reports a console that has gone away from the read itself,
+/// and this machine cannot drive the Windows key path from a test, so that path is left as it was
+/// rather than changed blind.
+#[cfg(unix)]
+fn watch_for_hangup(
+    tx: tokio::sync::mpsc::UnboundedSender<InputMsg>,
+    ended: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::os::unix::io::AsRawFd;
+
+    // The same choice crossterm makes before it reads. Kept in step by hand, because its helper is
+    // private and this must watch the descriptor that will actually hang up.
+    let controlling = if unsafe { libc::isatty(libc::STDIN_FILENO) } == 1 {
+        None
+    } else {
+        match std::fs::File::open("/dev/tty") {
+            Ok(file) => Some(file),
+            // No terminal to watch. Whatever happens next, the key thread reports it itself.
+            Err(_) => return,
+        }
+    };
+    let fd = match &controlling {
+        Some(file) => file.as_raw_fd(),
+        None => libc::STDIN_FILENO,
+    };
+
+    loop {
+        let mut watched = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // Half a second: long enough that this costs nothing while a person thinks, short enough
+        // that a terminal going away ends the run before anybody notices the core it burned.
+        let ready = unsafe { libc::poll(&mut watched, 1, 500) };
+        if ready < 0 {
+            // A signal interrupted the wait. Anything else means this watcher cannot see the
+            // terminal, and a watcher that cannot see is not a reason to end somebody's run.
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return;
+        }
+        if ready == 0 {
+            continue;
+        }
+        // `POLLHUP` together with `POLLIN` is the last of the input: the key thread can still read
+        // those bytes, so the hangup is only acted on once there is nothing left to read.
+        let gone = watched.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL);
+        if gone != 0 && watched.revents & libc::POLLIN == 0 {
+            let _ = tx.send(InputMsg::Quit);
+            // After the message, never before, for the reason the key thread spells out: the REPL
+            // treats "empty and ended" as the end of input.
+            ended.store(true, std::sync::atomic::Ordering::SeqCst);
+            return;
+        }
     }
 }
 
