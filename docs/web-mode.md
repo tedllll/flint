@@ -818,11 +818,36 @@ line they will send before they send it.
 | An empty menu says so | Node | a frame with no `from: "sessions"` rows draws `nothing to do from here` rather than an empty box |
 | It cannot outlive its numbers | `web/view.html`, read | a `reset` clears `doc.menu`, and `readSessions` closes a menu whose conversation is gone — the same argument `doc.confirm` is built on, because the `n` in a menu is a position |
 
+**The open conversation's name is edited in the same menu — added 2026-09-17.** The name is the one
+thing the sidebar *shows* that nothing on the page could change: `/name <text>` has been in the frame's
+forms class for as long as there has been one, and the panel's row for it can only rename the
+conversation that is open — which is also the reason the field is drawn on **one** row rather than on
+every row. `/name` names the conversation the run is writing, so a field on another row would either
+rename the wrong conversation or would have to switch to it first: a second line whose refusal (the
+session archived in the meantime) would leave the rename aimed at whatever was open. Click the row,
+then rename it. The field itself is the frame's — drawn only when the frame describes a `/name` that
+takes answers, with one input per answer it names — for the reason the destructive rows are: which
+commands a run offers is a fact the frame owns, and a control for a command nobody offered sends a line
+nobody can answer.
+
+| Claim | How | Result |
+|---|---|---|
+| The field is on the open conversation, and nowhere else | Node, over the stub DOM | the menu is `[button, form]` on the current row and `[button]` on another, with the same frame |
+| The field is the frame's own `/name` row | Node, over the stub DOM | a `/name` row with no `fields` draws no field at all, so a command that never said what it takes gets no control — the rule the destructive rows in this menu already follow |
+| It starts on the name in force | Node | `input.value` is the row's label; for a row labelled `(empty)` — this page's placeholder for a conversation with no name — the field is empty, because sending it would make `(empty)` the name |
+| A press composes the line the panel's forms compose | `tests/web_view.rs` over the page's bytes | `formLine(command.send, command.fields, …)`, one input per answer the frame names, and `sendText(line)` — the message route, not `/report`. Mutation-checked: deleting the `if (!line) return;` fails it |
+| An emptied field sends nothing | Node, by delivering the submit to the page's own handler | the handler returns before it closes the menu, where a non-empty one closes it. Not politeness: `/name` with no text *reports* the name, so a cleared field would ask a question nobody asked |
+| Typing in the field does not open the conversation | `tests/web_view.rs`, read | the form stops the click: the row behind it is the conversation, and for this row that is the conversation already open, so the press would send `/resume` for the row the name is being typed on |
+| Renaming refreshes the sidebar | `tests/cli_output.rs`, a real `--web` process | a `/name` line posted to `/message` puts `event: sessions` on the feed and the title in the session file; red without the `list_changed` call |
+
 **Not measured**: a browser, as ever. Nobody has opened this menu with a real pointer, so its position
 (`absolute`, against a `relative` row), its dismissal (the button toggles it, a `reset` clears it, and
 a click elsewhere does **not** close it) and its behaviour while the sidebar scrolls are reasoned
 rather than seen. The dismissal is the one worth watching in a real browser: the panel's choice list
-has an explicit `‹ commands` row to close it, and this menu has only its own button.
+has an explicit `‹ commands` row to close it, and this menu has only its own button. The rename field
+adds a second thing to watch there: whether the field keeps the focus it was given while the sidebar
+re-reads itself (a `sessions` frame arrives the moment a rename is sent), and whether Enter in it is
+the submit a person expects rather than the row's own click.
 
 **Deliberately not built**: `/config edit` on the page. Its keys are enumerable and its values are
 free-form, so a page form would send several settings at once while the terminal prompts for them one

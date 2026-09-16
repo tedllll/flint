@@ -94,13 +94,13 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 533 passing, 1 ignored on this machine
-(318 lib, 3 in the binary's own tests, 33 `agent_loop`, 66 `cli_output`, 35 `json_output` (7 structured
+As of the commit that carries this file, `cargo test` is 535 passing, 1 ignored on this machine
+(318 lib, 3 in the binary's own tests, 33 `agent_loop`, 67 `cli_output`, 35 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
 be able to read, 4 the answer written where the caller asked, 3 the file inlined into the prompt,
 1 the stream checked on its bytes, 1 how long a turn took),
-7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 7 `who`, 15 `task`, 3 `say`),
+7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 23 `web_view`, 7 `who`, 15 `task`, 3 `say`),
 and one more on Unix, `tty_hangup`, which is `#![cfg(unix)]` and needs a real pty. `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
 pass, and `python examples/python/test_call.py` is 118 checks, all passing (one of them waits
@@ -1402,10 +1402,27 @@ each with the reason it is left:
    `commands` panel with a real font, pressed one of the action buttons, typed into the masked
    credential field, or opened a destructive row's menu with a real pointer. So the gap has narrowed
    from "a browser" to a named list of controls.
-4. **Renaming from the sidebar** — a `/name` field exists in the panel and works, and the sidebar has
-   no affordance for it: the page's routes are `/session`, `/sessions`, `/events`, `/message`,
-   `/report` and `/log`, so a rename would be a `/name <name>` line through `/message` like every
-   other row action. Small drawing job, not a mechanism.
+4. **Renaming from the sidebar** — ~~a `/name` field exists in the panel and works, and the sidebar
+   has no affordance for it~~ **built 2026-09-17**, exactly as this line predicted: a `/name <text>`
+   line through `/message` like every other row action, with no route of its own. The row's menu
+   carries a field on the **open** conversation only, and that is the one design decision in it:
+   `/name` names the conversation the run is *writing*, so a field on another row would either rename
+   the wrong conversation or have to switch to it first — a second line whose refusal (the session
+   archived in the meantime) would leave the rename aimed at whatever was open. The field starts on
+   the label in force, because a rename is usually a correction, except when that label is the page's
+   own `(empty)`, which is a placeholder for a nameless conversation and not a name. The field is
+   drawn from the frame's own `/name` row — only when the frame describes one, like the destructive
+   rows above it — and its line is composed by the same `formLine` the panel's forms use. An emptied
+   field sends nothing, and the reason is not politeness: `/name` with no text *reports* the name, so a
+   cleared field would ask a question nobody asked. A press inside the field stops propagating, or
+   reaching for it would open the conversation under the person typing in it. And `/name` now pushes
+   the `sessions` frame `/archive` and `/delete` push (`viewer.list_changed()`): the rename field is
+   *in* the sidebar, so a page that renamed a conversation and went on showing the old label is a
+   rename that looks like it failed. Tests: `the_sidebar_renames_a_conversation_through_the_same_form_composition`
+   (`tests/web_view.rs`, the composition and the refusal, mutation-checked), the rename check in
+   `scripts/web-view-test.js` (the drawing, the prefill and the empty-field refusal), and
+   `renaming_a_conversation_tells_the_page_to_read_the_list_again` (`tests/cli_output.rs`, a real
+   `--web` process, red without the frame).
 
 - The small queued-line hole above still wants its two structural lines before a test can hold it.
   The report path now leans on the same machinery and does *not* have the hole: a report arriving

@@ -421,8 +421,9 @@ the composer ends up in the transcript, because the capture is at the funnel (`T
 / `answer_take` around `handle_command`) and `Live::command` pushes one `command` line; a command
 *read* by the page's own panel goes over `POST /report` and comes back marked as a panel's. HANDOFF
 has the round it landed in and `docs/web-mode.md` §11 the measurement — including the bug under it,
-where one mistyped command used to end the run. What is left of this residue is the sidebar's
-rename and the empty conversation, not the reading.
+where one mistyped command used to end the run. What was left of this residue — the sidebar's rename
+and the empty conversation — is settled: the empty conversation by the paragraph above it, and the
+rename after the class list below.
 
 The design, in the order the pieces depend on each other:
 
@@ -471,6 +472,40 @@ The design, in the order the pieces depend on each other:
   because of what already exists rather than anything new: `--web` binds loopback and hands the
   page a per-run token (docs/web-mode.md §4), and that token is checked on every request,
   including the event stream.
+
+**The sidebar's rename — built 2026-09-17, and it is a drawing job after all.** The name is the one
+thing the sidebar *shows* that nothing on the page could change: `/name <text>` was in the forms
+class above from the start, and the panel's row for it can only ever rename the conversation that is
+open. So the row's own menu now carries a field, which is where the name it starts on already is —
+and only on the **open** conversation. That is the one decision in it, and it is the terminal's rule
+rather than the page's taste: `/name` names the conversation the run is *writing*, so a field offered
+on another row would either rename the wrong conversation or would have to switch to it first, which
+is a second line whose refusal (a session archived in the meantime) would leave the rename aimed at
+whatever was open. Click the row, then rename it. The field starts on the label in force, because a
+rename is usually a correction, and not on the page's own `(empty)`, which is a placeholder for a
+conversation with no name rather than a name — sending it would make `(empty)` the name. And it is the
+*frame's* row, not the page's: the field is drawn only when the frame describes a `/name` that takes
+answers, and its line is composed by the same `formLine` the panel's forms use, so a name with two
+spaces in it arrives as one name and an emptied field sends nothing — `/name` with no text *reports*
+the name, which is a different command, and nobody who cleared a field asked to be told what it is
+called. The command is named in one place (`frameForm(doc, "/name")`) for the reason `resumeLine` names
+`/resume`: the sidebar's own lines are its vocabulary, and everything *about* the command comes from the
+frame.
+
+The half that is not the drawing is that `/name` now pushes the `sessions` frame `/archive` and
+`/delete` already push. The rename field is *in* the sidebar and the sidebar draws the name, so a page
+that renamed a conversation and went on showing the old label is a rename that looks like it failed —
+the same complaint the archive bug arrived as ("the page did not refresh"), one command over. The page
+does not have to guess: `list_changed` says the route is stale and the sidebar re-reads it, and the
+transcript is left alone because the rename did not change it. Three tests hold it, and each holds a
+different half: the drawing and the empty-field refusal under Node (`scripts/web-view-test.js`, which
+can deliver a submit to the page's own handler), the composition and the refusal over the page's bytes
+(`the_sidebar_renames_a_conversation_through_the_same_form_composition`, mutation-checked by deleting
+the `if (!line) return;`), and the frame over a real `--web` process
+(`renaming_a_conversation_tells_the_page_to_read_the_list_again`, red without `list_changed`). What a
+browser has not been asked yet is whether the field keeps the focus it was given while the sidebar
+re-reads itself, and whether Enter in it submits — §11's `Not yet measured in a browser` note is where
+that belongs, and this control joins it.
 
 **The toggle this would put a switch on did not work — fixed, 2026-09-14, and it was measured
 before the `state` frame was written because a frame that *reports* `readonly` out of a command
