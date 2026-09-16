@@ -52,14 +52,26 @@ depth bound, the mailbox default (a peer's words are shown to the human, never f
 someone opts in), and whether presence is `FLINT_HOME`-only.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 449 passing, 1 ignored (280 lib, 3 in
+As of the commit that carries this file, `cargo test` is 455 passing, 1 ignored (283 lib, 3 in
 the binary's own tests, 33 `agent_loop`, 58 `cli_output`, 22 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 5 the exit codes and the turn's outcome, 2 the
-balance, 1 what a caller's pipe must not come back out of), 7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`), `cargo clippy
+balance, 1 what a caller's pipe must not come back out of), 7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 6 `who`), `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
 pass, and `python examples/python/test_call.py` is 49 checks, all passing (one of them now waits
 out the fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from),
 and `python examples/mcp/test_mcp.py` passes its own 23.
+
+**`flint who` is built — stage 1 of `docs/agents.md`.** A running flint writes one record per run
+under `<FLINT_HOME>/live/` (`src/live.rs`), refreshed every five seconds by a thread that waits on a
+channel rather than sleeping, and removed by a `Drop` so that every exit path is covered by
+construction. `flint who` lists the live runs in this directory, calls a record left by a killed
+process *stale* rather than alive, reports a record somebody edited into nonsense as unreadable rather
+than skipping it, and prints the recent changes that it deliberately refuses to attribute to anybody.
+`who` needs no key and does not list itself; `--all` names runs elsewhere; `--json` is one object.
+One measurement is worth carrying forward: the first version of the refresh thread slept and was
+joined on the way out, which made **every run take up to five seconds longer to exit** — the existing
+quota test, which has a timing bound, caught it at 5.019 s. That is why the thread waits on
+`recv_timeout`.
 
 **A `--json` run now beats while it works.** `src/main.rs` spawns `beat_while_working` beside the
 turn: every five seconds it emits the `status` frame with the phrase the stream last described, plus

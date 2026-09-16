@@ -475,6 +475,16 @@ pub fn sessions_dir() -> PathBuf {
     config_dir().join("sessions")
 }
 
+/// Where a running flint says it is alive, so that another one can see it.
+///
+/// Under `FLINT_HOME` rather than in the project, for one reason: a `readonly` run must still be able
+/// to announce itself, and a checkout is not always writable. The cost is stated wherever this is
+/// documented rather than hidden -- two installations pointed at different `FLINT_HOME`s cannot see
+/// each other. `docs/agents.md` records the `.flint/` marker in the project as the stage-3 answer.
+pub fn live_dir() -> PathBuf {
+    config_dir().join("live")
+}
+
 /// Where tool output too long for one request is kept, in full, as plain text.
 ///
 /// Under the session rather than in a single pile, because the only question anyone asks

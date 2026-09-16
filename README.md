@@ -106,6 +106,7 @@ flint --fork                     # ...the most recent one, when a branch is the 
 flint exec "npm i -g @deepseek-ai/dsh"   # no model involved
 flint balance                    # is this provider usable, and what is left in the account?
 flint balance --json             # the same answer for a program
+flint who                        # who else is working in this directory, and what changed
 flint --list-sessions            # numbered, so --resume N works
 flint --name "codex config"      # name the conversation you are in
 flint --archive 3                # file it away, out of the list
@@ -131,6 +132,18 @@ person must act, `75` the check could not get out and is worth repeating, `1` re
 undecidable — so a batch that begins with `flint balance` learns about an empty account once instead
 of on its hundredth call. `--json` gives the same answer as one object, with the figures absent when
 the provider did not publish them.
+
+`flint who` answers the other question a second agent in the same directory has to ask. A running
+flint writes one small JSON record under `FLINT_HOME/live/`, refreshed every five seconds and removed
+when the run exits, and `flint who` lists what is alive in this directory — pid, directory, provider,
+model, whether it is `readonly`, how long it has been running and how long ago it last said so.
+Anything left behind by a killed process is reported as **stale** rather than as alive, and a record
+somebody edited into nonsense is reported as unreadable rather than skipped, because silence would
+look exactly like "no other agent". Alongside that it prints the files that changed recently, from
+`git status` and their modification times, and it says plainly that this line **names no author**: a
+Codex, a Claude Code, an editor's autosave and a person all look the same through it, so "no other
+flint" is not "nobody else". `--all` names runs in other directories; `--json` gives the whole answer
+one object at a time, with the same warning in it.
 
 Resuming prints the tail of the transcript, so "did it load?" is answerable at a
 glance. Loading also happens when there is no network: an unreachable provider is

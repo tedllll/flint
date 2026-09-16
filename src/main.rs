@@ -11,8 +11,8 @@
 //! unreachable, flint still runs commands.
 
 use flint::{
-    agent, config, context, display, engine, event, ndjson, provider, schema, search, session, sink,
-    term, tools, web,
+    agent, config, context, display, engine, event, live, ndjson, provider, schema, search, session,
+    sink, term, tools, web,
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -65,6 +65,14 @@ struct Args {
     /// of after it. Cheap by construction -- it never sends a completion -- and `--json` gives it a
     /// shape a program can read.
     balance: bool,
+    /// Who else is working in this directory: the live runs flint can see, and what changed on disk
+    /// that it cannot attribute to anybody. A question, not a gate -- it exits 0 either way, because
+    /// "nobody else is here" is an answer and a caller reads the list, not the status.
+    who: bool,
+    /// `flint who --all`: include runs in other directories. The question is normally about *here*,
+    /// which is where the collision would happen, so the rest of the machine is opt-in rather than
+    /// noise in the answer.
+    all: bool,
     exec: Option<String>,
     /// Serve a browser view of *this* run on loopback.
     ///
@@ -440,6 +448,15 @@ async fn real_main() -> Result<i32> {
         (None, None) => {}
     }
 
+    // ---- who else is working here, then stop ----
+    //
+    // Beside the archive/delete block for the same reason: it answers a question about files, and it
+    // may not depend on a key, a reachable endpoint, or a parseable provider block. It is asked most
+    // often on exactly the machine where the provider is what is in doubt.
+    if args.who {
+        return who_and_stop(cwd.clone(), args.all, args.json);
+    }
+
     // ---- resolve provider ----
     let provider_cfg = cfg.active_provider(args.provider.as_deref())?.clone();
     let mut provider_cfg = provider_cfg;
@@ -468,6 +485,15 @@ async fn real_main() -> Result<i32> {
     if args.balance {
         return balance_and_stop(provider_cfg.clone(), args.json).await;
     }
+
+    // ---- announce this run, so that another one can see it ----
+    //
+    // Here rather than earlier because a run is only a run once a provider has been resolved, and
+    // later than the preflight because `balance` and `who` are questions, not work: neither should
+    // appear in the answer to "who is working here". Held for the rest of `main` on purpose, so that
+    // every exit -- an early return, an error, an unwinding panic -- removes the record by
+    // construction rather than by remembering to.
+    let _live = live::Guard::begin(&cwd, &provider_cfg.name, &provider_cfg.model, readonly);
 
     // ---- resume a session, if asked ----
     //
@@ -4235,6 +4261,7 @@ fn parse_args(argv: Vec<String>) -> Result<Args> {
                 )
             }
             "--readonly" | "--no-edit" => args.readonly = true,
+            "--all" => args.all = true,
             "--no-color" => args.no_color = true,
             "--json" => args.json = true,
             "--web" => args.web = true,
@@ -4292,6 +4319,12 @@ fn parse_args(argv: Vec<String>) -> Result<Args> {
                 // arguments of its own later. The word is taken before the bare-word fallback below,
                 // which would otherwise turn `flint balance` into a prompt asking the model to guess.
                 args.balance = true;
+            }
+            "who" => {
+                // Besides `balance` for the same reason, and it must not need a key: the question
+                // "who else is working here" is asked *before* deciding to run anything, often on a
+                // machine where the provider is exactly what is in doubt.
+                args.who = true;
             }
             "debug" => {
                 let rest: Vec<String> = iter.by_ref().collect();
@@ -4354,6 +4387,7 @@ fn print_help(color: bool, term: &Term) {
   flint --fork [<n|id>]            copy a session and continue the copy, leaving the original alone
   flint exec <command>             run a command directly (no model, no network)
   flint balance [--json]           ask the provider whether it can be used, and what is left
+flint who [--all] [--json]       who else is working in this directory (flint only), and what changed
   flint debug prompt-input [msg]   print the request that would be sent, and send nothing
   flint --list-sessions            list saved sessions, numbered for --resume
   flint --name <text>              name this conversation (also: /name)
@@ -4474,6 +4508,196 @@ fn human_balance(name: &str, balance: &provider::Balance) -> String {
 /// must act (no key, rejected credentials, an empty account), `75` the check could not get out and is
 /// worth repeating, `1` reached but not decidable. A batch can therefore branch on `flint balance`
 /// exactly as it branches on a run that failed -- which is the point of asking before spending.
+/// Answer "who else is working here", with the two signals kept apart.
+///
+/// The shape of the answer is the whole point of the command, so it is worth stating what it refuses
+/// to do. It does not merge the live runs it knows about with the files that changed: the first are
+/// flint runs it can name, the second are files whose author it cannot know, and a single "2 agents
+/// here" would be wrong in both directions -- it would miss a Codex or a Claude Code, and it would
+/// turn somebody's editor into an agent. It does not print a green light either: "no other flint" is
+/// not "nobody else", and the second line is where that is said out loud.
+///
+/// Exit code 0 whatever it finds. A caller reads the list; "nobody is here" is an answer, not a
+/// failure, and the one thing this must never do is make a caller treat an uncertain answer as a
+/// negative one.
+fn who_and_stop(cwd: std::path::PathBuf, all: bool, json: bool) -> Result<i32> {
+    let listing = live::scan();
+    let (here_alive, elsewhere_alive): (Vec<_>, Vec<_>) = listing
+        .alive
+        .iter()
+        .partition(|record| record.cwd == cwd);
+    let (here_stale, _elsewhere_stale): (Vec<_>, Vec<_>) =
+        listing.stale.iter().partition(|record| record.cwd == cwd);
+    let recent = live::recent(&cwd, live::RECENT_WINDOW);
+    let newest = live::newest_session(&cwd);
+
+    let record_json = |record: &live::Presence| {
+        serde_json::json!({
+            "pid": record.pid,
+            "cwd": record.cwd.display().to_string(),
+            "provider": record.provider,
+            "model": record.model,
+            "readonly": record.readonly,
+            "started": record.started,
+            "last_seen": record.last_seen,
+            "seen_secs_ago": live::now_secs().saturating_sub(record.last_seen),
+        })
+    };
+
+    if json {
+        let mut object = serde_json::Map::new();
+        object.insert("type".to_string(), serde_json::json!("who"));
+        object.insert("cwd".to_string(), serde_json::json!(cwd.display().to_string()));
+        object.insert(
+            "live".to_string(),
+            serde_json::json!(here_alive.iter().map(|r| record_json(r)).collect::<Vec<_>>()),
+        );
+        object.insert(
+            "stale".to_string(),
+            serde_json::json!(here_stale.iter().map(|r| record_json(r)).collect::<Vec<_>>()),
+        );
+        object.insert(
+            "other_live".to_string(),
+            serde_json::json!(elsewhere_alive.len()),
+        );
+        if all {
+            object.insert(
+                "live_elsewhere".to_string(),
+                serde_json::json!(elsewhere_alive
+                    .iter()
+                    .map(|r| record_json(r))
+                    .collect::<Vec<_>>()),
+            );
+        }
+        object.insert(
+            "changed".to_string(),
+            serde_json::json!({
+                "window_secs": live::RECENT_WINDOW.as_secs(),
+                "git_paths": recent.git_lines.len(),
+                "files": recent.changed.iter().map(|c| serde_json::json!({
+                    "path": c.path,
+                    "secs_ago": c.secs_ago,
+                })).collect::<Vec<_>>(),
+                "note": recent.note,
+            }),
+        );
+        object.insert(
+            "newest_session".to_string(),
+            match &newest {
+                Some((path, age)) => serde_json::json!({
+                    "path": path.display().to_string(),
+                    "secs_ago": age,
+                }),
+                None => serde_json::Value::Null,
+            },
+        );
+        object.insert(
+            "unreadable".to_string(),
+            serde_json::json!(listing
+                .unreadable
+                .iter()
+                .map(|(path, error)| serde_json::json!({
+                    "path": path.display().to_string(),
+                    "error": error,
+                }))
+                .collect::<Vec<_>>()),
+        );
+        // Said in the machine-readable answer too, because a program is exactly the reader most
+        // likely to treat a short list as a complete one.
+        object.insert(
+            "note".to_string(),
+            serde_json::json!(
+                "`live` and `stale` are flint runs only. `changed` is what the filesystem shows and \
+                 names no author: another agent that is not flint, an editor, or a person all look \
+                 the same."
+            ),
+        );
+        println!("{}", serde_json::Value::Object(object));
+        return Ok(EXIT_OK);
+    }
+
+    let line = |record: &live::Presence| {
+        println!(
+            "  pid {}  {}  started {} ago, last seen {}  provider={} model={}{}",
+            record.pid,
+            record.cwd.display(),
+            record.age(),
+            record.seen_ago(),
+            record.provider,
+            record.model,
+            if record.readonly { " readonly" } else { "" },
+        );
+    };
+
+    println!("flint runs in this directory:");
+    if here_alive.is_empty() {
+        println!("  none that flint can see");
+    } else {
+        for record in &here_alive {
+            line(record);
+        }
+    }
+    if !elsewhere_alive.is_empty() {
+        let word = if elsewhere_alive.len() == 1 { "run" } else { "runs" };
+        println!(
+            "  ({} other {word} live elsewhere on this machine{})",
+            elsewhere_alive.len(),
+            if all {
+                ""
+            } else {
+                " -- `flint who --all` names them"
+            }
+        );
+    }
+    if all {
+        for record in &elsewhere_alive {
+            line(record);
+        }
+    }
+
+    if !here_stale.is_empty() {
+        // Named as stale rather than hidden: a killed process cannot clean up, and a run that was
+        // suspended is not coming back to notice anything. Reporting them as alive would be worse.
+        println!("\nstale records here (stopped refreshing, so the process is gone or suspended):");
+        for record in &here_stale {
+            line(record);
+        }
+    }
+
+    println!("\nchanged in this directory in the last {} minutes -- this names no author:",
+        live::RECENT_WINDOW.as_secs() / 60);
+    if let Some(note) = &recent.note {
+        println!("  {note}");
+    }
+    if recent.changed.is_empty() {
+        println!("  nothing that git tracks, or nothing written recently");
+    } else {
+        for change in &recent.changed {
+            println!("  {}  ({}s ago)", change.path, change.secs_ago);
+        }
+        if recent.git_lines.len() > recent.changed.len() {
+            println!(
+                "  ...and {} more tracked paths git reports as changed",
+                recent.git_lines.len() - recent.changed.len()
+            );
+        }
+    }
+    if let Some((path, age)) = &newest {
+        println!(
+            "\nthe conversation last written here is {} ({}s ago)",
+            path.display(),
+            age
+        );
+    }
+    if !listing.unreadable.is_empty() {
+        println!("\nrecords that could not be read:");
+        for (path, error) in &listing.unreadable {
+            println!("  {}: {error}", path.display());
+        }
+    }
+    Ok(EXIT_OK)
+}
+
 async fn balance_and_stop(cfg: config::ProviderConfig, json: bool) -> Result<i32> {
     let name = cfg.name.clone();
     let provider = provider::Provider::new(cfg)?;

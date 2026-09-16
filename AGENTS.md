@@ -40,8 +40,9 @@ whoever is changing the code — a person or a model driving it.
 | `src/context.rs` | `AGENTS.md` discovery and the skill catalog |
 | `src/config.rs` | config load/save and the paths under `FLINT_HOME` |
 | `src/search.rs` | web search: where the credential comes from, and DeepSeek's search endpoint |
+| `src/live.rs` | who else is working here: the presence record a run keeps while it lives, and the recent-changes signal that names no author |
 | `src/web.rs` | `--web`: the embedded viewer and the loopback listener that serves it |
-| `tests/` | `agent_loop` (stub provider), `cli_output` (real binary, raw bytes), `term_capture` (byte-exact terminal), `search_tool` (stub search endpoint), `balance` (the preflight, stub provider), `web_view` (the page's policy) |
+| `tests/` | `agent_loop` (stub provider), `cli_output` (real binary, raw bytes), `term_capture` (byte-exact terminal), `search_tool` (stub search endpoint), `balance` (the preflight, stub provider), `who` (the presence record and the changes that name no author), `web_view` (the page's policy) |
 | `scripts/` | Node replay tools: `vtscreen.js`, `term-layout-test.js`, `layout-trace.js` |
 | `examples/python/` | the Python caller: `flint_call.py` (ask/ask_json, no dependencies), its stub and its checks |
 | `examples/mcp/` | flint as an MCP tool for Codex, Claude Code and Cursor: `flint_server.py` (stdlib only, one tool) and `test_mcp.py`, which speaks the protocol at it |
@@ -70,12 +71,15 @@ in a scratch directory for the same reason.
 | `<FLINT_HOME>/sessions/archive/` | conversations filed away with `/archive` (a project's archive is `sessions/<dir>/archive/`) |
 | `<FLINT_HOME>/spill/<session>/<n>.txt` | tool output too long for one request, in full |
 | `<FLINT_HOME>/engines/<provider>.log` | a local engine's output, and the only place a failed start says why |
+| `<FLINT_HOME>/live/<pid>-<n>.json` | one record per *running* flint, refreshed every 5 s and removed when it exits; what `flint who` reads. A record left behind by a killed process is reported as stale rather than deleted, because a killed process cannot clean up |
 | `<FLINT_HOME>/AGENTS.md` | instructions that apply to every project |
 | `<FLINT_HOME>/skills/<name>/SKILL.md` | skills available everywhere |
 | `<project>/AGENTS.md` | instructions for that project |
 | `<project>/.flint/skills/<name>/SKILL.md` | skills for that project |
 
-Nothing else. A web search keeps no state on this machine at all: the request goes out, the
+Nothing else — and `live/` is the one directory here that is not a record of the past: a run that
+ends removes its own file, and anything left in there is reported as stale rather than cleaned up by
+somebody else. A web search keeps no state on this machine at all: the request goes out, the
 answer comes back as a tool result, and the sources land in the session file like any other
 tool output.
 
