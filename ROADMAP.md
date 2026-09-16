@@ -385,24 +385,38 @@ push a frame named `sessions`, and only the sidebar is re-read (the transcript h
 moved the page's rows from `1=gamma 2=beta 3=alpha` to `1=gamma 2=alpha 3=(empty)`, which is
 exactly the terminal's own numbering.
 
-**A conversation that has not happened yet is in the sidebar.** Start flint and type `/web`: the
-list already shows one conversation, labelled `(empty)`. That is the file `SessionWriter::create`
-opens at startup, and it is honest — the file *is* the session from the first moment, which is what
-makes `/new` and `--continue` and a crash all behave — but it reads as a conversation when nothing
-has been said. Three ways out, and they are not equivalent: do not create the file until the first
-message (then "the session is the record from the start" stops being true, and a crash before the
-first message leaves nothing); keep the file and hide empty sessions from the *list* (the sidebar
-and `/sessions` already share one listing, so it is one change in one place); or show it and mark
-it — dim, or "new conversation", or leave it out until it has a first message. The second is
-probably right, and the thing to decide first is whether `/resume` should also stop offering it.
+**A conversation that has not happened yet is in the sidebar — fixed, and the fix is the option this
+paragraph first rejected.** It opened on the file `SessionWriter::create` was thought to open at
+startup, which listed as `(empty)` before anything was said. The file is not created then any more:
+`SessionWriter::append` claims it on the **first event**, and creation *is* the claim — `create_new`
+is the only portable way to ask the operating system "is this name mine", and the answer decides
+both which file the conversation goes to and whether this writer writes `meta` into it (see
+`claim`, which is also the fix for six concurrent runs proposing one name). Measured on 2026-09-16
+with the real binary in a scratch `FLINT_HOME`, over the real route: `GET /sessions` before a word
+was said answers `{"sessions":[]}`, and after one line it answers one row — the same session
+`session.started` had named on the stream before the first write, so a caller is told its path
+without the file existing yet. What the paragraph above called the cost of this option — a crash
+before the first message leaves nothing — is the *point* of it, and the same decision already
+refuses to leave a directory behind for a run that never got a key. `(empty)` survives as the label
+for a file that holds a `meta` line and no messages, which is a real file and is described as one.
 
-**A command typed into the composer prints nothing — decided**, 2026-09-14. `/provider`,
+The other two ways out are therefore not taken, and the thing the paragraph wanted decided — whether
+`/resume` should offer such a conversation — answers itself: there is no such file to offer.
+
+**A command typed into the composer prints nothing — decided 2026-09-14, and built.** `/provider`,
 `/config`, `/usage`, `/tools`, `/sessions`, `/skills`, `/model`, `/name`, `/readonly`,
 `/verbose`, `/detail`, `/reload`, `/help` — all of them answer on the terminal, and the page
-shows none of it, so the composer is a prompt for messages and not for commands. The cause is
+showed none of it, so the composer was a prompt for messages and not for commands. The cause was
 structural: command output goes to `printer.term()`, which draws in the terminal and exists
 nowhere else. It is neither a session event (commands do not write to the session file) nor a
-live frame (the feed carries the *turn's* events), and the page renders exactly those two.
+live frame (the feed carries the *turn's* events), and the page renders exactly those two. The
+design below was carried out, and the two halves are worth keeping apart: a command *typed* into
+the composer ends up in the transcript, because the capture is at the funnel (`Term::answer_start`
+/ `answer_take` around `handle_command`) and `Live::command` pushes one `command` line; a command
+*read* by the page's own panel goes over `POST /report` and comes back marked as a panel's. HANDOFF
+has the round it landed in and `docs/web-mode.md` §11 the measurement — including the bug under it,
+where one mistyped command used to end the run. What is left of this residue is the sidebar's
+rename and the empty conversation, not the reading.
 
 The design, in the order the pieces depend on each other:
 
@@ -795,9 +809,13 @@ provider in one group and filling a masked box in another.
 **§8 is built.** All five controls are on the page — the buttons, the panels that read, the selectors,
 the forms and now the destructive ones — and what is left is not a class but three residues, each
 written down where it belongs: `/config edit` as a page form (it would need a command the terminal
-does not have, above), the mid-turn wait for a report (not asserted; needs a stub turn slow enough to
-click during, in `docs/web-mode.md` §11), and a browser, which nobody has opened with a real font and
-a real click. The queue below is what comes next.
+does not have, above), the mid-turn wait for a report — **asserted since 2026-09-16** by
+`a_report_asked_for_mid_turn_waits_for_the_turn`, which drives a real `--web` process against a stub
+slow enough to ask during, so this residue is closed — and a browser, **half measured**: §11's `L3 in a
+real browser` table was driven over the DevTools protocol against the real page (sidebar listing, row
+click, `+ new`, Enter, the layout at two sizes, three defects found), while the later controls are
+still bytes and not clicks, which §11's `Not yet measured in a browser` lines name one by one. The
+queue below is what comes next.
 
 - **A selector's options come from somewhere the frame already describes** — built: `/model`'s and
   `/provider`'s from `providers` (both controls exist), `/resume`'s and `/archive`'s from the

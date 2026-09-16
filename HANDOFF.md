@@ -1385,13 +1385,26 @@ each with the reason it is left:
    are free-form, so a page form would send several settings at once while the terminal prompts for
    them one at a time, and it would need a `/config set <key> <value>` the terminal does not have.
    Inventing a command for the page's benefit is what §8's design exists to prevent.
-2. **The mid-turn wait for a report** — the behaviour is built (`Handover` stashes it rather than
-   treating it as an interrupt) and asserted nowhere, because the assertion needs a stub turn slow
-   enough to click during.
-3. **A browser** — nobody has opened this page with a real font and a real click. That is what §11's
-   "not measured" lines keep saying, and it is the one gap that a test cannot close.
-4. **Renaming from the sidebar** — a `/name` field exists in the panel and works; the sidebar has no
-   affordance for it. Small drawing job, not a mechanism.
+2. **The mid-turn wait for a report** — ~~asserted nowhere~~ **asserted since, 2026-09-16**, and this
+   line was stale: `a_report_asked_for_mid_turn_waits_for_the_turn` in `tests/cli_output.rs` drives a
+   real `--web` process against a stub that draws a delta and holds the socket open, accepts a report
+   at `/report` mid-turn, stops the turn for real, and asserts the *order* of the two frames off one
+   feed (`turn.completed`, then the answer). The mechanism (`Handover` stashing it rather than
+   treating it as an interrupt) was already right; what was missing was a turn slow enough to ask
+   during, and the stub now provides one.
+3. **A browser** — **half done, and the two halves are worth keeping apart.** §11's `L3 in a real
+   browser` table was measured over the Chrome DevTools protocol against the real page and the real
+   binary: the sidebar listing, switching by clicking a row, `+ new`, Enter to send, the layout at two
+   window sizes — and it found three defects that reading the source could not. What is still
+   unmeasured is every *later* control, and §11 says so in its own `Not yet measured in a browser`
+   lines: the switches were checked as bytes rather than as clicks, and nobody has opened the
+   `commands` panel with a real font, pressed one of the action buttons, typed into the masked
+   credential field, or opened a destructive row's menu with a real pointer. So the gap has narrowed
+   from "a browser" to a named list of controls.
+4. **Renaming from the sidebar** — a `/name` field exists in the panel and works, and the sidebar has
+   no affordance for it: the page's routes are `/session`, `/sessions`, `/events`, `/message`,
+   `/report` and `/log`, so a rename would be a `/name <name>` line through `/message` like every
+   other row action. Small drawing job, not a mechanism.
 
 - The small queued-line hole above still wants its two structural lines before a test can hold it.
   The report path now leans on the same machinery and does *not* have the hole: a report arriving
@@ -1741,12 +1754,19 @@ Six commits, all pushed. The reasoning is in each commit message; this is the in
 ## Known unfinished
 
 **Three things the first real sessions with the browser page turned up** are written down in
-[`ROADMAP.md`](ROADMAP.md) §8 rather than here, because the middle one is a design question and
+[`ROADMAP.md`](ROADMAP.md) §8 rather than here, because the middle one was a design question and
 not a defect: a conversation that has not happened yet shows in the sidebar as `(empty)`, a command
 typed into the composer prints nothing (its output goes to the terminal and nowhere the page can
-read), and renaming a conversation from the sidebar has no affordance. None is started. A fourth
-from the same sessions -- history tidied in the terminal leaving the sidebar stale -- is fixed,
-because the numbers in that list are positions and a stale row resumes the wrong conversation.
+read) -- **and that one is built**, both halves of the read channel, so a command's answer reaches
+the page as a `command` block and the panel's own reads go over `/report` -- and renaming a
+conversation from the sidebar has no affordance. **Two of the three are closed since**: the empty
+row is gone, because the session file is claimed by the first event rather than at startup —
+measured on 2026-09-16 with the real binary (`GET /sessions` in a scratch home answers
+`{"sessions":[]}` before a word is said, one row after one line) — and the composer one is built.
+Renaming from the sidebar is the last of them, and it is a drawing job rather than a mechanism. A
+fourth from the same sessions -- history tidied in the terminal leaving the sidebar stale -- is
+fixed, because the numbers in that list are positions and a stale row resumes the wrong
+conversation.
 
 **A terminal that goes away takes a core with it.** When flint's pty is closed without a
 `SIGHUP` -- a terminal emulator that crashes, a `close(master)` from the other end -- the process
