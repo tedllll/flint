@@ -1,0 +1,47 @@
+name: ci
+
+# `release.yml` already builds all four targets on every push, so a change that
+# does not compile is caught by the push that broke it. What it does not do is
+# run a single test: a binary that links and a program that works are different
+# claims, and the second one is the claim this repository makes. This job is what
+# turns "the tests pass" from a fact about the machine that pushed into a fact
+# about the commit.
+#
+# Both platforms on purpose. The tests were written on Windows and the target that
+# would be shipped is usually Linux, so the interesting failures are the ones that
+# only one of the two sees -- a shell name from the config, a path separator in a
+# session directory, a test asserting on `\r\n`.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Both platforms report, even when the first one to finish fails: half the
+      # value of a matrix is knowing whether a failure is one platform or both.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # The dependency tree is the slow part and it changes on almost no commits.
+      # Without this the job costs minutes on a change to a comment, which is how
+      # a check like this gets switched off again.
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo test
+
+      # Silent is the standard this repository holds itself to, so a warning is
+      # the failure. `cargo test` builds the targets; this is what actually reads
+      # the lints in them.
+      - run: cargo clippy --all-targets -- -D warnings
