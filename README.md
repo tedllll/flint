@@ -98,6 +98,8 @@ vLLM, llama.cpp). The client appends `/chat/completions` to `base_url`.
 flint                            # interactive session
 flint -p "why is my dsh broken"  # one-shot
 flint why is my dsh broken       # same thing
+flint -p "apply @rules.csv"      # @file is replaced by that file's contents (for anything too
+                                 # big to fit on a command line)
 flint --continue                 # resume the last session here
 flint --resume 3                 # resume a particular one (see the list)
 flint --resume 1789116592        # ...by id prefix, or by path to the .jsonl
@@ -240,6 +242,29 @@ The vocabulary is closed and small: `session.started`, `turn.started`, `message.
   so an empty file means "nothing was answered", and a stale answer from an earlier run can never be
   read as this one's. It needs `--json` and a prompt; with no stream there is nothing to save a caller
   from, and redirecting stdout is the same thing.
+- **A document too big for a command line travels as its name.** Windows caps a command line at about
+  32k characters, and the cap is enforced by `CreateProcess`: a longer prompt never reaches flint at
+  all — Python's `subprocess` raises `FileNotFoundError [WinError 206]` in the caller's own code. So
+  `@file` in a prompt is replaced by that file's contents before the request, and the argument stays
+  as short as the name:
+
+  ```bash
+  flint -p "apply @rules.csv to today's orders" --json
+  ```
+
+  ```json
+  {"prompt":"apply @rules.csv to today's orders","attachments":[{"bytes":252894,"lines":12000,"path":"C:\\work\\rules.csv","token":"@rules.csv"}],"type":"turn.started"}
+  ```
+
+  The contents go *in the prompt*, which is the point: a path is a request the model may decline,
+  `read` returns 2000 lines by default, and a long tool result spills to a file. `@name with spaces`
+  is written `@"name with spaces"`, and `@a.txt.` at the end of a sentence works — the full stop is
+  the sentence's. A name that is not a readable text file is left exactly as typed, because a prompt
+  is prose and `someone@example.com` is an address: so `attachments` is how a caller sees what went
+  in, and an empty list is how a mistyped name becomes visible instead of a model quietly answering
+  about a path. Whole-prompt inlining is capped at 256 KB, refused by name before anything is sent —
+  a silent truncation at the endpoint would be a wrong answer that looks complete. The session file
+  records the expanded prompt (what the model was given); the stream keeps your words.
 - **The end of a turn says what the answer is worth.** `turn.completed` carries an `outcome`:
   `complete` (the model finished), `incomplete` (flint stopped asking at the `max_steps` limit, so
   the text above is half of what it had) or `stopped` (the caller cut it short, below). A caller that

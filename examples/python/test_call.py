@@ -260,6 +260,44 @@ def main():
         check("which is why stderr is silent about it", refused.stderr.strip() == "",
               repr(refused.stderr[:200]))
         check("and nothing pretended to be a session", refused.session is None, str(refused.session))
+
+        print("\n11. a document too big for a command line travels as a name")
+        # The wall this is written against was measured from here: a 33k prompt does not reach flint
+        # at all, because Windows caps a command line at ~32k and Python's own `subprocess` raises
+        # `FileNotFoundError [WinError 206]` -- the caller learns about it in the worst possible way,
+        # and no amount of care inside flint could help. `@path` is the way through: the argument
+        # stays four characters and flint puts the contents in the prompt itself, where the model
+        # cannot decline to look at them.
+        document = scratch / "rules.csv"
+        document.write_text(
+            "".join(f"row {n},2026-09-{(n % 28) + 1:02d}\n" for n in range(1, 12001)),
+            encoding="utf-8",
+        )
+        size = document.stat().st_size
+        check("the fixture really is too big for a command line", size > 32768, str(size))
+        attached = ask(
+            "apply @rules.csv to today",
+            home=str(scratch),
+            cwd=str(scratch),
+        )
+        check("the call is not refused by the operating system", attached.returncode == 0,
+              f"rc={attached.returncode} stderr={attached.stderr[:200]}")
+        started = next(e for e in attached.events if e["type"] == "turn.started")
+        check("the turn says what was asked, in the caller's own words",
+              started["prompt"] == "apply @rules.csv to today", repr(started.get("prompt")))
+        files = started.get("attachments") or []
+        check("and that the file went in", len(files) == 1, repr(started.get("attachments")))
+        if files:
+            check("with its real size, not the size of the name",
+                  files[0]["bytes"] == size and files[0]["lines"] == 12000, repr(files[0]))
+            check("and the path it was read from", Path(files[0]["path"]).is_file(), repr(files[0]))
+        # A name that matches nothing is prose, and the empty list is how a caller sees that rather
+        # than a model quietly answering about a path: this is the typo case.
+        typo = ask("apply @rules.csvv to today", home=str(scratch), cwd=str(scratch))
+        started = next(e for e in typo.events if e["type"] == "turn.started")
+        check("a mistyped name is left as prose rather than inlined",
+              not started.get("attachments"), repr(started.get("attachments")))
+        check("and the run still works", typo.returncode == 0, str(typo.returncode))
     finally:
         stub.terminate()
         try:

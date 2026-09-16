@@ -507,6 +507,182 @@ async fn a_result_file_without_json_is_refused() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// `@path`: a document named in the prompt, inlined before the request
+// ---------------------------------------------------------------------------
+
+/// A file too big for a command line still reaches the model, because flint inlines it.
+///
+/// This is the measured wall (`ROADMAP.md` §10, A1): on Windows a 33k prompt fails inside the
+/// *caller's* own `subprocess` call with `WinError 206`, before flint has started, so a document
+/// cannot travel as an argument at all. This test passes 200 KB through four characters of command
+/// line and asserts both halves: the request really carries the contents -- in the prompt, where the
+/// model cannot decline to look -- and the stream does not, because the frame is a view and the
+/// caller already has the file.
+#[tokio::test]
+async fn a_file_named_in_the_prompt_reaches_the_model_in_full() {
+    let server = MockServer::start().await;
+    let cwd = cwd_for("attach-inlined");
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    Mock::given(method("POST"))
+        .respond_with(Scripted {
+            answers: vec![sse_text("done")],
+            seen: std::sync::Arc::clone(&seen),
+        })
+        .mount(&server)
+        .await;
+
+    let body: String = (1..=4000)
+        .map(|n| format!("row {n}: 2026-09-{:02}\n", n % 28 + 1))
+        .collect();
+    std::fs::write(cwd.join("rules.csv"), &body).expect("the fixture file");
+
+    let home = home_for("attach-inlined", &server.uri(), &cwd);
+    let (code, lines, stderr) = run_json(
+        &home,
+        &cwd,
+        &["-p", "apply @rules.csv to today", "--json"],
+    );
+    assert_eq!(code, 0, "the run failed: {stderr} {lines:?}");
+
+    // The turn says what was asked, and what was added to it -- so a caller whose name matched
+    // nothing sees an empty list rather than a model quietly answering about a path.
+    let started = line_of(&lines, "turn.started");
+    assert_eq!(started["prompt"], "apply @rules.csv to today");
+    let attached = &started["attachments"][0];
+    assert_eq!(attached["token"], "@rules.csv");
+    assert_eq!(attached["lines"], 4000);
+    assert_eq!(attached["bytes"].as_u64().unwrap(), body.len() as u64);
+    assert!(
+        std::path::Path::new(attached["path"].as_str().expect("a path")).is_file(),
+        "the attachment does not name a file: {attached}"
+    );
+    assert!(
+        !started.to_string().contains("row 4000"),
+        "the stream carries the attached document: {}",
+        &started.to_string()[..200]
+    );
+
+    // ...and the request carries the contents themselves, which is the whole point: content that has
+    // to be seen must be *in* the prompt, not a path the model may decline to look up.
+    let bodies = recorded(&seen);
+    assert_eq!(bodies.len(), 1, "one turn for one answer");
+    let sent = bodies[0]["messages"]
+        .as_array()
+        .expect("messages")
+        .last()
+        .expect("a user message")["content"]
+        .as_str()
+        .expect("the user message is text");
+    assert!(
+        sent.starts_with("apply <file path=\"rules.csv\" lines=\"4000\">\nrow 1:"),
+        "the prompt does not open with the file: {}",
+        &sent[..120]
+    );
+    assert!(
+        sent.ends_with("</file> to today"),
+        "the prose around the name was not kept: {}",
+        &sent[sent.len() - 40..]
+    );
+    assert!(
+        sent.contains("row 4000: "),
+        "the file was inlined in part, not in full"
+    );
+
+    // The session records what the model was given rather than the abbreviation: resuming this
+    // conversation has to see the same text, or the record and the request disagree about what was
+    // asked.
+    let events = session_events(&home);
+    let recorded_prompt = events
+        .iter()
+        .find(|event| event["type"] == "chat" && event["message"]["role"] == "user")
+        .and_then(|event| event["message"]["content"].as_str())
+        .expect("the user's message in the session");
+    assert_eq!(
+        recorded_prompt, sent,
+        "the session and the request disagree about the prompt"
+    );
+}
+
+/// A name that is not a file is left exactly as typed, because a prompt is prose.
+#[tokio::test]
+async fn an_at_that_names_no_file_is_left_in_the_prompt_as_prose() {
+    let server = MockServer::start().await;
+    let cwd = cwd_for("attach-prose");
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    Mock::given(method("POST"))
+        .respond_with(Scripted {
+            answers: vec![sse_text("noted")],
+            seen: std::sync::Arc::clone(&seen),
+        })
+        .mount(&server)
+        .await;
+
+    let home = home_for("attach-prose", &server.uri(), &cwd);
+    let typed = "ask @bob, mail someone@example.com about the @decorator";
+    let (code, lines, stderr) = run_json(&home, &cwd, &["-p", typed, "--json"]);
+    assert_eq!(code, 0, "the run failed: {stderr} {lines:?}");
+
+    let started = line_of(&lines, "turn.started");
+    assert!(
+        started.get("attachments").is_none(),
+        "a sentence was treated as an attachment: {started}"
+    );
+    let sent = recorded(&seen)[0]["messages"]
+        .as_array()
+        .expect("messages")
+        .last()
+        .expect("a user message")["content"]
+        .as_str()
+        .expect("the user message is text")
+        .to_string();
+    assert_eq!(sent, typed, "prose was rewritten");
+}
+
+/// A file that cannot be inlined stops the run before anything is sent, and says which one.
+#[tokio::test]
+async fn a_file_that_cannot_be_inlined_is_refused_before_the_request() {
+    let server = MockServer::start().await;
+    let cwd = cwd_for("attach-toobig");
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    Mock::given(method("POST"))
+        .respond_with(Scripted {
+            answers: vec![sse_text("should never be asked")],
+            seen: std::sync::Arc::clone(&seen),
+        })
+        .mount(&server)
+        .await;
+
+    std::fs::write(cwd.join("huge.txt"), "x".repeat(300 * 1024)).expect("the fixture file");
+    let home = home_for("attach-toobig", &server.uri(), &cwd);
+    let (code, lines, stderr) = run_json(&home, &cwd, &["-p", "read @huge.txt", "--json"]);
+
+    assert_eq!(
+        code,
+        exit_codes::USAGE,
+        "an impossible prompt is the caller's command line: {lines:?} {stderr}"
+    );
+    assert_eq!(
+        kinds(&lines),
+        vec!["error"],
+        "a refused run put something else on the stream: {lines:?}"
+    );
+    let message = line_of(&lines, "error")["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(message.contains("@huge.txt"), "{message}");
+    assert!(
+        message.contains("262144"),
+        "the refusal does not say what the limit is: {message}"
+    );
+    // Nothing was sent, which is the difference between refusing and paying for an error.
+    assert!(
+        recorded(&seen).is_empty(),
+        "a refused run asked the provider anyway"
+    );
+}
+
 /// Without a prompt there is no run to describe, and the refusal still arrives as the one thing a
 /// `--json` caller reads.
 ///

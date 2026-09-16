@@ -33,8 +33,16 @@ rule now lives once (`SessionSummary::label`); and `--result-file <path>` writes
 a file as well as to the stream — the answer text, or the validated object pretty-printed when a
 schema was given — with the one property that makes it safe to reuse a path across a batch: **the
 file is emptied when the run starts and filled only if this run answers**, so an empty file means
-"nothing answered" rather than an earlier run's answer looking like this one's. Next in the queue:
-step 4 (`@path` expansion), then `--max-seconds`, the stream-integrity test, and the Python side.
+"nothing answered" rather than an earlier run's answer looking like this one's. **Step 4 is built
+too**: `@path` in a one-shot prompt is replaced by that file's contents before the request
+(`src/attach.rs`), which is how A1 is solved — a 247 KB document now travels through four characters
+of command line, checked in `examples/python/test_call.py` on the same Windows where a 33k argument
+raises `WinError 206` in `subprocess` before flint even starts. The rule is deliberately small (a
+name is inlined only when it is a readable text file; prose is left alone; `turn.started`'s
+`attachments` says what went in, so a mistyped name is a visible empty list), the cap is 256 KB
+refused before anything is sent, and the stream keeps the caller's own words while the request and
+the session hold the expanded prompt. Next in the queue: step 5 (`--max-seconds`), then the
+stream-integrity test, then the Python side.
 Read it before touching `src/main.rs`'s argument handling. In short: DeepSeek says it with
 **402**, OpenAI-shaped endpoints say it with **429 `insufficient_quota`** — the same status as a rate
 limit — and Anthropic with a 400 and a sentence. flint decides "transient" from the status **and** the
@@ -69,13 +77,14 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 482 passing, 1 ignored (293 lib, 3 in
-the binary's own tests, 33 `agent_loop`, 59 `cli_output`, 27 `json_output` (7 structured
+As of the commit that carries this file, `cargo test` is 493 passing, 1 ignored (301 lib, 3 in
+the binary's own tests, 33 `agent_loop`, 59 `cli_output`, 30 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 5 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
-be able to read, 4 the answer written where the caller asked), 7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 6 `who`, 6 `task`, 2 `say`), `cargo clippy
+be able to read, 4 the answer written where the caller asked, 3 the file inlined into the prompt),
+7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 6 `who`, 6 `task`, 2 `say`), `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
-pass, and `python examples/python/test_call.py` is 53 checks, all passing (one of them now waits
+pass, and `python examples/python/test_call.py` is 61 checks, all passing (one of them waits
 out the fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from),
 and `python examples/mcp/test_mcp.py` passes its own 23.
 
@@ -268,7 +277,7 @@ open, so the copy needs every flint window closed first — measured twice.
 
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
-cargo test                                        # 482 passing, 1 ignored
+cargo test                                        # 493 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed

@@ -137,6 +137,36 @@ pub fn turn_started(prompt: &str) -> String {
     frame("turn.started", json!({ "prompt": prompt }))
 }
 
+/// The same line for a prompt that had files inlined into it: the words as typed, and what went in.
+///
+/// `prompt` stays the caller's own text on purpose. The expanded prompt is what the model is given
+/// and what the session records, but it can be a whole attached document, and a stream that carried
+/// it would be the caller paying twice for bytes it already has on disk. What a caller needs is not
+/// the copy: it is the *fact* -- which files were inlined, where from, and how big -- so that a name
+/// that matched nothing is visible as an empty list rather than as a model quietly answering about a
+/// path. The key is absent rather than empty when nothing was inlined, so the frame for an ordinary
+/// run stays exactly what it was.
+pub fn turn_started_with(prompt: &str, attachments: &[crate::attach::Attachment]) -> String {
+    if attachments.is_empty() {
+        return turn_started(prompt);
+    }
+    let files: Vec<serde_json::Value> = attachments
+        .iter()
+        .map(|file| {
+            json!({
+                "token": file.token,
+                "path": file.path.to_string_lossy(),
+                "bytes": file.bytes,
+                "lines": file.lines,
+            })
+        })
+        .collect();
+    frame(
+        "turn.started",
+        json!({ "prompt": prompt, "attachments": files }),
+    )
+}
+
 /// The last line of a successful turn, carrying the tokens the provider last reported.
 ///
 /// Zero when the provider never reported a count: a made-up number would be worse than an

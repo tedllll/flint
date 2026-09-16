@@ -4,6 +4,7 @@
 //! real provider; `main.rs` is a thin CLI shell over it.
 
 pub mod agent;
+pub mod attach;
 pub mod config;
 pub mod context;
 pub mod ndjson;

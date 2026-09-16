@@ -30,6 +30,7 @@ whoever is changing the code — a person or a model driving it.
 |---|---|
 | `src/main.rs` | argument parsing, the REPL, slash commands, one-shot `exec` |
 | `src/agent.rs` | the tool loop: build the prompt, call the model, run tools, persist events |
+| `src/attach.rs` | `@path` in a one-shot prompt: which names are files, the inline block the model reads, and the 256 KB cap |
 | `src/provider.rs` | the OpenAI-compatible client, streaming, retries, usage |
 | `src/tools.rs` | the tool set, and the read-before-mutate gate |
 | `src/patch.rs` | the `apply_patch` format, parsed and applied — pure functions |

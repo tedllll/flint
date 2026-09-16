@@ -1156,7 +1156,7 @@ line no longer crosses the composer; **the page's own log, written by default** 
 the hand's code made the boot's first paint throw, taking the sidebar, the sessions and the feed
 with it; and `/stop`, the interrupt as a short word, reachable from the composer today.
 
-### 10. flint as a function a program can call — **in progress: steps 1–3 landed (B7 included), 4–7 queued**
+### 10. flint as a function a program can call — **in progress: steps 1–4 landed (B7 included), 5–7 queued**
 
 flint answers; it cannot yet be *trusted as a function*. A caller that acts on the result — writes a
 config, queues a job, retries a batch, feeds it data it did not author — has to know four things
@@ -1182,11 +1182,13 @@ missing is the one about money — what a run *cost* rather than what it answere
 
 #### A. Cannot be done at all
 
-1. **A large input.** Measured from Python: a 30000-character prompt is fine, 33000 is
-   `FileNotFoundError [WinError 206]`, because the prompt can only travel as an argument and Windows
-   caps a command line at ~32k. The failure is *not* flint's: it is `subprocess` refusing to start,
-   which is the worst way to learn this. A caller with a document, a rule table or a diff has no way
-   in at all.
+1. **A large input.** *Solved by `@path`, in step 4.* Measured from Python: a 30000-character prompt
+   is fine, 33000 is `FileNotFoundError [WinError 206]`, because the prompt can only travel as an
+   argument and Windows caps a command line at ~32k. The failure is *not* flint's: it is `subprocess`
+   refusing to start, which is the worst way to learn this. A caller with a document, a rule table or
+   a diff had no way in at all; now it names the file — `flint -p "apply @rules.csv"` — and flint
+   puts the contents in the prompt. The same measurement is a check in `examples/python/test_call.py`:
+   a 247 KB document goes through four characters of command line.
 2. **A budget for one call.** `max_steps` is a runaway guard, and exhausting it emits a `warning`
    string. Nothing bounds wall-clock time or spend from flint's side, so a caller cannot ask for
    "something in thirty seconds, or tell me you could not" and cannot cap what one call costs.
@@ -1399,7 +1401,33 @@ What to build for it, in step 2:
    A1 is solved, and it is deliberately not "tell the model a path": content that must be seen has to
    *be* in the prompt, where it is not subject to the model's discretion, to `read`'s 2000-line
    default, or to the 30000-character tool-output spill. It also composes with prose ("compare
-   `@a.txt` with `@b.txt`") and removes shell quoting from the caller's life.
+   `@a.txt` with `@b.txt`") and removes shell quoting from the caller's life. — **Built**
+   (`src/attach.rs`). The rule is small because a prompt is prose and `@` is an ordinary character in
+   it: a name is a candidate when it is `@` followed by a word (or by a quoted name that may contain
+   spaces), an `@` *inside* a word is not one (so `someone@example.com` is an address, not a file
+   called `example.com`), and a candidate is replaced **only if it names a file that can be read as
+   text**. Everything else is left exactly as typed — a mistyped path is a mistyped path rather than a
+   run that refuses to start over a character in prose — which is why the turn says what went in
+   (`turn.started`'s `attachments`: token, path, bytes, lines) instead of leaving a caller to hope;
+   the empty list is how a typo becomes visible. A name that is not a file is tried once more without
+   trailing punctuation (`@a.txt.` at the end of a sentence), trimmed-first so that one prompt means
+   one file on Windows, where the filesystem API strips a trailing dot and `@a.txt.` would otherwise
+   "work" while naming a file that resolves nowhere else.
+   Three decisions are worth keeping. **The cap is 256 KB of inlined text per prompt**, refused by
+   name before anything is sent: both alternatives are worse, since sending it lets the endpoint
+   refuse *after* the run with a provider's error instead of flint's, and an endpoint that silently
+   truncates turns an oversized document into a wrong answer that looks complete. **The stream keeps
+   the typed words** — the expanded prompt goes in the request and in the session file, because that
+   is what the model was given, but a frame carrying a whole attached document would be the caller
+   paying twice for bytes it already has. **A one-shot prompt only**: the wall is the command line
+   (A1), a person at a terminal has no such wall, and a conversation that silently grew by a megabyte
+   is a surprise in the one place where nobody asked for one. `flint debug prompt-input` expands too,
+   since a preview of a different request would be a lie about what would be sent.
+   *Not done, and deliberately*: an attachment does **not** count as the read that the
+   read-before-mutate gate wants. It would be defensible — the model really has seen the contents —
+   but the gate's bookkeeping lives in the tool set, so it means plumbing a path from `main` into it
+   for the rare case of editing a file that was also attached, and the cost of leaving it is one
+   `read` in that case, which also hands the model line numbers. Worth revisiting if it bites.
 5. **`--max-seconds`**, so a caller can ask for a bounded run and get `incomplete` rather than a
    process that is still going.
 6. **A stream-integrity test** — the thing C2 says does not exist: a run's stdout contains nothing

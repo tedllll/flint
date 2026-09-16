@@ -11,8 +11,8 @@
 //! unreachable, flint still runs commands.
 
 use flint::{
-    agent, config, context, display, engine, event, live, ndjson, provider, schema, search, session,
-    sink, term, tools, web,
+    agent, attach, config, context, display, engine, event, live, ndjson, provider, schema, search,
+    session, sink, term, tools, web,
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -790,6 +790,31 @@ async fn real_main(args: Args) -> Result<i32> {
         agent.record_schema(shaping.schema_json.as_ref())?;
     }
 
+    // ---- `@path`: a document named in the prompt, inlined before the request ----
+    //
+    // Here, once, for both one-shot doors, because both need the same thing and the expansion is a
+    // property of the prompt rather than of the output mode. It happens *after* the session and the
+    // schema are settled, so nothing is inlined for a run that a refusal would stop anyway, and
+    // before the agent is asked anything, so what the session records and what the model is given are
+    // the same text.
+    //
+    // Only for a one-shot prompt. The wall this exists for is the command line: a caller cannot put a
+    // document in an argument, and a path in prose is a request the model may decline. A person at a
+    // terminal has neither problem -- they can see the file, and the model can read it -- so a REPL
+    // line is left exactly as typed rather than quietly growing by a megabyte.
+    //
+    // A file that cannot be inlined is the caller's command line, not a fault of the run: exit 2,
+    // before anything is sent. What *was* inlined is on the stream (`turn.started`'s `attachments`)
+    // and in the transcript, so a caller with a mistyped name sees an empty list rather than a model
+    // that quietly answered about the path it was given.
+    let asked = match args.prompt.as_deref() {
+        Some(prompt) => Some(
+            attach::expand(prompt, &cwd)
+                .map_err(|e| -> anyhow::Error { Usage(format!("{e:#}")).into() })?,
+        ),
+        None => None,
+    };
+
     // ---- a run whose output is a stream of JSON objects ----
     //
     // Dispatched here, before the terminal exists, because in this mode stdout *is* the
@@ -798,14 +823,14 @@ async fn real_main(args: Args) -> Result<i32> {
     // it makes -- the clock, the answer strip, the redraw, the interrupt prompt -- and every
     // one of them is wrong for a program reading the output.
     if args.json {
-        let prompt = args.prompt.as_deref().ok_or_else(|| -> anyhow::Error {
+        let asked = asked.as_ref().ok_or_else(|| -> anyhow::Error {
             Usage("--json needs a prompt: `flint -p \"...\" --json`. Try --help.".to_string()).into()
         })?;
         return run_json_turn(
             &mut agent,
             &provider_cfg,
             provider_error.as_deref(),
-            prompt,
+            asked,
             &shaping,
             args.result_file.as_deref().map(std::path::Path::new),
         )
@@ -936,11 +961,19 @@ async fn real_main(args: Args) -> Result<i32> {
     }
 
     // ---- one-shot ----
-    if let Some(prompt) = args.prompt {
+    if let Some(asked) = &asked {
+        // Said before the turn, where the person is looking: the words on screen name a file, and
+        // what the model will actually be given is its contents. Silence here would make an inlined
+        // document and a path the model chose to ignore look the same from this side of the run.
+        for file in &asked.attachments {
+            printer
+                .term()
+                .line(format_args!("{}", printer.dim(&format!("  inlined {}", file.describe()))));
+        }
         run_turn(
             &mut agent,
             &provider_cfg,
-            &prompt,
+            &asked.sent,
             &printer,
             &mut input_rx,
             false,
@@ -3488,10 +3521,17 @@ async fn run_json_turn(
     agent: &mut agent::Agent,
     provider_cfg: &config::ProviderConfig,
     provider_error: Option<&str>,
-    prompt: &str,
+    asked: &attach::Prompt,
     shaping: &Shaping,
     result_file: Option<&std::path::Path>,
 ) -> Result<i32> {
+    // What the session and the request are built from. The stream's opening line carries the words
+    // the caller typed plus what was inlined into them, because the frame is a *view*: putting a
+    // whole attached document on the stream would pay for it twice, and a caller that wants to be
+    // sure its file got in is answered by `attachments` rather than by a megabyte of diff. The
+    // session file and the request carry the expanded prompt, because that is what the model was
+    // actually given and the session is the record of what happened.
+    let prompt = asked.sent.as_str();
     let mut out = std::io::stdout();
     // Flushed per line: a consumer may be reading the stream as it arrives, and a
     // block-buffered pipe would deliver the whole run at the end, which is the one thing a
@@ -3511,7 +3551,10 @@ async fn run_json_turn(
     if let Some(error) = provider_error {
         emit(ndjson::warning(error));
     }
-    emit(ndjson::turn_started(prompt));
+    emit(ndjson::turn_started_with(
+        &asked.typed,
+        &asked.attachments,
+    ));
 
     // The checks come after those three lines, not before, so that a run which cannot even
     // start is still described on stdout. Failing out to `main`'s error path would put the
@@ -4458,8 +4501,12 @@ fn run_debug(
             }
             // Everything after the subcommand is the message that would be sent, so this
             // answers "what would the model read if I said this" as well as "what does it
-            // read now".
-            let said = words[1..].join(" ");
+            // read now". `@path` is expanded here too, and for the same reason: the point of
+            // the command is the *request*, and a preview that showed `@a.txt` where a real
+            // run would send the file's contents would be a preview of a different request.
+            let said = attach::expand(&words[1..].join(" "), cwd)
+                .map_err(|e| -> anyhow::Error { Usage(format!("{e:#}")).into() })?
+                .sent;
             let next = if said.trim().is_empty() {
                 None
             } else {
@@ -4701,6 +4748,8 @@ fn print_help(color: bool, term: &Term) {
   flint -p \"<prompt>\"              one-shot, prints the answer and exits
   flint -p \"<prompt>\" --json       the same run as one JSON object per line
   flint <words...>                 same as -p
+                                   (`@file` in the prompt is replaced by that file's contents
+                                   before the request; \"@name with spaces\" when it has them)
   flint --continue                 resume the most recent session in this directory
   flint --resume <n|id>            resume a particular session
   flint --fork [<n|id>]            copy a session and continue the copy, leaving the original alone
