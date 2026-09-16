@@ -1292,13 +1292,14 @@ impl InputReader {
 ///
 /// `crossterm::event::read()` is `try_read(None)` -- its loop condition
 /// (`timeout.leftover().map_or(true, |t| !t.is_zero())`) is true for ever without a deadline -- and
-/// a hung-up descriptor reports `POLLHUP` without `POLLIN`, which none of its three branches
-/// consumes. So `poll` returns at once, nothing is read, and the key thread in `from_terminal`
-/// spins at 100% of a core for ever: measured at 100.3% with the master of flint's pty closed from
-/// the other end, on this build and on the one before it. Nothing inside that call can see the
-/// hangup, and the call is the only way to get a key event out of crossterm, so the terminal is
-/// watched from here instead -- on the descriptor crossterm itself reads, which is stdin when stdin
-/// is a terminal and `/dev/tty` otherwise (`tty_fd` in crossterm 0.29).
+/// a hung-up descriptor keeps reporting itself as ready (`POLLHUP`, and Linux leaves `POLLIN` set
+/// too), while a read on it produces end of file rather than an event. So `poll` returns at once,
+/// no event is produced, and the key thread in `from_terminal` spins at 100% of a core for ever:
+/// measured at 100.3% with the master of flint's pty closed from the other end, on this build and
+/// on the one before it. Nothing inside that call can see the hangup, and the call is the only way
+/// to get a key event out of crossterm, so the terminal is watched from here instead -- on the
+/// descriptor crossterm itself reads, which is stdin when stdin is a terminal and `/dev/tty`
+/// otherwise (`tty_fd` in crossterm 0.29).
 ///
 /// A hangup ends the run exactly the way an EOF on a pipe does: `Quit` on the input channel, which
 /// is what the REPL already knows how to leave through. Nothing is drawn and nothing is saved,
@@ -1351,10 +1352,14 @@ fn watch_for_hangup(
         if ready == 0 {
             continue;
         }
-        // `POLLHUP` together with `POLLIN` is the last of the input: the key thread can still read
-        // those bytes, so the hangup is only acted on once there is nothing left to read.
+        // Any of these means the terminal is gone. `POLLHUP` arriving *with* `POLLIN` is the case
+        // worth spelling out, because it is the one that was got wrong first: on a hung-up pty Linux
+        // keeps reporting the read end as readable for ever, so a rule that waited for the reader to
+        // drain it first spun this thread as well as crossterm's -- measured on the CI runner at
+        // 20.2 s of CPU in a 10 s window, two spinning threads and no exit. Bytes still in flight
+        // are lost, and they are lost with the terminal they came from.
         let gone = watched.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL);
-        if gone != 0 && watched.revents & libc::POLLIN == 0 {
+        if gone != 0 {
             let _ = tx.send(InputMsg::Quit);
             // After the message, never before, for the reason the key thread spells out: the REPL
             // treats "empty and ended" as the end of input.
