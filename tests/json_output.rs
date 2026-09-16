@@ -769,6 +769,61 @@ async fn a_json_run_with_a_mistyped_flag_is_refused_on_the_stream() {
 /// the situation a caller is in. What has to be true: the run ends *promptly* rather than when the
 /// model gets around to answering, it ends as a turn rather than as a crash, and the process is still
 /// there to be read afterwards -- killing it would take the session file's last writes with it.
+/// A turn says how long it took, because "was that slow or was it stuck" is the question a
+/// caller asks about a run that sat there for a while, and it is the one thing a caller cannot
+/// work out from the outside: timing the subprocess measures flint's start-up and the caller's
+/// own reading as well, and a caller that is streaming has no end to time at all.
+///
+/// The number is checked in both directions. It has to include the model's delay -- a field that
+/// reported the milliseconds since the last frame would pass a weaker test -- and it cannot
+/// exceed the wall clock the caller just measured for the whole process, which is what makes it
+/// this run's clock rather than a constant.
+#[tokio::test]
+async fn a_turn_says_how_long_it_took() {
+    struct Slow {
+        body: String,
+        delay: std::time::Duration,
+    }
+
+    impl Respond for Slow {
+        fn respond(&self, _req: &Request) -> ResponseTemplate {
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_delay(self.delay)
+                .set_body_string(self.body.clone())
+        }
+    }
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(Slow {
+            body: answers_in_two_fragments(),
+            delay: std::time::Duration::from_millis(1200),
+        })
+        .mount(&server)
+        .await;
+
+    let cwd = cwd_for("duration");
+    let home = home_for("duration", &server.uri(), &cwd);
+    let began = std::time::Instant::now();
+    let (code, lines, stderr) = run_json(&home, &cwd, &["-p", "say hello", "--json"]);
+    let waited = began.elapsed();
+
+    assert_eq!(code, 0, "the run failed: {stderr}");
+    let done = line_of(&lines, "turn.completed");
+    let ms = done["duration_ms"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("turn.completed carries no milliseconds: {done}"));
+    assert!(
+        ms >= 1100,
+        "the model was held for 1200 ms and the turn claims {ms} ms"
+    );
+    assert!(
+        ms <= waited.as_millis() as u64,
+        "the turn claims {ms} ms inside a {waited:?} run"
+    );
+}
+
 #[tokio::test]
 async fn a_run_can_be_stopped_from_stdin() {
     struct Slow {

@@ -57,8 +57,11 @@ result           json, attempts           a schema run's checked answer, once it
     usage            prompt_tokens, completion_tokens, total_tokens
     status           text, restarted
     warning          message
-    turn.completed   prompt_tokens, completion_tokens, outcome
-                                              how the turn ended: complete | incomplete | stopped
+    turn.completed   prompt_tokens, completion_tokens, outcome, duration_ms
+                                              how the turn ended: complete | incomplete | stopped,
+                                              and how long it took, from `turn.started` to here
+                                              (so it is the wait, not the process: time your own
+                                              subprocess only if you want start-up as well)
     error            message, code?, retryable?
                                               the run failed; `code` names the cause when known
                                               (`insufficient_balance`, `rate_limit`, `auth`, `no_key`,
@@ -184,6 +187,12 @@ class Turn:
     # the answer never matched its schema. An older flint has no such field, and this is then None for
     # every run: `ok` and `stopped` are the older signals and still work.
     outcome: str | None = None
+    # How long the turn took, in milliseconds, as flint measured it: from the `turn.started` line to
+    # the `turn.completed` line. It is the wait and not the process -- flint's own start-up and this
+    # module's reading are not in it -- which is the reason to read it rather than timing `ask()`
+    # yourself, and it is the only clock available to a caller that streams the answer. `None` for a
+    # run that never reached the end of a turn, and for an older flint.
+    duration_ms: int | None = None
     # The checked answer, when the run was given a schema: the `result` line's object. `None` for a
     # run with no schema, and `None` for a schema run whose answer never matched -- flint emits no
     # `result` line at all in that case, which is the point: see `ask_json`, which raises instead.
@@ -358,10 +367,11 @@ def _absorb(turn: Turn, line: str) -> dict | None:
     elif kind == "warning":
         turn.warnings.append(event.get("message", ""))
     elif kind == "turn.completed":
-        # The end of a turn is the only place that says how it ended and whether the answer is
-        # whole, which is not something a caller can work out from the text it received. The
+        # The end of a turn is the only place that says how it ended, whether the answer is whole and
+        # how long the caller waited, none of which can be worked out from the text it received. The
         # token counts live on the same line, so this branch is also where the usage goes.
         turn.outcome = event.get("outcome")
+        turn.duration_ms = event.get("duration_ms")
         turn.usage = {
             "prompt_tokens": event.get("prompt_tokens", 0),
             "completion_tokens": event.get("completion_tokens", 0),

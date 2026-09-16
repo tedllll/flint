@@ -237,11 +237,24 @@ impl Limit {
 /// `limit` is carried only for an unfinished turn, and only when flint knows which budget ran out:
 /// the key is absent rather than null everywhere else, so a caller reads its presence as the fact it
 /// is.
-pub fn turn_completed(usage: Option<Usage>, outcome: Outcome, limit: Option<Limit>) -> String {
+///
+/// `duration_ms` is always carried, and it is the one number here that is not about the answer. It
+/// is measured from `turn.started` -- the frame the caller's wait begins at -- to this one, so it
+/// answers "was that slow, or was it stuck" without the caller timing the subprocess, which would
+/// also measure flint's own start-up and the caller's reading, and which a streaming caller cannot
+/// do at all. What it is *not* is a cost: see B5 in `ROADMAP.md`, where the money half of this row
+/// has no home because flint does not know what a token costs on the endpoint it was pointed at.
+pub fn turn_completed(
+    usage: Option<Usage>,
+    outcome: Outcome,
+    limit: Option<Limit>,
+    duration_ms: u64,
+) -> String {
     let mut body = json!({
         "prompt_tokens": usage.map_or(0, |u| u.prompt_tokens),
         "completion_tokens": usage.map_or(0, |u| u.completion_tokens),
         "outcome": outcome.as_str(),
+        "duration_ms": duration_ms,
     });
     if outcome == Outcome::Incomplete {
         if let (Some(limit), Some(object)) = (limit, body.as_object_mut()) {
@@ -518,10 +531,14 @@ mod tests {
             }),
             Outcome::Complete,
             None,
+            1234,
         ))
         .unwrap();
         assert_eq!(usage["type"], "turn.completed");
         assert_eq!(usage["prompt_tokens"], 7);
+        // How long the turn took is on every ending, including the ones that are not an answer: a
+        // stopped turn is exactly when a caller asks whether waiting was worth it.
+        assert_eq!(usage["duration_ms"], 1234);
         // The outcome is a field on the end of the turn rather than a frame of its own: a consumer
         // that already reads this line for the token counts gets the answer's worth for free, and
         // there is no second thing to keep in step with the first.
@@ -535,6 +552,7 @@ mod tests {
             None,
             Outcome::Incomplete,
             Some(Limit::Steps),
+            9,
         ))
         .unwrap();
         assert_eq!(step_limited["reason"], "steps");
@@ -542,11 +560,12 @@ mod tests {
             None,
             Outcome::Incomplete,
             Some(Limit::Seconds),
+            9,
         ))
         .unwrap();
         assert_eq!(timed_out["reason"], "seconds");
         let stopped: Value =
-            serde_json::from_str(&turn_completed(None, Outcome::Stopped, None)).unwrap();
+            serde_json::from_str(&turn_completed(None, Outcome::Stopped, None, 9)).unwrap();
         assert!(stopped.get("reason").is_none(), "{stopped}");
 
         let failed: Value = serde_json::from_str(&error("no model configured")).unwrap();

@@ -90,15 +90,15 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 511 passing, 1 ignored (305 lib, 3 in
-the binary's own tests, 33 `agent_loop`, 61 `cli_output`, 34 `json_output` (7 structured
+As of the commit that carries this file, `cargo test` is 512 passing, 1 ignored (305 lib, 3 in
+the binary's own tests, 33 `agent_loop`, 61 `cli_output`, 35 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
 be able to read, 4 the answer written where the caller asked, 3 the file inlined into the prompt,
-1 the stream checked on its bytes),
+1 the stream checked on its bytes, 1 how long a turn took),
 7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 7 `who`, 13 `task`, 2 `say`), `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
-pass, and `python examples/python/test_call.py` is 117 checks, all passing (one of them waits
+pass, and `python examples/python/test_call.py` is 118 checks, all passing (one of them waits
 out the fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from),
 and `python examples/mcp/test_mcp.py` passes its own 23.
 
@@ -216,6 +216,23 @@ so anything that reads a run's stdout to EOF is waiting for the whole process tr
 run. flint's own `bash` tool has always worked this way. The tests therefore measure the parent's own
 exit rather than the harness's patience (`run_flint_until_exit` in `tests/task.rs`), and a caller that
 wants to come back with the run it started should stop at the terminal frame rather than at EOF.
+
+**`turn.completed` now carries `duration_ms`, which is the last thing §10's own table was missing
+except the money.** The clock starts where `turn.started` is written and stops at the frame that ends
+the turn, so the number is the caller's wait rather than the process's lifetime: timing the subprocess
+would include flint's start-up and the caller's own reading, and a caller streaming the answer has no
+end to time at all. It is on every ending — `stopped` and `incomplete` included, which is exactly when
+a caller asks — and it is per turn, so a schema repair attempt and a turn a steering line started each
+report their own. The test asserts it in both directions rather than merely present: a stub held for
+1200 ms must be reported as at least 1100, and the frame may not claim more milliseconds than the run
+the harness just measured (`a_turn_says_how_long_it_took` in `tests/json_output.rs`, watched red first
+— *"turn.completed carries no milliseconds"*). `Turn.duration_ms` in `examples/python/flint_call.py` is
+the same field for the Python caller, checked in the batch section of `test_call.py` where the stub
+already holds each call a second (`[1007, 1007, 1006, 1007, 1008, 1006]`), which is 118 checks now.
+The money half of that row is **refused rather than pending**, and `ROADMAP.md` records why: flint talks
+to whatever OpenAI-compatible endpoint it is pointed at, providers disagree about cached-prompt pricing,
+and a price table kept in this repository would go stale into a wrong number — worse than no number. A
+caller with its own tariff has the token counts on the same line.
 
 **And a child's conversation no longer joins the person's list of conversations — the second report of
 that same evening.** "子代理的会话窗口居然可以被会话历史栏看到": a `task` child's session file was in

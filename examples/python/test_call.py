@@ -613,6 +613,11 @@ def main():
             check("and each one is its own conversation",
                   len({t.session for t in turns}) == len(questions),
                   str(sorted(t.session for t in turns)))
+            # Each turn says how long it took, and these were held a second each, so the number is
+            # checked against something known rather than merely being present.
+            check("and every turn says how long it waited",
+                  all(isinstance(t.duration_ms, int) and t.duration_ms >= 900 for t in turns),
+                  str([t.duration_ms for t in turns]))
             check("no call was asked twice", all(t.ok for t in turns),
                   str([t.error for t in turns if not t.ok]))
             stats = json.loads(

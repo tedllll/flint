@@ -3640,6 +3640,11 @@ async fn run_json_turn(
         &asked.typed,
         &asked.attachments,
     ));
+    // The clock the `turn.completed` line reports, started where the caller's wait starts: the frame
+    // that says the turn began. It deliberately does not include what came before -- argument parsing,
+    // config, inlining an `@path` -- because the question the number answers is "was the model slow, or
+    // stuck", and a caller that wants the whole process has its own subprocess to time.
+    let turn_began = std::time::Instant::now();
 
     // The checks come after those three lines, not before, so that a run which cannot even
     // start is still described on stdout. Failing out to `main`'s error path would put the
@@ -3796,6 +3801,7 @@ async fn run_json_turn(
                     agent.last_usage(),
                     ndjson::Outcome::Incomplete,
                     Some(ndjson::Limit::Seconds),
+                    ms(&turn_began),
                 ));
                 // Same terms as the stream, and the same meaning as a schema that never matched: an
                 // unfinished answer is not a usable one, so the code says so as well as the stream.
@@ -3816,6 +3822,7 @@ async fn run_json_turn(
                 agent.last_usage(),
                 ndjson::Outcome::Stopped,
                 None,
+                ms(&turn_began),
             ));
             // The half-answer goes where the caller asked for it too, on the same terms as the
             // stream: the code (130) and the outcome say what it is worth, and a stopped run that
@@ -3854,7 +3861,12 @@ async fn run_json_turn(
         };
         match result {
             Ok(()) => {
-                emit(ndjson::turn_completed(agent.last_usage(), outcome, limit));
+                emit(ndjson::turn_completed(
+                    agent.last_usage(),
+                    outcome,
+                    limit,
+                    ms(&turn_began),
+                ));
                 // With no schema the answer *is* the text, and this is where it goes where the
                 // caller asked. With one, the answer is the validated object further down, and
                 // writing the prose here would put a shape in the file that the caller never asked
@@ -4274,6 +4286,15 @@ fn toggles(agent: &agent::Agent, printer: &Printer<'_>) -> serde_json::Value {
     ])
 }
 
+/// Milliseconds since a turn began, in the shape `turn.completed` reports them.
+///
+/// The instant is passed rather than read from a field because every turn has its own clock: a schema
+/// repair attempt and a turn a steering line started are both turns of this run, and each reports the
+/// one it belongs to.
+fn ms(began: &std::time::Instant) -> u64 {
+    began.elapsed().as_millis() as u64
+}
+
 /// Nothing is being waited for any more.
 fn status_done(printer: &Printer<'_>, live: Option<&web::Live>) {
     printer.term().activity_done();
@@ -4296,10 +4317,16 @@ fn turn_over(
     agent: &agent::Agent,
     outcome: ndjson::Outcome,
     limit: Option<ndjson::Limit>,
+    began: &std::time::Instant,
 ) {
     status_done(printer, live);
     if let Some(live) = live {
-        live.line(ndjson::turn_completed(agent.last_usage(), outcome, limit));
+        live.line(ndjson::turn_completed(
+            agent.last_usage(),
+            outcome,
+            limit,
+            ms(began),
+        ));
     }
 }
 
@@ -4377,6 +4404,9 @@ async fn run_turn(
     // turn runs the loop again, and what the caller is holding at the end is the last turn's answer.
     // The loop is the expression, so there is no path that reaches the end without having decided.
     let ended = loop {
+        // This turn's clock, started here rather than once for the whole function: a steering line
+        // runs the loop again, and the second turn's `turn.completed` has to report the second turn.
+        let turn_began = std::time::Instant::now();
         // A tool round is another wait: the step starts by asking the model again, and the clock has
         // to be running for it or the pause after every tool call looks like the turn is over. The
         // round's own state -- which tools are in flight, which are being waited for, the answer so
@@ -4554,7 +4584,7 @@ async fn run_turn(
         // request in flight is dropped, which is what `Interrupt` does too -- a command is not a
         // reason to keep paying for an answer nobody is waiting for any more.
         if let Some(line) = hand_back {
-            turn_over(printer, live, agent, outcome, limit);
+            turn_over(printer, live, agent, outcome, limit, &turn_began);
             return Ok(Handover {
                 line: Some(line),
                 reports,
@@ -4564,7 +4594,7 @@ async fn run_turn(
 
         // Whatever happened, nothing is running now: leaving a stale clock on the strip
         // would be worse than showing none.
-        turn_over(printer, live, agent, outcome, limit);
+        turn_over(printer, live, agent, outcome, limit, &turn_began);
 
         match steering {
             None => {

@@ -1156,7 +1156,7 @@ line no longer crosses the composer; **the page's own log, written by default** 
 the hand's code made the boot's first paint throw, taking the sidebar, the sessions and the feed
 with it; and `/stop`, the interrupt as a short word, reachable from the composer today.
 
-### 10. flint as a function a program can call — **done: steps 1–7 landed (B7 included)**
+### 10. flint as a function a program can call — **done: steps 1–7 landed (B7 included, and the duration half of B5)**
 
 flint answers; it cannot yet be *trusted as a function*. A caller that acts on the result — writes a
 config, queues a job, retries a batch, feeds it data it did not author — has to know four things
@@ -1172,13 +1172,15 @@ this class: every one of them is invisible from a terminal.
 | the answer is separated from the noise | `simonw/llm`, `mods -r` | ✓ stdout is only the stream |
 | the result says **why the run ended** | Claude Code `-p --output-format json`, whose `subtype` is `success`, `error_max_budget_usd`, … | ✓ `outcome` on `turn.completed` (step 1) |
 | structured output is a field, not prose | the same: `structured_output` beside `result` | ✓ the `result` frame |
-| cost and duration are part of the result | the same: `total_cost_usd`, `duration_ms`, `model_usage` | ✗ `duration_ms` is the cheap half of it (B5) |
+| cost and duration are part of the result | the same: `total_cost_usd`, `duration_ms`, `model_usage` | ✓ the duration half: `duration_ms` on `turn.completed` (B5); ✗ the money half, and deliberately — flint does not know what a token costs where it was pointed |
 | the conversation can be named and resumed | the same: `session_id`, `--resume` | ✓ |
 | the exit code classifies the failure | `sysexits.h`: 2 usage, 65 data error, 69 unavailable, 75 retryable. "A CLI that always exits 0 (or always 1) hides this signal, forcing agents to parse error text with regex" | ✓ 0, 1 unclassified, 2, 65, 69, 75, 130 (steps 1–2) |
 
 At the time this section was written, flint did exactly what that last row warns against, and the row
-was the section in one line. It no longer is: four of the six properties are in, and the one still
-missing is the one about money — what a run *cost* rather than what it answered.
+was the section in one line. It no longer is: five of the six properties are in whole, and the sixth is
+in with the half that is honest — a run says how long it took, and cannot say what it cost, because
+flint has no idea what a token costs on the endpoint somebody pointed it at, and a number invented from
+a price table would be worse than the absence.
 
 #### A. Cannot be done at all
 
@@ -1229,8 +1231,12 @@ decision, not a gap.
 4. **Whether the turn changed anything.** Tool calls are visible individually, but no summary says
    which files were written or which commands ran. For a caller deciding whether it is safe to
    proceed, that is the first question, and today it is answered by reading the whole event stream.
-5. **What it cost.** Token counts for the last turn are in `turn.completed`; cost, wall-clock
-   duration and how many provider retries happened (currently only on stderr) are not.
+5. **What it cost.** Token counts for the last turn are in `turn.completed`, and *done since*: the
+   wall-clock duration is there too (`duration_ms`, measured from `turn.started`, on every ending
+   including a stopped one). What is still absent is the money — see the note under B5 above for why
+   that half is refused rather than pending — and how many provider retries happened, which is still
+   only on stderr; a retry is invisible in the stream and is the one part of "why was that slow" that
+   `duration_ms` can now raise without being able to answer.
 
 #### C. Holes
 
@@ -1544,8 +1550,14 @@ Five lessons from them, and what each becomes here:
 5. **No structured output leaves a hack in its place** — with nothing schema-shaped to read, that
    project keeps `prediction = first non-empty line, truncated to 120 characters`. `--schema` is the
    answer to that. Its other gap is B5: Codex headless reports no token usage at all and OpenCode no
-   cost, so the cheap half of B5 belongs in the same round as the balance work — **`duration_ms` on
-   `turn.completed`**, which costs one `Instant` and answers "was that slow or was it stuck".
+   cost. **`duration_ms` on `turn.completed` is built** — one `Instant` per turn, started at
+   `turn.started` and reported on every ending including `stopped`, so "was that slow or was it stuck"
+   has an answer in the stream rather than in a stopwatch around the subprocess. What the number is
+   *not* is a price, and that half stays absent for a reason worth writing down rather than a gap to
+   close: flint talks to whatever OpenAI-compatible endpoint it is pointed at, providers disagree about
+   whether a cached prompt costs less, and a price table maintained in this repository would go stale
+   into a wrong number — which is worse than no number. A caller that knows its own tariff has
+   `prompt_tokens` and `completion_tokens` on the same line.
 
 Also worth doing while the release workflow is fresh: it **builds on every push and runs no tests**.
 The three commands in `AGENTS.md` ("Verifying a change") are exactly what a job should run, and a
