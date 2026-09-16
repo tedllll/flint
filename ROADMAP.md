@@ -1670,12 +1670,21 @@ and C6 is the note that the documentation has to say so).
 
 ## Known unfinished
 
-Five known defects are not repeated here, so that the list cannot drift apart from the
-state of the tree: Windows newline and code-page behaviour, CI that checks nothing on push,
-three `eprintln!` sites that can land inside the answer strip, and a transcript that is not
+Three known defects are not repeated here, so that the list cannot drift apart from the
+state of the tree: a terminal that goes away taking a core with it (the `crossterm` spin that
+predates the browser work), CI that checks nothing on push, and a transcript that is not
 trimmed by construction.
 [`HANDOFF.md`](HANDOFF.md#known-unfinished) has each in detail, labelled by what was
 measured and what was not.
+
+Two things left this list rather than being carried on it. The `eprintln!` sites that could
+land inside the answer strip are fixed — there were four, not the three this file used to
+name, and the fourth (`provider.rs`, printing the retry ladder from inside the request loop)
+was the likeliest to fire; all four go through the notice sink now. And Windows newline and
+code-page behaviour came *off* the list because it was measured: the console output code page
+is never set and does not need to be (Rust writes to a console as UTF-16), and
+`DISABLE_NEWLINE_AUTO_RETURN` is clear with a linefeed at the last column still advancing one
+row, so nothing there was broken.
 
 ## Not doing, and why
 

@@ -641,13 +641,17 @@ impl Provider {
                         .as_ref()
                         .map(|e| format!("{e:#}"))
                         .unwrap_or_default();
-                    eprintln!(
-                        "flint: {} -- retrying in {}s (attempt {}/{})",
+                    // Through the notice sink rather than `eprintln!`: this fires from inside the
+                    // request loop, so it is always during a turn, and with the strip active a stray
+                    // write to stderr lands inside the answer being drawn. The sink falls back to
+                    // stderr for a run with no UI (`--json`, a test), where that is the right place.
+                    crate::tools::notice(&format!(
+                        "{} -- retrying in {}s (attempt {}/{})",
                         first_line(&why),
                         wait.as_secs(),
                         attempt + 1,
                         MAX_ATTEMPTS
-                    );
+                    ));
                     tokio::time::sleep(wait).await;
                 }
             }

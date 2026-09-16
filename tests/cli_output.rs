@@ -1265,6 +1265,121 @@ async fn the_repl_names_the_open_session_and_refuses_to_delete_it() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// A warning raised while the REPL is running belongs in the transcript, not on stderr.
+///
+/// With the strip active a stray write to stderr lands wherever the cursor is -- inside the answer
+/// being drawn -- and tears the layout apart. Three sites did exactly that: a session event that
+/// could not be persisted (`agent.rs`), a session file with an unreadable line (`session.rs`), and a
+/// default config being created under `/reload` (`config.rs`). This drives the one a test can reach
+/// deterministically -- `/resume` on a damaged file -- and asserts both halves, because either half
+/// alone passes for the wrong reason: a warning that vanished passes "not on stderr", and one
+/// printed twice passes a one-sided check.
+#[cfg(debug_assertions)]
+#[test]
+fn a_warning_from_a_resumed_session_is_a_transcript_line_and_not_stderr() {
+    let home = test_home("warning-line", "http://127.0.0.1:1/v1");
+    let sessions = home.join("sessions");
+    std::fs::create_dir_all(&sessions).expect("sessions directory");
+    // Damage, not somebody else's event: valid JSON, a type this build knows, and a `message` that
+    // is not the object it has to be. That is the distinction `session::load` documents, and it is
+    // the one the warning exists for.
+    std::fs::write(
+        sessions.join("damaged.jsonl"),
+        "{\"type\":\"meta\",\"v\":1,\"id\":\"damaged\",\"created\":\"epoch:1\",\"cwd\":\".\",\
+         \"provider\":\"stub\",\"model\":\"stub-model\"}\n\
+         {\"type\":\"chat\",\"message\":\"not an object\"}\n",
+    )
+    .expect("damaged session");
+
+    let mut child = binary()
+        .env("FLINT_HOME", &home)
+        .env("FLINT_TERM_CAPTURE", "1")
+        .env("FLINT_TERM_SIZE", "80x24")
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to run flint");
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().expect("no stdin handle");
+        stdin
+            .write_all(b"/resume 1\n/exit\n")
+            .expect("failed to write stdin");
+    }
+    let out = child.wait_with_output().expect("flint did not finish");
+    let screen = String::from_utf8_lossy(&out.stdout).to_string();
+    let errors = String::from_utf8_lossy(&out.stderr).to_string();
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(
+        screen.contains("unreadable line(s) skipped"),
+        "the warning never reached the transcript: {screen:?}"
+    );
+    assert!(
+        !errors.contains("unreadable line(s) skipped"),
+        "the warning wrote to stderr, which lands inside the strip: {errors:?}"
+    );
+}
+
+/// The retry ladder says what it is doing in the transcript too.
+///
+/// The same fault as the test above, one layer down and far more likely to fire: the ladder that
+/// waits between attempts printed on stderr from inside the request loop, which is *always* during
+/// a turn. A dead endpoint is the cheap way to reach it -- connection refused is retryable, so the
+/// ladder walks its 1s, 2s and 4s waits -- and the assertion is the same two-sided one, because a
+/// notice that went nowhere and a notice printed twice are different bugs.
+///
+/// The second line is written only after the turn has had time to fail, unlike every other test
+/// here: piped input is *steering*, so a `/exit` that arrives while the turn is running drops the
+/// turn instead of leaving it -- measured, and it made the first version of this test pass for the
+/// wrong reason (nothing was ever retried).
+#[cfg(debug_assertions)]
+#[test]
+fn the_retry_ladder_says_so_in_the_transcript_and_not_on_stderr() {
+    let home = test_home("retry-line", "http://127.0.0.1:1/v1");
+
+    let mut child = binary()
+        .env("FLINT_HOME", &home)
+        .env("FLINT_TERM_CAPTURE", "1")
+        .env("FLINT_TERM_SIZE", "80x24")
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to run flint");
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().expect("no stdin handle");
+        stdin
+            .write_all(b"are you there\n")
+            .expect("failed to write stdin");
+        stdin.flush().expect("flush");
+        // The ladder is 1s + 2s + 4s of waiting between four attempts, so this is comfortably past
+        // the end of the turn and well short of the test suite's patience.
+        std::thread::sleep(std::time::Duration::from_secs(10));
+        stdin.write_all(b"/exit\n").expect("failed to write stdin");
+    }
+    let out = child.wait_with_output().expect("flint did not finish");
+    let screen = String::from_utf8_lossy(&out.stdout).to_string();
+    let errors = String::from_utf8_lossy(&out.stderr).to_string();
+    let _ = std::fs::remove_dir_all(&home);
+
+    // "trying in", not "retrying in": the notice is one long line and the strip wraps it, so the
+    // captured bytes carry a `\r\n` and a repaint escape in the middle of the word. The phrase that
+    // survives the wrap is the one that is on a row of its own.
+    assert!(
+        screen.contains("trying in"),
+        "the retry never reached the transcript: {screen:?}"
+    );
+    assert!(
+        !errors.contains("trying in"),
+        "the retry wrote to stderr, which lands inside the strip: {errors:?}"
+    );
+}
+
 /// `/skills` has to show what the model would actually be handed.
 ///
 /// The REPL is the only place a person can check that, and the check that matters is the

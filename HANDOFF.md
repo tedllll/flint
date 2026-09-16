@@ -94,8 +94,8 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 525 passing, 1 ignored (313 lib, 3 in
-the binary's own tests, 33 `agent_loop`, 63 `cli_output`, 35 `json_output` (7 structured
+As of the commit that carries this file, `cargo test` is 527 passing, 1 ignored (313 lib, 3 in
+the binary's own tests, 33 `agent_loop`, 65 `cli_output`, 35 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
 be able to read, 4 the answer written where the caller asked, 3 the file inlined into the prompt,
@@ -1792,7 +1792,8 @@ recorded there with what is missing and why the fix is not free. The line-ending
 `apply_patch` (§6.4) was the other item on that list and is now built, with the fact it measured: a
 patch line cannot carry a `\r`, so the sentence names `edit` instead.
 
-**Windows terminal behaviour has now been measured, in a private console.** Read
+**Windows terminal behaviour has now been measured, in a private console, and is kept here as
+history rather than as an open item — nothing in it turned out to be broken.** Read
 [`docs/windows.md`](docs/windows.md) first — it has the mechanisms, labelled by what was
 measured versus reasoned, and §1–§3 are all measured as of the session that finished
 `docs/windows-tooling.md`. The short version: the layout is built on terminal *behaviour*
@@ -1815,10 +1816,30 @@ and `workflow_dispatch`, so a push to `main` checks nothing on any platform. The
 cross-compile cannot even be type-checked from a Mac: `aws-lc-sys` (rustls's crypto backend)
 needs a Windows C toolchain, not just `rustup target add`.
 
-**Three `eprintln!` sites can still fire mid-turn**, which puts them inside the strip:
-`agent.rs` (cannot persist session event), `config.rs`, `session.rs`. They are rare
-enough that they have not been seen, but they are the same fault that was fixed for tool
-notices — they should move to the notice sink.
+**The `eprintln!` sites that could fire inside the strip are fixed, and there were four rather
+than three.** The list named `agent.rs` (a session event that could not be persisted), `config.rs`
+and `session.rs`; walking the tree for the same shape found the fourth and the most likely one —
+`provider.rs` printed the retry ladder's line from *inside the request loop*, so every endpoint
+hiccup wrote to stderr during a turn. All four go through the notice sink now (`tools::notice`,
+whose doc says it is the one route for anything below the REPL that must not write to stderr), which
+means the transcript when there is a UI and the same stderr line as before when there is not: a
+`--json` run and a test both fall back, so nothing a program reads changed. `config.rs`'s message
+was one write carrying a newline and is two notices now, because one `line` call with a newline in
+it walks down rows the layout reserved for something else — and the two lines it prints on a first
+run are byte-for-byte what they were on stderr. The remaining `eprintln!` calls are all
+*startup* ones (the missing-session and forked-into lines, the presence record that could not be
+written, the top-level error printer, a one-shot failure), which run before the strip exists or on a
+run that has no UI at all.
+
+Two tests, both watched red first, both two-sided on purpose — a warning that vanished passes "not
+on stderr", and one printed twice passes a one-sided check: `/resume` on a file with an unreadable
+line (`session.rs`'s path, cheap and deterministic), and a turn against a dead endpoint so the
+ladder walks its 1s, 2s and 4s waits (`provider.rs`'s path, ~10s). The second one also measured
+something worth keeping: piped input is *steering*, so the first version of it sent `/exit`
+immediately and the turn was dropped before any retry happened — the test passed nothing and failed
+nothing until the second line was written late. It also shows why the assertion is on `"trying in"`
+rather than the whole sentence: the notice is longer than the strip, so the captured bytes carry a
+wrap and a repaint escape in the middle of it.
 
 **The transcript is not trimmed by construction.** The step guard is 100, and what keeps
 a long turn from walking into the context ceiling is request-side pruning of stale tool

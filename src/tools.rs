@@ -828,6 +828,12 @@ pub fn progress(line: &str) {
 }
 
 /// Report something to the user without disturbing whatever is on screen.
+///
+/// The one route for anything below the REPL that has to say something and must not write to
+/// stderr: with the answer strip active, a stray write lands wherever the cursor is. The sink is
+/// installed by the CLI and wraps `Term::notice`, which commits the half-drawn answer first; the
+/// fallback below is for a run with no UI at all (a test, an embedder, `--json`), where stderr is
+/// the parseable place for it.
 pub fn notice(message: &str) {
     match NOTICE.get() {
         Some(sink) => sink(message),

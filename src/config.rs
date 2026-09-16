@@ -618,10 +618,16 @@ impl Config {
         if !path.exists() {
             let cfg = Config::default();
             cfg.save()?;
-            eprintln!(
-                "flint: created default config at {}\n\
-                 flint: set your API key there (or export DEEPSEEK_API_KEY), then re-run.\n",
+            // Two notices rather than one message with a newline in it: one `line` call carrying a
+            // newline moves the cursor down through rows the layout reserved for something else.
+            // This is reachable mid-session -- `/reload` with the file deleted -- which is why it
+            // goes through the sink instead of straight to stderr.
+            crate::tools::notice(&format!(
+                "created default config at {}",
                 path.display()
+            ));
+            crate::tools::notice(
+                "set your API key there (or export DEEPSEEK_API_KEY), then re-run.",
             );
             return Ok(cfg);
         }

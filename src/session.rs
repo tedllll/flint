@@ -509,10 +509,12 @@ pub fn load(path: &Path) -> Result<LoadedSession> {
     }
 
     if damaged > 0 {
-        eprintln!(
-            "flint: {damaged} unreadable line(s) skipped in {}",
+        // Through the notice sink: `/resume` loads a file in the middle of a session, and a stray
+        // write to stderr with the strip active lands inside the answer being drawn.
+        crate::tools::notice(&format!(
+            "{damaged} unreadable line(s) skipped in {}",
             path.display()
-        );
+        ));
     }
     Ok(loaded)
 }

@@ -783,7 +783,11 @@ impl Agent {
     fn record(&mut self, event: SessionEvent) {
         if let Some(writer) = &mut self.writer {
             if let Err(e) = writer.append(&event) {
-                eprintln!("flint: warning: cannot persist session event: {e:#}");
+                // Through the notice sink rather than `eprintln!`: this happens *during* a turn, and
+                // with the strip active a stray write to stderr lands wherever the cursor is -- inside
+                // the answer being drawn. The sink also keeps the sentence out of a `--json` run's
+                // stdout, which is the other half of why it exists.
+                crate::tools::notice(&format!("warning: cannot persist session event: {e:#}"));
             }
         }
     }
