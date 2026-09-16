@@ -73,12 +73,23 @@ pub enum SessionEvent {
     /// loop that has no permission layer, which is the fault `docs/agents.md` refuses to build. `load`
     /// therefore reads this event and keeps it out of `messages`; the transcript shows it at the moment
     /// it arrived, and `SessionEvent::Peer` is the record that it did.
+    ///
+    /// `heard` is true when this run was started with `--hear-peers` and therefore relayed the message
+    /// to the model on the next request. It is recorded because a person reading the file back is
+    /// entitled to know whether an agent was told something, and because it is the only place that
+    /// answers the question -- the request body is not kept anywhere. It does **not** make the words
+    /// history: `load` still skips this event, so a resumed conversation cannot inherit a decision
+    /// somebody made once.
     Peer {
         from: String,
         text: String,
         /// When it arrived, as a unix second, or 0 when the sender did not say.
         #[serde(default)]
         at: u64,
+        /// Whether this run passed it on to the model. Defaulted, so a file written before the opt-in
+        /// existed still reads as what it was: a message the model never saw.
+        #[serde(default)]
+        heard: bool,
     },
     Usage {
         usage: Usage,

@@ -163,6 +163,21 @@ async fn a_one_shot_run_stops_when_its_budget_is_gone() {
     );
 }
 
+/// The mirror of the budget: a flag about *between* turns has no turn to act in when there is one.
+///
+/// Refused rather than ignored, because the failure this prevents is the quiet one: a caller who
+/// believed a peer's words would be relayed, and a run that read no mailbox at all.
+#[test]
+fn hearing_peers_on_a_one_shot_run_is_refused() {
+    let (code, out) = run(&["-p", "hello", "--hear-peers"]);
+    assert_eq!(code, 2, "{}", String::from_utf8_lossy(&out));
+    let text = String::from_utf8_lossy(&out);
+    assert!(
+        text.contains("--hear-peers") && text.contains("/hear-peers"),
+        "the refusal does not name the flag or the command that would work: {text}"
+    );
+}
+
 /// The same flag on a run with no prompt: there is no call to bound, and a budget is not a setting.
 #[test]
 fn a_budget_without_a_prompt_is_refused() {
@@ -3677,7 +3692,7 @@ async fn the_page_is_told_which_commands_it_may_offer() {
         "a no-argument action is not carried, which is the class §8 builds first: {commands:?}"
     );
     // The classes the page cannot draw from *this* frame are not in it. `/exit` is the one §8 calls
-    // out (a window onto a process, and a misclick must not end a session); the three toggles are
+    // out (a window onto a process, and a misclick must not end a session); the toggles are
     // already on the page from the `toggles` field, and repeating them here would be one fact in
     // two places; `/web` has nothing to offer (the page *is* the web view) and `!` is a shell
     // escape that the composer can type anyway.
@@ -3686,6 +3701,7 @@ async fn the_page_is_told_which_commands_it_may_offer() {
         "\"label\":\"/verbose",
         "\"label\":\"/detail",
         "\"label\":\"/readonly",
+        "\"label\":\"/hear-peers",
         "\"label\":\"/web",
         "\"label\":\"!<command>\"",
     ] {

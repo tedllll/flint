@@ -175,6 +175,28 @@ The schema in the line is checked when it is read: a keyword this build cannot v
 refused with the conversation named, rather than an answer being certified against a rule
 nobody checked.
 
+### `peer`
+
+```json
+{"type":"peer","from":"peer 41288","text":"please do not commit docs/sandbox.md; I am still writing it","at":1789290999,"heard":false}
+```
+
+A run in this directory was left a message with `flint say`, and it showed it to its person. `from` is a
+claim rather than an identity — whoever can write a mailbox file can write that field — and `at` is a
+unix second, or 0 when the sender did not say.
+
+**It is not a `chat`, and that is the whole reason it is an event of its own.** `load` reads this line
+and deliberately keeps it out of `messages`, so a peer's words cannot become history: anything able to
+write a mailbox could otherwise steer the tool loop of a process that has no permission layer, and a
+conversation resumed from this file would relay them again to a run whose person never asked. The
+transcript shows the message at the moment it arrived; this line is the record that it did.
+
+`heard` is true when that run was started with `--hear-peers` (or had `/hear-peers on` in force) and
+therefore sent the words to the model with its next request — where they arrived as a user message
+labelled with where they came from. It is the only place that answers "was the model told this", since a
+request body is not kept anywhere, and it is defaulted on read so a file written before the option
+existed still reads as what it was: a message no model ever saw.
+
 ## The rules a reader must keep
 
 - **Unknown `type` is skipped in silence.** Another build, a newer flint, or you with an

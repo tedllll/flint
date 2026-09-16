@@ -166,14 +166,20 @@ pub enum Event {
     Status { text: String, restarted: bool },
     /// One agent turn finished (no more tool calls pending).
     Done,
-    /// A peer left a message for this run, and it is **for the person, not for the model**.
+    /// A peer left a message for this run, and it is **for the person, not for the model** -- unless
+    /// this run was started with `--hear-peers`, which `heard` is.
     ///
-    /// `from` is a claim, not an identity: whoever can write the mailbox can write that field. This
-    /// event exists so the message reaches the transcript and the session file; it must never reach a
-    /// request body, which is the rule `docs/agents.md` calls the reason the mailbox is safe to have at
-    /// all. Nothing that builds a request may match on this variant -- the compiler is the only reason
-    /// it is not a `Warning`.
-    Peer { from: String, text: String },
+    /// `from` is a claim, not an identity: whoever can write the mailbox can write that field, and a
+    /// run that hears peers is trusting that claim on purpose. By default this event exists so the
+    /// message reaches the transcript and the session file and never a request body, which is the rule
+    /// `docs/agents.md` calls the reason the mailbox is safe to have at all; `heard` is the deliberate
+    /// exception, and it is on the event so the transcript can say which one happened instead of
+    /// telling the person the model has not seen something it has.
+    Peer {
+        from: String,
+        text: String,
+        heard: bool,
+    },
     /// A non-fatal problem worth surfacing to the user.
     Warning(String),
 }

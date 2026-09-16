@@ -236,20 +236,29 @@ impl<'a, 'p> EventSink<'a, 'p> {
                     .term()
                     .line(format_args!("{} {w}", self.printer.style(RED, "warning:")));
             }
-            // Shown, never sent. Two lines because the second one is the whole safety rule, and a
-            // person reading a message that sounds like an instruction needs to know that the model
-            // has not seen it -- otherwise "the agent ignored me" is the natural, wrong conclusion.
-            Event::Peer { from, text } => {
+            // Shown, and then the one thing the reader cannot work out for themselves: whether the model
+            // was given it. Two lines because the second is the whole safety rule, and a person reading a
+            // message that sounds like an instruction needs to know which of the two happened --
+            // otherwise "the agent ignored me" or "the agent obeyed a stranger" is the natural, wrong
+            // conclusion. `heard` is the run's own decision, reported rather than assumed.
+            Event::Peer { from, text, heard } => {
                 self.printer.term().blank();
                 self.printer.term().line(format_args!(
                     "{} {} says: {text}",
                     self.printer.style(CYAN, "peer"),
                     if from.trim().is_empty() { "someone" } else { from.as_str() }
                 ));
-                self.printer.term().line(format_args!(
-                    "      (shown to you; not sent to the model)"
-                ));
+                if heard {
+                    self.printer.term().line(format_args!(
+                        "      (passed on to the model, because you asked to hear peers)"
+                    ));
+                } else {
+                    self.printer.term().line(format_args!(
+                        "      (shown to you; not sent to the model)"
+                    ));
+                }
             }
+
             Event::Done => {}
             // The terminal never receives one of these: the status *is* the terminal's own row, and
             // `waiting` reads from it rather than feeding it. A caller that could send one would be a

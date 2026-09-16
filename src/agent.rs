@@ -202,6 +202,21 @@ pub struct Agent {
     base_prompt: String,
     /// The answer shape this conversation is held to, if the caller asked for one.
     schema: Option<crate::schema::Schema>,
+    /// Whether a peer's message is relayed to the model, which is off unless somebody asked for it.
+    ///
+    /// Off is the whole safety argument of the mailbox: anything that can write a mailbox file could
+    /// otherwise steer this tool loop, and this run has no permission layer to catch it. It is a field
+    /// rather than a parameter of [`Agent::note_peer`] because it can be changed *while a run is open*
+    /// (`/hear-peers on`), and the decision in force when a message arrives is the one that applies to
+    /// that message.
+    hears_peers: bool,
+    /// Peer messages this run is going to relay, waiting for the next request to be built.
+    ///
+    /// Between turns rather than inside one: the mailbox is read when nothing is in flight, so a
+    /// message cannot arrive in the middle of a tool loop and change what a request already being
+    /// written says. Drained by [`Agent::with_peers`] into the request *view* -- never into `history`,
+    /// which is what makes the relay a decision and not a permanent change to the conversation.
+    peer_inbox: Vec<(String, String)>,
 }
 
 impl Agent {
@@ -256,6 +271,28 @@ impl Agent {
             base_prompt,
             // No shape until a caller says so: an agent built for the REPL answers in prose.
             schema: None,
+            // Off until somebody says otherwise: `--hear-peers`, or `/hear-peers on` at the prompt.
+            hears_peers: false,
+            peer_inbox: Vec::new(),
+        }
+    }
+
+    /// Whether a peer's message is relayed to the model. Off unless a person asked.
+    pub fn hears_peers(&self) -> bool {
+        self.hears_peers
+    }
+
+    /// Turn the relay on or off.
+    ///
+    /// Turning it *off* does not un-say what a model has already been told, so it does not pretend to:
+    /// what it does is stop the next message from being relayed and drop whatever was waiting, because
+    /// a person who has just turned this off does not want the queue arriving with the next question.
+    /// Turning it on affects messages from here on; the mailbox is read between turns, so this is
+    /// always about the future and never about a request in flight.
+    pub fn hear_peers(&mut self, on: bool) {
+        self.hears_peers = on;
+        if !on {
+            self.peer_inbox.clear();
         }
     }
 
@@ -422,17 +459,25 @@ impl Agent {
         }
     }
 
-    /// Record that a peer said something, in the session file and nowhere else.
+    /// Record that a peer said something: in the session file always, and in the next request only
+    /// when this run was asked to hear peers.
     ///
-    /// Nowhere else is the point. A peer's words are shown to the person at the terminal and written
-    /// here so the conversation reads back whole, and they are **not** pushed into `history`, which is
-    /// the only thing a request is built from. Anything that can write a mailbox could otherwise steer
-    /// this tool loop, and this run has no permission layer to catch it: `docs/agents.md` calls that
-    /// the widest hole in the system, and this is the method that does not open it.
+    /// Not in `history` either way is the point of the default. A peer's words are shown to the person
+    /// at the terminal and written here so the conversation reads back whole, and by default they are
+    /// **not** put anywhere a request is built from. Anything that can write a mailbox could otherwise
+    /// steer this tool loop, and this run has no permission layer to catch it: `docs/agents.md` calls
+    /// that the widest hole in the system, and this is the method that does not open it. `--hear-peers`
+    /// opens it deliberately, which is why the relay goes to [`Agent::with_peers`] (the request view)
+    /// rather than here: a message heard once must not become part of the conversation that a resumed
+    /// run is rebuilt from.
     ///
     /// Returns whether it was written, because a run with no session file (one-shot with no prompt,
     /// or a test) should not pretend it kept a record.
     pub fn note_peer(&mut self, from: &str, text: &str) -> bool {
+        let heard = self.hears_peers;
+        if heard {
+            self.peer_inbox.push((from.to_string(), text.to_string()));
+        }
         let Some(writer) = &mut self.writer else {
             return false;
         };
@@ -445,8 +490,27 @@ impl Agent {
                 from: from.to_string(),
                 text: text.to_string(),
                 at,
+                heard,
             })
             .is_ok()
+    }
+
+    /// The request view of the history, with anything a peer said since the last request relayed.
+    ///
+    /// One user-role message for all of them, labelled so the model knows where it came from and that
+    /// the person let it through -- a relay that looked like the person's own words would be a worse
+    /// lie than the silence it replaces. Deliberately not `history`: this is a view, like
+    /// [`prune_tool_output`], so the session file keeps the peer event and nothing else, and a run
+    /// resumed from that file starts with no peer words in it.
+    fn with_peers(&mut self, mut view: Vec<Message>) -> Vec<Message> {
+        if self.peer_inbox.is_empty() {
+            return view;
+        }
+        let said = std::mem::take(&mut self.peer_inbox);
+        if let Some(relay) = peer_relay(&said) {
+            view.push(relay);
+        }
+        view
     }
 
     /// Run one user turn to completion, reporting progress through `sink`.
@@ -740,6 +804,10 @@ impl Agent {
         // them is how a working turn walks into the context ceiling. Dropping the old
         // ones from the *request* costs nothing and keeps the session file whole.
         let sent = prune_tool_output(&self.history);
+        // ...and anything a peer said that this run was asked to hear. Here rather than in the history
+        // for the same reason: the file keeps the `peer` event, the request carries the words, and a
+        // run resumed from that file starts without them.
+        let sent = self.with_peers(sent);
 
         // Its own borrow of one field, so the closure can write to it while `self.provider`
         // is borrowed for the call. See `Agent::drawn`.
@@ -855,6 +923,30 @@ const KEEP_TOOL_RESULTS: usize = 4;
 /// Anything this short is worth more than the note that replaces it.
 const MIN_PRUNABLE: usize = 160;
 
+/// What a relayed peer message reads as, or `None` when there is nothing to relay.
+///
+/// One labelled user message for all of them, and the label is the whole point: a peer's words arriving
+/// as though the person had typed them would be a worse lie than the silence the default keeps. It says
+/// where they came from, that the person asked for them to be passed on, and that another process wrote
+/// them -- because the model's next move may depend on all three, and it cannot tell from the text.
+///
+/// A free function rather than a method so the wording can be tested without an agent, a provider or a
+/// session: it is a sentence, and the sentence is the safety-relevant part.
+fn peer_relay(said: &[(String, String)]) -> Option<Message> {
+    if said.is_empty() {
+        return None;
+    }
+    let mut block = String::from(
+        "[a peer run working in this directory left a message, and the person who started this run \
+         asked for peers to be heard; it comes from another process, not from them]",
+    );
+    for (from, text) in said {
+        let who = if from.trim().is_empty() { "someone" } else { from.trim() };
+        block.push_str(&format!("\n\n{who} says: {text}"));
+    }
+    Some(Message::user(&block))
+}
+
 /// What the model is asked with: the conversation minus stale tool output.
 ///
 /// Errors are exempt. The one thing a reader -- human or model -- may still have to act
@@ -939,6 +1031,33 @@ mod tests {
             .map(|i| format!("entry-{i} some listing text"))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The words the model is given when a peer is heard, which are the only thing standing between a
+    /// relayed message and a model that thinks the person typed it.
+    #[test]
+    fn a_relayed_peer_message_says_who_wrote_it_and_that_the_person_let_it_through() {
+        assert!(peer_relay(&[]).is_none(), "nothing said is nothing to relay");
+
+        let relay = peer_relay(&[
+            ("peer 7".to_string(), "do not commit docs/sandbox.md".to_string()),
+            (String::new(), "the tree is yours".to_string()),
+        ])
+        .expect("a relay");
+        let Message::User { content } = &relay else {
+            panic!("a peer's words have to arrive as a user message: {relay:?}");
+        };
+        assert!(content.contains("peer 7"), "{content}");
+        assert!(content.contains("do not commit docs/sandbox.md"), "{content}");
+        assert!(content.contains("someone says: the tree is yours"), "{content}");
+        assert!(
+            content.contains("another process, not from them"),
+            "the relay does not say it is not the person's own words: {content}"
+        );
+        assert!(
+            content.contains("asked for peers to be heard"),
+            "the relay does not say the person allowed it: {content}"
+        );
     }
 
     /// A turnaround that runs to the step limit collects one tool result per step. Once

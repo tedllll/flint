@@ -200,6 +200,149 @@ async fn a_peers_words_reach_the_person_and_the_session_but_never_the_model() {
     let _ = std::fs::remove_file(&mailbox);
 }
 
+/// The opt-in, which is the whole difference between a mailbox and an injection channel.
+///
+/// With `--hear-peers`, the message a peer left between two turns is relayed to the model on the next
+/// request -- and only there: the session records that it was heard, and the history a *resumed*
+/// conversation is rebuilt from still cannot contain it, because the event it was written as is not a
+/// chat message. That second half is the property worth a test, not the first: an opt-in that quietly
+/// persisted into every later run would be a decision made once and never again.
+#[tokio::test]
+async fn a_run_that_asked_to_hear_peers_relays_them_and_a_resumed_one_does_not_inherit_them() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let server = MockServer::start().await;
+    let (home, work) = scratch("hears", &server.uri());
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(Talking {
+            seen: seen.clone(),
+            home: home.clone(),
+            work: work.clone(),
+            said: Mutex::new(false),
+        })
+        .mount(&server)
+        .await;
+
+    let mailbox = mailbox_of(&home, &work);
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_flint"))
+        .args(["--hear-peers", "--cwd", &work.display().to_string()])
+        .env("FLINT_HOME", &home)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to run flint");
+
+    // Two turns, and the second one has to be asked for at the right moment: the peer speaks during
+    // the first turn, the mailbox is read when that turn ends, and a line typed while a turn is
+    // running *steers* it instead of becoming the next question. So the transcript is read as it
+    // arrives and the second line goes in when the peer's message has been shown -- which is the
+    // moment the run is back at its prompt, and is the same fact this test is about.
+    let transcript = Arc::new(Mutex::new(String::new()));
+    let reader = {
+        let sink = transcript.clone();
+        let mut out = child.stdout.take().expect("stdout");
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = out.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                sink.lock().expect("transcript lock").push_str(&String::from_utf8_lossy(&buf[..n]));
+            }
+        })
+    };
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().expect("stdin");
+        stdin.write_all(b"hello there\n").expect("write");
+        stdin.flush().expect("flush");
+    }
+    let began = std::time::Instant::now();
+    while !transcript.lock().expect("transcript lock").contains("says:") {
+        assert!(
+            began.elapsed() < std::time::Duration::from_secs(30),
+            "the peer's message never reached the person: {}",
+            transcript.lock().expect("transcript lock")
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().expect("stdin");
+        stdin.write_all(b"and now revise the plan\n").expect("write");
+        stdin.flush().expect("flush");
+    }
+    child.stdin.take();
+    let status = child.wait().expect("flint did not finish");
+    reader.join().expect("the reader thread");
+    let stdout = transcript.lock().expect("transcript lock").clone();
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        use std::io::Read;
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+    assert!(status.success(), "the run failed: {stderr}");
+
+    // 1. The person is told the truth about this one: it *was* passed on.
+    assert!(
+        stdout.contains("docs/sandbox.md"),
+        "the message never reached the person: {stdout}  stderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("passed on to the model"),
+        "the transcript does not say the model was given it: {stdout}"
+    );
+    assert!(
+        !stdout.contains("not sent to the model"),
+        "the transcript still claims the model has not seen it: {stdout}"
+    );
+
+    // 2. It reached the request that followed -- and not the one that was in flight, because a mailbox
+    //    is read between turns rather than in the middle of a tool loop.
+    let bodies = seen.lock().expect("seen lock").clone();
+    assert_eq!(bodies.len(), 2, "expected two turns: {bodies:?}");
+    assert!(
+        !bodies[0].contains("docs/sandbox.md"),
+        "the peer's words were in a request that was already being written: {}",
+        bodies[0]
+    );
+    assert!(
+        bodies[1].contains("docs/sandbox.md"),
+        "--hear-peers relayed nothing: {}",
+        bodies[1]
+    );
+    assert!(
+        bodies[1].contains("peer"),
+        "the relayed message does not say where it came from: {}",
+        bodies[1]
+    );
+
+    // 3. The session file says it was heard, and the history a later run is built from does not have it.
+    let session = only_session(&home);
+    let recorded = std::fs::read_to_string(&session).expect("reading the session");
+    let peer_line = recorded
+        .lines()
+        .find(|line| line.contains("\"type\":\"peer\""))
+        .unwrap_or_else(|| panic!("no peer event in {recorded}"));
+    assert!(
+        peer_line.contains("\"heard\":true"),
+        "the record does not say the model was given it: {peer_line}"
+    );
+    let resumed = flint::session::load(&session).expect("loading the session back");
+    for message in &resumed.messages {
+        let text = format!("{message:?}");
+        assert!(
+            !text.contains("docs/sandbox.md"),
+            "a peer's words came back as history, which is what the opt-in must not do: {text}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_file(&mailbox);
+}
+
 #[tokio::test]
 async fn saying_something_needs_no_key_and_says_where_it_went() {
     // An empty home with no provider at all: the message is a file, not a model call.

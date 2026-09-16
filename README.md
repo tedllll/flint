@@ -110,7 +110,7 @@ flint exec "npm i -g @deepseek-ai/dsh"   # no model involved
 flint balance                    # is this provider usable, and what is left in the account?
 flint balance --json             # the same answer for a program
 flint who                        # who else is working in this directory, and what changed
-flint say "the tree is yours"    # leave whoever is working here a message (they see it; the model does not)
+flint say "the tree is yours"    # leave whoever is working here a message (they see it; --hear-peers relays it)
 flint --list-sessions            # numbered, so --resume N works
 flint --list-sessions --json     # the same list as data, each row with its session path
 flint --name "codex config"      # name the conversation you are in
@@ -186,6 +186,7 @@ Inside the REPL:
 | `/verbose [on\|off\|full]` | how much of the agent's activity to narrate |
 | `/detail [on\|off]` | print tool output (default off: one line per result) |
 | `/readonly [on\|off]` | toggle the write guard |
+| `/hear-peers [on\|off]` | relay messages from `flint say` to the model (default off) |
 | `/tools` | list tools |
 | `/skills [name]` | list skills, or print one the way the model would get it |
 | `/sessions` | list past sessions, numbered |
@@ -202,7 +203,7 @@ Type while the model is working to interrupt it; your line becomes the next
 input. Ctrl-C clears a half-typed line, and quits when the line is already
 empty. Ctrl-D quits.
 
-Flags: `--provider`, `--model`, `--readonly`, `--cwd`, `--no-color` (or
+Flags: `--provider`, `--model`, `--readonly`, `--hear-peers`, `--cwd`, `--no-color` (or
 `NO_COLOR`), `--continue`, `--resume`, `--fork`, `--name`, `--archive`, `--delete`,
 `--json`, `--schema`, `--result-file`, `--list-sessions`, `--max-seconds`.
 
@@ -546,11 +547,29 @@ said to whoever is working in C:\work\flint (pid 41288)
      shown to the person reading that run; never sent to a model
 ```
 
-The sentence appears in a running flint's transcript, prefixed with who said it — and that is all it
-does. It is written to the session file as its own `peer` event, never as a chat message, so it cannot
-end up in a request body: anything that can write a mailbox could otherwise steer the tool loop of a
-process that has no permission layer. Feeding a peer's words to the model is a decision a *person*
-makes, and that decision is not built. `--to <pid>` addresses one run instead of everyone here.
+The sentence appears in a running flint's transcript, prefixed with who said it. By default that is all
+it does: it is written to the session file as its own `peer` event, never as a chat message, so it
+cannot end up in a request body — anything that can write a mailbox could otherwise steer the tool loop
+of a process that has no permission layer. `--to <pid>` addresses one run instead of everyone here.
+
+Feeding a peer's words to the model is a decision a *person* makes, and there is a switch for it:
+
+```console
+$ flint --hear-peers              # this run relays what `flint say` leaves here
+> /hear-peers off                 # or back off, mid-session
+peer messages OFF — shown to you, never sent to the model
+```
+
+With it on, a message that arrived between turns is sent with the next request as a user message
+labelled as coming from another process — the model is told where it came from and that you let it
+through — and the transcript says `passed on to the model` instead of `not sent to the model`. It is a
+session switch and not a one-shot flag: relaying needs a *next* turn to relay into, so `-p` with
+`--hear-peers` is refused rather than quietly ignored. Three more things bound it, and they are the
+reason it is safe to have at all: the default is off and there is no config key, so a standing session
+never relays by accident; the setting is per run, so a *resumed* conversation inherits nothing (the peer
+event is still not history, so a decision made once cannot become permanent); and the session file
+records `"heard":true` on the message that was relayed, which is the only place that says so. The page
+has the same switch, drawn from the run like its others.
 
 ### Watching a run in a browser
 

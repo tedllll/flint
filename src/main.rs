@@ -52,6 +52,13 @@ struct Args {
     provider: Option<String>,
     model: Option<String>,
     readonly: bool,
+    /// Relay what a peer says in this directory to the model, instead of only showing it to the person.
+    ///
+    /// Off by default, and that default is the safety argument rather than a preference: anything that
+    /// can write a mailbox file could otherwise steer a tool loop that has no permission layer. A flag
+    /// rather than a config key on purpose -- a standing property is one somebody forgets they set,
+    /// and this is a decision to make per run. `/hear-peers` changes it while the run is open.
+    hear_peers: bool,
     no_color: bool,
     /// Write the run as NDJSON on stdout instead of prose, for a program to read.
     ///
@@ -468,6 +475,19 @@ async fn real_main(args: Args) -> Result<i32> {
             .map_err(|e| -> anyhow::Error { Usage(format!("{e:#}")).into() })?;
     }
 
+    // ---- hearing peers needs a second turn to hear them in ----
+    //
+    // The mailbox is read between turns and relayed with the *next* request, so a one-shot run has
+    // nowhere to relay anything to: `-p` asks one question and ends. Accepted and ignored, the flag
+    // would look like it was working -- the dangerous direction for a switch whose whole point is that
+    // somebody chose it. So it is refused, and the sentence says which door to use instead.
+    if args.hear_peers && args.prompt.is_some() {
+        return usage(
+            "--hear-peers relays what a peer leaves between turns, and a one-shot run has no next \
+             turn to relay it in: start a session (no -p) and use /hear-peers there.",
+        );
+    }
+
     // ---- the budget, if the caller set one ----
     //
     // A prompt is required, and for the same reason `--json` requires one: a budget bounds a *call*,
@@ -826,6 +846,11 @@ async fn real_main(args: Args) -> Result<i32> {
     }
 
     let mut agent = agent::Agent::new(&cfg, provider, readonly, cwd.clone(), writer);
+    // Off unless `--hear-peers` said otherwise, and set here rather than in `Agent::new` because the
+    // decision belongs to the run and not to the machinery: a resumed conversation inherits no such
+    // decision (the file has no field for it), and `/hear-peers` is the only thing that changes it
+    // afterwards.
+    agent.hear_peers(args.hear_peers);
     if !history.is_empty() {
         agent.splice_loaded_history(&cfg, &cwd, history);
     }
@@ -1344,18 +1369,23 @@ async fn interactive(
 
     loop {
         // Anything a peer left while the last turn ran, before the prompt comes back: shown to the
-        // person and written to the session file, never to the model. This is the one moment in the
-        // REPL where the conversation is between turns, which is exactly where an interjection
-        // belongs -- and it is why a peer's words cannot arrive in the middle of a tool loop.
+        // person and written to the session file, and relayed to the model only when this run was
+        // asked to hear peers. This is the one moment in the REPL where the conversation is between
+        // turns, which is exactly where an interjection belongs -- and it is why a peer's words cannot
+        // arrive in the middle of a tool loop, where they would change a request already being written.
         for message in mailbox.new_messages(&me) {
             let from = if message.from.trim().is_empty() {
                 "someone".to_string()
             } else {
                 message.from.clone()
             };
+            // Read once, here, so the sentence on screen and the record in the file cannot disagree
+            // about whether the model was given it.
+            let heard = agent.hears_peers();
             let event = event::Event::Peer {
                 from: from.clone(),
                 text: message.text.clone(),
+                heard,
             };
             // The same sink a turn's events go through, so the message reaches the transcript, the
             // page and the `--json` stream in one place instead of three.
@@ -1486,7 +1516,7 @@ async fn interactive(
             match flow {
                 Flow::Continue => continue,
                 Flow::Exit => break,
-                Flow::NewAgent(new_agent, new_provider) => {
+                Flow::NewAgent(mut new_agent, new_provider) => {
                     // The page follows whichever file the run is writing, and it is told here rather
                     // than in each command because `/new` and `/resume` do move the run to another
                     // file. `/model`, `/provider` and `/reload` no longer do -- they replace the
@@ -1507,6 +1537,13 @@ async fn interactive(
                     if let Some(path) = new_agent.session_path() {
                         live_guard.set_session(&path);
                     }
+                    // And the peer-relay decision, for the same reason it is here rather than in each
+                    // command: whether a run hears peers is a decision about *this run*, so a command
+                    // that rebuilds the agent around the conversation must not quietly reverse it. The
+                    // one place every rebuild passes through is the place to keep it, and a command
+                    // cannot forget because it never has to remember.
+                    let heard = agent.hears_peers();
+                    new_agent.hear_peers(heard);
                     *agent = new_agent;
                     *provider_cfg = new_provider;
                     continue;
@@ -2398,6 +2435,13 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp::row("/verbose [on|off|full]", "/verbose", "how much of the agent's activity to narrate", HelpSection::Commands, OnPage::Toggles),
     CommandHelp::row("/detail [on|off]", "/detail", "print tool output (off: one line per result)", HelpSection::Commands, OnPage::Toggles),
     CommandHelp::row("/readonly [on|off]", "/readonly", "toggle the write guard", HelpSection::Commands, OnPage::Toggles),
+    CommandHelp::row(
+        "/hear-peers [on|off]",
+        "/hear-peers",
+        "send what a peer says here to the model (off: show it to you only)",
+        HelpSection::Commands,
+        OnPage::Toggles,
+    ),
     CommandHelp::row("/tools", "/tools", "list available tools", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/skills [name]", "/skills", "list skills, or print one as the model would see it", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/agents [name]", "/agents", "list agent profiles (.flint/agents/*.md), or print one", HelpSection::Commands, OnPage::Panel),
@@ -2914,6 +2958,38 @@ async fn handle_command(
             }
             None => printer.term().line(format_args!("{dim}no usage reported yet by this provider{reset}")),
         },
+
+        "/hear-peers" => {
+            let turn_on = match arg {
+                "on" => true,
+                "off" => false,
+                "" => !agent.hears_peers(),
+                other => return Err(anyhow!("expected on|off, got '{other}'")),
+            };
+            agent.hear_peers(turn_on);
+            if turn_on {
+                printer.term().line(format_args!(
+                    "{}",
+                    printer.style(
+                        YELLOW,
+                        "peer messages ON — what `flint say` leaves here is now sent to the model"
+                    )
+                ));
+                printer.term().line(format_args!(
+                    "{dim}the transcript says when one was passed on, and the session file records it; \
+                     starting a new run does not carry this over{reset}"
+                ));
+            } else {
+                printer.term().line(format_args!(
+                    "{}",
+                    printer.style(GREEN, "peer messages OFF — shown to you, never sent to the model")
+                ));
+                printer.term().line(format_args!(
+                    "{dim}anything that arrived while it was on stays in the transcript and the file; \
+                     nothing queued is still waiting{reset}"
+                ));
+            }
+        }
 
         "/readonly" => {
             let turn_on = match arg {
@@ -4283,6 +4359,11 @@ fn toggles(agent: &agent::Agent, printer: &Printer<'_>) -> serde_json::Value {
         },
         { "name": "detail", "values": ["off", "on"], "value": on_off(printer.tool_detail()) },
         { "name": "readonly", "values": ["off", "on"], "value": on_off(agent.readonly()) },
+        // The fourth switch, and the only one whose "on" spends something the person cannot see: what a
+        // peer writes here starts reaching the model. It is on the page because the page is a person's
+        // door -- and it shows its value for the same reason the others do, so a session that is
+        // relaying says so rather than looking like every other session.
+        { "name": "hear-peers", "values": ["off", "on"], "value": on_off(agent.hears_peers()) },
     ])
 }
 
@@ -4826,6 +4907,7 @@ fn parse_args(argv: Vec<String>, stream_seen: &mut bool) -> Result<Args> {
                 )
             }
             "--readonly" | "--no-edit" => args.readonly = true,
+            "--hear-peers" => args.hear_peers = true,
             "--all" => args.all = true,
             "--no-color" => args.no_color = true,
             "--json" => {
@@ -5003,7 +5085,8 @@ fn print_help(color: bool, term: &Term) {
   flint balance [--json]           ask the provider whether it can be used, and what is left
 flint who [--all] [--json]       who else is working in this directory (flint only), and what changed
   flint say <text> [--to <pid>]    leave a message for whoever is working here: shown to the person,
-                                   never sent to a model
+                                   and sent to the model only if that run asked to hear peers
+                                   ({b}/hear-peers{r} turns that on for a running session)
   flint debug prompt-input [msg]   print the request that would be sent, and send nothing
   flint --list-sessions            list saved sessions, numbered for --resume
                                    (--json: one object, with each session's path)
@@ -5015,6 +5098,10 @@ flint who [--all] [--json]       who else is working in this directory (flint on
   --provider <name>   use a specific provider          (config: default_provider)
   --model <name>      override the model for this run
   --readonly          refuse writes and mutating commands
+  --hear-peers        relay what `flint say` leaves in this directory to the model, on the next
+                      request, instead of only showing it to you. Off unless asked for, per run,
+                      and it needs a session: a one-shot run has no next turn. A peer's words can
+                      then steer this tool loop, which has no permission layer
   --json              with -p: write the run as NDJSON on stdout
   --web               also serve a browser view of this run on 127.0.0.1
                       (/web opens the same thing from inside a conversation)

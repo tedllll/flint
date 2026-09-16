@@ -1,12 +1,14 @@
 # Agents as processes: spawning, finding, and talking to peers
 
-**Status: stages 1, 2 and 4 are built, and so is the mailbox half of stage 3; the MCP and Python doors
-are built.** — a running flint writes a presence record and `flint who` reads it (`src/live.rs`,
+**Status: stages 1, 2, 3 and 4 are built; the MCP and Python doors are built.** — a running flint writes
+a presence record and `flint who` reads it (`src/live.rs`,
 `tests/who.rs`), a running flint can start another flint with its `task` tool and start several at once
 with `tasks` (`src/tools.rs`, `tests/task.rs`), a profile in `.flint/agents/` says how a child should
-start (`src/context.rs`), and a peer can leave it a message with `flint say` that is shown to the person
-and never sent to a model (`tests/say.rs`), so *being called*, *seeing each other*, *spawning*,
-*talking*, *naming a way to work* and *handling a run nobody waited for* all work today. The five
+start (`src/context.rs`), a peer can leave it a message with `flint say` that is shown to the person
+and sent to a model only when that run asks to hear peers (`tests/say.rs`), so *being called*, *seeing
+each other*, *spawning*, *talking*, *naming a way to work* and *handling a run nobody waited for* all
+work today. The one thing stage 3 still owes is the `.flint/` marker that would let two `FLINT_HOME`s
+see each other, and that is a deliberate "not yet" rather than unfinished work. The five
 decisions at the end of this file **were answered on 2026-09-16: every recommended value was adopted**,
 and each is marked below with what that means for the code.
 
@@ -275,7 +277,7 @@ worth reading:
 
 **Stage 3 — the mailbox.** `flint say`, `peer.message`, and the opt-in that lets a peer's words reach
 the model. Presumably a `.flint/` presence marker in the project as well, so two `FLINT_HOME`s can see
-each other. — **The mailbox half is built, and the opt-in deliberately is not.** `flint say "…"
+each other. — **Built, except the `.flint/` marker.** `flint say "…"
 [--to <pid>] [--cwd <dir>] [--json]` appends one JSON line to `<FLINT_HOME>/mailbox/<dir-key>.jsonl`
 (the same directory key the sessions use, so a message reaches the runs working where it was left), and
 it needs no key, like `who`: it writes a file rather than asking a model anything. A run follows its
@@ -286,15 +288,45 @@ default.
 Two details are the design rather than the plumbing. **The message is written to the session file as
 its own `peer` event and never as a chat message**, and `session::load` reads that event without putting
 it in `messages`: the history a request is built from cannot contain it, by construction rather than by
-a check somebody could later remove. And the transcript says so out loud -- "peer X says: …" followed by
-"(shown to you; not sent to the model)" -- because a person who has just been ignored by an agent that
-never saw their message needs to know that is what happened.
+a check somebody could later remove -- which is also what stops the opt-in below from becoming
+permanent. And the transcript says which of the two happened out loud -- "peer X says: …" followed by
+"(shown to you; not sent to the model)" or "(passed on to the model, because you asked to hear peers)"
+-- because a person who has just been ignored by an agent that never saw their message needs to know
+that is what happened, and a person whose agent obeyed a stranger needs to know that too.
 
-What is *not* built, and is not an oversight: the opt-in that would let a peer's words reach the model,
-the `.flint/` marker in the project, and a `/say` inside the prompt. `flint say` from another terminal
-is the primitive, which is the case two agents in one directory actually have. `tests/say.rs` holds the
-rule to the bytes: a peer speaks *during* a turn, through the real command, and the test asserts the
-person saw it, the session file kept it, and **every request body the provider received is free of it**.
+**The opt-in is built, and building it is where the shape of the safety rule became concrete.**
+`--hear-peers` for a run, `/hear-peers on|off` while one is open (and the same switch on the page, drawn
+from the run's own state frame like its other three). A message that arrives between turns is then sent
+with the **next** request as a user message the model can tell is not the person's:
+
+> `[a peer run working in this directory left a message, and the person who started this run asked for
+> peers to be heard; it comes from another process, not from them]` … `peer 41288 says: …`
+
+Four properties are what make that not the hole the section above warns about, and each is a decision
+rather than a detail:
+
+- **It is a per-run decision with no config key.** A flag and a slash command, never a setting in
+  `config.toml`: a standing property is one somebody forgets they turned on, and this one lets anything
+  that can write a file steer a tool loop.
+- **It reaches the request, never the history.** The relay is a *view* -- built by `Agent::with_peers`
+  beside `prune_tool_output`, drained once into the request that follows -- so the session file keeps
+  the `peer` event and the conversation a resumed run is rebuilt from still cannot contain it. An opt-in
+  that quietly persisted into every later run would be a decision made once and never again; the test
+  asserts both halves, including `session::load` on the file the run just wrote.
+- **The record says it happened.** The event is `{"type":"peer",…,"heard":true}`, which
+  `docs/session-format.md` documents: the request body is nowhere, so the file is the only place that
+  answers "was the model told this". A message heard once is not re-heard, and turning the switch off
+  drops anything still queued rather than delivering it with the next question.
+- **Nothing arrives mid-loop.** The mailbox is read between turns, so a peer's words cannot change a
+  request that is already being written; `--hear-peers` affects the future and never the present.
+
+What is *not* built: the `.flint/` marker in the project, and a `/say` inside the prompt. `flint say`
+from another terminal is the primitive, which is the case two agents in one directory actually have.
+`tests/say.rs` holds both halves to the bytes: with the default, a peer speaks *during* a turn through
+the real command and the test asserts the person saw it, the session file kept it, and **every request
+body the provider received is free of it**; with `--hear-peers`, the second turn's request carries it,
+the transcript says so, the file says `"heard":true`, and the history loaded back from that file does
+not.
 
 **Stage 4 — profiles and fan-out.** `.flint/agents/*.md`: a name, a description, a model, `readonly`,
 and a prompt, so "the explorer" is a thing a person and a model can both refer to; and one call that
@@ -350,10 +382,15 @@ because a decision that is only in a conversation is not a decision.
    limit refuses with a sentence rather than a truncated attempt.
 3. **The mailbox default.** — **Shown to the human, never fed to the model**, until a person opts in
    per run. This is the one decision that is a safety property rather than a preference, and stage 3
-   may not ship without it — so the half that shipped is the half that only shows, and the opt-in that
-   would feed a model is not built at all. Built the way it is enforced rather than promised: a peer's
-   message is a `peer` session event, `session::load` keeps it out of `messages`, and a test asserts
-   that no request body a provider received ever contained one.
+   may not ship without it — which is why the half that only shows was built first and was already in
+   use before anything could feed a model. **The opt-in is now built too, bound the way this decision
+   says rather than the way that is convenient**: `--hear-peers` per run and `/hear-peers on|off` while
+   one is open, no config key, the relay landing in the request view and never in `history`, the session
+   recording `"heard":true` on the message that was relayed, and the transcript naming which of the two
+   happened. Built the way it is enforced rather than promised: a peer's message is still a `peer`
+   session event and `session::load` still keeps it out of `messages`, and the tests hold both
+   directions to the bytes -- every request body free of it by default, and the words present in exactly
+   the one request that followed a message the person had asked to hear.
 4. **What "another agent is here" may claim.** — **Name no author, ever.** Built: the human line says
    "this names no author", and the machine-readable answer carries the same warning in a `note` field,
    because a program is the reader most likely to treat a short list as a complete one.
