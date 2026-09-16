@@ -32,7 +32,7 @@ whoever is changing the code — a person or a model driving it.
 | `src/agent.rs` | the tool loop: build the prompt, call the model, run tools, persist events |
 | `src/attach.rs` | `@path` in a one-shot prompt: which names are files, the inline block the model reads, and the 256 KB cap |
 | `src/provider.rs` | the OpenAI-compatible client, streaming, retries, usage |
-| `src/tools.rs` | the tool set (`task`/`tasks` for children — a handle at once, `background: false` when the next step needs the answer — `task_op` for a job nobody waited for, and the notice a job that ends leaves behind), and the read-before-mutate gate |
+| `src/tools.rs` | the tool set (`task`/`tasks` for children — a handle at once, `background: false` when the next step needs the answer — `bash`/`pwsh`/`exec` with `background: true` for a command nobody waits for, `job_op` for either kind of job, and the notice a job that ends leaves behind), and the read-before-mutate gate |
 | `src/patch.rs` | the `apply_patch` format, parsed and applied — pure functions |
 | `src/term.rs` | the inline viewport: scroll region, answer strip, status clock |
 | `src/display.rs` | how a tool call and its result read in the transcript |
@@ -54,7 +54,7 @@ whoever is changing the code — a person or a model driving it.
 | `docs/deepseek-search.md` | web search: what was measured about DeepSeek's search, and what it costs |
 | `docs/decisions.md` | why flint is built this way, decision by decision |
 | `docs/sandbox.md` | a plan for replacing permission modes with grants — **not built, and it argues against the "Not doing, and why" entry in `ROADMAP.md` on purpose**; read it as an argument, not as the state of the tree |
-| `docs/agents.md` | the plan for runs that spawn, find and talk to each other (a `task` tool, presence, a mailbox, profiles) — stages 1–4 are built, including a `task` that hands back a handle by default and reports the job once when it ends, and `task_op` (`src/live.rs`, `TaskTool`/`TasksTool`/`TaskOpTool` in `src/tools.rs`, the report in `Agent::with_jobs`, profiles in `src/context.rs`, `flint say` and the `--hear-peers`/`/hear-peers` opt-in that lets a peer's words reach a model); only the `.flint/` marker that would let two `FLINT_HOME`s see each other is not |
+| `docs/agents.md` | the plan for runs that spawn, find and talk to each other (a `task` tool, presence, a mailbox, profiles) — stages 1–4 are built, including a `task` that hands back a handle by default and reports the job once when it ends, a background command that is the same job with a log file where a child has a conversation, and `job_op` (`src/live.rs`, `TaskTool`/`TasksTool`/`JobOpTool` in `src/tools.rs`, the report in `Agent::with_jobs`, profiles in `src/context.rs`, `flint say` and the `--hear-peers`/`/hear-peers` opt-in that lets a peer's words reach a model); only the `.flint/` marker that would let two `FLINT_HOME`s see each other is not |
 | `ROADMAP.md` | the plan of record: the ordered queue, and what is deliberately not done |
 | `HANDOFF.md` | state of the project at the end of the last working session |
 
@@ -72,6 +72,7 @@ in a scratch directory for the same reason.
 | `<FLINT_HOME>/sessions/<dir>/children/<stamp>-<ms>-<pid>.jsonl` | the conversation of a run another run started (a `task`/`tasks` child, or the same thing from Python or MCP). A session file like any other — same format, readable, resumable by path — and one level deeper on purpose: no listing reads that directory, so `/sessions`, `--list-sessions`, the page's sidebar and `--continue` show a person their own conversations and nothing else. Its `meta` line names the parent in `parent`. `mv` it up a level to adopt it |
 | `<FLINT_HOME>/sessions/archive/` | conversations filed away with `/archive` (a project's archive is `sessions/<dir>/archive/`) |
 | `<FLINT_HOME>/spill/<session>/<n>.txt` | tool output too long for one request, in full |
+| `<FLINT_HOME>/spill/<session>/background-<tool>-<n>.log` | what a background command (`bash`/`pwsh`/`exec` with `background: true`) has printed, both streams in one file, named in the handle it returns and readable while it is still being written |
 | `<FLINT_HOME>/engines/<provider>.log` | a local engine's output, and the only place a failed start says why |
 | `<FLINT_HOME>/live/<pid>-<n>.json` | one record per *running* flint, refreshed every 5 s and removed when it exits; what `flint who` reads. A record left behind by a killed process is reported as stale rather than deleted, because a killed process cannot clean up |
 | `<FLINT_HOME>/mailbox/<dir-key>.jsonl` | one append-only file per working directory, where `flint say` leaves a message for whoever is working there. A run reads what arrives *after* it started and shows it to its person; reaching a model needs that run to have asked (`--hear-peers`, or `/hear-peers on`), because anything that can write a file would otherwise be able to steer a tool loop with no permission layer |

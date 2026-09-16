@@ -78,7 +78,8 @@ in this checkout at once, one of them mid-write in `docs/sandbox.md`, and the ot
 half-written revision of it with `git add -A`). Its claim is that a subagent, a Python call, an MCP call
 and "a background process" are one thing — a run — seen through four doors, and that the MCP and Python
 doors are already built. **Stages 1–4 are all built** (`flint who`, the `task` tool, `tasks`, profiles,
-`flint say`, `background: true` with `task_op` for a child nobody waited for, and the `--hear-peers` /
+`flint say`, `background: true` with `job_op` for a job nobody waited for — a `task` child, or a
+`bash`/`pwsh`/`exec` command — and the `--hear-peers` /
 `/hear-peers` opt-in that lets a peer's words reach a model when a person asks), the "Subagents" entry
 in `ROADMAP.md`
 was edited in the same commit as the code that adopts it, and **the five decisions at the end of that
@@ -93,7 +94,7 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 518 passing, 1 ignored (306 lib, 3 in
+As of the commit that carries this file, `cargo test` is 524 passing, 1 ignored (312 lib, 3 in
 the binary's own tests, 33 `agent_loop`, 63 `cli_output`, 35 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
@@ -111,7 +112,7 @@ and can only wait"), and confirmed in the person's own session files rather than
 conversation, two `task` calls, **neither** carrying `background`, one of them interrupted by typing at
 the frozen parent -- which drops the turn -- with the literal tool result
 `interrupted by the user: tool 'task' was requested but never ran`. The mechanism (supervisor, handle,
-`task_op`) was built and tested; what was wrong is that the tool's description ended with "this tool
+`job_op`) was built and tested; what was wrong is that the tool's description ended with "this tool
 waits for it", so a model never asked for the handle. So `task` returns the child's pid and conversation
 at once unless the call says `background: false`, and the second half is what makes that safe rather
 than a way to lose work: a job that ends is **reported exactly once** -- to the person in the transcript
@@ -130,9 +131,35 @@ would be a lie), the report landing in exactly one request -- the parent was giv
 that carried it, and the mutation that drops the `reported` check fails with "the model was told 2
 times, out of 4 requests: [2, 3]" -- and the person's notice on stderr. Five existing tests that had
 quietly assumed `task` waits now say `background: false` with a comment saying what each one is about.
-**Not built yet, on purpose**: `bash`/`pwsh`/`exec` still wait, because a command's output is usually
-the input to the next step; when background commands land they go on this same job record, under this
-same verb (`task_op` becomes `job_op`, since it stops being only about children).
+
+**The other half of that landed next, and it is the same record rather than a second feature: a
+background command.** Asked for directly ("some other tasks must be backgroundable too, surely —
+certain Python scripts, bash"), and the ground was already prepared, which is why the change is small:
+the sentence that had said "`bash`/`pwsh`/`exec` still wait" was true only of the *default*. `Job`
+gained a `kind` (`Child`/`Command`), a `log` path and a read cursor; `bash`, `exec` and `pwsh` gained
+`background: true`, which spawns through `start_background_command` — **both streams into one file**
+under this session's spill directory (`background-<tool>-<n>.log`, named in the handle, readable with
+`tail` while it is still being written) — and a supervisor that owns the child, its budget and the
+`KillTree`; and `job_op` gained `output`. The variant renamed `job_op` to `job_op` in the same commit,
+because it had stopped being only about children. Three differences are all that the kinds do not
+share: where the output goes (a conversation versus a log file), how it is stopped (`/stop` on stdin
+versus `taskkill /PID … /T /F` — killing the shell alone leaves `cargo` holding `target/`, measured in
+`KillTree`'s comment), and what `output` means (a child has none; its answer is `wait`, while a command
+can be polled incrementally from the job's own cursor, so watching a build costs the new lines and a
+finished job read to its end counts as collected). Four decisions worth keeping: **commands stay
+foreground by default** while `task` does not (a command's output is usually the input to the next
+step); a background command gets the **long** default budget (900 s, enforced by the supervisor, so it
+comes due whether or not anything is waiting); **`output` is a window and `wait` is the answer**; and
+**nothing new was invented for the notice** — a command's exit rides the same `reported` flag to the
+same two lanes. Tests, watched red first: the handle arriving before the command (the call used to
+block 3.07 s), reading a running command and then collecting the whole of it (the mutation that ignores
+the cursor fails with "the same output was handed over twice"), a stop that keeps what was already
+written, the budget coming due with nobody watching (the mutation that removes the supervisor's
+timeout fails with "the budget was not enforced while nobody waited"), and the readonly gate refusing a
+mutating *background* command before anything is spawned. Two limits are written down rather than
+implied: a background command dies with the run on Windows and not on Unix (the same
+`docs/windows-tooling.md` §6.1 gap), and it is not a run — no session file, no presence record, so
+`flint who` will not name it.
 
 **A run can now be asked to hear its peers, which is the opt-in decision 3 was holding open.**
 `--hear-peers` for a run, `/hear-peers [on|off]` while one is open, and the same switch on the page
@@ -245,7 +272,7 @@ in `src/tools.rs`, and the stream test's budget shape in `tests/json_output.rs`.
 
 **The handle itself is built, and building it moved three things out of the tool call.** `task` now
 takes `background: true` and returns at once with the child's pid and the conversation it is holding;
-`task_op` takes `action: "status" | "wait" | "stop"` and a `pid`, and answers in the same shape a
+`job_op` takes `action: "status" | "wait" | "stop"` and a `pid`, and answers in the same shape a
 foreground `task` does. It is **one** tool rather than the three the sketch named, because every schema
 is re-sent with every request and three verbs about one child do not deserve three schemas — and it is
 not folded into `task`, because a call that sometimes returns an answer and sometimes a receipt is one
@@ -264,13 +291,13 @@ it named, and the exit status once it ends. Three consequences, each of which wa
   returns, which is what makes the stop possible at all.
 - **The handle is not the presence record**, which is what the plan sketched. A record can say a run is
   alive; it cannot carry a pipe. So presence is for *seeing*: asked about a pid this run did not start,
-  `task_op status` reads the records and reports directory, endpoint, `readonly` and session, and says
+  `job_op status` reads the records and reports directory, endpoint, `readonly` and session, and says
   plainly that it can be seen and not waited for or stopped. What `flint who` gained from the previous
   commit — `Presence.session` — is exactly the field that answer needs.
 
 Three tests in `tests/task.rs`, all watched red first (with `background` temporarily ignored, all three
 fail on the assertion that owns them): a background child whose answer lands in its own session file
-after the parent has exited, a `task_op` status-then-wait pair where the scripted model reads the pid
+after the parent has exited, a `job_op` status-then-wait pair where the scripted model reads the pid
 out of the tool result it was given, and a stop that ends a child stuck in a model call with exit 130 —
 a stop, not a kill, so the half-answer it had drawn survives. That last one needed a new stub shape: a
 scripted model that answers **by conversation** rather than by request number, because a background

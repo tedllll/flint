@@ -522,10 +522,12 @@ billing. So the call returns the child's pid and the conversation its answer is 
 the work happens off to the side. A model that needs the answer *now* says `"background": false` and
 waits; otherwise it carries on and is told, in its next request, that a job finished — one line per job,
 with the pid and the verb that collects it. You are told too, in the transcript, as soon as it ends.
-The collecting verb is one tool with an action:
+The collecting verb is one tool — `job_op`, which answers for a child and for a background command
+alike — with an action:
 
 ```jsonc
 {"action": "status"}                  // this run's jobs: running, or ended with their exit code
+{"action": "output", "pid": 12345}    // what a background command has printed since you last asked
 {"action": "wait",   "pid": 12345}    // block until it ends, and take the answer
 {"action": "stop",   "pid": 12345}    // ask it to stop (the graceful 'stop' the MCP door uses)
 ```
@@ -535,6 +537,24 @@ having collected it, so nothing is repeated at every request afterwards. A job t
 can still be seen — `status` reads the presence record and says what it is and where its conversation
 is — but it says plainly that it cannot be waited for or stopped from here, because the pipe a `stop`
 needs belongs to whoever spawned it.
+
+**A command is a job too, and that is what the same verb is for.** A `bash`, `exec` or `pwsh` call
+still waits by default — a command's output is usually the input to the next step — but it takes
+`"background": true` when it is the wrong thing to wait for:
+
+```jsonc
+// bash, exec and pwsh all take it; the budget defaults to 900s for a backgrounded command
+{"program": "cargo", "args": ["build", "--release"], "background": true}
+```
+
+The call comes back at once with a pid and a log file — both streams in one file, under this session's
+directory, named in the reply — and the same three verbs apply: `status`, `wait` (the whole log plus
+`exit code: N`), `stop` (a kill, because there is no conversation to interrupt), and `output`, which
+reads only what has been printed since the last time you asked, so watching a ten-minute build costs
+the new lines rather than the whole log. The budget is enforced by flint whether or not anything is
+waiting, and the end of the job is announced the same way a child's is. There is nothing to
+collect into a session file, so this is not a run: no presence record, no conversation, just a pid, a
+log and a notice.
 
 While a `task` call waits, the child's own work shows on the parent's status row — `task: running
 search`, `explorer: waiting for the model` — because the child is already saying what it is doing on its
@@ -784,7 +804,7 @@ program and its verb rather than by re-reading a command line it never had. Use 
 
 | Tool | Purpose |
 |---|---|
-| `bash` | run a shell command (120s default timeout, `timeout_secs` to raise) |
+| `bash` | run a shell command (120s default timeout, `timeout_secs` to raise, `background: true` for one nobody should wait for) |
 | `exec` | run a program with its arguments as an array — no shell, so nothing re-parses them |
 | `pwsh` | run a PowerShell script, written to a `.ps1` file (Windows only) |
 | `read` | read a file with line numbers, pageable via `offset`/`limit` |

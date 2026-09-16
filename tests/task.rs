@@ -1439,8 +1439,8 @@ async fn a_handle_says_where_a_child_is_and_then_collects_its_answer() {
                 "ask the child",
                 vec![
                     Step::Call("task", r#"{"prompt":"SLOW JOB"}"#),
-                    Step::Call("task_op", r#"{"action":"status"}"#),
-                    Step::Call("task_op", r#"{"action":"wait","pid":{pid}}"#),
+                    Step::Call("job_op", r#"{"action":"status"}"#),
+                    Step::Call("job_op", r#"{"action":"wait","pid":{pid}}"#),
                     Step::Say("PARENT DONE"),
                 ],
                 std::time::Duration::ZERO,
@@ -1503,7 +1503,7 @@ async fn a_handle_can_ask_a_stuck_child_to_stop() {
                 "ask the child",
                 vec![
                     Step::Call("task", r#"{"prompt":"STUCK JOB"}"#),
-                    Step::Call("task_op", r#"{"action":"stop","pid":{pid}}"#),
+                    Step::Call("job_op", r#"{"action":"stop","pid":{pid}}"#),
                     Step::Say("PARENT DONE"),
                 ],
                 std::time::Duration::ZERO,

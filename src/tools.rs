@@ -69,11 +69,15 @@ impl ToolBox {
                 config: config.clone(),
                 readonly,
                 cwd: cwd.clone(),
+                spill_dir: spill_dir.clone(),
+                logs: std::sync::atomic::AtomicUsize::new(0),
             }),
             Box::new(ExecTool {
                 config: config.clone(),
                 readonly,
                 cwd: cwd.clone(),
+                spill_dir: spill_dir.clone(),
+                logs: std::sync::atomic::AtomicUsize::new(0),
             }),
             Box::new(ReadTool {
                 cwd: cwd.clone(),
@@ -127,7 +131,7 @@ impl ToolBox {
             // The handle for a child nobody waited for. It starts nothing and costs nothing to offer:
             // one schema with three words in it, against a `task` that has been able to leave a child
             // running since the fan-out existed.
-            Box::new(TaskOpTool),
+            Box::new(JobOpTool),
         ];
         // Always offered: reading a URL needs no credential, and this is the safe path to
         // the open web -- the alternative is `bash` and `curl`, which puts a page's raw
@@ -578,6 +582,12 @@ pub struct BashTool {
     config: Config,
     readonly: bool,
     cwd: PathBuf,
+    /// Where a background command's log goes, and how many this session has started.
+    ///
+    /// The same directory the spilled output and the `pwsh` scripts go to, for the same reason: a
+    /// session's files belong together, where a person reading the transcript can find them.
+    spill_dir: PathBuf,
+    logs: std::sync::atomic::AtomicUsize,
 }
 
 /// Resolve which shell program and arguments to actually use.
@@ -827,7 +837,21 @@ pub fn notice(message: &str) {
     }
 }
 
-/// A child this run started, from the moment it is spawned until the last call that asks about it.
+/// Which of the two things a job can be: a run this one started, or a command it started.
+///
+/// One record for both, because a handle is a handle: the same pid, the same budget enforced
+/// whether or not anybody is waiting, the same notice when it ends. The differences are three, and
+/// each is about what the job *produces* -- a child answers in a session file and is asked to stop
+/// by writing `/stop` to its stdin, while a command writes to a log file and can only be killed.
+/// Keeping the kind on the job is what lets one verb answer for either without a model having to
+/// remember which tool it started a thing with.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JobKind {
+    Child,
+    Command,
+}
+
+/// A job this run started, from the moment it is spawned until the last call that asks about it.
 ///
 /// It used to be a note that a child was running -- for the one sentence a dropped turn has to be
 /// honest with. It is now the whole handle, because that sentence and a handle are the same fact: a
@@ -835,11 +859,19 @@ pub fn notice(message: &str) {
 /// presence record says a process is alive without saying what it answered. Everything a later tool
 /// call needs is here: where its conversation is, whether it has ended, what it said, and the stdin
 /// that is the only way to ask it to stop.
+///
+/// A background *command* is the same record with a different `kind`, and that is the whole of the
+/// extension: what it produced is a log file instead of a conversation, and `stop` is a kill
+/// because there is no conversation to interrupt. The pid, the budget, the `reported` bookkeeping
+/// and the notice are shared, which is why there is one `job_op` rather than one verb per kind of
+/// thing a run can leave running.
 struct Job {
+    kind: JobKind,
     pid: u32,
     label: String,
     /// What it was asked, cut short: a status listing that does not say which job this is makes a
-    /// person read the session file to tell two children apart.
+    /// person read the session file to tell two children apart. For a command this is its command
+    /// line, which is the same question ("which one is this?") with the same answer.
     prompt: String,
     started: std::time::Instant,
     /// Set when the child ended, so "finished 40s ago" is answerable without waiting for anything.
@@ -871,6 +903,12 @@ struct Job {
     done: tokio::sync::Notify,
     /// The schema handed to it through a file, deleted once it has ended.
     schema_file: std::sync::Mutex<Option<PathBuf>>,
+    /// Where a background *command* is writing: the file both streams go into, and the answer a
+    /// `wait` hands over. `None` for a child, whose output is its conversation.
+    log: Option<PathBuf>,
+    /// How much of that file has already been handed over by `output`, so that reading a running
+    /// command twice is two windows on it rather than the same log twice.
+    read_offset: std::sync::Mutex<u64>,
 }
 
 /// How a child ended, and everything it said on the way.
@@ -959,25 +997,45 @@ impl Job {
 
     /// The one line a status listing gives for this child.
     fn describe(&self) -> String {
-        let session = match self.session() {
-            Some(path) => format!("session {path}"),
-            None => "its session is not named yet".to_string(),
+        // Where to go for what it produced: a child's answer is a conversation, a command's is a
+        // file. Everything else about the line is the same question asked of either.
+        let produced = match self.kind {
+            JobKind::Child => match self.session() {
+                Some(path) => format!("session {path}"),
+                None => "its session is not named yet".to_string(),
+            },
+            JobKind::Command => match &self.log {
+                Some(path) => format!("output in {}", path.display()),
+                None => "it has no output file".to_string(),
+            },
+        };
+        let collecting = match self.kind {
+            JobKind::Child => "`wait` collects what it said",
+            JobKind::Command => "`wait` collects its output, `output` reads what is new",
         };
         match self.finished.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             Some(finished) => format!(
-                "pid {}: {} -- ended with exit code {} ({}), {}; `wait` collects what it said",
+                "pid {}: {} -- ended with exit code {} ({}), {}; {}",
                 self.pid,
                 self.label,
                 finished.code,
                 task_exit_meaning(finished.code),
-                session
+                produced,
+                collecting
+            ),
+            None if self.kind == JobKind::Command => format!(
+                "pid {}: {} -- running for {}, {}",
+                self.pid,
+                self.label,
+                elapsed_label(self.started.elapsed()),
+                produced
             ),
             None => format!(
                 "pid {}: {} -- running for {}, {}; asked: {}",
                 self.pid,
                 self.label,
                 elapsed_label(self.started.elapsed()),
-                session,
+                produced,
                 util::truncate(&self.prompt, 80)
             ),
         }
@@ -1060,8 +1118,81 @@ impl Job {
         wrote
     }
 
+    /// End a background *command*.
+    ///
+    /// There is nothing to ask: a command has no conversation to interrupt and no half of an answer
+    /// to commit, so this is a kill -- and it has to be the whole tree. `kill_on_drop` ends only the
+    /// process that was spawned, and on Windows the shell stays as the parent of whatever it ran:
+    /// the measurement in `KillTree`'s comment is about exactly this (a killed `cmd.exe` left
+    /// `cargo`/`rustc` holding `target/`). On Unix this is the one process, which is the documented
+    /// gap rather than a decision: `sh -c` usually *becomes* the command it was given, and a script
+    /// that backgrounds work is not covered -- `docs/windows-tooling.md` §6.1.
+    ///
+    /// Blocking, and on purpose: the caller is a tool call that has already decided to end this, and
+    /// `taskkill` measures in the hundreds of milliseconds.
+    fn kill(&self) {
+        let pid = self.pid.to_string();
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = std::process::Command::new("taskkill");
+            command.args(["/PID", &pid, "/T", "/F"]);
+            command
+        };
+        #[cfg(not(windows))]
+        let mut command = {
+            let mut command = std::process::Command::new("kill");
+            command.arg(&pid);
+            command
+        };
+        let _ = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+
+    /// What a background command has printed since the last time somebody asked.
+    ///
+    /// Incremental on purpose: a build prints for ten minutes, and a verb that handed over the whole
+    /// log on every call would put the same thousands of lines into the request again and again. The
+    /// cursor lives on the job, so "since the last time" survives the call that asked -- and reading
+    /// to the end of a job that has *ended* is reading all of it, which counts as collecting it.
+    fn new_output(&self) -> String {
+        let Some(path) = &self.log else {
+            return "this job has no output file: it is a child, and what a child produced comes from \
+                    `wait`."
+                .to_string();
+        };
+        let bytes = std::fs::read(path).unwrap_or_default();
+        let start = {
+            let offset = self.read_offset.lock().unwrap_or_else(|e| e.into_inner());
+            // Saturating rather than trusting: the file is only ever appended to, but a person can
+            // truncate it by hand, and a stale offset must not panic or skip the new output.
+            (*offset as usize).min(bytes.len())
+        };
+        let fresh = String::from_utf8_lossy(&bytes[start..]).to_string();
+        *self.read_offset.lock().unwrap_or_else(|e| e.into_inner()) = bytes.len() as u64;
+        if fresh.trim().is_empty() {
+            return format!(
+                "nothing new from pid {} ({}); it is {}",
+                self.pid,
+                path.display(),
+                if self.has_finished() { "over" } else { "still running" }
+            );
+        }
+        if self.has_finished() {
+            // Everything it will ever print has now been handed over, so the notice that it ended
+            // would be news the caller already has.
+            self.mark_reported();
+        }
+        fresh
+    }
+
     /// The child's answer, in the shape a caller reads.
     fn render(&self, finished: &Finished) -> String {
+        if self.kind == JobKind::Command {
+            return self.render_command(finished);
+        }
         let collected = &finished.collected;
         let mut text = match collected.answer() {
             Some(answer) => answer,
@@ -1108,6 +1239,36 @@ impl Job {
         }
         text
     }
+
+    /// A background command's answer: the file it wrote to, and how it ended.
+    ///
+    /// The whole file, even the part an `output` call already showed: this is the answer, and a
+    /// caller that asked for it by name is not being told something twice. It is the log rather than
+    /// a summary because for a command the output *is* the answer -- a build's last twenty lines are
+    /// the whole result of a twenty-minute build.
+    fn render_command(&self, finished: &Finished) -> String {
+        let mut text = match &self.log {
+            Some(path) => match std::fs::read_to_string(path) {
+                Ok(text) if !text.trim().is_empty() => text,
+                Ok(_) => "(it printed nothing)".to_string(),
+                Err(e) => format!("(its output could not be read: {e})"),
+            },
+            None => "(it has no output file)".to_string(),
+        };
+        text.push_str(&format!(
+            "\n\nexit code: {} ({})",
+            finished.code,
+            task_exit_meaning(finished.code)
+        ));
+        if let Some(path) = &self.log {
+            text.push_str(&format!("\noutput: {}", path.display()));
+        }
+        text.push_str(&finished.note);
+        // No depth and no readonly here, unlike a child: a command is not a run, so there is no
+        // chain for it to be part of and no second context for the flag to have been decided in.
+        text.push_str(&format!("\nran for {:.0}s", self.started.elapsed().as_secs_f64()));
+        text
+    }
 }
 
 /// The children this run has left running, in the words a caller needs. Empty when there are none.
@@ -1122,18 +1283,33 @@ pub fn children_running() -> Vec<String> {
         .iter()
         .filter(|job| !job.has_finished())
         .map(|child| {
-            let mut line = format!(
-                "a child this run started is still going on its own: {} (pid {}, running for {})",
-                child.label,
-                child.pid,
-                elapsed_label(child.started.elapsed())
-            );
-            match child.session() {
-                Some(path) => line.push_str(&format!(
+            let mut line = match child.kind {
+                JobKind::Child => format!(
+                    "a child this run started is still going on its own: {} (pid {}, running for {})",
+                    child.label,
+                    child.pid,
+                    elapsed_label(child.started.elapsed())
+                ),
+                JobKind::Command => format!(
+                    "a command this run started in the background is still running: {} (pid {}, \
+                     running for {})",
+                    child.label,
+                    child.pid,
+                    elapsed_label(child.started.elapsed())
+                ),
+            };
+            match (&child.kind, child.session(), &child.log) {
+                (JobKind::Child, Some(path), _) => line.push_str(&format!(
                     ". Its answer is being written to its own session, {path} -- read it there \
                      rather than asking for the same work again"
                 )),
-                None => line.push_str(". It has not named its session yet"),
+                (JobKind::Child, None, _) => line.push_str(". It has not named its session yet"),
+                (JobKind::Command, _, Some(path)) => line.push_str(&format!(
+                    ". Its output is going to {} -- read it there, or ask `job_op` for it, \
+                     rather than running the same command again",
+                    path.display()
+                )),
+                (JobKind::Command, _, None) => line.push_str(". It has no output file"),
             }
             line.push('.');
             line
@@ -1158,18 +1334,28 @@ impl Job {
             return String::new();
         };
         let mut line = format!(
-            "pid {} ({}) finished: exit code {} ({}), after {}. Nothing has collected what it said; \
-             `task_op` action \"wait\" with pid {} gets it",
+            "pid {} ({}) finished: exit code {} ({}), after {}. Nothing has collected what it {}; \
+             `job_op` action \"wait\" with pid {} gets it",
             self.pid,
             self.label,
             finished.code,
             task_exit_meaning(finished.code),
             elapsed_label(self.started.elapsed()),
+            // `wait` for either kind, deliberately: it is the verb that hands over the whole of what
+            // a job produced, and a report that taught a second verb for the same move would be
+            // teaching the model a distinction that only matters while the job is still running.
+            match self.kind {
+                JobKind::Child => "said",
+                JobKind::Command => "printed",
+            },
             self.pid
         );
         match self.session() {
             Some(path) => line.push_str(&format!(". Its conversation: {path}.")),
-            None => line.push('.'),
+            None => match &self.log {
+                Some(path) => line.push_str(&format!(". Its output: {}.", path.display())),
+                None => line.push('.'),
+            },
         }
         line
     }
@@ -1196,7 +1382,10 @@ impl Job {
         );
         match self.session() {
             Some(path) => line.push_str(&format!("; its answer is in {path}")),
-            None => line.push_str("; it never named a conversation"),
+            None => match &self.log {
+                Some(path) => line.push_str(&format!("; its output is in {}", path.display())),
+                None => line.push_str("; it never named a conversation"),
+            },
         }
         line
     }
@@ -1733,6 +1922,208 @@ impl Drop for KillTree {
     }
 }
 
+/// Start one command and come back without waiting for it, with its output going to a file.
+///
+/// The same job record as a child's, because the facts are the same and only three of them differ: a
+/// pid, a budget enforced whether or not anybody is watching, a handle to read later, and one notice
+/// when it ends. What differs is where its output goes (a log file rather than a conversation), how
+/// it is stopped (a kill rather than `/stop`), and the fact that there is nothing to wait for but the
+/// file -- which is what `JobKind::Command` carries.
+///
+/// Two decisions are worth reading rather than skimming:
+///
+/// * **The output goes to a file, not into memory.** A command run this way is usually the long one
+///   -- a build, an install, a test suite -- and its log is exactly the thing that is too big for a
+///   request. The file is the answer, and it is plain text a person can `tail`.
+/// * **It does not die with the call, but it should not outlive the run either.** `kill_on_drop` is
+///   deliberately *not* set here, because the whole point is that this outlives the tool call that
+///   started it. What ends it is its budget, a `stop`, or the run itself: dropping this task on the
+///   way out of the process fires the guard below, which ends the tree on Windows. On Unix the guard
+///   is the same no-op it already is for foreground commands -- a background command outliving flint
+///   is part of the gap `docs/windows-tooling.md` §6.1 documents, not a second one.
+async fn start_background_command(
+    config: &Config,
+    run: &Invocation,
+    stdin: Option<&str>,
+    cwd: &Path,
+    timeout_secs: u64,
+    log: PathBuf,
+    label: String,
+) -> Result<std::sync::Arc<Job>> {
+    if let Some(parent) = log.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+    }
+    let file =
+        std::fs::File::create(&log).with_context(|| format!("cannot write {}", log.display()))?;
+
+    let mut cmd = tokio::process::Command::new(&run.program);
+    apply_invocation(cmd.as_std_mut(), run);
+    cmd.current_dir(cwd);
+    cmd.stdin(if stdin.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
+    // Both streams into the one file, in the order they arrive: a build's warnings and its errors
+    // belong in the order they happened, and this file is the record of what it did.
+    cmd.stdout(Stdio::from(
+        file.try_clone()
+            .with_context(|| format!("cannot write {}", log.display()))?,
+    ));
+    cmd.stderr(Stdio::from(file));
+    if let Some(proxy) = config.proxy.as_deref().filter(|p| !p.trim().is_empty()) {
+        cmd.env("HTTP_PROXY", proxy);
+        cmd.env("HTTPS_PROXY", proxy);
+        cmd.env("http_proxy", proxy);
+        cmd.env("https_proxy", proxy);
+        cmd.env("ALL_PROXY", proxy);
+        cmd.env("all_proxy", proxy);
+    }
+
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("cannot spawn program '{}'", run.program))?;
+    let pid = child.id().unwrap_or(0);
+
+    // The caller's text goes in through the pipe, never through the command line -- and detached,
+    // because a program that never reads its input must not hold up the handle.
+    if let Some(text) = stdin {
+        if let Some(mut pipe) = child.stdin.take() {
+            let bytes = text.as_bytes().to_vec();
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let _ = pipe.write_all(&bytes).await;
+                let _ = pipe.shutdown().await;
+            });
+        }
+    }
+
+    let job = std::sync::Arc::new(Job {
+        kind: JobKind::Command,
+        pid,
+        label: label.clone(),
+        prompt: label,
+        started: std::time::Instant::now(),
+        ended: std::sync::Mutex::new(None),
+        // A command is not a run: it is not part of the depth chain, and `readonly` was decided by
+        // the tool call that got here, before anything was spawned.
+        depth: 0,
+        readonly: false,
+        // Always background: this function exists for the calls that said so.
+        background: true,
+        reported: std::sync::atomic::AtomicBool::new(false),
+        timeout_secs,
+        // Nothing is ever written to a command's stdin after it starts: the payload, when there is
+        // one, has already gone in through the detached writer above.
+        stdin: std::sync::Mutex::new(None),
+        session: std::sync::Mutex::new(None),
+        session_known: tokio::sync::Notify::new(),
+        finished: std::sync::Mutex::new(None),
+        done: tokio::sync::Notify::new(),
+        schema_file: std::sync::Mutex::new(None),
+        log: Some(log),
+        read_offset: std::sync::Mutex::new(0),
+    });
+    forget_old_finished();
+    jobs().push(std::sync::Arc::clone(&job));
+
+    // The supervisor, for the same reason a child has one: a `timeout_secs` that only a waiter could
+    // enforce would be a budget that never comes due for a job nobody is waiting for.
+    let supervisor = std::sync::Arc::clone(&job);
+    tokio::spawn(async move {
+        let mut tree = KillTree::arm(Some(pid));
+        let (code, note) = match tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs),
+            child.wait(),
+        )
+        .await
+        {
+            Ok(status) => {
+                tree.defuse();
+                (
+                    status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1),
+                    String::new(),
+                )
+            }
+            Err(_) => {
+                // Out of budget. The guard fires *here* rather than at the end, for the reason its
+                // own comment gives: `/T` walks the shell's children, and once the shell is gone
+                // they are reparented and cannot be found any more.
+                drop(tree);
+                let _ = child.start_kill();
+                let code = child
+                    .wait()
+                    .await
+                    .map(|s| s.code().unwrap_or(-1))
+                    .unwrap_or(-1);
+                (
+                    code,
+                    format!("\nkilled after {timeout_secs}s: the command's budget ran out\n"),
+                )
+            }
+        };
+        *supervisor
+            .finished
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(Finished {
+            code,
+            note,
+            // A command's complaints are in its log with everything else; there is no second stream
+            // to keep apart.
+            stderr: String::new(),
+            collected: Collected::default(),
+        });
+        *supervisor
+            .ended
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+        supervisor.done.notify_waiters();
+        // The person's lane, exactly as for a child: a command started in the background is a job
+        // nobody is waiting for, and a build that ended while they were reading is news.
+        if !supervisor.was_reported() {
+            notice(&supervisor.finished_notice());
+        }
+    });
+
+    Ok(job)
+}
+
+/// What a `bash`/`exec`/`pwsh` call gets back when it does not wait: a handle, and what to do with it.
+///
+/// Synchronous, unlike a child's: there is no conversation to wait to be named, because the file the
+/// command writes to is created before the command is spawned. That is also why the path is in the
+/// handle at all -- it is the thing a person can read with `tail`, and the thing a model can be
+/// pointed at when the verb is not what it wants.
+fn command_handle(job: &Job) -> String {
+    let log = job
+        .log
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    format!(
+        "started in the background: pid {} ({}). It is running and this call is not waiting for \
+         it.\noutput: {log}\nUse `job_op` with action \"status\" to see where it is, \"output\" to read \
+         what it has printed since you last asked, \"wait\" to collect all of it when it ends, or \
+         \"stop\" to kill it (pid {}). Its budget is {}s, and nobody has to be waiting for that to \
+         happen. You will be told when it ends even if you do not ask.",
+        job.pid,
+        util::preview(&job.label, 80),
+        job.pid,
+        job.timeout_secs
+    )
+}
+
+/// The file a background command's output goes to.
+///
+/// In this session's own directory, where the spilled output and the `pwsh` scripts already go, and
+/// named for the tool that started it as well as numbered: the three tools that can start a
+/// background command keep their own counters, and `background-1.log` from two of them at once would
+/// be one command's output disappearing into another's.
+fn background_log_path(dir: &Path, tag: &str, n: usize) -> PathBuf {
+    dir.join(format!("background-{tag}-{n}.log"))
+}
+
 /// How large the file a download is writing to has become, if it can be told.
 ///
 /// Best effort by design. Finding the destination means reading the command line, and a
@@ -1864,11 +2255,19 @@ impl Tool for BashTool {
         "bash"
     }
 
+    /// A background command's log goes where the spilled output goes, so that one directory holds
+    /// everything this session wrote and a person can find the log by reading the handle.
+    fn use_spill_dir(&mut self, dir: &Path) {
+        self.spill_dir = dir.to_path_buf();
+    }
+
     fn description(&self) -> &str {
         "Run a shell command on the local machine and return its combined output. \
          This is the primary way to inspect and repair the system (package \
          managers, git, cargo, npm, service status). Working directory is \
-         preserved across calls within a session."
+         preserved across calls within a session. Set `background: true` for a command that \
+         takes minutes: the call comes back at once with a pid and a log file, and `job_op` \
+         reads, waits for or kills it -- do that rather than holding the session still."
     }
 
     fn schema(&self) -> Value {
@@ -1882,12 +2281,24 @@ impl Tool for BashTool {
                          the command line does not make that obvious. A download is not killed on \\
                          a total time budget; it is killed only if it stops producing output."
                 },
+                "background": {
+                    "type": "boolean",
+                    "description": format!(
+                        "Default false: wait here for the command and return its output. Set true for \
+                         anything slow -- a build, an install, a test suite -- and the call returns at \
+                         once with a pid and a log file, with `job_op` to read, wait for or kill it. A \
+                         background command's default budget is {LONG_BASH_TIMEOUT}s rather than \
+                         {DEFAULT_BASH_TIMEOUT}s. Its log file is in this session's directory and can \
+                         be read with `read` while it runs."
+                    )
+                },
                 "timeout_secs": {
                     "type": "integer",
                     "description": format!(
                         "Kill the command after this many seconds (default {DEFAULT_BASH_TIMEOUT} \
                          for ordinary commands, {LONG_BASH_TIMEOUT} when the command installs, \
-                         builds or downloads). Raise it for anything known to be slow."
+                         builds, downloads or runs in the background). Raise it for anything known \
+                         to be slow."
                     )
                 }
             },
@@ -1904,12 +2315,18 @@ impl Tool for BashTool {
         // flag would silently restore the two-minute kill.
         let declared = optional_bool(args, "download")?;
         let download = declared || looks_like_download(command);
+        // Opt-in for a command, unlike `task` and deliberately the other way round: a command's
+        // output is usually the input to the next step, so waiting is the useful default. What the
+        // flag buys is the long build, and the model is the one that knows which one it is asking for.
+        let background = optional_bool(args, "background")?;
 
         let timeout = match optional_u64(args, "timeout_secs")? {
             Some(explicit) => explicit,
             // A download is bounded by idleness rather than by a total budget: it may
             // legitimately take an hour, and what matters is whether it is still moving.
             None if download => DOWNLOAD_BASH_TIMEOUT,
+            // A command somebody chose not to wait for is by definition not a two-minute command.
+            None if background => LONG_BASH_TIMEOUT,
             // A command that installs or builds is expected to be slow, and killing
             // `cargo install` at two minutes is not a safety feature -- it is a false
             // alarm that teaches the model to work around the tool.
@@ -1924,6 +2341,28 @@ impl Tool for BashTool {
                  Turn it off with /readonly, or use a read-only command.",
                 util::preview(command, 120)
             ));
+        }
+
+        // Reached only after the gate above, which is the same gate a foreground command goes
+        // through: a background call is not a way around `readonly`.
+        if background {
+            let log = background_log_path(
+                &self.spill_dir,
+                "bash",
+                self.logs.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1,
+            );
+            let run = shell_invocation(&self.config, command);
+            let job = start_background_command(
+                &self.config,
+                &run,
+                None,
+                &self.cwd,
+                timeout,
+                log,
+                util::preview(command, 120),
+            )
+            .await?;
+            return Ok(command_handle(&job));
         }
 
         let outcome =
@@ -2155,8 +2594,17 @@ impl Tool for PwshTool {
                 "timeout_secs": {
                     "type": "integer",
                     "description": format!(
-                        "Kill the script after this many seconds (default {DEFAULT_BASH_TIMEOUT}). \
-                         Raise it for anything known to be slow."
+                        "Kill the script after this many seconds (default {DEFAULT_BASH_TIMEOUT}, or \
+                         {LONG_BASH_TIMEOUT} when it runs in the background). Raise it for anything \
+                         known to be slow."
+                    )
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": format!(
+                        "Default false: wait here for the script. Set true for anything slow, and the \
+                         call returns at once with a pid and a log file (default budget \
+                         {LONG_BASH_TIMEOUT}s) for `job_op` to read, wait for or kill."
                     )
                 }
             },
@@ -2182,9 +2630,13 @@ impl Tool for PwshTool {
         }
         let extra = optional_str_list(args, "args")?;
         let stdin = optional_str(args, "stdin")?;
-        let timeout = optional_u64(args, "timeout_secs")?
-            .unwrap_or(DEFAULT_BASH_TIMEOUT)
-            .clamp(1, 24 * 3600);
+        let background = optional_bool(args, "background")?;
+        let timeout = match optional_u64(args, "timeout_secs")? {
+            Some(explicit) => explicit,
+            None if background => LONG_BASH_TIMEOUT,
+            None => DEFAULT_BASH_TIMEOUT,
+        }
+        .clamp(1, 24 * 3600);
 
         let shell = self.shell().ok_or_else(|| {
             anyhow!("no PowerShell on this machine: neither `pwsh` nor `powershell` could be run")
@@ -2206,6 +2658,20 @@ impl Tool for PwshTool {
         argv.extend(extra);
 
         let run = Invocation::plain(&shell.program, argv);
+
+        if background {
+            let log = background_log_path(
+                &self.script_dir,
+                "pwsh",
+                self.scripts.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1,
+            );
+            let label = format!("pwsh {}", util::preview(script, 100));
+            let job =
+                start_background_command(&self.config, &run, stdin, &self.cwd, timeout, log, label)
+                    .await?;
+            return Ok(command_handle(&job));
+        }
+
         let outcome =
             run_program_streaming(&self.config, &run, stdin, &self.cwd, timeout, false).await?;
 
@@ -2241,12 +2707,23 @@ pub struct ExecTool {
     config: Config,
     readonly: bool,
     cwd: PathBuf,
+    /// Where a background command's log goes, and how many this session has started.
+    spill_dir: PathBuf,
+    logs: std::sync::atomic::AtomicUsize,
 }
 
 #[async_trait::async_trait]
 impl Tool for ExecTool {
     fn name(&self) -> &str {
         "exec"
+    }
+
+    /// A background command's log goes where the spilled output goes, for the reason `bash`'s does
+    /// and one more: without this the log lands in the shared `spill/unattached/` directory, where
+    /// every session's `background-exec-1.log` is the same file. Caught by a test that asserts the
+    /// handle's path is inside this session's directory, not by reading the code.
+    fn use_spill_dir(&mut self, dir: &Path) {
+        self.spill_dir = dir.to_path_buf();
     }
 
     fn description(&self) -> &str {
@@ -2280,8 +2757,16 @@ impl Tool for ExecTool {
                     "type": "integer",
                     "description": format!(
                         "Kill the program after this many seconds (default {DEFAULT_BASH_TIMEOUT} \
-                         for ordinary commands, {LONG_BASH_TIMEOUT} when it installs, builds or \
-                         downloads). Raise it for anything known to be slow."
+                         for ordinary commands, {LONG_BASH_TIMEOUT} when it installs, builds, \
+                         downloads or runs in the background). Raise it for anything known to be slow."
+                    )
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": format!(
+                        "Default false: wait here for the program. Set true for anything slow, and the \
+                         call returns at once with a pid and a log file (default budget \
+                         {LONG_BASH_TIMEOUT}s) for `job_op` to read, wait for or kill."
                     )
                 }
             },
@@ -2296,6 +2781,7 @@ impl Tool for ExecTool {
         }
         let argv = optional_str_list(args, "args")?;
         let stdin = optional_str(args, "stdin")?;
+        let background = optional_bool(args, "background")?;
 
         // The time and download heuristics read the call as a line, which is the only
         // place an argument array is ever flattened. Nothing is executed from it: the
@@ -2306,6 +2792,7 @@ impl Tool for ExecTool {
         let timeout = match optional_u64(args, "timeout_secs")? {
             Some(explicit) => explicit,
             None if download => DOWNLOAD_BASH_TIMEOUT,
+            None if background => LONG_BASH_TIMEOUT,
             None if looks_slow(&label) => LONG_BASH_TIMEOUT,
             None => DEFAULT_BASH_TIMEOUT,
         }
@@ -2323,6 +2810,26 @@ impl Tool for ExecTool {
         // argument list. A caller that wants shell syntax wants `bash`, whose invocation is
         // built by `shell_invocation`.
         let run = Invocation::plain(program, argv);
+
+        // After the gate, as in `bash`: backgrounding is not a way around `readonly`.
+        if background {
+            let log = background_log_path(
+                &self.spill_dir,
+                "exec",
+                self.logs.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1,
+            );
+            let job = start_background_command(
+                &self.config,
+                &run,
+                stdin,
+                &self.cwd,
+                timeout,
+                log,
+                util::preview(&label, 120),
+            )
+            .await?;
+            return Ok(command_handle(&job));
+        }
 
         let outcome = run_program_streaming(&self.config, &run, stdin, &self.cwd, timeout, download)
             .await?;
@@ -3063,6 +3570,8 @@ mod tests {
             config: Config::default(),
             readonly: true,
             cwd: PathBuf::from("."),
+            spill_dir: std::env::temp_dir(),
+            logs: std::sync::atomic::AtomicUsize::new(0),
         };
         let args = json!({ "command": "rm -rf /tmp/definitely-not-real" });
         let result = tool.call(&args).await;
@@ -3779,7 +4288,7 @@ impl Tool for TaskTool {
          This starts it and returns at once with a handle -- pid and the conversation its answer is \
          being written to -- instead of waiting for it, because a job that takes minutes must not \
          make this session unusable. You are told when it ends and can collect its answer with \
-         `task_op` action \"wait\". Use `background: false` when the next thing you do depends on \
+         `job_op` action \"wait\". Use `background: false` when the next thing you do depends on \
          the answer and there is nothing else to get on with. `readonly` here forces it there."
     }
 
@@ -3814,7 +4323,7 @@ impl Tool for TaskTool {
             "background": {
                 "type": "boolean",
                 "description": "Default true: start it and return at once with a handle (its pid and \
-                     its conversation) instead of waiting. Collect the answer with `task_op` action \
+                     its conversation) instead of waiting. Collect the answer with `job_op` action \
                      \"wait\", and see where it is with \"status\". Set it to false only when what you \
                      do next depends on the answer."
             }
@@ -3891,7 +4400,7 @@ impl Tool for TaskTool {
 /// write `/stop` to a stdin it holds, and only the run that spawned a child holds one. Another run's
 /// child is visible through its presence record -- which is what `flint who` reads, and what the
 /// session path in that record is for -- and is handled there by a person, not from here.
-pub struct TaskOpTool;
+pub struct JobOpTool;
 
 /// What the presence records say about a run this one did not start.
 fn foreign_run(pid: u32) -> Option<String> {
@@ -3930,18 +4439,20 @@ fn foreign_run(pid: u32) -> Option<String> {
     ))
 }
 
-/// Which child an action is about: the pid when one was named, otherwise the only one it could mean.
+/// Which job an action is about: the pid when one was named, otherwise the only one it could mean.
+///
+/// "Job" rather than "child" throughout since background commands share this: a pid is a pid, and a
+/// caller that names one should not have to remember which tool started it.
 fn job_for(pid: Option<u32>, action: &str) -> Result<std::sync::Arc<Job>> {
     if let Some(pid) = pid {
         if let Some(job) = job_by_pid(pid) {
             return Ok(job);
         }
         return Err(anyhow!(
-            "no child of this run has pid {pid}. {}",
+            "no job of this run has pid {pid}. {}",
             foreign_run(pid).unwrap_or_else(|| "Nothing on this machine says it is either: `flint \
-                                                 who` lists the runs that exist, and `task_op` \
-                                                 action \"status\" lists the children this run \
-                                                 started."
+                                                 who` lists the runs that exist, and `job_op` \
+                                                 action \"status\" lists the jobs this run started."
                 .to_string())
         ));
     }
@@ -3950,8 +4461,8 @@ fn job_for(pid: Option<u32>, action: &str) -> Result<std::sync::Arc<Job>> {
         .filter(|job| !job.has_finished())
         .cloned()
         .collect();
-    // Nothing running: a finished child is still worth collecting, and there is only one thing a
-    // bare `wait` could mean when exactly one of them exists.
+    // Nothing running: a finished job is still worth collecting, and there is only one thing a bare
+    // `wait` could mean when exactly one of them exists.
     let candidates = if running.is_empty() {
         jobs_listed()
     } else {
@@ -3959,12 +4470,13 @@ fn job_for(pid: Option<u32>, action: &str) -> Result<std::sync::Arc<Job>> {
     };
     match candidates.len() {
         0 => Err(anyhow!(
-            "this run has started no children, so there is nothing to {action}. `task` starts one \
-             and comes back with its pid at once."
+            "this run has started no jobs, so there is nothing to {action}. `task` starts a child and \
+             comes back with its pid at once, and `bash`/`exec`/`pwsh` start a background command the \
+             same way with `background: true`."
         )),
         1 => Ok(candidates[0].clone()),
         _ => Err(anyhow!(
-            "{} children of this run are in play: {} -- name one with `pid`.",
+            "{} jobs of this run are in play: {} -- name one with `pid`.",
             candidates.len(),
             candidates
                 .iter()
@@ -3975,14 +4487,14 @@ fn job_for(pid: Option<u32>, action: &str) -> Result<std::sync::Arc<Job>> {
     }
 }
 
-/// Every child this run started, in the words of the tool that has to answer for them.
+/// Every job this run started, in the words of the tool that has to answer for them.
 fn status_text(pid: Option<u32>) -> String {
     match pid {
         Some(pid) => match job_by_pid(pid) {
             Some(job) => job.describe(),
             None => foreign_run(pid).unwrap_or_else(|| {
                 format!(
-                    "no child of this run has pid {pid}, and nothing on this machine says it is \
+                    "no job of this run has pid {pid}, and nothing on this machine says it is \
                      {pid}. `flint who` lists the runs that exist."
                 )
             }),
@@ -3990,8 +4502,8 @@ fn status_text(pid: Option<u32>) -> String {
         None => {
             let listed = jobs_listed();
             if listed.is_empty() {
-                "this run has started no children. `task` starts one and comes back at once with \
-                 its pid; it only waits when the call says `background: false`."
+                "this run has started no jobs. `task` starts a child and comes back at once with its \
+                 pid; it only waits when the call says `background: false`."
                     .to_string()
             } else {
                 listed
@@ -4005,15 +4517,17 @@ fn status_text(pid: Option<u32>) -> String {
 }
 
 #[async_trait::async_trait]
-impl Tool for TaskOpTool {
+impl Tool for JobOpTool {
     fn name(&self) -> &str {
-        "task_op"
+        "job_op"
     }
 
     fn description(&self) -> &str {
-        "See what became of a child this run started and did not wait for. `status` reports every \
-         child this run started, running first; `wait` collects one's answer, waiting for it if need \
-         be; `stop` asks one to stop, which keeps the half of an answer it had drawn. Only children \
+        "See what became of a job this run started and did not wait for -- a `task` child, or a \
+         command started with `background: true`. `status` reports every job this run started, \
+         running first; `output` reads what a background command has printed since it was last \
+         asked, without collecting it; `wait` collects the whole of what a job produced, waiting for \
+         it if need be; `stop` ends one, which keeps whatever it had already produced. Only jobs \
          *this* run started can be waited for or stopped -- a run in another process can be seen with \
          `flint who`, not handled from here."
     }
@@ -4024,12 +4538,12 @@ impl Tool for TaskOpTool {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["status", "wait", "stop"],
-                    "description": "status: where every child of this run is. wait: its answer, when it has one. stop: ask it to stop."
+                    "enum": ["status", "output", "wait", "stop"],
+                    "description": "status: where every job of this run is. output: what a background command has printed since you last asked. wait: the whole of what it produced, when it has it. stop: end it."
                 },
                 "pid": {
                     "type": "number",
-                    "description": "Which child, as the handle from `task` gave it. Default: all of them for status, or the only one in play for wait and stop."
+                    "description": "Which job, as the handle from `task` or from a background command gave it. Default: all of them for status, or the only one in play for output, wait and stop."
                 },
                 "timeout_secs": {
                     "type": "number",
@@ -4052,6 +4566,15 @@ impl Tool for TaskOpTool {
             .filter(|secs| *secs > 0);
         match action.as_str() {
             "status" => Ok(status_text(pid)),
+            // A window on a running command, not a collection of it: the answer to "is it still
+            // getting anywhere?" arrives while the job is still going, which is the whole reason
+            // there is a file to read. Reading it does not consume the job, so the notice at the end
+            // still comes -- except when the job has already ended, where reading to the end of the
+            // file *is* collecting it.
+            "output" => {
+                let job = job_for(pid, "read the output of")?;
+                Ok(job.new_output())
+            }
             "wait" => {
                 let job = job_for(pid, "wait for")?;
                 let limit = seconds.unwrap_or(300);
@@ -4073,29 +4596,48 @@ impl Tool for TaskOpTool {
                     job.mark_reported();
                     return Ok(format!(
                         "it had already ended, so there was nothing to stop; `wait` collects what it \
-                         said.\n{}",
+                         {}.\n{}",
+                        match job.kind {
+                            JobKind::Child => "said",
+                            JobKind::Command => "printed",
+                        },
                         job.describe()
                     ));
                 }
-                let asked = job.ask_to_stop().await;
-                if !asked {
-                    return Ok(format!(
-                        "could not ask pid {} to stop: its stdin is closed, which means it has just \
-                         ended.\n{}",
-                        job.pid,
-                        job.describe()
-                    ));
-                }
+                // Two ways to end a job, because they are two different things: a child is *asked*
+                // -- it is a run, and `/stop` lets it finish the thought it was on -- while a
+                // command is killed, because there is nothing to ask.
+                let ended_how = match job.kind {
+                    JobKind::Child => {
+                        if !job.ask_to_stop().await {
+                            return Ok(format!(
+                                "could not ask pid {} to stop: its stdin is closed, which means it has \
+                                 just ended.\n{}",
+                                job.pid,
+                                job.describe()
+                            ));
+                        }
+                        "asked to stop, and it did -- keeping the half of an answer it had drawn"
+                    }
+                    JobKind::Command => {
+                        job.kill();
+                        "killed it, and it is gone -- what it had already written is still in its log"
+                    }
+                };
                 let limit = seconds.unwrap_or(20);
                 match job.wait(Some(Duration::from_secs(limit))).await {
-                    Some(finished) => Ok(format!(
-                        "asked to stop, and it did -- keeping the half of an answer it had drawn.\n{}",
-                        job.render(&finished)
-                    )),
+                    Some(finished) => Ok(format!("{ended_how}.\n{}", job.render(&finished))),
                     None => Ok(format!(
-                        "asked pid {} to stop; it is still going {}s later. It writes what it has \
-                         drawn and exits, and its own budget of {}s ends it either way.\n{}",
-                        job.pid,
+                        "{}; it is still going {}s later. Its own budget of {}s ends it either way.\n{}",
+                        match job.kind {
+                            // A child that ignores `/stop` is a run choosing to finish the thought
+                            // it was on, and its own budget is what ends it.
+                            JobKind::Child => format!("asked pid {} to stop", job.pid),
+                            // A command that survives a `taskkill /T /F` is a kill that has not
+                            // landed yet -- there is nothing for it to be deliberating about.
+                            JobKind::Command =>
+                                format!("killed pid {}, and the kill has not landed yet", job.pid),
+                        },
                         limit,
                         job.timeout_secs,
                         job.describe()
@@ -4103,7 +4645,7 @@ impl Tool for TaskOpTool {
                 }
             }
             other => Err(anyhow!(
-                "task_op takes action \"status\", \"wait\" or \"stop\", not {other:?}"
+                "job_op takes action \"status\", \"output\", \"wait\" or \"stop\", not {other:?}"
             )),
         }
     }
@@ -4329,6 +4871,7 @@ fn start_child(child: Child) -> Result<std::sync::Arc<Job>> {
     // Registered before its stream is read, because the whole point is to survive this future being
     // dropped: after that, the detached reader below is the only thing still watching the child.
     let job = std::sync::Arc::new(Job {
+        kind: JobKind::Child,
         pid,
         label: label.clone(),
         prompt,
@@ -4345,6 +4888,9 @@ fn start_child(child: Child) -> Result<std::sync::Arc<Job>> {
         finished: std::sync::Mutex::new(None),
         done: tokio::sync::Notify::new(),
         schema_file: std::sync::Mutex::new(child.schema_file.clone()),
+        // A child's output is its conversation, which it names for itself a moment from now.
+        log: None,
+        read_offset: std::sync::Mutex::new(0),
     });
     forget_old_finished();
     jobs().push(std::sync::Arc::clone(&job));
@@ -4500,11 +5046,11 @@ async fn background_handle(job: std::sync::Arc<Job>) -> String {
     match &session {
         Some(path) => text.push_str(&format!("session: {path}\n")),
         None => {
-            text.push_str("session: not named yet -- ask `task_op` with action \"status\" for it\n")
+            text.push_str("session: not named yet -- ask `job_op` with action \"status\" for it\n")
         }
     }
     text.push_str(&format!(
-        "Use `task_op` with action \"status\" to see where it is, \"wait\" to collect its answer \
+        "Use `job_op` with action \"status\" to see where it is, \"wait\" to collect its answer \
          (pid {}), or \"stop\" to ask it to stop. Its budget is {}s, and nobody has to be waiting for \
          that to happen. You will be told when it ends even if you do not ask.\n\
          depth: {} (this run is {}), readonly: {}",
@@ -5403,6 +5949,262 @@ mod spill_tests {
         assert!(
             !dir.path().join("spill").exists(),
             "a spill directory was made for output that fit"
+        );
+    }
+}
+
+#[cfg(test)]
+mod background_command_tests {
+    use super::test_support::TempDir;
+    use super::*;
+    use crate::config::Config;
+    use serde_json::json;
+
+    /// A command that takes a few seconds and says something before and after, so there is
+    /// something to read *while* it runs. `ping` rather than `timeout`/`sleep`: this has to run on
+    /// Windows, where neither exists, and the loopback ping is the shortest reliable wait there.
+    fn slow_command() -> &'static str {
+        if cfg!(windows) {
+            "echo one & ping -n 4 127.0.0.1 >NUL & echo two"
+        } else {
+            "echo one; sleep 3; echo two"
+        }
+    }
+
+    /// The pid and log file out of a handle, which is what a caller has to work with.
+    fn handle_of(text: &str) -> (u32, PathBuf) {
+        let pid = text
+            .split("pid ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|pid| pid.trim_matches(|c: char| !c.is_ascii_digit()).parse().ok())
+            .unwrap_or_else(|| panic!("no pid in the handle: {text}"));
+        let log = text
+            .lines()
+            .find_map(|line| line.strip_prefix("output: "))
+            .unwrap_or_else(|| panic!("no output file in the handle: {text}"));
+        (pid, PathBuf::from(log))
+    }
+
+    fn toolbox(dir: &TempDir, readonly: bool) -> ToolBox {
+        ToolBox::new(&Config::default(), readonly, dir.path().to_path_buf())
+            .with_spill_dir(dir.path().join("spill"))
+    }
+
+    /// Poll `job_op` action "output" until the wanted text shows up, the way a caller with a loop
+    /// would. Not a sleep-and-hope: the point is that reading during a run is possible at all.
+    async fn read_until(tools: &ToolBox, pid: u32, wanted: &str, tries: u32) -> String {
+        let mut seen = String::new();
+        for _ in 0..tries {
+            seen.push_str(
+                &tools
+                    .invoke("job_op", &json!({ "action": "output", "pid": pid }))
+                    .await
+                    .expect("output"),
+            );
+            if seen.contains(wanted) {
+                return seen;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        seen
+    }
+
+    /// The whole point of the feature: the call comes back before the command does, it says how to
+    /// reach the answer, and the file it names is a file that actually exists.
+    #[tokio::test]
+    async fn a_background_command_hands_back_a_handle_at_once_and_names_a_log_that_exists() {
+        let dir = TempDir::new("bg-handle");
+        let tools = toolbox(&dir, false);
+        let started = std::time::Instant::now();
+        let handle = tools
+            .invoke(
+                "bash",
+                &json!({ "command": slow_command(), "background": true }),
+            )
+            .await
+            .expect("background bash");
+        let took = started.elapsed();
+
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "the call waited for the command: {took:?}"
+        );
+        let (pid, log) = handle_of(&handle);
+        assert!(handle.contains("job_op"), "no way to reach it: {handle}");
+        assert!(pid > 0, "no pid in the handle: {handle}");
+        assert!(log.is_file(), "the named log does not exist: {log:?}");
+
+        // Leave nothing running behind the test.
+        let _ = tools
+            .invoke("job_op", &json!({ "action": "stop", "pid": pid }))
+            .await;
+    }
+
+    /// Reading while it runs, then collecting the whole of it: two different questions, and the
+    /// second one has to answer with the first part as well.
+    #[tokio::test]
+    async fn a_running_commands_output_is_read_incrementally_and_wait_hands_over_all_of_it() {
+        let dir = TempDir::new("bg-output");
+        let tools = toolbox(&dir, false);
+        let handle = tools
+            .invoke(
+                "bash",
+                &json!({ "command": slow_command(), "background": true }),
+            )
+            .await
+            .expect("background bash");
+        assert!(
+            handle.contains("pid "),
+            "not a handle, so the call waited for the command: {handle}"
+        );
+        let (pid, _) = handle_of(&handle);
+
+        let during = read_until(&tools, pid, "one", 40).await;
+        assert!(
+            during.contains("one"),
+            "nothing was readable while it ran: {during:?}"
+        );
+
+        let whole = tools
+            .invoke("job_op", &json!({ "action": "wait", "pid": pid, "timeout_secs": 30 }))
+            .await
+            .expect("wait");
+        assert!(whole.contains("one"), "the early output is missing: {whole}");
+        assert!(whole.contains("two"), "the late output is missing: {whole}");
+        assert!(whole.contains("exit code: 0"), "no exit code: {whole}");
+
+        // Incremental, not a replay: what `output` already handed over does not come back, which is
+        // the difference between watching a build and being sent the same log on every poll.
+        let after = tools
+            .invoke("job_op", &json!({ "action": "output", "pid": pid }))
+            .await
+            .expect("output after the end");
+        assert!(
+            !after.contains("one"),
+            "the same output was handed over twice: {after:?}"
+        );
+    }
+
+    /// A kill has to leave the log readable: the half of the output that was written before the
+    /// stop is the only thing there is, and throwing it away would make the verb useless.
+    #[tokio::test]
+    async fn a_background_command_can_be_stopped_and_keeps_what_it_had_written() {
+        let dir = TempDir::new("bg-stop");
+        let tools = toolbox(&dir, false);
+        let handle = tools
+            .invoke(
+                "bash",
+                &json!({ "command": slow_command(), "background": true }),
+            )
+            .await
+            .expect("background bash");
+        assert!(
+            handle.contains("pid "),
+            "not a handle, so the call waited for the command: {handle}"
+        );
+        let (pid, log) = handle_of(&handle);
+
+        // Wait for the first line so there is something to keep.
+        let during = read_until(&tools, pid, "one", 40).await;
+        assert!(during.contains("one"), "nothing to keep: {during:?}");
+
+        let stopped = tools
+            .invoke("job_op", &json!({ "action": "stop", "pid": pid, "timeout_secs": 20 }))
+            .await
+            .expect("stop");
+        assert!(
+            stopped.contains("one"),
+            "the stop threw away what it had written: {stopped}"
+        );
+        let kept = std::fs::read_to_string(&log).expect("the log survived");
+        assert!(kept.contains("one"), "the log lost its first line: {kept:?}");
+    }
+
+    /// Which directory the log lands in is part of the handle being usable: a person reading the
+    /// transcript follows the path into *this session's* directory, and a tool that was never told
+    /// where that is falls back to the shared `unattached` one instead. That is the difference
+    /// between a log a person finds and a log two sessions overwrite.
+    #[tokio::test]
+    async fn a_background_exec_writes_its_log_where_the_session_keeps_its_files() {
+        let dir = TempDir::new("bg-exec");
+        let tools = toolbox(&dir, false);
+        let config = Config::default();
+        // The same slow command as the bash tests, handed to `exec` as a program and an argument
+        // list -- which is the other tool that can start a background command, and the one that had
+        // to be told about the spill directory separately.
+        let run = shell_invocation(&config, slow_command());
+        let handle = tools
+            .invoke(
+                "exec",
+                &json!({ "program": run.program, "args": run.args, "background": true }),
+            )
+            .await
+            .expect("background exec");
+        assert!(
+            handle.contains("pid "),
+            "not a handle, so the call waited for the command: {handle}"
+        );
+        let (pid, log) = handle_of(&handle);
+        assert!(
+            log.starts_with(dir.path().join("spill")),
+            "the log went somewhere other than this session's directory: {log:?}"
+        );
+
+        let _ = tools
+            .invoke("job_op", &json!({ "action": "stop", "pid": pid }))
+            .await;
+    }
+
+    /// The budget belongs to the job, not to the waiter: this command is stopped by its own
+    /// supervisor one second in, while nothing at all is waiting for it.
+    #[tokio::test]
+    async fn a_background_command_is_stopped_when_its_own_budget_runs_out() {
+        let dir = TempDir::new("bg-budget");
+        let tools = toolbox(&dir, false);
+        let handle = tools
+            .invoke(
+                "bash",
+                &json!({ "command": slow_command(), "background": true, "timeout_secs": 1 }),
+            )
+            .await
+            .expect("background bash");
+        assert!(
+            handle.contains("pid "),
+            "not a handle, so the call waited for the command: {handle}"
+        );
+        let (pid, _) = handle_of(&handle);
+
+        let waited = tools
+            .invoke("job_op", &json!({ "action": "wait", "pid": pid, "timeout_secs": 10 }))
+            .await
+            .expect("wait");
+        assert!(
+            waited.contains("budget ran out"),
+            "the budget was not enforced while nobody waited: {waited}"
+        );
+    }
+
+    /// The gate is not a foreground-only gate. A background call is the same permission question
+    /// asked of the same command, and it must be answered before anything is spawned.
+    #[tokio::test]
+    async fn a_readonly_run_refuses_a_mutating_command_in_the_background_too() {
+        let dir = TempDir::new("bg-readonly");
+        let tools = toolbox(&dir, true);
+        let refused = tools
+            .invoke(
+                "bash",
+                &json!({ "command": "echo written > out.txt", "background": true }),
+            )
+            .await
+            .expect_err("a readonly run allowed a mutating background command");
+        assert!(
+            format!("{refused}").contains("readonly"),
+            "the refusal does not say why: {refused}"
+        );
+        assert!(
+            !dir.path().join("out.txt").exists(),
+            "the command ran anyway"
         );
     }
 }

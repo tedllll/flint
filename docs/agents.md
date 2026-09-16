@@ -42,7 +42,7 @@ That equality is the design, not a coincidence: a feature that works from outsid
 |---|---|---|
 | `flint -p … --json` over a pipe | Python, a shell, an editor, another agent's shell tool | **Built.** `examples/python/flint_call.py`; every fact needed to branch is on the stream |
 | an MCP tool call | Codex, Claude Code, Cursor | **Built.** `examples/mcp/flint_server.py`, one tool, stdio |
-| a `task` tool inside flint | flint itself | **Built.** `src/tools.rs` (`TaskTool`), `tests/task.rs`; one child per call, `tasks` for several at once, and a handle by default -- pid and the conversation the answer is being written to -- with `task_op` to look at, collect or stop a job nobody waited for (`background: false` is the door that waits) |
+| a `task` tool inside flint | flint itself | **Built.** `src/tools.rs` (`TaskTool`), `tests/task.rs`; one child per call, `tasks` for several at once, and a handle by default -- pid and the conversation the answer is being written to -- with `job_op` to look at, collect or stop a job nobody waited for (`background: false` is the door that waits). A background *command* (`bash`/`pwsh`/`exec` with `background: true`) is the same handle, the same three verbs and the same one notice, with a log file where a child has a conversation |
 | a profile in `<project>/.flint/agents/<name>.md` | a person, once; a model or a person afterwards | **Built.** `src/context.rs`; the same child, started with instructions, a model and `readonly` already decided |
 
 The third door is the first two in Rust. It runs `std::env::current_exe()` with the same arguments,
@@ -162,8 +162,8 @@ frames its reader has absorbed, the session it named and the exit status once it
 process state, not derived state and not a cache: it is exactly the set of facts that stop existing when
 the process that owns them exits, and nothing on disk pretends otherwise.
 
-What presence is still for is the *looking*, and it is what makes the scope honest. `task_op` with
-`action: "status"` lists the children this run started; asked about a pid it did not start, it reads the
+What presence is still for is the *looking*, and it is what makes the scope honest. `job_op` with
+`action: "status"` lists the jobs this run started; asked about a pid it did not start, it reads the
 presence records and answers with what those say — directory, endpoint, `readonly`, the conversation it
 is holding — and says plainly that it can be seen and not waited for or stopped. A person gets the whole
 listing from `flint who`.
@@ -172,7 +172,9 @@ The three verbs became **one** tool with an `action`, not three tools. Every too
 every request of every conversation, and three verbs about one child do not deserve three schemas; it is
 deliberately *not* folded into `task` either, because a call that sometimes answers and sometimes hands
 back a receipt is one whose result a model has to guess at. The names in the sketch (`task_status`,
-`task_wait`, `task_stop`) are therefore `task_op` with `action: "status" | "wait" | "stop"`.
+`task_wait`, `task_stop`) are therefore `job_op` with
+`action: "status" | "output" | "wait" | "stop"` -- the fourth added when a background *command* joined
+the record, because a log can be read while the thing is still writing it and a child's answer cannot.
 
 Three things fell out of building it that the sketch did not anticipate:
 
@@ -215,7 +217,7 @@ costs whether or not its answer is ever read. So a job that ends is reported, on
   from the person: …]` listing every job that ended unread, with the pid and the verb that collects it.
 
 The lanes are the same fact for two readers, so neither marks the other's work done, and the *third*
-reader -- `task_op wait`, `task_op stop`, or a `stop` on a job that had already ended -- counts as a
+reader -- `job_op wait`, `job_op stop`, or a `stop` on a job that had already ended -- counts as a
 read and suppresses the notice, which is what makes "once" true rather than "every request from now
 on". The bookkeeping is one `AtomicBool` on the job (`reported`), and the report goes into the request
 **view** beside the peer relay and never into `history`: the session file stays the record of what
@@ -227,14 +229,52 @@ check makes it fail with "told 2 times"), and the person's notice on stderr.
 
 **The shape was read off DSH's job runtime rather than invented**, which is worth recording because two
 of its decisions were adopted and one was refused. Adopted: **the same verbs for every kind of job**
-(DSH's `job_output`/`job_list`/`job_kill` are kind-independent, and flint's single `task_op` with
+(DSH's `job_output`/`job_list`/`job_kill` are kind-independent, and flint's single `job_op` with
 `status`/`wait`/`stop` is the same idea in one schema), and **a settled job is announced exactly once,
 suppressed by any read or kill**. Refused: **waking an idle owner with a turn of its own**. DSH does
 that because its agents run unattended goal loops; flint's REPL has a person at the keyboard, and
 starting a model turn nobody asked for is a bill nobody agreed to. The person is told instead, and the
-model learns on its next request -- which is the same information, one prompt cheaper. (The second half
-of the extension, background *commands*, is not built: `bash`/`pwsh`/`exec` still wait, because a
-command's output is usually the input to the next step. When it is built it goes on this same record.)
+model learns on its next request -- which is the same information, one prompt cheaper.
+
+**Built since: a command is a job too, and that is what made the record earn its name.** The question
+that drove it was the same complaint one step further out: *"some other tasks must be backgroundable
+too, surely -- certain Python scripts, bash."* They were, mechanically: `bash` had a timeout, a spill
+file and a kill-tree, and `exec`/`pwsh` went through the same runner. What they did not have was a
+handle, so a ten-minute build meant either a held turn or a `nohup` the model had to invent, with no
+exit code and no notice at the end.
+
+The change is deliberately small, because it was designed as one record rather than two features.
+`Job` gained a `kind` (`Child`/`Command`), a `log` path and a read cursor; `bash`, `exec` and `pwsh`
+gained `background: true`, which spawns through `start_background_command` with **both streams into one
+log file** under this session's directory and a supervisor that owns the child, its budget and its
+`KillTree`; and `job_op` gained `output`. The three differences between the kinds are the three that
+could not be shared: where the output goes (a conversation versus a log file), how it is stopped
+(`/stop` on stdin versus a kill, and on Windows `taskkill /PID … /T /F`, because killing the shell
+alone leaves `cargo` holding `target/` -- measured, in `KillTree`'s comment), and what `output` means
+(a child has none; its answer is `wait`).
+
+Four decisions in that list are worth keeping:
+
+- **Commands stay foreground by default, and `task` does not.** The defaults point opposite ways on
+  purpose. A command's output is usually the input to the very next step, so waiting is useful; a
+  child's answer is a piece of work whose whole value is that the parent keeps going.
+- **A background command gets the *long* budget** (`LONG_BASH_TIMEOUT`, 900 s) rather than the ordinary
+  two minutes: a command somebody chose to stop waiting for is by definition not a two-minute command.
+  The budget is enforced by the supervisor, not by a waiter -- held by a test that starts a 1-second
+  budget with nobody watching.
+- **`output` is a window, `wait` is the answer.** Reading a running command is incremental from a
+  cursor on the job, so polling a build costs the new lines rather than the whole log; `wait` hands over
+  the entire file plus its exit code. Reading a job that has *already ended* to the end of its file is
+  reading all of it, which counts as collecting it -- so it marks the job reported, exactly like `wait`.
+- **Nothing new was invented for the notice.** A command's exit goes to the same person's lane and the
+  same request-view report as a child's, through the same `reported` flag, which is the payoff for
+  calling both of them one thing.
+
+Two limits are honest and worth stating where a reader will meet them. A command dies with the run on
+Windows (the guard fires as the runtime drops the task); on Unix it does not, which is the same
+single-process gap `docs/windows-tooling.md` §6.1 already documents for foreground commands. And a
+background command is **not** a run: it has no session file, no presence record, and no depth, so
+`flint who` will not name it and `job_op` answers for it only from the process that started it.
 
 ## Stages
 
@@ -264,9 +304,9 @@ same commit, keeping the original reason. — **Built**, and the differences fro
 worth reading:
 
 - **The background handle is built, as one tool with an `action`.** `task` hands back a handle at once —
-  the child's pid and the conversation it is holding — and `task_op` takes
-  `action: "status" | "wait" | "stop"`, and `pid` names which child. The three verbs did not become
-  three tools because every schema is re-sent with every request, and they did not go into `task`
+  the child's pid and the conversation it is holding — and `job_op` takes
+  `action: "status" | "output" | "wait" | "stop"`, and `pid` names which job. The verbs did not become
+  separate tools because every schema is re-sent with every request, and they did not go into `task`
   because a call that sometimes returns an answer and sometimes a receipt is one whose result a model
   has to guess at. What a caller gets is described under "Background is the same record", including the
   two things building it changed: the timeout moved off the waiter into a detached supervisor, and the
@@ -289,7 +329,7 @@ worth reading:
 - **A session id in the presence record is built.** The stage-1 note above is now history: the record
   carries `session` as a **path** (written where the writer is created, updated where the page is told
   the run has moved), so a `task` child appears in `flint who` as a run *and* as the conversation it is
-  holding, and a reader no longer has to guess which file is live. That path is also how `task_op`
+  holding, and a reader no longer has to guess which file is live. That path is also how `job_op`
   answers for a run this process did not start: the record says what it is and where its conversation
   is, and says honestly that it cannot be waited for or stopped from here.
 - **A child's conversation is not one of the person's, and it says whose it is.** Reported from a real
@@ -315,7 +355,7 @@ worth reading:
   status row is not a second transcript), and the placeholder a dropped turn writes says the result
   never came back **and** describes the child that is still going, with its pid and the session its
   answer will be written to. That sentence and the handle now read the same record, so a child that has
-  ended stops being described as "still going", and `task_op` can hand over the answer the sentence
+  ended stops being described as "still going", and `job_op` can hand over the answer the sentence
   promised.
 
 **Stage 3 — the mailbox.** `flint say`, `peer.message`, and the opt-in that lets a peer's words reach

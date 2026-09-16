@@ -1712,10 +1712,16 @@ measured and what was not.
   for is the default rather than an option**: `task` hands back a handle (its pid and its conversation)
   unless the call says `background: false`, because the first version made the parent sit still for
   minutes and a real session shows what that costs — the person typed at the frozen parent, the turn was
-  dropped, and the record said the tool *never ran* while the child kept spending. `task_op` takes
-  `status`, `wait` or `stop` for such a job, and a job that ends is reported exactly once — to
+  dropped, and the record said the tool *never ran* while the child kept spending. `job_op` takes
+  `status`, `output`, `wait` or `stop` for such a job, and a job that ends is reported exactly once — to
   the person when it ends, and to the model in its next request — with any `wait`/`stop` counting as
-  having collected it, so a default that starts work nobody is waiting for cannot lose the work. See
+  having collected it, so a default that starts work nobody is waiting for cannot lose the work. **A
+  background command is the same job**, because the same complaint had a second half: a ten-minute build
+  or a long Python script had a timeout and a kill-tree but no handle, so it meant a held turn or a
+  `nohup` the model invented by hand, with no exit code and no notice. `bash`, `exec` and `pwsh` take
+  `background: true` (a command's output is usually the input to the next step, so they still wait by
+  default, unlike `task`), write both streams to one log file under this session's directory, and answer
+  to the same `status`/`output`/`wait`/`stop`. See
   "Background is the same record" in [`docs/agents.md`](docs/agents.md) for why the handle is the
   parent's own job record rather than the presence record, for the measured fact that a caller reading
   stdout to EOF waits for the whole process tree rather than for the run, and for the two decisions taken
