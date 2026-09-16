@@ -21,9 +21,13 @@ out of the code that read the response, `classify` reads the body as well as the
 frame names the cause, and the exit code follows the cause (`69` for money or credentials, `75` for a
 failure the retries could not outlast). **Still open in B6**: only the `map_calls` circuit breaker, which belongs to step 7.
 `flint balance` is built (a preflight that asks `/user/balance`, falls back to `/models`, and says
-"cannot tell" rather than "usable" when neither answers). Next in the queue after that: **B7** (a refusal
-made before the stream opens reaches only stderr) and then step 3 (`--result-file`,
-`--list-sessions --json`). Read it before touching `src/provider.rs`. In short: DeepSeek says it with
+"cannot tell" rather than "usable" when neither answers). **B7 is built too**, so a `--json` caller now
+hears about *every* failure on the stream, including a refusal resolved before the stream would have
+been opened: the command line is read in `main`, a failure is written there as one `error` frame (from
+the same `error_frame` the end of a turn uses) and not to stderr, and the case where flint was refused
+*before* it had read `--json` is the honest residue — it is reported on stderr like any other bad
+command line. Next in the queue: step 3 (`--result-file`,
+`--list-sessions --json`). Read it before touching `src/main.rs`'s argument handling. In short: DeepSeek says it with
 **402**, OpenAI-shaped endpoints say it with **429 `insufficient_quota`** — the same status as a rate
 limit — and Anthropic with a 400 and a sentence. flint decides "transient" from the status **and** the
 body (`provider::classify`), which is what stopped the four retries: before that, a quota 429 was
@@ -57,12 +61,13 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 476 passing, 1 ignored (293 lib, 3 in
-the binary's own tests, 33 `agent_loop`, 58 `cli_output`, 22 `json_output` (7 structured
+As of the commit that carries this file, `cargo test` is 477 passing, 1 ignored (293 lib, 3 in
+the binary's own tests, 33 `agent_loop`, 58 `cli_output`, 23 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 5 the exit codes and the turn's outcome, 2 the
-balance, 1 what a caller's pipe must not come back out of), 7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 6 `who`, 6 `task`, 2 `say`), `cargo clippy
+balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
+be able to read), 7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 6 `who`, 6 `task`, 2 `say`), `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
-pass, and `python examples/python/test_call.py` is 49 checks, all passing (one of them now waits
+pass, and `python examples/python/test_call.py` is 53 checks, all passing (one of them now waits
 out the fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from),
 and `python examples/mcp/test_mcp.py` passes its own 23.
 
@@ -255,7 +260,7 @@ open, so the copy needs every flint window closed first — measured twice.
 
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
-cargo test                                        # 476 passing, 1 ignored
+cargo test                                        # 477 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed

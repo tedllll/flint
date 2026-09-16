@@ -247,7 +247,19 @@ def main():
         # ready: the empty answer is the failure mode this command is written against.
         missing = balance(provider="not-a-provider", home=str(scratch))
         check("an unresolvable provider is not `ok`", not missing.ok, str(missing.returncode))
-        check("and it says why from stderr", bool(missing.error), repr(missing.error))
+        check("and it says why", bool(missing.error), repr(missing.error))
+
+        print("\n10. a refusal reaches the stream, not only stderr")
+        # Before `ROADMAP.md` §10 B7 this was the one failure a reader of stdout could not see: the
+        # command line is refused before the stream is opened, so the reason was on stderr and stdout
+        # was empty. A `--json` caller reads one channel, and it now carries the refusal.
+        refused = ask("any question", home=str(scratch), cwd=str(HERE), extra=["--nope"])
+        check("a mistyped flag is refused", refused.returncode == 2, str(refused.returncode))
+        check("and the reason is on the stream the caller reads",
+              bool(refused.error) and "--nope" in refused.error, repr(refused.error))
+        check("which is why stderr is silent about it", refused.stderr.strip() == "",
+              repr(refused.stderr[:200]))
+        check("and nothing pretended to be a session", refused.session is None, str(refused.session))
     finally:
         stub.terminate()
         try:

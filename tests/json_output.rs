@@ -345,21 +345,67 @@ async fn a_run_that_cannot_start_ends_the_stream_with_an_error() {
     );
 }
 
-/// Without a prompt there is no run to describe, and saying so must not write half a
-/// stream first: a caller reads stdout and would see an empty run as a successful one.
+/// Without a prompt there is no run to describe, and the refusal still arrives as the one thing a
+/// `--json` caller reads.
+///
+/// The rule this pins is the whole of `ROADMAP.md` §10 B7: *every* failure of a `--json` run is on
+/// the stream, including the ones decided before the stream is opened. It must not write a *half*
+/// stream to get there -- no `session.started`, no `turn.started`, nothing that would let a caller
+/// mistake a run that never happened for one that answered nothing -- but silence with a code was
+/// the other failure, because it is the one shape a reader of stdout cannot see.
 #[tokio::test]
-async fn json_without_a_prompt_is_refused_without_writing_a_stream() {
+async fn json_without_a_prompt_is_refused_on_the_stream_and_not_silently() {
     let server = MockServer::start().await;
     let cwd = cwd_for("refuse");
     let home = home_for("refuse", &server.uri(), &cwd);
     let (code, lines, stderr) = run_json(&home, &cwd, &["--json"]);
 
     assert_eq!(code, exit_codes::USAGE, "a missing prompt is the caller's command line");
-    assert!(lines.is_empty(), "a refused run still wrote a stream: {lines:?}");
-    assert!(
-        stderr.contains("--json needs a prompt"),
-        "the refusal does not say what is missing: {stderr}"
+    assert_eq!(
+        kinds(&lines),
+        vec!["error"],
+        "a refused run has to say so once, on the stream, and nothing else: {lines:?}"
     );
+    assert!(
+        line_of(&lines, "error")["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("--json needs a prompt"),
+        "the refusal does not say what is missing: {lines:?}"
+    );
+    assert_eq!(
+        stderr, "",
+        "the reason was written to stderr as well; a --json caller reads one channel"
+    );
+}
+
+/// A command line flint could not finish reading is the same shape, when it had already read `--json`.
+///
+/// The flag has to have been *read* for flint to know the caller is reading stdout: this is a caller
+/// that asked for a stream and then mistyped a flag, and it must not be the one caller whose failure
+/// is only on stderr. What is deliberately not claimed is the reverse order -- `flint --nope -p x
+/// --json` refuses before it has learned anything, and says so the way every program does.
+#[tokio::test]
+async fn a_json_run_with_a_mistyped_flag_is_refused_on_the_stream() {
+    let server = MockServer::start().await;
+    let cwd = cwd_for("refuse-flag");
+    let home = home_for("refuse-flag", &server.uri(), &cwd);
+    let (code, lines, stderr) = run_json(&home, &cwd, &["-p", "hello", "--json", "--nope"]);
+
+    assert_eq!(code, exit_codes::USAGE, "an unknown flag is the caller's command line");
+    assert_eq!(
+        kinds(&lines),
+        vec!["error"],
+        "a refused run has to say so once, on the stream, and nothing else: {lines:?}"
+    );
+    assert!(
+        line_of(&lines, "error")["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("--nope"),
+        "the refusal does not name the flag: {lines:?}"
+    );
+    assert_eq!(stderr, "", "the reason was written to stderr as well: {stderr}");
 }
 
 /// A caller that has changed its mind can stop the run without killing the process.
@@ -950,9 +996,14 @@ mod exit_codes {
     #[test]
     fn an_unusable_schema_is_a_usage_error() {
         let cwd = cwd_for("code-schema");
-        std::fs::create_dir_all(&cwd).expect("working directory");
-        let home = std::env::temp_dir().join(format!("flint-json-code-schema-{}", std::process::id()));
-        std::fs::create_dir_all(&home).expect("home directory");
+        // A home with a provider in it, so the only thing that can fail is the schema: an empty home
+        // makes `Config::load` print its first-run banner to stderr, which is a different question
+        // (that banner is for a person, and it is written before any of this is resolved).
+        let home = home_configured(
+            "code-schema",
+            "",
+            "name = \"stub\"\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key = \"test\"\nmodel = \"stub-model\"",
+        );
 
         let (code, lines, stderr) = run_json(
             &home,
@@ -960,17 +1011,24 @@ mod exit_codes {
             &["-p", "hello", "--json", "--schema", r#"{"type":"object","pattern":1}"#],
         );
         let _ = std::fs::remove_dir_all(&home);
-        // The refusal reaches stderr, not stdout: the schema is resolved before the stream is opened,
-        // so a `--json` caller sees an empty stdout and a non-zero code. Recorded rather than fixed
-        // here -- `ROADMAP.md` §10 B7 is the item, and it belongs with the rest of "a run that cannot
-        // start says nothing on the stream" -- but the code is what this test is about.
-        assert!(
-            stderr.contains("pattern") || stderr.contains("schema"),
-            "the refusal does not say what is wrong: {stderr}"
+        // The refusal is resolved before the stream is opened, and it still arrives on the stream:
+        // this is the case `ROADMAP.md` §10 B7 was written from, and the code is the other half of
+        // it. One `error` line and nothing else -- no `session.started`, because nothing started.
+        assert_eq!(
+            kinds(&lines),
+            vec!["error"],
+            "a run refused before it started did not describe the refusal on its own stream: {lines:?}"
         );
+        let message = line_of(&lines, "error")["message"]
+            .as_str()
+            .unwrap_or_default();
         assert!(
-            lines.is_empty(),
-            "unexpected output on a run that never started: {lines:?}"
+            message.contains("pattern") || message.contains("schema"),
+            "the refusal does not say what is wrong: {message}"
+        );
+        assert_eq!(
+            stderr, "",
+            "the reason was written to stderr as well; a --json caller reads one channel"
         );
         assert_eq!(code, USAGE, "a schema this build cannot check is the caller's input");
     }
@@ -1429,14 +1487,21 @@ async fn a_schema_this_build_cannot_check_is_refused_before_the_run() {
     );
 
     assert_ne!(code, 0, "a schema that cannot be checked must not run");
-    assert!(
-        lines.is_empty(),
+    // On the stream, once, and not on stderr: the refusal happens before the stream is opened and
+    // still belongs to the caller that asked for one (§10 B7).
+    assert_eq!(
+        kinds(&lines),
+        vec!["error"],
         "a refused run still wrote a stream: {lines:?}"
     );
     assert!(
-        stderr.contains("oneOf"),
-        "the refusal does not name the keyword flint cannot check: {stderr}"
+        line_of(&lines, "error")["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("oneOf"),
+        "the refusal does not name the keyword flint cannot check: {lines:?}"
     );
+    assert_eq!(stderr, "", "the refusal went to stderr as well: {stderr}");
 }
 
 /// The subset is checked as a unit here: the module's own tests cover the keyword walk.

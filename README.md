@@ -228,7 +228,11 @@ The vocabulary is closed and small: `session.started`, `turn.started`, `message.
   other run, and `session.started` names it, so a `--json` run can be resumed, listed and
   read afterwards like anything else.
 - **A failure is on the stream too**, as an `error` line plus a non-zero exit code, so a
-  caller reading stdout does not also have to read stderr to find out what happened.
+  caller reading stdout does not also have to read stderr to find out what happened. That includes a
+  refusal decided *before* the stream would have been opened — a `--schema` this build cannot check, a
+  missing prompt — which is written as one `error` line and nothing else, never as half a run. The one
+  case that still reaches stderr is a command line flint could not read before it got as far as
+  `--json` (`flint --nope -p x --json`), because at that point it does not know a stream was asked for.
 - **The end of a turn says what the answer is worth.** `turn.completed` carries an `outcome`:
   `complete` (the model finished), `incomplete` (flint stopped asking at the `max_steps` limit, so
   the text above is half of what it had) or `stopped` (the caller cut it short, below). A caller that

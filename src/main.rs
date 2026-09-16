@@ -198,21 +198,80 @@ fn main() {
     // The only thing needed to report a startup failure in the right colours.
     let color = colour_allowed(std::env::args().any(|a| a == "--no-color"));
 
-    let code = match runtime.block_on(real_main()) {
+    // The command line is read here rather than inside the run, because whether this run writes a
+    // stream decides *where* its failures are reported -- and a refusal can happen while the line is
+    // still being read. `stream_seen` is written by the parser the moment it reads `--json`, so a
+    // line refused at its second flag is still answered on stdout; see [`report_failure`].
+    let mut stream_seen = false;
+    let parsed = as_usage(parse_args(
+        std::env::args().skip(1).collect(),
+        &mut stream_seen,
+    ));
+    // The parsed answer when there is one, and what the parser had read when there is not: a run
+    // whose line was refused has no `args` to ask, and the flag is the thing that decides the channel.
+    let stream = match &parsed {
+        Ok(args) => args.json,
+        Err(_) => stream_seen,
+    };
+
+    let outcome: Result<i32> = match parsed {
+        Ok(args) => runtime.block_on(real_main(args)),
+        Err(e) => Err(e),
+    };
+    let code = match outcome {
         Ok(code) => code,
         Err(e) => {
-            let (red, reset) = if color { ("\x1b[31m", "\x1b[0m") } else { ("", "") };
-            eprintln!("{red}flint: error:{reset} {e:#}");
-            // Read from the error itself rather than guessed at here: the code is a promise to a
-            // program, and a promise made from the outside is the kind that breaks quietly.
-            if e.downcast_ref::<Usage>().is_some() {
-                EXIT_USAGE
-            } else {
-                EXIT_FAILURE
-            }
+            report_failure(&e, stream, color);
+            failure_code(&e)
         }
     };
     std::process::exit(code);
+}
+
+/// Say what went wrong, in the one channel this run promised.
+///
+/// A `--json` run's whole report is its stream, so a failure resolved *before* the stream is opened
+/// is still written there as a frame -- and not to stderr, because one caller reads one channel and
+/// a failure that arrives in two shapes is a failure a program has to be taught twice. Every other
+/// run reports the way a command line program does. Both carry the same sentence.
+///
+/// This is `ROADMAP.md` §10 B7, and the flag has to have been *read* for flint to know the caller is
+/// reading stdout: `flint --nope -p x --json` refuses before it has learned anything, and says so on
+/// stderr. Reading the rest of a line flint could not parse would mean guessing at a command line
+/// that is, by construction, not the one it was written to understand.
+fn report_failure(error: &anyhow::Error, stream: bool, color: bool) {
+    if stream {
+        // `println!` rather than the run's own writer: there is no writer yet at this point, which is
+        // the whole reason this function exists, and a process about to exit flushes stdout itself.
+        println!("{}", error_frame(error));
+        return;
+    }
+    let (red, reset) = if color { ("\x1b[31m", "\x1b[0m") } else { ("", "") };
+    eprintln!("{red}flint: error:{reset} {error:#}");
+}
+
+/// The exit code for a failure, read from the error rather than guessed at here.
+///
+/// A code is a promise to a program, and a promise made from the outside is the kind that breaks
+/// quietly: the cause is marked where it was known, and this only translates it.
+fn failure_code(error: &anyhow::Error) -> i32 {
+    if error.downcast_ref::<Usage>().is_some() {
+        return EXIT_USAGE;
+    }
+    // Not "the provider was already known to be unusable": nothing was checked, so this failure is
+    // read on its own rather than as an earlier fault arriving late.
+    exit_code_for(error.downcast_ref::<provider::ProviderFailure>(), false)
+}
+
+/// The frame for a failure, classified when flint knows the cause.
+///
+/// One function for both the failure reported before a run starts and the one reported at the end of
+/// a turn, so the two cannot drift into two shapes -- which is exactly what §10 B7 was.
+fn error_frame(error: &anyhow::Error) -> String {
+    match error.downcast_ref::<provider::ProviderFailure>() {
+        Some(f) => ndjson::error_coded(&format!("{error:#}"), f.code, f.retryable),
+        None => ndjson::error(&format!("{error:#}")),
+    }
 }
 
 /// Turn what the user typed after `--resume` into a session file.
@@ -339,9 +398,7 @@ fn print_transcript(history: &[event::Message], printer: &Printer<'_>) {
     printer.term().blank();
 }
 
-async fn real_main() -> Result<i32> {
-    let args = as_usage(parse_args(std::env::args().skip(1).collect()))?;
-
+async fn real_main(args: Args) -> Result<i32> {
     // Decide colour before anything prints.
     let color = colour_allowed(args.no_color);
 
@@ -3514,11 +3571,13 @@ async fn run_json_turn(
             // account -- and a failure with no classification says so by carrying no code, rather
             // than naming the wrong cause at the edge.
             Err(e) => {
+                // The cause is read from the error itself when flint knows it -- the provider attaches
+                // its own classification, which is the only place that can tell a rate limit from an
+                // empty account -- and a failure with no classification says so by carrying no code,
+                // rather than naming the wrong cause at the edge. The same function writes the frame
+                // for a failure that never got this far, so the two cannot drift apart.
                 let failure = e.downcast_ref::<provider::ProviderFailure>();
-                match failure {
-                    Some(f) => emit(ndjson::error_coded(&format!("{e:#}"), f.code, f.retryable)),
-                    None => emit(ndjson::error(&format!("{e:#}"))),
-                }
+                emit(error_frame(&e));
                 return Ok(exit_code_for(failure, provider_error.is_some()));
             }
         }
@@ -4298,7 +4357,13 @@ const NO_RESPONSE_AFTER: std::time::Duration = std::time::Duration::from_secs(5)
 const NO_RESPONSE_LABEL: &str = "no response yet — the network or the endpoint may be stuck";
 
 /// Reduce a tool's JSON arguments to the one value worth showing on a line.
-fn parse_args(argv: Vec<String>) -> Result<Args> {
+/// Read the command line.
+///
+/// `stream_seen` is written the moment `--json` is read, and it is the one thing this function
+/// reports *before* it finishes: a caller reading stdout has to be told about a refusal even when the
+/// refusal is the next flag, so the intent cannot be kept inside the answer that a refusal throws
+/// away (`main` is where the two are put back together; see [`report_failure`]).
+fn parse_args(argv: Vec<String>, stream_seen: &mut bool) -> Result<Args> {
     let mut args = Args::default();
     let mut iter = argv.into_iter().peekable();
 
@@ -4351,7 +4416,10 @@ fn parse_args(argv: Vec<String>) -> Result<Args> {
             "--readonly" | "--no-edit" => args.readonly = true,
             "--all" => args.all = true,
             "--no-color" => args.no_color = true,
-            "--json" => args.json = true,
+            "--json" => {
+                args.json = true;
+                *stream_seen = true;
+            }
             "--web" => args.web = true,
             "--port" => {
                 let value = iter

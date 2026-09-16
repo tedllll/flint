@@ -1156,7 +1156,7 @@ line no longer crosses the composer; **the page's own log, written by default** 
 the hand's code made the boot's first paint throw, taking the sidebar, the sessions and the feed
 with it; and `/stop`, the interrupt as a short word, reachable from the composer today.
 
-### 10. flint as a function a program can call — **in progress: steps 1 and 2 landed, 3–7 queued**
+### 10. flint as a function a program can call — **in progress: steps 1 and 2 landed (B7 included), 3–7 queued**
 
 flint answers; it cannot yet be *trusted as a function*. A caller that acts on the result — writes a
 config, queues a job, retries a batch, feeds it data it did not author — has to know four things
@@ -1252,12 +1252,26 @@ decision, not a gap.
    by decision (the reasons are in the code), which leaves dates, identifiers and enumerations to
    `enum` or to the caller. The documentation has to say this plainly, because a caller who reads
    "schema" as a guarantee will act on a string that says the model could not determine anything.
-7. **A refusal before the stream starts reaches only stderr.** Found while building step 1: a
+7. **A refusal before the stream starts reaches only stderr.** *Done.* Found while building step 1: a
    `--schema` this build cannot check is refused while the arguments are being resolved, which is
-   before the stream is opened, so a `--json` caller gets an empty stdout and a code. The code carries
-   it (2) and the reason is on stderr, but every other failure in this mode is also *on the stream*,
+   before the stream is opened, so a `--json` caller gets an empty stdout and a code. The code carried
+   it (2) and the reason was on stderr, but every other failure in this mode is also *on the stream*,
    and the comment in `run_json_turn` says why ("a run which cannot even start is still described on
    stdout"). Two shapes of failure for one caller is one shape too many.
+
+   **Built**, and where it lives is the decision worth recording: the command line is now read in
+   `main`, before the run, and a failure is reported in whichever channel the run promised — one
+   `error` frame on stdout for a `--json` caller, the usual stderr line for everyone else. Three
+   details are deliberate. The frame is written by the same `error_frame` the end of a turn uses, so a
+   failure before the run and a failure at the end of one cannot drift into two shapes. A refusal
+   still writes **no half stream**: no `session.started`, no `turn.started`, nothing that would let a
+   caller mistake a run that never happened for one that answered nothing — which is what the older
+   test was protecting, and it now asserts exactly that (`kinds == ["error"]`). And the flag has to
+   have been *read*: the parser sets `stream_seen` the moment it sees `--json`, so `flint -p x --json
+   --nope` is answered on the stream and `flint --nope -p x --json` is not, because flint has learned
+   nothing at that point and reading the rest of a line it could not parse would mean guessing at a
+   command line that is, by construction, not the one it was written to understand. That last case is
+   the honest residue of this item.
 
 #### The order
 
@@ -1282,8 +1296,9 @@ stopped run, because it was true before — that was the bug). B7 above is what 
 2. **`error.code`**, produced where the cause is known — in `provider` for no key, network and status
    codes; in `agent` for a schema that never matched; in `main` for arguments. Classified by matching
    on the error's text at the edge would be the same fragility this is meant to remove. **Done**,
-   except for one thing the work turned up rather than planned: **B7** (a refusal made before the
-   stream opens still reaches only stderr). `flint balance` -- the preflight A4 asked for -- is built
+   including **B7** (a refusal made before the stream opens is now described on the stream whenever
+   the caller asked for one — unless the command line was refused before flint had read `--json`).
+   `flint balance` -- the preflight A4 asked for -- is built
    too (below).
    **Its first job was the balance/quota cause below**, which was a bug fix as much as a
    classification: an OpenAI-shaped `429 insufficient_quota` used to be retried four times with

@@ -279,8 +279,11 @@ def balance(
             result.error = event.get("message")
             result.error_code = event.get("code")
     if result.error is None and not proc.stdout.strip():
-        # No stream at all: the provider could not even be resolved (a bad `--provider`, an unreadable
-        # config). stderr is the only place that says so, and an empty answer must not read as ready.
+        # Nothing on the stream at all. A current flint puts every refusal there -- including one
+        # resolved before the stream would have been opened (an unresolvable `--provider`, an
+        # unreadable config), which is what `ROADMAP.md` §10 B7 fixed -- so this is the belt for an
+        # older binary and for the case where nothing was written anywhere. An empty answer must never
+        # read as ready, so the fallback names the exit code rather than staying silent.
         result.error = proc.stderr.strip() or f"flint balance exited {proc.returncode} with no answer"
     return result
 
