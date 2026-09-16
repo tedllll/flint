@@ -1458,9 +1458,12 @@ Two findings from checking rather than assuming:
   invent — and `--readonly` on the flint side is then a second, cheap one rather than the only one.
 - **flint's stdin steering is unconditional**, and a parent agent or a pipeline that writes to flint's
   stdin gets `warning` lines for it. Harmless in practice (the lines are ignored and reported, never
-  acted on), but it is a surprise a caller should not have to discover. **Decide**: a `--steer` flag
-  that turns the reader on, with the Python caller passing it, or keep it on and document it as part
-  of the contract. The first is safer for a program that owns the pipe; the second has no new flag.
+  acted on), but it is a surprise a caller should not have to discover. **Decided and built**: the
+  reader stays unconditional, and what arrives on it is *counted and never repeated* — the warning says
+  how many lines were ignored and says plainly that flint does not repeat what a caller piped in,
+  because a caller's pipe is not a private channel. A `--steer` flag was rejected: the Python caller
+  relies on `/stop` for its timeout, and an opt-in reader would silently downgrade that to a kill with
+  the half-answer lost.
 - Nothing stops a flint from starting another flint, and nothing bounds how deep that goes: tools are
   not restricted by choice, so a nested call is a spend that recurses. Recording it rather than
   proposing a guard — the honest place for a limit here is the caller that started the first one.
@@ -1541,7 +1544,11 @@ measured and what was not.
   still one window, and a subagent's value is isolation and least privilege rather than a
   bigger window. The same file argues for the other half — two runs in one directory being
   able to see each other, which is what the `git add -A` incident above needed and does not
-  contradict this bullet.
+  contradict this bullet. **That half is built** (`flint who`, `src/live.rs`), and the
+  decision to adopt the narrow version of *this* bullet was taken on 2026-09-16 — the text
+  here still says "under review" on purpose, because the rule is that this bullet changes in
+  the same commit as the code that adopts it, and that code is the `task` tool, not the
+  presence record.
 - **MCP** — deferred, not refused: it is a protocol with real weight, and nothing here yet
   needs what it offers. **Being callable over MCP is the other direction and is built**:
   `examples/mcp/flint_server.py`.

@@ -1,9 +1,11 @@
 # Agents as processes: spawning, finding, and talking to peers
 
-**Status: a plan. One half of it is built** — `examples/mcp/flint_server.py` and the Python caller
-exist, so *being called* works today. Everything about *calling*, *finding* and *talking to* another
-flint is a plan, and stage 2 deliberately contradicts the "Subagents" entry in `ROADMAP.md`. Read that
-entry beside this file; adopting any stage below means editing it in the same commit.
+**Status: stage 1 is built; the MCP and Python doors are built; stages 2–4 are a plan.** — a running
+flint writes a presence record and `flint who` reads it (`src/live.rs`, `tests/who.rs`), so *being
+called* and *seeing each other* work today. Stage 2 deliberately contradicts the "Subagents" entry in
+`ROADMAP.md`. Read that entry beside this file; adopting any stage below means editing it in the same
+commit. The five decisions at the end of this file **were answered on 2026-09-16: every recommended
+value was adopted**, and each is marked below with what that means for the code.
 
 Written because of three questions asked directly, and because the same afternoon produced the incident
 that makes the middle of this document concrete: two agents were working in this checkout at once, one
@@ -140,7 +142,18 @@ its session file, which is the same provenance rule as everywhere else.
 **Stage 1 — presence and `flint who`.** A record per live run, refreshed on the heartbeat flint
 already emits, removed on exit, stale after a window. A command that prints it, plus the unattributed
 "changed recently" line. No standing decision is touched, and it is what would have prevented the
-incident. **This is the one to build first.**
+incident. **This is the one to build first.** — **Built**, with one difference from the sketch above
+worth recording: the refresh is *not* driven by the heartbeat. The heartbeat only beats while a model
+call is in flight, so a run in the middle of a two-minute `bash` command would have looked dead. The
+record is refreshed by a thread that waits on a channel with a five-second timeout, which is
+independent of what the run is doing, and the record is removed by a `Drop` so that every exit path is
+covered by construction. A record may go unrefreshed for sixty seconds before it is called stale,
+because a *wrong* "no other agent" is the failure this exists to prevent. One thing the sketch promised
+and the first version does not carry: the record names the run's provider, model and whether it is
+`readonly`, but **not its session id**. `flint who` instead reports the newest session file written in
+that directory and how long ago, which answers "which conversation is live" for a process it cannot
+otherwise see. Putting the session id in the record needs a hook where the writer is created, and it is
+a stage-2 addition rather than a reason to hold this one back.
 
 **Stage 2 — the `task` tool.** spawn one child (or the same tool with `background: true`), with
 `readonly`, `model`, `provider`, `cwd`, `schema` and a depth bound. Adopting it edits the "Subagents"
@@ -157,20 +170,29 @@ and a prompt, so "the explorer" is a thing a person and a model can both refer t
 runs N children at once. This is where "native subagents" as people mean the phrase actually lands — and
 it is last on purpose, because everything above is useful without it.
 
-## Decisions this needs from the person whose repository it is
+## Decisions this needed from the person whose repository it is
 
-1. **Adopt stage 2, and edit the "Subagents" entry?** Nothing in this file is adopted until that entry
-   says otherwise. The narrow version (a tool that spawns a flint) is what is being asked for; the
-   original decision's reason survives it, and the entry should say how.
-2. **The depth bound.** Proposed: `FLINT_DEPTH` in the environment, default maximum 2, so a child may
-   spawn a grandchild and no more. It has to be an environment variable rather than a flag so the model
-   cannot edit it out of its own command line.
-3. **The mailbox default.** Proposed: shown to the human, not to the model, until a person says
-   otherwise per run.
-4. **What "another agent is here" may claim** when the only evidence is a changed file. Proposed: name
-   no author, always.
-5. **Presence in `FLINT_HOME` only, or also a `.flint/` marker in the project?** The second is what
-   makes two installations see each other, and it writes into the user's checkout.
+**Answered on 2026-09-16: every recommended value was adopted.** Recorded with what each one binds,
+because a decision that is only in a conversation is not a decision.
+
+1. **Adopt stage 2, and edit the "Subagents" entry?** — **Yes, the narrow version.** A `task` tool that
+   starts another flint the way a Python caller or an MCP client does. The `ROADMAP.md` bullet still
+   reads "under review" and is edited **in the same commit as the code that adopts it**: nothing is
+   adopted by this document, and the original reason survives the edit (the parent's context is still
+   one window; a subagent's value is isolation and least privilege, not a bigger window).
+2. **The depth bound.** — **`FLINT_DEPTH`, maximum 2, an environment variable** rather than a flag, so
+   that a model cannot edit the bound out of its own command line. Not built yet; it arrives with the
+   `task` tool, because a bound on a feature that does not exist is a promise rather than a guard.
+3. **The mailbox default.** — **Shown to the human, never fed to the model**, until a person opts in
+   per run. This is the one decision that is a safety property rather than a preference, and stage 3
+   may not ship without it.
+4. **What "another agent is here" may claim.** — **Name no author, ever.** Built: the human line says
+   "this names no author", and the machine-readable answer carries the same warning in a `note` field,
+   because a program is the reader most likely to treat a short list as a complete one.
+5. **Presence in `FLINT_HOME` only, or also `.flint/` in the project?** — **`FLINT_HOME` only, for now**
+   (the stage-3 `.flint/` marker is the addition that makes two installations see each other). Built as
+   decided, with the cost written down where a reader will meet it: two `FLINT_HOME`s cannot see each
+   other.
 
 ## What would make this the wrong idea
 
