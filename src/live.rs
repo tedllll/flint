@@ -363,9 +363,67 @@ pub fn newest_session(cwd: &Path) -> Option<(PathBuf, u64)> {
     newest
 }
 
+/// The one sentence that says what the "changed" section does and does not know.
+///
+/// A pure function because its three cases *are* the honesty of the whole signal, and they are easy to
+/// collapse into a single wrong one: "nothing changed", "something changed but not recently" and "here
+/// is what changed recently" are three different statements, and the first may only be said when git
+/// reported nothing at all. Written here rather than assembled at the print site so a test can hold
+/// each case still -- which it does, after a real run in a real checkout printed "nothing changed"
+/// while three uncommitted files sat in the directory, merely older than the window.
+pub fn changed_line(git_paths: usize, shown: usize, window_minutes: u64) -> String {
+    if git_paths == 0 {
+        return "nothing that git tracks has changed".to_string();
+    }
+    if shown == 0 {
+        return format!(
+            "{git_paths} tracked path{} changed, but none written in the last {window_minutes} minutes",
+            if git_paths == 1 { " has" } else { "s have" }
+        );
+    }
+    let mut line = format!(
+        "{shown} path{} written in the last {window_minutes} minutes",
+        if shown == 1 { "" } else { "s" }
+    );
+    if git_paths > shown {
+        line.push_str(&format!(
+            " ({} more tracked path{} changed but older)",
+            git_paths - shown,
+            if git_paths - shown == 1 { " has" } else { "s have" }
+        ));
+    }
+    line
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_changed_is_never_confused_with_whether_anything_was_looked_at() {
+        // Nothing changed at all: the only case that may say so.
+        assert_eq!(
+            changed_line(0, 0, 10),
+            "nothing that git tracks has changed"
+        );
+        // Changed, but older than the window: "nothing changed" would be a lie about work in
+        // progress, which is exactly what an uncommitted revision is.
+        let older = changed_line(3, 0, 10);
+        assert_eq!(
+            older,
+            "3 tracked paths have changed, but none written in the last 10 minutes"
+        );
+        // Recent changes, with the rest counted rather than dropped.
+        let some = changed_line(7, 2, 10);
+        assert!(some.starts_with("2 paths written in the last 10 minutes"), "{some}");
+        assert!(some.contains("5 more"), "{some}");
+        // Singular and plural are both readable, because this line is read by a person.
+        assert_eq!(
+            changed_line(1, 0, 10),
+            "1 tracked path has changed, but none written in the last 10 minutes"
+        );
+        assert_eq!(changed_line(1, 1, 10), "1 path written in the last 10 minutes");
+    }
 
     #[test]
     fn a_fresh_record_is_alive_and_an_old_one_is_stale() {

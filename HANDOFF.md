@@ -52,10 +52,10 @@ depth bound, the mailbox default (a peer's words are shown to the human, never f
 someone opts in), and whether presence is `FLINT_HOME`-only.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 455 passing, 1 ignored (283 lib, 3 in
+As of the commit that carries this file, `cargo test` is 456 passing, 1 ignored (284 lib, 3 in
 the binary's own tests, 33 `agent_loop`, 58 `cli_output`, 22 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 5 the exit codes and the turn's outcome, 2 the
-balance, 1 what a caller's pipe must not come back out of), 7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 6 `who`), `cargo clippy
+balance, 1 what a caller's pipe must not come back out of), 7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 6 `who`)), `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
 pass, and `python examples/python/test_call.py` is 49 checks, all passing (one of them now waits
 out the fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from),

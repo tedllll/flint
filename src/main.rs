@@ -4667,20 +4667,24 @@ fn who_and_stop(cwd: std::path::PathBuf, all: bool, json: bool) -> Result<i32> {
     println!("\nchanged in this directory in the last {} minutes -- this names no author:",
         live::RECENT_WINDOW.as_secs() / 60);
     if let Some(note) = &recent.note {
+        // git could not answer, so there is nothing to summarise. The note is the statement, and
+        // adding "nothing has changed" under it would claim a look that never happened.
         println!("  {note}");
-    }
-    if recent.changed.is_empty() {
-        println!("  nothing that git tracks, or nothing written recently");
     } else {
-        for change in &recent.changed {
-            println!("  {}  ({}s ago)", change.path, change.secs_ago);
-        }
-        if recent.git_lines.len() > recent.changed.len() {
-            println!(
-                "  ...and {} more tracked paths git reports as changed",
-                recent.git_lines.len() - recent.changed.len()
-            );
-        }
+        println!(
+            "  {}",
+            live::changed_line(
+                recent.git_lines.len(),
+                recent.changed.len(),
+                live::RECENT_WINDOW.as_secs() / 60
+            )
+        );
+    }
+    // Three cases behind that sentence, and it distinguishes them: nothing changed, something
+    // changed that is older than the window, or the recent ones. Collapsing the middle case into the
+    // first would say "nothing changed" about an uncommitted revision sitting in the directory.
+    for change in &recent.changed {
+        println!("    {}  ({}s ago)", change.path, change.secs_ago);
     }
     if let Some((path, age)) = &newest {
         println!(
