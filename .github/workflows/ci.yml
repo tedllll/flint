@@ -39,7 +39,27 @@ jobs:
       # a check like this gets switched off again.
       - uses: Swatinem/rust-cache@v2
 
-      - run: cargo test
+      # `pipefail` is the difference between a failing test run and a green step:
+      # without it the pipeline's status is `tee`'s, and the output is only read by
+      # the step below.
+      - name: Test
+        id: test
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p target
+          cargo test 2>&1 | tee target/test-output.txt
+
+      # A red build has to say *which* test failed somewhere a reader can see it. The
+      # runner's own log needs a token with write access to download; an annotation does
+      # not, and this repository is pushed to from a machine that has no token at all --
+      # so without this step the only honest report available is "exit code 1".
+      - name: Name the failing tests
+        if: failure() && steps.test.outcome == 'failure'
+        shell: bash
+        run: |
+          [ -f target/test-output.txt ] || exit 0
+          grep -E '^test .* FAILED$' target/test-output.txt | head -20 | sed 's/^/::error::/'
 
       # Silent is the standard this repository holds itself to, so a warning is
       # the failure. `cargo test` builds the targets; this is what actually reads
