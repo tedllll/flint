@@ -497,6 +497,15 @@ Two runs working in one directory can see each other: `flint who` prints the liv
 about, and, separately, what changed recently — a line that names no author, because a changed file is
 not evidence of who changed it. `flint who --all` lists runs in other directories too.
 
+While the parent waits, the child's own work shows on its status row — `task: running search`,
+`explorer: waiting for the model` — because the child is already saying what it is doing on its own
+`--json` stream and a row that says one unchanging word for two minutes is a row that tells nobody
+whether anything is happening. Typing at the parent still interrupts the turn (that is what typing
+does), but the child is a process of its own and does **not** stop: the turn that was dropped records
+what it left running, with the child's pid and the session its answer will land in, so the work is
+collected rather than repeated. A `task` child outliving the turn that started it is real — measured,
+by way of a bug report — so the honest thing is to say so rather than to claim the tool never ran.
+
 And they can say something to each other:
 
 ```console

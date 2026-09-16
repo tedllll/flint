@@ -648,12 +648,29 @@ impl Agent {
             }
             for call in tool_calls {
                 if !answered.contains(&call.id) {
+                    // What is true of every dropped tool call: the result never arrived. What used to
+                    // be written here was stronger than that -- "was requested but never ran" -- and
+                    // for the two tools that start a process it was false. Measured on a real
+                    // session: the child of a `task` that was interrupted ran on for minutes
+                    // afterwards, spending the caller's money, while the parent's own record said it
+                    // had never run and the model, reading that, offered to run it again.
+                    let mut content = format!(
+                        "interrupted by the user: the result of '{}' never came back.",
+                        call.name
+                    );
+                    // The children are processes of their own, so they are still there to be
+                    // described -- and the place their answers will land is the one fact that turns
+                    // this from a loss into something to go and read.
+                    if matches!(call.name.as_str(), "task" | "tasks") {
+                        for line in crate::tools::children_running() {
+                            content.push(' ');
+                            content.push_str(&line);
+                            content.push('.');
+                        }
+                    }
                     let placeholder = Message::Tool {
                         tool_call_id: call.id.clone(),
-                        content: format!(
-                            "interrupted by the user: tool '{}' was requested but never ran.",
-                            call.name
-                        ),
+                        content,
                     };
                     self.record(SessionEvent::Chat {
                         message: placeholder.clone(),

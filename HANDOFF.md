@@ -87,17 +87,36 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 499 passing, 1 ignored (301 lib, 3 in
+As of the commit that carries this file, `cargo test` is 502 passing, 1 ignored (302 lib, 3 in
 the binary's own tests, 33 `agent_loop`, 61 `cli_output`, 34 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
 be able to read, 4 the answer written where the caller asked, 3 the file inlined into the prompt,
 1 the stream checked on its bytes),
-7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 6 `who`, 6 `task`, 2 `say`), `cargo clippy
+7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 6 `who`, 8 `task`, 2 `say`), `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
 pass, and `python examples/python/test_call.py` is 61 checks, all passing (one of them waits
 out the fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from),
 and `python examples/mcp/test_mcp.py` passes its own 23.
+
+**The `task` bug report of 2026-09-16 is fixed, and it was the missing background handle seen from the
+other side.** A person started a child, the parent's status row went on saying `task` and nothing else
+for minutes, so they typed at it — which is what typing does, it steers, so the turn was dropped — and
+the parent then recorded *"interrupted by the user: tool 'task' was requested but never ran."* while the
+child went on working with its own session file and its own bill. Three things changed. The child's own
+`tool.started` and `status` frames are forwarded to the parent's status row (`task: running search`),
+because the parent was already reading those frames and discarding them; the sentence a dropped turn
+writes is now the true one (*"the result of 'task' never came back"*) and continues with each child that
+is still going, naming its pid and the session its answer will be written to (`tools::children_running`,
+fed by a registry the reader task fills and clears, so it survives the dropped future); and a `--json`
+run that is cut short says the same thing as a `warning` before its outcome, because a one-shot has no
+next turn in which `close_dangling_tool_calls` could say it. Four tests, each watched red first:
+`a_childs_own_progress_reaches_the_parents_status_row` and `an_interrupted_task_says_what_it_left_running`
+in `tests/task.rs` (the second drives the real REPL through a pipe, steers mid-turn, then reads the
+parent's own session and stops the child by the pid the parent named), `a_childs_frames_are_reduced_to_what_it_is_doing_right_now`
+in `src/tools.rs`, and the stream test's budget shape in `tests/json_output.rs`. What is *still* missing
+is the handle itself — `task_status`, `task_wait`, `task_stop` — so collecting a child means reading the
+session the note names.
 
 **`flint who` is built — stage 1 of `docs/agents.md`.** A running flint writes one record per run
 under `<FLINT_HOME>/live/` (`src/live.rs`), refreshed every five seconds by a thread that waits on a

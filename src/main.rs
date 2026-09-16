@@ -3731,6 +3731,13 @@ async fn run_json_turn(
             // anywhere. Committed here, by the code that did the dropping, because the agent cannot
             // do it for itself after its future is gone. Same fault and same fix as the REPL's.
             agent.commit_drawn_answer();
+            // A one-shot run has no next turn, so `close_dangling_tool_calls` -- which is where an
+            // interrupted conversation records what it left behind -- never runs. The caller is still
+            // owed the fact: a child of this run is a process of its own with its own bill, and it is
+            // still going. Said before the outcome line, because it is part of how this run ended.
+            for line in tools::children_running() {
+                emit(ndjson::warning(&line));
+            }
             // A dropped turn with a budget on it is the budget's doing: the caller asked for
             // "something in N seconds or tell me you could not", and this is the telling. It is
             // *unfinished* rather than stopped, because nobody changed their mind -- a limit the
@@ -4446,6 +4453,12 @@ async fn run_turn(
                 printer
                     .term()
                     .notice("stopped -- the model is not running any more");
+            }
+            // What the drop left behind, said to the person as well as recorded for the model: a child
+            // is a process of its own and is still going, and "the model is not running any more" is
+            // not true of it. Named here because this is the moment somebody is wondering.
+            for line in tools::children_running() {
+                printer.term().notice(&line);
             }
             if expired {
                 printer.term().notice(&format!(

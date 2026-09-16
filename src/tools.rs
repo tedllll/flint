@@ -805,6 +805,86 @@ pub fn notice(message: &str) {
     }
 }
 
+/// A child this run started, from the moment it is spawned until its stream ends.
+struct Running {
+    pid: u32,
+    label: String,
+    /// Where its session is, once it has said. Shared because the reader task learns it and the code
+    /// that has to be honest about a child reads it later, from somewhere else entirely.
+    session: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    started: std::time::Instant,
+}
+
+/// The children this process has started and not yet reaped.
+///
+/// A global for the same reason the two sinks above are, and one more: the code that has to be honest
+/// about a child -- `Agent::close_dangling_tool_calls`, which repairs the conversation after the wait
+/// for it has already been dropped -- cannot ask the tool anything, because the tool's future is the
+/// thing that was dropped. Measured on a real session: a `task` child outlived the turn that started
+/// it by minutes, and the parent's record said the tool "was requested but never ran". Both halves of
+/// that are wrong, and this is the only place the truth survives the drop.
+static CHILDREN: std::sync::OnceLock<std::sync::Mutex<Vec<Running>>> =
+    std::sync::OnceLock::new();
+
+fn running_children() -> std::sync::MutexGuard<'static, Vec<Running>> {
+    CHILDREN
+        .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Note a child as running, and hand back the slot its session path will be written into.
+fn running_now(pid: u32, label: &str) -> std::sync::Arc<std::sync::Mutex<Option<String>>> {
+    let session = std::sync::Arc::new(std::sync::Mutex::new(None));
+    running_children().push(Running {
+        pid,
+        label: label.to_string(),
+        session: std::sync::Arc::clone(&session),
+        started: std::time::Instant::now(),
+    });
+    session
+}
+
+/// The child is over, whatever it answered: nothing is left running to tell anyone about.
+fn no_longer_running(pid: u32) {
+    running_children().retain(|child| child.pid != pid);
+}
+
+/// The children this run has left running, in the words a caller needs. Empty when there are none.
+///
+/// One line each, and the session path is the important half: a child is a run of its own, so its
+/// answer is being written to a file of its own *whatever happens to this one* -- which is what turns
+/// "the task was interrupted" from a loss into a place to go and look. The other half is the warning
+/// not to ask for the same work again, which is the mistake this exists to prevent: the tokens are
+/// already spent, and a model that cannot see that spends them twice.
+pub fn children_running() -> Vec<String> {
+    running_children()
+        .iter()
+        .map(|child| {
+            let session = child
+                .session
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let mut line = format!(
+                "a child this run started is still going on its own: {} (pid {}, running for {})",
+                child.label,
+                child.pid,
+                elapsed_label(child.started.elapsed())
+            );
+            match session {
+                Some(path) => line.push_str(&format!(
+                    ". Its answer is being written to its own session, {path} -- read it there \
+                     rather than asking for the same work again"
+                )),
+                None => line.push_str(". It has not named its session yet"),
+            }
+            line.push('.');
+            line
+        })
+        .collect()
+}
+
 impl CommandOutcome {
     pub fn success(&self) -> bool {
         self.code == 0
@@ -3574,25 +3654,55 @@ async fn run_child(child: Child) -> Result<String> {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 
     let started = std::time::Instant::now();
+    // Before `argv` is moved out: the name this child is known by while it runs.
+    let label = child.label();
     let argv = child.argv;
     let mut process = tokio::process::Command::new(&argv[0])
         .args(&argv[1..])
         .env("FLINT_DEPTH", child.depth.to_string())
+        // A child is not drawing on this terminal: its stdout is a pipe. The capture variables are
+        // the debug build's way of pretending there *is* a terminal, and a child that inherits them
+        // opens the same capture file as its parent and truncates it -- measured: the parent's
+        // recording came back empty because the child had recreated the file under it. Removed here
+        // rather than checked for at the other end, because the child has no way to know whose file
+        // it would be opening.
+        .env_remove("FLINT_TERM_CAPTURE")
+        .env_remove("FLINT_TERM_CAPTURE_FILE")
+        .env_remove("FLINT_TERM_SIZE")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .with_context(|| format!("running {}", argv[0]))?;
 
+    // Said before the first frame can arrive: a child takes seconds to start up and make its first
+    // request, and a status row that says the same word as before is the state this fixes.
+    progress(&format!("{label}: starting"));
+
+    // Noted before its stream is read, because the whole point is to survive this future being
+    // dropped: after that, the detached reader below is the only thing still watching the child.
+    let pid = process.id().unwrap_or(0);
+    let session = running_now(pid, &label);
+
     let stdout = process.stdout.take().expect("stdout was piped");
     let stderr = process.stderr.take().expect("stderr was piped");
+    let reader_label = label.clone();
     let reader = tokio::spawn(async move {
         let lines = tokio::io::BufReader::new(stdout).lines();
         let mut collected = Collected::default();
         let mut lines = Box::pin(lines);
         while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(note) = child_progress(&reader_label, &line) {
+                progress(&note);
+            }
+            if let Some(path) = child_session(&line) {
+                *session.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
+            }
             collected.absorb(&line);
         }
+        // Its stdout is closed, so it is over -- and this is the one place that still runs when the
+        // parent stopped waiting: `run_child`'s own future may have been dropped long before.
+        no_longer_running(pid);
         collected
     });
     let complaints = tokio::spawn(async move {
@@ -3687,6 +3797,53 @@ async fn run_child(child: Child) -> Result<String> {
     Ok(text)
 }
 
+/// How a child is named on the parent's status row while it runs.
+///
+/// The profile it was given, when the call named one, because that is what the person asked for and
+/// what the model will see in the result. Otherwise the tool's own name, numbered when it is one of
+/// several: a fan-out that shows one line for three children says less than nothing about which of
+/// them is slow.
+impl Child {
+    fn label(&self) -> String {
+        match (&self.agent, self.index) {
+            (Some(agent), 0) => agent.clone(),
+            (Some(agent), n) => format!("{agent} {}", n + 1),
+            (None, 0) => "task".to_string(),
+            (None, n) => format!("children {}", n + 1),
+        }
+    }
+}
+
+/// The phrase a child's own frame contributes to the parent's status row, when it has one.
+///
+/// Two frames, and both are about *now*: `tool.started` is what the child is doing, and `status` is
+/// its heartbeat -- the only thing that arrives while it waits on a model, and the difference between
+/// a child that is thinking and one that is stuck. Its answer is deliberately not here: deltas are
+/// fragments of prose, and a status row that scrolls a child's answer past the parent's transcript is
+/// not progress, it is a second transcript.
+///
+/// Measured, because the alternative was assumed and wrong: a parent's row said one unchanging word
+/// (`task`) for the whole of a two-minute research child, and the person watching it could not tell
+/// whether anything was happening -- which is the question a status row exists to answer.
+fn child_progress(label: &str, line: &str) -> Option<String> {
+    let event: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    let doing = match event.get("type").and_then(|v| v.as_str())? {
+        "tool.started" => format!("running {}", event.get("name").and_then(|v| v.as_str())?),
+        "status" => event.get("text").and_then(|v| v.as_str())?.to_string(),
+        _ => return None,
+    };
+    Some(format!("{label}: {doing}"))
+}
+
+/// The session path a child's stream named, if this line was the one that named it.
+fn child_session(line: &str) -> Option<String> {
+    let event: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    if event.get("type").and_then(|v| v.as_str())? != "session.started" {
+        return None;
+    }
+    event.get("session").and_then(|v| v.as_str()).map(str::to_string)
+}
+
 /// The frames worth keeping from a child's stream, gathered in one place.
 #[derive(Default)]
 struct Collected {
@@ -3764,6 +3921,36 @@ impl Collected {
 mod task_tests {
     use super::*;
     use std::path::Path;
+
+    /// What a child's frames say on the parent's status row, and what they do not.
+    #[test]
+    fn a_childs_frames_are_reduced_to_what_it_is_doing_right_now() {
+        assert_eq!(
+            child_progress("task", r#"{"type":"tool.started","id":"c1","name":"search"}"#).as_deref(),
+            Some("task: running search")
+        );
+        assert_eq!(
+            child_progress(
+                "child 2",
+                r#"{"type":"status","text":"waiting for the model","elapsed_secs":5}"#
+            )
+            .as_deref(),
+            Some("child 2: waiting for the model")
+        );
+        // The answer is not progress: a fragment of prose on the status row would be replaced by the
+        // next fragment, so the child's answer would scroll past in pieces nobody can read.
+        assert_eq!(
+            child_progress("task", r#"{"type":"message.delta","text":"the answer "}"#),
+            None
+        );
+        assert_eq!(child_progress("task", "not json at all"), None);
+        // Where the answer will land, which is the fact that outlives the wait for it.
+        assert_eq!(
+            child_session(r#"{"type":"session.started","session":"C:\\s\\x.jsonl"}"#).as_deref(),
+            Some(r"C:\s\x.jsonl")
+        );
+        assert_eq!(child_session(r#"{"type":"message.delta","text":"x"}"#), None);
+    }
 
     /// The child's command line is the whole interface between two flints, so its shape is held
     /// still here rather than only observed end to end.

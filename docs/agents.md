@@ -142,6 +142,15 @@ Two consequences worth stating: a background run's cost lands on whoever pays fo
 `usage` is part of the handle rather than a secret; and a background run whose parent has exited keeps
 its session file, which is the same provenance rule as everywhere else.
 
+**Measured, and the reason to build the handle next:** a `task` child already *is* a background run in
+everything but the handle. When the parent's turn was interrupted (a bug report, 2026-09-16), the child
+kept working for minutes with its own session file and its own bill, while the parent's record said the
+tool never ran and offered to do the work again. Both halves of that are now fixed from the parent's
+side — it forwards the child's progress, and it records the child's pid and session instead of denying
+that it started — but neither is a substitute for the three verbs: `task_status` to ask, `task_wait` to
+collect, `task_stop` to stop paying. Until then, "collect" means reading the session file the note
+names, and "stop" means stopping that process by hand.
+
 ## Stages
 
 **Stage 1 — presence and `flint who`.** A record per live run, refreshed on the heartbeat flint
@@ -188,6 +197,20 @@ worth reading:
 - **A session id in the presence record is still open.** The stage-1 note above stands: the record has
   no session id, so a `task` child appears in `flint who` as a run in that directory rather than as
   *this* run's child, and a parent cannot point at a handle for it.
+- **A child's own progress reaches the parent's status row, and a child left running is named.** Both
+  were added after a bug report, and both are the price of having no handle yet. A realistic `task`
+  runs for minutes; the parent's row said one unchanging word (`task`) for all of it, because the child
+  was already describing what it was doing on its own `--json` stream and the parent was reading those
+  frames and discarding them. Typing at a parent whose row is frozen is what a person does next, and
+  because a typed line steers, the turn was dropped — and the child, a process of its own, kept going
+  for minutes while the parent's record said the tool *"was requested but never ran"*. So: the child's
+  `tool.started` and `status` frames are forwarded as `task: running search` (its answer is not — a
+  status row is not a second transcript), the placeholder a dropped turn writes says the result never
+  came back **and** describes the child that is still going, with its pid and the session its answer
+  will be written to, and the same sentence goes to the person's transcript and onto a `--json` stream
+  that is about to end. What is still missing is the handle itself: nothing here can *wait* for that
+  child or *stop* it (see "Background is the same record"), so the answer is collected by reading the
+  session file it names rather than by asking the parent.
 
 **Stage 3 — the mailbox.** `flint say`, `peer.message`, and the opt-in that lets a peer's words reach
 the model. Presumably a `.flint/` presence marker in the project as well, so two `FLINT_HOME`s can see

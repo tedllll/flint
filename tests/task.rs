@@ -532,8 +532,21 @@ impl Respond for Jobs {
     }
 }
 
+/// One at a time, for the tests that read a wall clock.
+///
+/// Cargo runs the tests in a binary on several threads, and each of these starts real flint processes
+/// against its own stub: a fan-out of three children measured while three other tests are starting
+/// processes is measuring the machine, not the tool. The file's other tests are about content and do
+/// not care.
+static ALONE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn alone() -> tokio::sync::MutexGuard<'static, ()> {
+    ALONE.lock().await
+}
+
 #[tokio::test]
 async fn a_fan_out_runs_the_jobs_at_the_same_time_and_labels_every_answer() {
+    let _solo = alone().await;
     let step = Arc::new(AtomicUsize::new(0));
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let server = MockServer::start().await;
@@ -671,4 +684,416 @@ async fn a_fan_out_that_is_already_deep_is_refused_before_any_child_starts() {
     );
 
     let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Answers by request number, holding every answer but the first for a while.
+///
+/// The first is the parent's, and it starts the child; every later one is the child's, and the delay is
+/// what makes the parent wait long enough for its status row to have been painted at all -- the row is
+/// held back for [`ACTIVITY_DELAY`] so that a fast tool does not flicker a clock nobody can read.
+struct SlowAfterFirst {
+    step: Arc<AtomicUsize>,
+    bodies: Vec<String>,
+    delay: std::time::Duration,
+}
+
+impl Respond for SlowAfterFirst {
+    fn respond(&self, _req: &Request) -> ResponseTemplate {
+        let n = self.step.fetch_add(1, Ordering::SeqCst);
+        let body = self
+            .bodies
+            .get(n)
+            .or_else(|| self.bodies.last())
+            .cloned()
+            .unwrap_or_else(|| prose("NOTHING SCRIPTED"));
+        let template = ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(body);
+        if n == 0 {
+            template
+        } else {
+            template.set_delay(self.delay)
+        }
+    }
+}
+
+/// A parent asks for a child; the child is then held, so it is still running when the test looks.
+///
+/// Only the child's request is delayed: the parent's second turn has to be answered, or a test waits
+/// for a conversation that never continues.
+struct HeldChild {
+    step: Arc<AtomicUsize>,
+    hold: std::time::Duration,
+    /// What the parent's later turns are told, so a test can see the session end normally.
+    then: &'static str,
+}
+
+impl Respond for HeldChild {
+    fn respond(&self, _req: &Request) -> ResponseTemplate {
+        let n = self.step.fetch_add(1, Ordering::SeqCst);
+        let body = match n {
+            0 => tool_call("task", r#"{"prompt":"look around"}"#),
+            1 => prose("CHILD EVENTUALLY ANSWERS"),
+            _ => prose(self.then),
+        };
+        let template = ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(body);
+        if n == 1 {
+            template.set_delay(self.hold)
+        } else {
+            template
+        }
+    }
+}
+
+/// A parent's own account of the child it left running, and the child's session path inside it.
+fn left_running_in(text: &str) -> Option<(u32, String)> {
+    let pid = pid_from(text)?;
+    let session = session_path_from(text)?;
+    Some((pid, session))
+}
+
+/// A line typed while a child is running drops the turn -- and the parent must say what it left going.
+///
+/// This is the reported bug, reproduced: a `task` child is started, the person (seeing nothing change,
+/// because nothing did) types at the parent, and the turn is dropped. What the parent recorded was
+/// "tool 'task' was requested but never ran", which is false in both halves -- it ran, and it was still
+/// running minutes later with its own bill -- and a model reading that sentence offers to run the task
+/// again, spending the same money twice.
+///
+/// The REPL is driven through its own input path rather than with `-p`: the second line has to arrive
+/// *while* the first turn is waiting, which is what steering is, and a one-shot run has only one turn
+/// to be interrupted in. Under `FLINT_TERM_CAPTURE` the input comes from the pipe instead of a
+/// keyboard (see `main`), which is what makes a whole session scriptable from a test.
+#[tokio::test]
+async fn an_interrupted_task_says_what_it_left_running() {
+    let _solo = alone().await;
+    let step = Arc::new(AtomicUsize::new(0));
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(HeldChild {
+            step: step.clone(),
+            hold: std::time::Duration::from_secs(120),
+            then: "PARENT DONE",
+        })
+        .mount(&server)
+        .await;
+
+    let home = scratch("interrupted", &server.uri());
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("work dir");
+    let capture = std::env::temp_dir().join(format!(
+        "flint-task-interrupted-{}.cap",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&capture);
+
+    let mut child = binary()
+        .args(["--cwd", &work.display().to_string()])
+        .env("FLINT_HOME", &home)
+        .env_remove("FLINT_DEPTH")
+        .env("FLINT_TERM_CAPTURE", "1")
+        .env("FLINT_TERM_CAPTURE_FILE", &capture)
+        .env("FLINT_TERM_SIZE", "100x24")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to run flint");
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().expect("stdin");
+        stdin.write_all(b"ask the child\n").expect("write");
+        stdin.flush().expect("flush");
+    }
+    // Long enough for the child to have started -- its own request is what the parent is waiting on --
+    // and short enough that it is still waiting when the line arrives.
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().expect("stdin");
+        stdin.write_all("any news?\n".as_bytes()).expect("write");
+        stdin.flush().expect("flush");
+    }
+    drop(child.stdin.take());
+    let status = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            if let Some(status) = child.try_wait().expect("wait") {
+                return status;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the parent never exited");
+    assert_eq!(status.code(), Some(0), "the session ended badly");
+    let _ = std::fs::remove_file(&capture);
+
+    // The parent's own session, found by what only it says: both of its prompts.
+    let mut parent = None;
+    for entry in walk(&home.join("sessions")) {
+        let text = transcript(&entry);
+        if text.contains("ask the child") && text.contains("any news?") {
+            parent = Some(text);
+        }
+    }
+    let text = parent.expect("the parent's session was not found");
+    assert!(
+        text.contains("the result of 'task' never came back"),
+        "the record still claims the tool never ran: {text}"
+    );
+    assert!(
+        text.contains("still going on its own"),
+        "nothing says the child outlived the turn: {text}"
+    );
+    // The child's session path is the actionable half: the answer is being written there, and a run
+    // that says so is a run whose work can still be collected.
+    let (pid, child_session) =
+        left_running_in(&text).expect("the note does not say what it left running");
+    assert!(
+        std::path::Path::new(&child_session).is_file(),
+        "the note names a session that is not there: {child_session}"
+    );
+    assert!(
+        transcript(std::path::Path::new(&child_session)).contains("look around"),
+        "the session in the note is not the child's: {child_session}"
+    );
+
+    // Left behind on purpose, and stopped here: a test that walked away from it would leave a flint
+    // running on this machine, which is the fault being fixed rather than a way to end a test.
+    stop(pid);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A `--json` run has no next turn, so the fact has to be on the stream or it is nowhere.
+///
+/// This is the caller-shaped half of the same bug: a program that ran flint with a budget gets exit 65
+/// and, without this, no way at all to learn that a child it paid for is still going and where its
+/// answer will be. The parent's own session is not the caller's to read -- `close_dangling_tool_calls`
+/// only runs on a *next* turn, which a one-shot does not have -- so the warning is the only channel
+/// left, and it is emitted before the outcome line because it is part of how the run ended.
+#[tokio::test]
+async fn a_json_run_cut_short_names_the_child_it_left_running() {
+    let _solo = alone().await;
+    let step = Arc::new(AtomicUsize::new(0));
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(HeldChild {
+            step: step.clone(),
+            hold: std::time::Duration::from_secs(120),
+            then: "PARENT DONE",
+        })
+        .mount(&server)
+        .await;
+
+    let home = scratch("cut-short", &server.uri());
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("work dir");
+    let out_file = home.join("stream.ndjson");
+    let mut child = binary()
+        .args([
+            "-p",
+            "ask the child",
+            "--json",
+            "--max-seconds",
+            "2",
+            "--cwd",
+            &work.display().to_string(),
+        ])
+        .env("FLINT_HOME", &home)
+        .env_remove("FLINT_DEPTH")
+        .stdin(std::process::Stdio::null())
+        // A file rather than `output()`, and not for tidiness: the child is started with its own
+        // pipes, but a *grandchild* still holds whatever this end of the stream is open with until it
+        // exits, so reading a pipe to EOF here would block for as long as the child this test exists
+        // to catch outlives its parent. Reading the file once the parent is gone is the same bytes
+        // without that.
+        .stdout(std::process::Stdio::from(
+            std::fs::File::create(&out_file).expect("stream file"),
+        ))
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to run flint");
+    let started = std::time::Instant::now();
+    let status = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            if let Some(status) = child.try_wait().expect("wait") {
+                return status;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the parent never exited");
+    let took = started.elapsed();
+    let stdout = std::fs::read_to_string(&out_file).expect("stream file");
+    assert_eq!(
+        status.code(),
+        Some(65),
+        "not the budget's exit code: {stdout}"
+    );
+    assert!(
+        took < std::time::Duration::from_secs(30),
+        "the run outlived its own budget by {took:?}: the deadline did not cut it"
+    );
+
+    let warnings: Vec<String> = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|frame| frame["type"] == "warning")
+        .filter_map(|frame| frame["message"].as_str().map(str::to_string))
+        .collect();
+    let note = warnings
+        .iter()
+        .find(|text| text.contains("still going on its own"))
+        .unwrap_or_else(|| panic!("the caller was never told about the child: {warnings:?}"));
+    let (pid, child_session) = left_running_in(note).expect("the warning names nothing actionable");
+    assert!(
+        Path::new(&child_session).is_file(),
+        "the warning names a session that is not there: {child_session}"
+    );
+    // The outcome still comes, and still says what it always said: the child is an addition to the
+    // caller's picture, not a change to the vocabulary.
+    assert!(stdout.contains(r#""outcome":"incomplete""#), "{stdout}");
+    assert!(stdout.contains(r#""reason":"seconds""#), "{stdout}");
+
+    stop(pid);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Every file under a directory, one level of `read_dir` at a time.
+fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            found.extend(walk(&path));
+        } else {
+            found.push(path);
+        }
+    }
+    found
+}
+
+/// The pid in the sentence a dropped turn leaves about its child.
+fn pid_from(text: &str) -> Option<u32> {
+    let at = text.find("(pid ")? + "(pid ".len();
+    let digits: String = text[at..].chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// The session path in the same sentence.
+fn session_path_from(text: &str) -> Option<String> {
+    let at = text.find("own session, ")? + "own session, ".len();
+    let rest = &text[at..];
+    let end = rest.find(" --")?;
+    Some(rest[..end].trim().to_string())
+}
+
+/// End a process this test started and deliberately left running.
+fn stop(pid: u32) {
+    #[cfg(windows)]
+    let mut command = {
+        let mut c = std::process::Command::new("taskkill");
+        c.args(["/PID", &pid.to_string(), "/T", "/F"]);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut command = {
+        let mut c = std::process::Command::new("kill");
+        c.args(["-9", &pid.to_string()]);
+        c
+    };
+    let _ = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+/// While the parent waits for a child, the child's own work shows on the parent's status row.
+///
+/// This is a bug report, not a nicety. A realistic `task` runs for minutes -- a research child made
+/// eleven model calls and took two -- and the parent's row says one unchanging word for all of it:
+/// `task`. Someone watching that cannot tell a child that is working from one that is stuck, and the
+/// reported outcome was exactly that: "no further changes, the indicator is gone, I do not know
+/// whether it is running" -- followed by typing at it, which (because a typed line steers) dropped
+/// the turn and discarded the child's answer. The child is already saying what it is doing on its own
+/// `--json` stream; the parent was reading those frames and throwing them away.
+///
+/// The capture harness is how a test can see the status row at all: it draws the interactive layout
+/// into a file, and `-p` plus `FLINT_TERM_CAPTURE` takes the interactive path on purpose (see
+/// `term::capture_requested`).
+#[tokio::test]
+async fn a_childs_own_progress_reaches_the_parents_status_row() {
+    let _solo = alone().await;
+    let step = Arc::new(AtomicUsize::new(0));
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(SlowAfterFirst {
+            step: step.clone(),
+            delay: std::time::Duration::from_secs(2),
+            bodies: vec![
+                // The parent asks for a child.
+                tool_call("task", r#"{"prompt":"look around"}"#),
+                // The child asks for a listing, which is the frame the parent has to pass on.
+                tool_call("list", r#"{"path":"."}"#),
+                // The child answers...
+                prose("CHILD DONE"),
+                // ...and the parent finishes.
+                prose("PARENT DONE"),
+            ],
+        })
+        .mount(&server)
+        .await;
+
+    let home = scratch("progress", &server.uri());
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("work dir");
+    let capture = std::env::temp_dir().join(format!(
+        "flint-task-progress-{}.cap",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&capture);
+
+    let out = binary()
+        .args(["-p", "ask the child", "--cwd", &work.display().to_string()])
+        .env("FLINT_HOME", &home)
+        .env("FLINT_TERM_CAPTURE", "1")
+        .env("FLINT_TERM_CAPTURE_FILE", &capture)
+        .env("FLINT_TERM_SIZE", "100x24")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("failed to run flint");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    // A captured run draws into the file, and that is where the answer and the status row both are.
+    let drawn = std::fs::read(&capture)
+        .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+        .unwrap_or_default();
+    let _ = std::fs::remove_file(&capture);
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "flint failed: {stdout} / {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        drawn.contains("PARENT DONE"),
+        "the parent never drew its answer, so the capture is not a run: {drawn:?}"
+    );
+    // Named for the child, not for a tool of the parent's: "list" is the child's tool, and the
+    // parent has no such call, so this text can only have come from the child's stream.
+    assert!(
+        drawn.contains("task: running list"),
+        "the parent's status row never said what the child was doing: {drawn:?}"
+    );
 }
