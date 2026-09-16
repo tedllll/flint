@@ -1717,6 +1717,84 @@ fn a_long_conversation_is_trimmed_in_the_request_and_not_in_the_session_file() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// A rename reaches the sidebar it was typed into.
+///
+/// The rename field lives in the sidebar, and the sidebar shows the name -- so a page that renamed a
+/// conversation and went on showing the old label is a rename that looks like it failed, which is the
+/// same complaint `/archive` produced ("the page did not refresh") one command over. The frame is the
+/// one those two already push, for the same reason: what the list says has changed, and the list is a
+/// route (`GET /sessions`) the page re-reads rather than data it is sent.
+#[tokio::test]
+async fn renaming_a_conversation_tells_the_page_to_read_the_list_again() {
+    // No stub server: nothing in this test answers a model, and `/name` appends to the session file.
+    let home = test_home("name-frame", "http://127.0.0.1:9/v1");
+    std::fs::write(
+        home.join("config.toml"),
+        "default_provider = \"stub\"\n\n\
+         [[providers]]\n\
+         name = \"stub\"\n\
+         base_url = \"http://127.0.0.1:9/v1\"\n\
+         model = \"stub-model\"\n\
+         api_key = \"not-a-real-key\"\n",
+    )
+    .expect("the test config");
+
+    let log = home.join("transcript.txt");
+    let mut child = binary()
+        .arg("--web")
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::fs::File::create(&log).expect("transcript file"))
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to run flint");
+
+    let (port, token) = port_and_token(&wait_for_url(&log));
+    // Connected before the rename, so this is the frame a page that is open right now receives --
+    // which is the whole point: the label on screen is the one that is now wrong.
+    let mut watching = http_stream(port, "/events", &token);
+    let opening = read_until(&mut watching, "\"model\":\"stub-model\"", 20);
+
+    let answered = post_message(port, &token, "/name a better name");
+    // A named frame: `event: sessions` with an empty line, because what the page is told is that a
+    // *route* (`GET /sessions`) is stale rather than anything about the run.
+    let told = read_until(&mut watching, "event: sessions", 20);
+
+    drop(watching);
+    drop(child.stdin.take());
+    let exited = wait_for_exit(&mut child, 20);
+    let transcript = std::fs::read_to_string(&log).unwrap_or_default();
+    let written = flint::session::list_detailed(&home.join("sessions"))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.title.unwrap_or_default())
+        .collect::<Vec<_>>();
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit");
+    assert!(
+        opening.contains("\"type\":\"state\""),
+        "the page was never told the state, so nothing before the rename was measurable: {opening:?}"
+    );
+    assert!(
+        // 202 and a `queued` body: the route stashes the line for the loop that owns the commands,
+        // which is the same answer every other line a page sends gets.
+        answered.contains("202 Accepted") && answered.contains("\"queued\":true"),
+        "the rename was not accepted: {answered:?} {transcript:?}"
+    );
+    assert!(
+        told.contains("event: sessions"),
+        "the rename left the sidebar showing the old name, because nothing told the page the list \
+         it draws had changed. Frames: {told:?} Terminal: {transcript:?}"
+    );
+    assert_eq!(
+        written,
+        vec!["a better name".to_string()],
+        "the title was not written to the conversation that is open"
+    );
+}
+
 /// The `debug` namespace says what it knows rather than failing silently.
 #[test]
 fn an_unknown_debug_subcommand_names_the_ones_that_exist() {

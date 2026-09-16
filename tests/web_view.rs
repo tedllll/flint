@@ -631,6 +631,68 @@ fn the_answers_of_a_form_become_one_line_and_a_missing_one_stops_it() {
     );
 }
 
+/// The sidebar's rename row is the frame's own `/name` row, composed the way every other form is.
+///
+/// The drawing is checked under Node (`scripts/web-view-test.js` runs the page against a stub DOM);
+/// what belongs here is the composition, because a name is the one answer a person types freely. The
+/// page must not build `/name " + value` itself: `formLine` is what trims and what refuses an empty
+/// answer, and a second composition is how the panel's forms and the sidebar's would come to disagree
+/// about a name with two spaces in it.
+///
+/// The refusal is the half that matters. `/name` with no text is not an error -- it *reports* the
+/// name -- so a submit that fell through an emptied field would turn a cleared field into a question
+/// about the conversation's name, and the answer would land in the transcript as a command nobody
+/// asked for.
+#[test]
+fn the_sidebar_renames_a_conversation_through_the_same_form_composition() {
+    let row = from("function nameRow(doc, session, command)", 40);
+    assert!(
+        row.contains("formLine(command.send, command.fields, inputs.map((input) => input.value))"),
+        "the sidebar's rename field does not compose its line from the frame's own row, so what a \
+         person typed is joined to the command by hand and an empty answer is sent as the bare \
+         `/name`: {row}"
+    );
+    assert!(
+        row.contains("if (!line) return;"),
+        "the rename handler sends what `formLine` refused, so clearing the field asks the terminal \
+         what the conversation is called instead of doing nothing: {row}"
+    );
+    // The field sits inside the row, and the row is the conversation: a press that lands in the
+    // field must not open it. For this row that is the conversation already open, so the bubbling
+    // press would send `/resume` for the row the name is being typed on.
+    assert!(
+        row.contains("event.stopPropagation"),
+        "a click inside the rename field bubbles to the row, so reaching for the field opens the \
+         conversation under the person typing in it: {row}"
+    );
+    assert!(
+        row.contains("sendText(line)"),
+        "the rename is not sent on the message route, which is the route every line a person would \
+         have typed takes (and the one that reaches the transcript): {row}"
+    );
+    // The field starts on the label in force, and the page's own `(empty)` is not offered as a name.
+    assert!(
+        row.contains("session.label === \"(empty)\" ? \"\" : session.label"),
+        "the rename field does not start on the conversation's current label, or it would prefill \
+         the page's own placeholder for an unnamed conversation and send it: {row}"
+    );
+    // And the row is drawn because the *frame* described it: which commands a run offers is the
+    // frame's fact, so neither the command nor its answers are described a second time here -- which
+    // is the rule the destructive rows in this same menu already follow.
+    let lookup = from("function frameForm(doc, send)", 14);
+    assert!(
+        lookup.contains("if (fields.length === 0) continue;"),
+        "a command row that says nothing about its answers is treated as a form, so a field appears \
+         for a command that never said what it takes: {lookup}"
+    );
+    assert!(
+        from("function sessionMenu(doc, session)", 45)
+            .contains("session.current ? frameForm(doc, \"/name\") : null"),
+        "the rename field is drawn without asking the frame whether the run offers `/name`, or it is \
+         drawn for a conversation other than the open one"
+    );
+}
+
 /// A destructive row takes two presses, and the second one prints the line it will send.
 ///
 /// §8's last class, and the one where a single press could destroy work that no undo anywhere in

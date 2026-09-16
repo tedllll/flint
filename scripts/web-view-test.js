@@ -790,7 +790,9 @@ check("a conversation's row carries its own actions behind one button", () => {
 
   // The conversation you are in is offered them too, and the *terminal* is what refuses: its
   // refusal explains itself ("/new starts a fresh one; then this one can be filed away"), and a
-  // page that hid the row would be deciding a rule it does not own.
+  // page that hid the row would be deciding a rule it does not own. No rename field here, because
+  // this frame does not describe one: `/name` is not in the list at all, which is the case the
+  // check below pins from the other side.
   d.menu = { n: 1, id: "111-1" };
   const current = menuOf(page.sessionRow(d, { n: 1, id: "111-1", label: "this one", current: true }));
   eq(current.children.length, 2, "the open conversation is offered them as well");
@@ -800,6 +802,84 @@ check("a conversation's row carries its own actions behind one button", () => {
   d.menu = { n: 3, id: "173-9" };
   page.applyState(d, JSON.stringify({ type: "state", provider: "stub", model: "m", commands: [] }));
   eq(menuOf(page.sessionRow(d, session)).children.map(says), ["nothing to do from here"], "an empty menu says so");
+});
+
+check("the conversation you are in can be renamed from its own row", () => {
+  const page = loadViewer();
+  const d = page.newDoc();
+  page.applyState(d, JSON.stringify({
+    type: "state", provider: "stub", model: "m",
+    commands: [
+      { label: "/archive <n|id>", send: "/archive", help: "file it away", class: "danger", from: "sessions" },
+      {
+        label: "/name [text]", send: "/name", help: "name this conversation", class: "form",
+        fields: [{ field: "text", name: "text", optional: false }],
+      },
+    ],
+  }));
+  const menuOf = (row) => row.children.find((n) => n.className === "menu");
+  const formOf = (row) => menuOf(row).children.find((n) => n.tag === "form");
+
+  // The open conversation: its name is a field, and the field starts on what the row is called
+  // now -- a rename is usually a correction, and retyping the whole name to fix a word is not.
+  d.menu = { n: 1, id: "111-1" };
+  const current = page.sessionRow(d, { n: 1, id: "111-1", label: "the branch", current: true });
+  const form = formOf(current);
+  if (!form) throw new Error("the open conversation has no rename field");
+  eq(menuOf(current).children.map((n) => n.tag), ["button", "form"], "the actions, then the name");
+  eq(form.children.map((n) => n.tag), ["input", "button"], "one field and the command it sends");
+  eq(form.children[0].value, "the branch", "the field starts on the name in force");
+  eq(form.children[0].placeholder, "name this conversation", "and says what the frame says it is for");
+  eq(form.children[1].textContent, "/name", "the button says which command it sends");
+
+  // What a press does with what is in the field. The harness cannot see the POST -- `canSend` is
+  // only true on a page flint is serving, and this stub has no `location` -- so what is asserted
+  // here is the *decision* the handler makes with the field's contents, which is what the drawing
+  // owns: a name closes the menu behind it, and an emptied field leaves everything as it was.
+  // The line itself, composed by the same `formLine` the panel's forms use, is asserted over the
+  // page's own bytes in `tests/web_view.rs`.
+  form.children[0].value = "  the other branch  ";
+  page.fire(form, "submit", { preventDefault() {} });
+  eq(d.menu, null, "the menu closes behind the rename it sent");
+  eq(page.sent.length, 0, "the harness cannot send, so nothing was posted from here");
+
+  // An emptied field sends nothing, and the difference is visible: the handler returns before it
+  // closes the menu, so a cleared field is a press that did nothing. That matters because `/name`
+  // with no text *reports* the name, which is a different command, and nobody clearing this field
+  // asked to be told what the conversation is called.
+  d.menu = { n: 1, id: "111-1" };
+  const again = formOf(page.sessionRow(d, { n: 1, id: "111-1", label: "the branch", current: true }));
+  again.children[0].value = "   ";
+  page.fire(again, "submit", { preventDefault() {} });
+  ok(d.menu !== null, "an empty name was taken as a rename");
+
+  // A conversation with no name yet is not prefilled with the page's own placeholder for one: the
+  // word `(empty)` is this page's, and sending it would make it the conversation's actual name.
+  d.menu = { n: 2, id: "222-2" };
+  const unnamed = formOf(page.sessionRow(d, { n: 2, id: "222-2", label: "(empty)", current: true }));
+  eq(unnamed.children[0].value, "", "a nameless conversation has an empty field");
+
+  // Another conversation gets no rename field, and the reason is the terminal's own rule rather than
+  // the page's taste: `/name` names the conversation the run is *writing*, so a rename offered on
+  // another row would either rename the wrong conversation or would have to switch to it first --
+  // a second line whose refusal would leave the rename aimed at whatever was open.
+  d.menu = { n: 3, id: "173-9" };
+  const other = page.sessionRow(d, { n: 3, id: "173-9", label: "someone else's", current: false });
+  eq(menuOf(other).children.map((n) => n.tag), ["button"], "only the actions the frame offers");
+
+  // And the field is the *frame's*, not the page's: a run that does not describe what `/name` takes
+  // gets no field, because a control for a command nobody offered sends a line nobody can answer --
+  // the rule the destructive rows already follow, one level up.
+  d.menu = { n: 1, id: "111-1" };
+  page.applyState(d, JSON.stringify({
+    type: "state", provider: "stub", model: "m",
+    commands: [
+      { label: "/archive <n|id>", send: "/archive", help: "file it away", class: "danger", from: "sessions" },
+      { label: "/name [text]", send: "/name", help: "name this conversation", class: "form" },
+    ],
+  }));
+  const bare = menuOf(page.sessionRow(d, { n: 1, id: "111-1", label: "the branch", current: true }));
+  eq(bare.children.map((n) => n.tag), ["button"], "a command that says nothing about its answers gets no field");
 });
 
 check("a row the panel cannot press says where its control is", () => {

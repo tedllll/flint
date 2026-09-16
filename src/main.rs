@@ -3519,6 +3519,13 @@ async fn handle_command(
                 return Ok(Flow::Continue);
             }
             agent.name_session(arg)?;
+            // The sidebar draws this name, and the rename field lives *in* that sidebar -- so a page
+            // that renamed a conversation and went on showing the old label is a rename that looks
+            // like it failed. The same frame `/archive` and `/delete` push, for the same reason: the
+            // list is a route the page re-reads, and what it would answer has changed.
+            if let Some(viewer) = viewer.as_mut() {
+                viewer.list_changed();
+            }
             printer.term().line(format_args!("{green}named:{reset} {arg}"));
         }
 

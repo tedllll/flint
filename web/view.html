@@ -261,6 +261,21 @@
   }
   #sessions li .menu button.row:hover code, #sessions li .menu button.row:hover span { color: var(--bad); }
   #sessions li .menu .row { color: var(--dim); font-size: 12.5px; }
+  /* The rename field inside the menu: the same shape as the panel's forms -- a row that takes an
+     answer is still a row -- at the size of the list it hangs off rather than the size of the panel.
+     It is drawn here rather than in the panel because the conversation it names is the one this row
+     is, and the field starts on that name. */
+  #sessions li .menu form.field { display: flex; gap: 6px; align-items: baseline; margin-top: 4px; }
+  #sessions li .menu form.field input.value {
+    font: inherit; font-size: 12.5px; flex: 1 1 auto; min-width: 0; color: var(--fg);
+    background: none; border: 0; border-bottom: 1px solid var(--dim); padding: 0 0 1px;
+  }
+  #sessions li .menu form.field input.value:focus { outline: none; border-bottom-color: var(--user); }
+  #sessions li .menu form.field button.send {
+    font: inherit; font-size: 12.5px; color: var(--dim); background: none; border: 0; padding: 0;
+    cursor: pointer; white-space: nowrap;
+  }
+  #sessions li .menu form.field button.send:hover { color: var(--user); }
   #sessions .none, #sessions .waiting { color: var(--dim); cursor: default; padding: 7px 14px; }
   /* `position: relative` and `--pad-x` are for the reading-width hand below: the hand is placed
      against the pane's own edge, and the padding is a variable because three things need the same
@@ -1653,8 +1668,84 @@ function sessionMenu(doc, session) {
     row.appendChild(el("span", "", command.help || ""));
     menu.appendChild(row);
   }
-  if (!actions.length) menu.appendChild(el("div", "row", "nothing to do from here"));
+  // The name, and only for the conversation the run is *writing*.
+  //
+  // A field for the frame's own `/name` row, drawn only when the frame has one -- the rule the
+  // destructive rows above already follow, for the same reason: which commands a run offers is a fact
+  // the frame owns, and a control for a command that is not there sends a line nobody can answer.
+  //
+  // `/name` names the open conversation -- that is what the terminal's own command means, and this
+  // page will not give it a second meaning. Offering it on another row would either rename the wrong
+  // conversation or would have to switch to that one first, which is a different action with a
+  // visible consequence (the transcript changes under the person) and a second line whose *refusal*
+  // -- a session archived in the meantime -- would leave the rename aimed at whatever was open.
+  // Click the row to open it, then rename it here.
+  const rename = session.current ? frameForm(doc, "/name") : null;
+  if (rename) menu.appendChild(nameRow(doc, session, rename));
+  // An empty menu is indistinguishable from one that failed to draw, so it says which it is -- and
+  // a rename field counts as something to do, which is why this asks the menu rather than the frame.
+  if (!menu.children.length) menu.appendChild(el("div", "row", "nothing to do from here"));
   return menu;
+}
+
+/// One of the frame's own command rows, when it offers the command and says what it takes.
+///
+/// The sidebar composes `/resume` and `/new` itself, because those two lines *are* the sidebar -- a
+/// number the list is showing, and a button that starts one -- and there is nothing in the frame to
+/// read them from. A command that takes answers is different: the frame says which answers it wants
+/// and what the answers are for, so the field is drawn from that rather than described a second time
+/// here. A second description is one that drifts, which is the argument the panel's rows are built on.
+function frameForm(doc, send) {
+  const commands = doc.state && Array.isArray(doc.state.commands) ? doc.state.commands : [];
+  for (const command of commands) {
+    if (!command || command.send !== send) continue;
+    const fields = Array.isArray(command.fields) ? command.fields : [];
+    if (fields.length === 0) continue;
+    return { send: send, fields: fields, help: typeof command.help === "string" ? command.help : "" };
+  }
+  return null;
+}
+
+/// The rename row: the name it is called now, in the frame's own field, and the command that sets it.
+///
+/// One input per answer the frame names, so this draws a name rather than assuming a name is one word
+/// of text, and the button says the command the frame says it sends. The field starts on the label in
+/// force -- a rename is usually a correction -- unless that label is this page's own `(empty)`, which
+/// is a placeholder for a conversation that has no name rather than a name, and sending it would give
+/// the conversation `(empty)` as its actual name.
+function nameRow(doc, session, command) {
+  const form = el("form", "field");
+  const inputs = command.fields.map((spec) => {
+    const input = el("input", "value");
+    input.type = spec && spec.field === "password" ? "password" : "text";
+    input.placeholder = command.help || command.send;
+    return input;
+  });
+  if (inputs.length > 0) inputs[0].value = session.label === "(empty)" ? "" : session.label;
+  const submit = el("button", "send", command.send);
+  submit.type = "submit";
+  // The row behind this field *is* the conversation, and clicking into the field is not a press on
+  // it: without this the press that puts the cursor in the field would bubble up and open the
+  // conversation -- and for this row that is the conversation already open, so `/resume` would
+  // rebuild the transcript under the person half-way through typing a name into it.
+  form.addEventListener("click", (event) => {
+    if (event && event.stopPropagation) event.stopPropagation();
+  });
+  form.addEventListener("submit", (event) => {
+    if (event && typeof event.preventDefault === "function") event.preventDefault();
+    if (event && event.stopPropagation) event.stopPropagation();
+    const line = formLine(command.send, command.fields, inputs.map((input) => input.value));
+    // An emptied field sends nothing, and the reason is not politeness: `/name` with no text
+    // *reports* the name, which is a different command, and nobody clearing this field asked to be
+    // told what the conversation is called.
+    if (!line) return;
+    doc.menu = null;
+    paintSessions();
+    sendText(line);
+  });
+  for (const input of inputs) form.appendChild(input);
+  form.appendChild(submit);
+  return form;
 }
 
 /// Ask the process to switch conversations.
