@@ -51,7 +51,7 @@ whoever is changing the code — a person or a model driving it.
 | `src/live.rs` | who else is working here: the presence record a run keeps while it lives, and the recent-changes signal that names no author |
 | `src/web.rs` | `--web`: the embedded viewer and the loopback listener that serves it |
 | `src/util.rs` | small shared helpers (truncation on a char boundary, and the two-ended cut a long answer gets) |
-| `tests/` | `agent_loop` (stub provider), `cli_output` (real binary, raw bytes), `json_output` (the `--json` stream: one object per line, the heartbeat, the stop channel, the exit codes and the turn's outcome, the balance preflight, and the refusals a caller has to be able to read), `term_capture` (byte-exact terminal), `search_tool` (stub search endpoint), `balance` (the preflight, stub provider), `who` (the presence record and the changes that name no author), `task` (one flint starting another: argv, the child's stream, the depth bound, a readonly parent that cannot be talked into a writing child, a profile deciding the child's instructions and model, a fan-out whose children are shown to have started together, a child's own progress arriving on the parent's status row, what a dropped turn says about the child it left running -- in a session and on a `--json` stream, a child's conversation being kept out of the person's list of conversations, and the background handle: a parent that does not wait, a status that says where the child is, a wait that collects its answer, and a stop that ends it, a model that says so when the next step needs the answer, and a job that ends while its parent is working being reported to it exactly once), `say` (the mailbox: a peer's words reaching the person and the session file, and never a request body -- unless the run asked to hear peers, and then exactly once, in the request that followed, with `"heard":true` on the record), `web_view` (the page's policy), `tty_hangup` (Unix only, the one suite that needs a real pty: a child is given a terminal, the master is closed, and the run must end rather than spin -- the defect `watch_for_hangup` in `src/main.rs` exists for) |
+| `tests/` | `agent_loop` (stub provider), `cli_output` (real binary, raw bytes — including a resumed conversation whose request past `max_request_chars` opens with the note while the file on disk still has the first question), `json_output` (the `--json` stream: one object per line, the heartbeat, the stop channel, the exit codes and the turn's outcome, the balance preflight, and the refusals a caller has to be able to read), `term_capture` (byte-exact terminal), `search_tool` (stub search endpoint), `balance` (the preflight, stub provider), `who` (the presence record and the changes that name no author), `task` (one flint starting another: argv, the child's stream, the depth bound, a readonly parent that cannot be talked into a writing child, a profile deciding the child's instructions and model, a fan-out whose children are shown to have started together, a child's own progress arriving on the parent's status row, what a dropped turn says about the child it left running -- in a session and on a `--json` stream, a child's conversation being kept out of the person's list of conversations, and the background handle: a parent that does not wait, a status that says where the child is, a wait that collects its answer, and a stop that ends it, a model that says so when the next step needs the answer, and a job that ends while its parent is working being reported to it exactly once), `say` (the mailbox: a peer's words reaching the person and the session file, and never a request body -- unless the run asked to hear peers, and then exactly once, in the request that followed, with `"heard":true` on the record), `web_view` (the page's policy), `tty_hangup` (Unix only, the one suite that needs a real pty: a child is given a terminal, the master is closed, and the run must end rather than spin -- the defect `watch_for_hangup` in `src/main.rs` exists for) |
 | `scripts/` | Node replay tools: `vtscreen.js`, `term-layout-test.js`, `layout-trace.js` |
 | `examples/python/` | the Python caller: `flint_call.py` (ask/ask_json, no dependencies), its stub and its checks |
 | `examples/mcp/` | flint as an MCP tool for Codex, Claude Code and Cursor: `flint_server.py` (stdlib only, one tool) and `test_mcp.py`, which speaks the protocol at it |
@@ -117,6 +117,8 @@ default_provider = "deepseek"   # which provider is used without --provider
 shell = "cmd"                   # bash tool's shell program (Unix: "sh")
 shell_args = ["/C"]             # arguments that run a command string (Unix: ["-c"])
 max_tool_output = 30000         # characters of tool output per reply; the rest spills
+max_request_chars = 400000      # characters of conversation per request; the oldest turns
+                                # are left out of the request past it, never out of the file
 max_steps = 100                 # runaway-loop guard, not a work ration
 readonly = false                # refuse write/edit/apply_patch and mutating bash
 proxy = ""                      # exported to bash children as HTTP(S)_PROXY
@@ -236,9 +238,10 @@ then `/check-runs/<id>/annotations` for the reason. Read that before guessing fr
 `flint debug prompt-input` prints the request body that would be sent — system prompt,
 history, tool schemas — without sending it or needing a key. It is built by the same
 `provider::request_body` the client posts, so it is the honest way to check what the model is
-actually given after changing the prompt, a tool schema or the request-side pruning. The
-request is *not* the transcript: the session file keeps every byte, and pruning drops stale
-tool output from the request only.
+actually given after changing the prompt, a tool schema or the request-side bounds. The
+request is *not* the transcript: the session file keeps every byte, pruning drops stale tool
+output from the request only, and `trim_old_turns` drops the oldest turns past
+`max_request_chars`, with a note in their place.
 
 `HANDOFF.md` has the current counts and the state of the tree as the last session left it;
 the count in this file would only be a date. Keep the tests honest instead: write the test

@@ -94,8 +94,8 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 527 passing, 1 ignored on this machine
-(313 lib, 3 in the binary's own tests, 33 `agent_loop`, 65 `cli_output`, 35 `json_output` (7 structured
+As of the commit that carries this file, `cargo test` is 533 passing, 1 ignored on this machine
+(318 lib, 3 in the binary's own tests, 33 `agent_loop`, 66 `cli_output`, 35 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
 be able to read, 4 the answer written where the caller asked, 3 the file inlined into the prompt,
@@ -1903,11 +1903,28 @@ nothing until the second line was written late. It also shows why the assertion 
 rather than the whole sentence: the notice is longer than the strip, so the captured bytes carry a
 wrap and a repaint escape in the middle of it.
 
-**The transcript is not trimmed by construction.** The step guard is 100, and what keeps
-a long turn from walking into the context ceiling is request-side pruning of stale tool
-output (`prune_tool_output` in `agent.rs`): the four most recent results, anything short,
-and every failure are kept; older long output is replaced with a note. The session file
-keeps every byte. `flint debug prompt-input` is how to see the difference.
+**The request is bounded by construction now, not only the turn.** The step guard is 100, and what
+keeps a long turn from walking into the context ceiling is request-side pruning of stale tool output
+(`prune_tool_output` in `agent.rs`): the four most recent results, anything short, and every failure
+are kept; older long output is replaced with a note. Neither of those bounds a *conversation*,
+though, and nothing ever dropped an old turn — so a long one grew the request until the provider
+refused it, in the middle of a turn, as an error nobody decided on. `max_request_chars` is the bound
+(default 400,000 characters, the unit `max_tool_output` uses, `0` turns it off) and `trim_old_turns`
+in `agent.rs` enforces it on the request side only: the session file keeps every message, the same
+promise pruning makes, and a note where the turns were says how many went and that the file has them.
+
+Three decisions are worth keeping. The unit is a **turn** — a user message through to the next one —
+because a tool result whose call has been dropped is a request the provider rejects, and a turn
+boundary cannot fall inside such a pair (`every_result_answers_a_kept_call` in the tests is the check,
+and it fails if the trim is changed to cut at every message). The **newest turn is never dropped** and
+the system prompt is never counted against the budget, whatever the numbers say, because a request with
+nothing to answer is not a smaller request — and the note itself is charged to the budget, so the
+message that says the request was too long cannot be what makes it too long. Pruning runs first, in
+both `Agent::step` and `Agent::request_preview`, so the cheap bound is spent before the expensive one;
+that same order in both places is what keeps the preview's promise that it prints what would be sent.
+Seen from a terminal: `/config` prints the number in force, and `flint --resume 1 debug prompt-input
+"..."` in a home whose `max_request_chars` is small shows a request that opens with the note while the
+file on disk still has the first question.
 
 **A stream that ends without a completion signal used to be taken for an answer.** Found
 while making the text stream: `parser.done` was only ever used to leave the read loop early,

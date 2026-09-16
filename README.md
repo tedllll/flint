@@ -69,6 +69,7 @@ shell = "cmd"              # Unix: "sh"
 shell_args = ["/C"]        # Unix: ["-c"]
 
 max_tool_output = 30000   # cap on tool output fed back to the model
+max_request_chars = 400000 # cap on the conversation in one request; 0 = off
 max_steps = 100           # runaway-loop guard, not a work ration
 readonly = false          # true = refuse every write
 
@@ -688,8 +689,10 @@ without sending anything or writing a session.
 The reason this is worth a command is that the request is **not** the transcript. Tool
 results are pruned from the request once they are stale, so a turn that ran twenty commands
 sends the model recent output and drops the listings it has already summarised, while the
-session file keeps every byte. "Why did it forget what it read ten steps ago" and "why is
-the prompt this big" both have their answer in this output and nowhere else.
+session file keeps every byte. A conversation past `max_request_chars` loses its oldest
+*turns* the same way, replaced by a note saying how many and where they are. "Why did it
+forget what it read ten steps ago" and "why is the prompt this big" both have their answer
+in this output and nowhere else.
 
 It is built by the same function the client posts, and there is a test that runs a turn
 against a stub provider and asserts the preview equals the bytes the server received — so
@@ -868,6 +871,16 @@ reply keeps both ends -- the first 4096 characters and the last 1024 -- with a l
 how long the output was and which file holds the rest. Cutting the tail instead, which is
 what a plain `[truncated]` marker does, throws away the end of a build log: the part that
 says what failed and the part that gets looked for.
+
+A whole conversation is capped too, at `max_request_chars` characters per request (400,000 by
+default; `0` turns it off). Past it, the oldest *turns* are left out of the request and a note
+in their place says how many went: `[12 earlier messages were left out of this request: the
+conversation is longer than max_request_chars (400000). The session file keeps every one of
+them...]`. What is dropped is the request, never the transcript — the session file keeps every
+message, so a turn that has scrolled out of the request can still be read, or asked about, or
+recovered by resuming the session. The newest turn and the system prompt are never dropped,
+however small the budget, and a tool result is never separated from the call it answers.
+`/config` shows the number in force.
 
 `write` and `edit` refuse to touch a file this run has not read, and refuse again if the
 file was read and then changed on disk by something else — a build, a formatter, a

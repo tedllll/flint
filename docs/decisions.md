@@ -93,6 +93,19 @@ and the first errors are; the tail is where "build failed" and the summary are; 
 what a person would skim. The whole output goes to `~/.flint/spill/<session>/<n>.txt`, plain
 text, named in the reply — `[truncated]` alone used to throw away the line that mattered.
 
+**What a request carries is bounded, and the transcript is not the request.** Three separate
+caps, because they protect against three different things: `max_tool_output` bounds one tool
+result (the rest spills to a file), `prune_tool_output` shrinks the stale results *inside* a
+turn before it is sent, and `max_request_chars` (400,000 characters, `0` turns it off) drops
+the oldest *turns* of a conversation past it. All three are request-side only: the session
+file keeps every message, which is what makes a dropped turn something that can still be
+read, be named in a note, or be recovered by resuming — and it is why `flint debug
+prompt-input` is a command rather than a debugging session. The unit of the third one is a
+turn because a tool result separated from the call it answers is a request the provider
+refuses, and the newest turn and the system prompt are never dropped because a request with
+nothing to answer is not a smaller request. Pruning runs before trimming, so the cheap bound
+is spent before the expensive one.
+
 **A repeated call is noted, never blocked.** The 3rd, 5th and 8th identical call in one turn
 gets one line saying so, and the note is attached to the result so the *model* sees it. A
 repeat is sometimes right — another process may have changed the file, a command may be

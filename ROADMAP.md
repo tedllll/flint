@@ -1676,12 +1676,26 @@ and C6 is the note that the documentation has to say so).
 
 ## Known unfinished
 
-One known defect is not repeated here, so that the list cannot drift apart from the
-state of the tree: a transcript that is not trimmed by construction.
-[`HANDOFF.md`](HANDOFF.md#known-unfinished) has it in detail, labelled by what was
-measured and what was not.
+No known defect is open. The five that were on this list are closed, and they are kept here
+rather than deleted, because "this was broken and is not now" is the part a next reader
+cannot reconstruct from the code. [`HANDOFF.md`](HANDOFF.md#known-unfinished) has the long
+form of each, labelled by what was measured and what was not. What is left in this file is
+planned work, not damage: the queue above, the small agreed items in §8, and the entries in
+"Not doing" below.
 
-Four things left this list rather than being carried on it. The `eprintln!` sites that could
+**A conversation had no bound**, and that is the fifth. The request grew with the transcript
+until the provider refused it — in the middle of a turn, as an error nobody decided on —
+because the step guard bounds one turn and pruning bounds the stale output inside it, and
+neither of those is a bound on a *conversation*. `max_request_chars` (400,000 characters by
+default, in the unit `max_tool_output` uses, `0` to turn it off) and `trim_old_turns` in
+`src/agent.rs` are the bound, request-side only: the session file keeps every message and a
+note where the dropped turns were says how many went. The unit is a **turn**, so a tool result
+is never separated from the call it answers; the newest turn is never dropped, because a
+request with nothing to answer is not a smaller request; and the note is charged to the
+budget it describes. `tests/cli_output.rs` holds it end to end — a resumed conversation whose
+request opens with the note while the file on disk still has the first question.
+
+Four things left this list earlier rather than being carried on it. The `eprintln!` sites that could
 land inside the answer strip are fixed — there were four, not the three this file used to
 name, and the fourth (`provider.rs`, printing the retry ladder from inside the request loop)
 was the likeliest to fire; all four go through the notice sink now. CI checks a push: the
