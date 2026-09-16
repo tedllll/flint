@@ -94,13 +94,14 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 527 passing, 1 ignored (313 lib, 3 in
-the binary's own tests, 33 `agent_loop`, 65 `cli_output`, 35 `json_output` (7 structured
+As of the commit that carries this file, `cargo test` is 527 passing, 1 ignored on this machine
+(313 lib, 3 in the binary's own tests, 33 `agent_loop`, 65 `cli_output`, 35 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
 be able to read, 4 the answer written where the caller asked, 3 the file inlined into the prompt,
 1 the stream checked on its bytes, 1 how long a turn took),
-7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 7 `who`, 15 `task`, 3 `say`), `cargo clippy
+7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 7 `who`, 15 `task`, 3 `say`),
+and one more on Unix, `tty_hangup`, which is `#![cfg(unix)]` and needs a real pty. `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
 pass, and `python examples/python/test_call.py` is 118 checks, all passing (one of them waits
 out the fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from),
@@ -1768,16 +1769,46 @@ fourth from the same sessions -- history tidied in the terminal leaving the side
 fixed, because the numbers in that list are positions and a stale row resumes the wrong
 conversation.
 
-**A terminal that goes away takes a core with it.** When flint's pty is closed without a
-`SIGHUP` -- a terminal emulator that crashes, a `close(master)` from the other end -- the process
-spins at 100% of a core forever and never exits. The spin is inside `crossterm`, not here:
-`crossterm::event::read()` is `try_read(None)`, whose loop condition
-(`timeout.leftover().map_or(true, |t| !t.is_zero())`) is always true, and the fd reports `POLLHUP`
-without `POLLIN`, which none of its three branches handles -- so `poll` returns immediately,
-nothing is consumed, and it polls again. `src/event/source/unix/tty.rs` in crossterm 0.29 is the
-place to read. Measured on both this build and the one before it (100.3% and 100.7%), so it
-predates the browser work. A fix means driving the loop from `event::poll(timeout)` and checking
-whether the terminal is still there, which is a change to the key thread rather than to a flag.
+**A terminal that goes away now takes the run with it, and the spin it used to take a core with was
+`crossterm`'s.** When flint's pty is closed without a `SIGHUP` -- a terminal emulator that crashes, a
+`close(master)` from the other end -- the process spun at 100% of a core forever and never exited
+(100.3% and 100.7%, measured on the two builds before this one, so it predates the browser work). The
+spin is not flint's: `crossterm::event::read()` is `try_read(None)`, whose loop condition
+(`timeout.leftover().map_or(true, |t| !t.is_zero())`) is always true, and a hung-up descriptor keeps
+reporting itself as ready -- `POLLHUP`, with Linux leaving `POLLIN` set as well -- while a read on it
+produces end of file rather than an event, so `poll` returns at once and it polls again
+(`event/source/unix/tty.rs` in crossterm 0.29 is the place to read). The paragraph that used to sit
+here sketched the fix as driving the key thread from `event::poll(timeout)` and checking whether the
+terminal was still there; what is built is the check, in a thread of its own. `watch_for_hangup` in
+`src/main.rs` polls the descriptor crossterm reads -- stdin when stdin is a terminal, `/dev/tty`
+otherwise, which is `tty_fd`'s own rule -- and on a hangup sends `Quit` on the input channel, which is
+how an EOF on a pipe already ends a run. The key thread is untouched on purpose: on Windows the read
+reports a vanished console itself, and nothing on this machine can drive the Windows key path (the
+capture hook reads lines from a pipe, and there is no pty without a console), so the one path that
+cannot be exercised here is left exactly as it was. `libc` moved from the dev-dependencies to a
+Unix-only dependency for it, which adds no crate -- it was already in the tree -- and it also removes
+half the cost of the Unix process-group kill `docs/windows-tooling.md` §6.1 leaves open.
+
+The test is Unix-only because the bug is: `tests/tty_hangup.rs` gives a child a real pty as its
+standard input, output and error (so `isatty` is true and the interactive path -- the one with the key
+thread in it, which nothing else in the suite reaches -- is what runs), marks the master `FD_CLOEXEC`
+so the child cannot keep its own terminal alive, waits for the banner, closes the master, and asserts
+the process ends within ten seconds. Two guards stop it passing for the wrong reason: the banner must
+have been drawn, and the process must still be alive at that moment, so a child that died at startup
+cannot satisfy "it is not running any more". Its failure message carries the CPU the child burned,
+because a hang and a spin are the same to a stopwatch and nothing alike in `/proc`. Three CI rounds
+were needed, and each one is the reason for something in the code: the first failed the *guard* (the
+banner was in the capture and the assertion did not match it, because the banner is coloured per piece
+and only contiguous on screen -- stripping the escapes is the fix, and it is the same trap as
+asserting on a terminal without replaying it); the second failed with "10s after the pty was closed it
+was still running, having burned 10.2s of CPU", which is the defect reproduced on Linux at one core;
+and the third burned **20.2s in the same window**, two full cores, because the first version of the
+watcher waited for `POLLHUP` *without* `POLLIN` on the theory that a hangup arriving with readable
+input was the last of the input and the key thread should have it. On a hung-up pty `POLLIN` stays set
+for ever and a read clears nothing, so that rule never fired and the watcher spun beside crossterm. A
+hangup is a hangup: bytes still in flight are lost with the terminal they came from. The run after
+that one is green on both platforms, and that CPU number is the whole argument for watching the red
+before believing the green -- the second bug lived inside the fix for the first.
 
 **The Windows half of the tooling plan is written, and this paragraph used to say it was not.** All five
 steps in [`docs/windows-tooling.md`](docs/windows-tooling.md) §7 are done on this machine — the shared

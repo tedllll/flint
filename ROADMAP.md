@@ -1670,19 +1670,23 @@ and C6 is the note that the documentation has to say so).
 
 ## Known unfinished
 
-Two known defects are not repeated here, so that the list cannot drift apart from the
-state of the tree: a terminal that goes away taking a core with it (the `crossterm` spin that
-predates the browser work), and a transcript that is not trimmed by construction.
-[`HANDOFF.md`](HANDOFF.md#known-unfinished) has each in detail, labelled by what was
+One known defect is not repeated here, so that the list cannot drift apart from the
+state of the tree: a transcript that is not trimmed by construction.
+[`HANDOFF.md`](HANDOFF.md#known-unfinished) has it in detail, labelled by what was
 measured and what was not.
 
-Three things left this list rather than being carried on it. The `eprintln!` sites that could
+Four things left this list rather than being carried on it. The `eprintln!` sites that could
 land inside the answer strip are fixed — there were four, not the three this file used to
 name, and the fourth (`provider.rs`, printing the retry ladder from inside the request loop)
 was the likeliest to fire; all four go through the notice sink now. CI checks a push: the
 claim here was wrong as written (`release.yml` has always triggered on every push and builds
 four targets), what was missing was a test job, and `.github/workflows/ci.yml` is one now —
-`cargo test` and `cargo clippy` on Linux and Windows. And Windows newline and code-page
+`cargo test` and `cargo clippy` on Linux and Windows. A terminal that goes away no longer
+takes a core with it: the spin was `crossterm`'s (`event::read` polls a hung-up descriptor for
+ever), so it is watched for from outside the call — `watch_for_hangup` in `src/main.rs`, Unix
+only — and `tests/tty_hangup.rs` holds it with a real pty, which took three CI rounds to get
+right, the middle one burning *two* cores because the first watcher waited for a hangup with
+nothing readable in it and Linux never reports that. And Windows newline and code-page
 behaviour came *off* the list because it was measured: the console output code page is never
 set and does not need to be (Rust writes to a console as UTF-16), and
 `DISABLE_NEWLINE_AUTO_RETURN` is clear with a linefeed at the last column still advancing one

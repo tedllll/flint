@@ -330,10 +330,13 @@ escapes it. **Built as recommended**: `KillTree::arm` in `src/tools.rs`.
   deliberately detached.
 - On **Unix** the gap is the same shape and is *not* fixed: `sh -c 'sleep 300 & wait'`
   leaves a child that `kill_on_drop` does not reach, because there is no process group in
-  play and no `setsid` to put one there. Closing it means `libc` (a dev-dependency today) and
-  either `killpg` after `setsid` or a scan of `/proc`. Unmeasured here — this machine is
-  Windows — and left undone deliberately rather than half-done: the Windows path is where
-  the damage was observed, and the Unix case needs a test before it needs code.
+  play and no `setsid` to put one there. Closing it means `libc` and either `killpg` after
+  `setsid` or a scan of `/proc`; the dependency is no longer part of the cost — `libc` became
+  a Unix dependency when a hung-up terminal had to be watched for (`watch_for_hangup` in
+  `src/main.rs`) — so what is left is the code and the test, neither of which this machine can
+  run. Unmeasured here — this machine is Windows — and left undone deliberately rather than
+  half-done: the Windows path is where the damage was observed, and the Unix case needs a
+  test before it needs code.
 
 ### 6.2 GBK output becomes U+FFFD — `MEASURED`, fixed differently than planned
 
