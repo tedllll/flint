@@ -58,6 +58,23 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         body = json.loads(self.rfile.read(length) or b"{}")
         CALLS["n"] += 1
+        # A schema run asks for JSON in the request itself (`response_format`), and the answer has to
+        # oblige or the run is testing flint's retry ladder instead of its structured output. Checked
+        # before the counter below, so this does not disturb the tool-call sequence the other checks
+        # depend on -- a schema run and a prose run are different conversations.
+        if body.get("response_format") and not STALL:
+            raw = (
+                'data: {"choices":[{"delta":{"content":"{\\"ok\\": true}"}}]}\n\n'
+                'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+                'data: {"choices":[],"usage":{"prompt_tokens":21,"completion_tokens":5}}\n\n'
+                "data: [DONE]\n\n"
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+            return
         if STALL:
             # No Content-Length and no chunking: the body ends when the connection does, and this one
             # does not end on its own. The client is left waiting, which is the state `/stop` exists

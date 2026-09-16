@@ -338,6 +338,38 @@ check carries on with nothing. `cwd=` is required and is what separates conversa
 `docs/python.md` is the whole story, and `examples/python/timing_demo.py` shows both behaviours as
 measured output.
 
+### Being used by another agent (MCP)
+
+Codex, Claude Code and Cursor speak MCP, so `examples/mcp/flint_server.py` is a stdio MCP server —
+standard library only, one tool — that lets any of them ask flint about a directory without inventing
+a shell pipeline. Codex (`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.flint]
+command = "python"
+args = ["C:\\path\\to\\flint\\examples\\mcp\\flint_server.py"]
+```
+
+Claude Code takes the same shape: `claude mcp add flint -- python <path>`. The tool is `flint_ask`
+with `prompt`, `cwd`, `readonly`, `model`, `provider`, `schema` and `timeout_secs`; the answer comes
+back as text with flint's **exit code, outcome, cause and session path attached**, and a schema run
+also returns `structuredContent`. That trailing block is the point: a parent agent can tell a finished
+answer from half of one, can see that the account is empty instead of guessing, and can point at the
+conversation that produced the value.
+
+Two deliberate choices keep it cheap, because MCP's real cost is what the *client* carries:
+
+- **one fat tool, not twenty thin ones.** A tool description and its schema are re-sent on every
+  request of every conversation, so the cheapest thing a server can be is a single tool with a short
+  description. Everything flint can do lives behind that one name.
+- **the tool loop stays in the child.** The parent never receives flint's ten tool schemas — it asks a
+  question and gets an answer. That is the advantage of calling an agent rather than a tool
+  collection, and it is where the tokens are.
+
+A long run is stopped gracefully: the server writes `/stop` to flint's stdin (the same word the
+terminal takes) so the half-answer drawn so far stays in the session file, and kills only if flint
+ignores it. `examples/mcp/test_mcp.py` speaks the protocol at it and checks all of the above.
+
 ### Watching a run in a browser
 
 A terminal is a poor renderer for a long answer: the scroll region fights you, a tool call is

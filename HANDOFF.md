@@ -25,16 +25,19 @@ made before the stream opens reaches only stderr) and then step 3 (`--result-fil
 `--list-sessions --json`). Read it before touching `src/provider.rs`. In short: DeepSeek says it with
 **402**, OpenAI-shaped endpoints say it with **429 `insufficient_quota`** — the same status as a rate
 limit — and Anthropic with a 400 and a sentence. flint decides "transient" from the status **and** the
-body now (`provider::classify`), which is what stopped the four retries.
-*before* reading the body, so a quota 429 is retried four times with a 1+2+4+8-second backoff and the
-caller learns nothing from the exit code (1). The plan is `error.code: "insufficient_balance"`, a
-`retryable: true|false` field on the `error` frame, exit 69 for it (never 75, which invites the retry
-that cannot work), `flint balance` as the preflight that A4 has been missing (DeepSeek's
-`GET /user/balance` returns `is_available`), a batch circuit breaker on the Python side, and a test per
-provider shape asserting the quota cases are attempted **once**. §10 also gained a survey of the prior
-art (Claude Agent SDK, community subprocess adapters, the "LLM is a function" line) and the two small
-things it settled: the `error`-and-`outcome` combination that needs documenting and a test, and
-`duration_ms` on `turn.completed`.
+body (`provider::classify`), which is what stopped the four retries: before that, a quota 429 was
+retried four times with a 1+2+4+8-second backoff and the caller learned nothing from the exit code.
+
+**flint is now callable from an MCP-speaking agent, and that is built rather than planned.**
+`examples/mcp/flint_server.py` is a stdio MCP server (standard library only, one tool, `flint_ask`)
+for Codex, Claude Code and Cursor; the result text carries flint's exit code, outcome, cause and
+session path, and a schema run also returns `structuredContent`. `examples/mcp/test_mcp.py` speaks
+the protocol at it — handshake, listing, a real answer, structured output, and a schema that never
+matched arriving as `isError` + exit 65 instead of as a success. §10's "being used by another agent"
+section also records what the wrapper deliberately does about MCP's token cost (one tool, the tool
+loop stays in the child, answers instead of transcripts, a byte-stable description so a parent's
+prompt cache survives a release). The Python caller's `balance()` is the other half of B6: ask before
+the batch instead of discovering an empty account on call one.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
 As of the commit that carries this file, `cargo test` is 449 passing, 1 ignored (280 lib, 3 in
@@ -43,7 +46,8 @@ output, 1 the heartbeat, 2 the stop channel, 5 the exit codes and the turn's out
 balance, 1 what a caller's pipe must not come back out of), 7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`), `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
 pass, and `python examples/python/test_call.py` is 49 checks, all passing (one of them now waits
-out the fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from).
+out the fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from),
+and `python examples/mcp/test_mcp.py` passes its own 23.
 
 **A `--json` run now beats while it works.** `src/main.rs` spawns `beat_while_working` beside the
 turn: every five seconds it emits the `status` frame with the phrase the stream last described, plus

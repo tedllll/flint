@@ -44,6 +44,7 @@ whoever is changing the code — a person or a model driving it.
 | `tests/` | `agent_loop` (stub provider), `cli_output` (real binary, raw bytes), `term_capture` (byte-exact terminal), `search_tool` (stub search endpoint), `balance` (the preflight, stub provider), `web_view` (the page's policy) |
 | `scripts/` | Node replay tools: `vtscreen.js`, `term-layout-test.js`, `layout-trace.js` |
 | `examples/python/` | the Python caller: `flint_call.py` (ask/ask_json, no dependencies), its stub and its checks |
+| `examples/mcp/` | flint as an MCP tool for Codex, Claude Code and Cursor: `flint_server.py` (stdlib only, one tool) and `test_mcp.py`, which speaks the protocol at it |
 | `docs/windows.md` | field notes on Windows terminal behaviour; read before touching layout |
 | `docs/windows-tooling.md` | the plan for command-line escaping on Windows, half built (`exec` and the shared runner are in; the PowerShell half needs a Windows session); read before touching `probe_shell` or adding a tool |
 | `docs/session-format.md` | the session file format, for readers and for hand-editing |

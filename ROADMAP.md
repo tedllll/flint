@@ -1442,9 +1442,12 @@ three ways in, and two of them need nothing from flint:
 2. A thin **MCP wrapper** — `examples/mcp/flint_server.py`, stdio JSON-RPC, one tool — which makes
    flint a tool rather than a command. flint itself stays out of MCP, which was a decision about
    *consuming* MCP rather than about being callable; this is the other direction, and it is a Python
-   example with no dependencies, like the caller in `examples/python/`. **Not built yet.** MCP's tool
-   input is a JSON Schema and flint's `--schema` already takes one, so the mapping is direct and the
-   answer comes back structured.
+   example with no dependencies, like the caller in `examples/python/`. **Built**, with
+   `examples/mcp/test_mcp.py` speaking the protocol at it: handshake, listing, a real answer, structured
+   output, and a schema that never matched arriving as `isError` + exit 65 rather than as a success.
+   MCP's tool input is a JSON Schema and flint's `--schema` already takes one, so the mapping is direct
+   and the answer comes back structured. The result text carries flint's exit code, outcome, cause and
+   session path, which is what lets a parent agent tell a finished answer from half of one.
 3. A custom prompt or skill that wraps option 1 — the lightest, and the least honest about it.
 
 Two findings from checking rather than assuming:
@@ -1461,6 +1464,27 @@ Two findings from checking rather than assuming:
 - Nothing stops a flint from starting another flint, and nothing bounds how deep that goes: tools are
   not restricted by choice, so a nested call is a spend that recurses. Recording it rather than
   proposing a guard — the honest place for a limit here is the caller that started the first one.
+
+**What the MCP wrapper deliberately does about token cost.** Asked directly ("MCP is a settled
+protocol, but it spends too many tokens for what it returns — can it be improved?"). The cost is not
+in the transport; it is in what a client carries *because* a server exists: every tool's name,
+description and full JSON Schema is re-sent with every request of every conversation, and a client
+with four servers and forty tools pays for all forty on every turn. A server cannot fix its client,
+but it can refuse to be the expensive part:
+
+- **One tool, not twenty.** `flint_ask` is the only name a parent ever pays for, and its description
+  is short — the full documentation lives in `--help`, not in the schema.
+- **The tool loop stays in the child.** The parent never receives flint's ten tool schemas. This is
+  the structural advantage of calling an *agent* rather than a tool collection: MCP's usual bill is
+  handing twenty schemas to a parent that needs none of them.
+- **Results are answers, not transcripts,** with the session path attached so "tell me more" is a
+  second cheap call rather than a bigger first one.
+- **Cost is reported** (`usage` is in the stream) instead of hidden, which MCP normally does not do.
+- **The description is byte-stable across versions** — a description that drifts with a release
+  invalidates the parent's prompt cache, and that is a real bill paid by somebody else.
+
+Still to do, and worth doing only if a caller asks: forwarding `heartbeat` as
+`notifications/progress`, and a batch argument that runs N prompts in one round trip.
 
 **Deliberately not in this section**: a resident `flint serve` (190 ms per call does not buy back the
 complexity of a second process lifetime, and a resident mode was explicitly not wanted), an asyncio
