@@ -225,7 +225,8 @@ impl Agent {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "unattached".to_string());
         let tools = ToolBox::new(config, readonly, cwd.clone())
-            .with_spill_dir(crate::config::spill_dir().join(tag));
+            .with_spill_dir(crate::config::spill_dir().join(tag))
+            .with_task_endpoint(provider.name(), provider.model());
         // One walk, two answers: the prompt's note and the page's menu. See `Agent::skills`.
         let workspace = context::Workspace::discover(&cwd, &config.skill_dirs);
         let skills = workspace.skill_names();

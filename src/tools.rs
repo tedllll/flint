@@ -29,6 +29,13 @@ pub trait Tool: Send + Sync {
     /// directory, where a person can find it after reading the transcript. Told rather than
     /// asked for, because a tool is built before the session it belongs to names itself.
     fn use_spill_dir(&mut self, _dir: &Path) {}
+
+    /// This tool as the `task` tool, for the one thing that has to be told later: which endpoint to
+    /// hand a child. `None` for every other tool, which is what makes the caller a two-line loop
+    /// rather than a downcast.
+    fn as_task(&mut self) -> Option<&mut TaskTool> {
+        None
+    }
 }
 
 pub struct ToolBox {
@@ -87,6 +94,15 @@ impl ToolBox {
             Box::new(ListTool),
             Box::new(GlobTool { cwd: cwd.clone() }),
             Box::new(GrepTool { cwd: cwd.clone() }),
+            // Always offered, and the endpoint is filled in by `with_task_endpoint` once the run
+            // knows it. A `task` that cannot reach an endpoint fails with a classified cause rather
+            // than mysteriously, which is worth one schema in the request.
+            Box::new(TaskTool {
+                cwd: cwd.clone(),
+                readonly,
+                provider: String::new(),
+                model: String::new(),
+            }),
         ];
         // Always offered: reading a URL needs no credential, and this is the safe path to
         // the open web -- the alternative is `bash` and `curl`, which puts a page's raw
@@ -137,6 +153,23 @@ impl ToolBox {
             tool.use_spill_dir(&dir);
         }
         self.spill_dir = dir;
+        self
+    }
+
+    /// Tell the `task` tool which endpoint it should hand to a child.
+    ///
+    /// Told rather than asked for, because the tool set is built before the run's provider is
+    /// resolved (`Agent::new` has it; `ToolBox::new` does not), and told explicitly rather than left
+    /// to the child's own default, because `--provider` and `--model` on this run's command line are
+    /// nowhere in the config -- a child that resolved its own default would quietly be a different
+    /// model than the one the caller is talking to.
+    pub fn with_task_endpoint(mut self, provider: &str, model: &str) -> Self {
+        for tool in &mut self.tools {
+            if let Some(task) = tool.as_task() {
+                task.provider = provider.to_string();
+                task.model = model.to_string();
+            }
+        }
         self
     }
 
@@ -2982,6 +3015,546 @@ impl Tool for GrepTool {
         }
         text.push_str(&format!("\n({} match(es) in {} file(s))", out.len(), matched_files));
         Ok(util::truncate(&text, 20_000))
+    }
+}
+
+/// Ask another flint to do something, in its own context.
+///
+/// The same door a Python caller or an MCP client opens, opened from inside: it runs another flint
+/// with `-p … --json`, reads that stream the way any caller does, and hands back the answer with the
+/// facts a caller needs to judge it. Deliberately a process rather than a function call -- a child
+/// that is a process has its death, its timeout, its output size and its exit code solved by the
+/// operating system and by an interface that already exists, and a feature that worked from outside
+/// but not from inside would be two behaviours to keep in step.
+///
+/// What it buys over "the model can already run `flint` through `bash`": the answer comes back with
+/// the exit code, the outcome, the cause and the child's session path attached; the endpoint and
+/// `readonly` are chosen by flint rather than typed into a command line by a model; `readonly` is
+/// monotonic; and the depth is bounded, which `bash` cannot do.
+///
+/// Three things it deliberately is not. It is not a way to get more context: the child starts with no
+/// history from here, so its value is isolation and least privilege, never a bigger window. It is not
+/// free: the child is a whole run, and the tokens land on whoever pays for the endpoint. And it is not
+/// a permission boundary: the child runs as the same user, with the same tools, and `readonly` is the
+/// only switch either of them has.
+pub struct TaskTool {
+    /// Where the child works unless the call names another directory.
+    cwd: PathBuf,
+    /// Whether *this* run is readonly. A readonly run may not spawn a writing child: the flag is
+    /// monotonic, or `readonly` would stop meaning anything the moment a model could call `task`.
+    readonly: bool,
+    /// The endpoint handed to the child, so that "same as here" stays true even when this run was
+    /// started with `--provider`/`--model` flags that appear nowhere in the config.
+    provider: String,
+    model: String,
+}
+
+/// How deep a chain of flint runs may go.
+///
+/// Two, so a run may spawn a child and that child may spawn a grandchild. The point is not the number:
+/// it is that a nested call is a spend that recurses, and nothing bounded it before this. Set in the
+/// environment rather than by a flag, because a flag is something the model writes in the command line
+/// it is composing, and a bound a model can edit is not a bound.
+pub const MAX_TASK_DEPTH: u32 = 2;
+
+/// How deep this run is. `FLINT_DEPTH` is written by one thing only: the `task` tool, for its child.
+pub fn task_depth() -> u32 {
+    std::env::var("FLINT_DEPTH")
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .unwrap_or(0)
+}
+
+/// The child's command line, as a pure function so that its shape is held still by a test.
+///
+/// The endpoint is always passed explicitly. Left out, the child would resolve its own default --
+/// which is right until this run was started with `--provider` or `--model`, at which point "another
+/// flint like this one" would quietly mean a different model.
+pub fn task_argv(
+    exe: &Path,
+    prompt: &str,
+    cwd: &Path,
+    readonly: bool,
+    provider: &str,
+    model: &str,
+    schema: Option<&Path>,
+) -> Vec<String> {
+    let mut argv = vec![
+        exe.display().to_string(),
+        "-p".to_string(),
+        prompt.to_string(),
+        "--json".to_string(),
+        "--cwd".to_string(),
+        cwd.display().to_string(),
+    ];
+    if readonly {
+        argv.push("--readonly".to_string());
+    }
+    if !provider.is_empty() {
+        argv.push("--provider".to_string());
+        argv.push(provider.to_string());
+    }
+    if !model.is_empty() {
+        argv.push("--model".to_string());
+        argv.push(model.to_string());
+    }
+    if let Some(path) = schema {
+        argv.push("--schema".to_string());
+        argv.push(path.display().to_string());
+    }
+    argv
+}
+
+/// What an exit code means, in the child's own vocabulary. Duplicated in
+/// `examples/mcp/flint_server.py` because that one is Python: two doors, one set of words.
+fn task_exit_meaning(code: i32) -> &'static str {
+    match code {
+        0 => "finished",
+        1 => "failed, cause not classified",
+        2 => "the arguments were wrong, so nothing was asked",
+        65 => "the answer is not usable: a schema never matched, or the run ran out of steps",
+        69 => "a person must act: no key, rejected credentials, or an account with no balance",
+        75 => "the retries ran out; asking again later is right",
+        130 => "the run was stopped",
+        _ => "unknown",
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for TaskTool {
+    fn name(&self) -> &str {
+        "task"
+    }
+
+    fn description(&self) -> &str {
+        "Ask another flint to do a job in its own context and give back its answer. Use it for \
+         work that is large or self-contained -- a wide search, reading a lot of files, a question \
+         whose transcript you do not want in this conversation. The other flint starts fresh: it \
+         cannot see this conversation, so the prompt has to stand alone. It is a whole model run, \
+         so it costs what a run costs, and this tool waits for it. `readonly` here forces it there."
+    }
+
+    fn as_task(&mut self) -> Option<&mut TaskTool> {
+        Some(self)
+    }
+
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "What to ask, complete enough to stand alone: the other flint has no history from here."
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Directory for the other flint to work in (default: this run's directory)."
+                },
+                "readonly": {
+                    "type": "boolean",
+                    "description": "Refuse writes and mutating commands there. Always true when this run is readonly."
+                },
+                "provider": { "type": "string", "description": "Another provider for this child (default: this run's)." },
+                "model": { "type": "string", "description": "Another model for this child (default: this run's)." },
+                "schema": {
+                    "type": "object",
+                    "description": "A JSON Schema for the answer; the validated object comes back beside the prose."
+                },
+                "timeout_secs": {
+                    "type": "number",
+                    "description": "Stop the child after this long (default 600). Stopping is `/stop`, so half an answer survives."
+                }
+            },
+            "required": ["prompt"]
+        })
+    }
+
+    async fn call(&self, args: &Value) -> Result<String> {
+        let prompt = require_str(args, "prompt")?;
+        if prompt.trim().is_empty() {
+            return Err(anyhow!("task requires a non-empty `prompt`"));
+        }
+
+        // Refused rather than truncated: a run that silently stopped descending and answered anyway
+        // would be telling the model its child had done something it never did.
+        let depth = task_depth();
+        if depth + 1 > MAX_TASK_DEPTH {
+            return Ok(format!(
+                "not started: this is already a flint run at depth {depth}, and flint does not go \
+                 deeper than {MAX_TASK_DEPTH}. Do this work here, or ask for it in a run that was \
+                 started at the top."
+            ));
+        }
+
+        let cwd = match optional_str(args, "cwd")? {
+            Some(dir) => {
+                let path = resolve_path(&self.cwd, dir);
+                if !path.is_dir() {
+                    return Err(anyhow!("task cwd is not a directory: {}", path.display()));
+                }
+                path
+            }
+            None => self.cwd.clone(),
+        };
+        // An absent `readonly` is false, which is what the schema promises.
+        let requested_readonly = optional_bool(args, "readonly")?;
+        // Monotonic: a readonly run cannot be talked into a writing child by its own model.
+        let readonly = self.readonly || requested_readonly;
+        let provider = optional_str(args, "provider")?
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| self.provider.clone());
+        let model = optional_str(args, "model")?
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| self.model.clone());
+        let timeout_secs = args
+            .get("timeout_secs")
+            .and_then(|v| v.as_u64())
+            .filter(|secs| *secs > 0)
+            .unwrap_or(600);
+
+        // Through a file, for the same reason the Python caller does it: a schema inline has to
+        // survive a command line, and a path always does.
+        let schema_file = match args.get("schema") {
+            Some(schema) if schema.is_object() => {
+                let path = std::env::temp_dir().join(format!(
+                    "flint-task-schema-{}-{}.json",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0)
+                ));
+                std::fs::write(&path, serde_json::to_string(schema)?)
+                    .with_context(|| format!("writing {}", path.display()))?;
+                Some(path)
+            }
+            Some(other) => {
+                return Err(anyhow!(
+                    "task `schema` must be a JSON Schema object, not {}",
+                    other
+                ))
+            }
+            None => None,
+        };
+
+        let exe = match std::env::var("FLINT_BIN") {
+            Ok(value) if !value.trim().is_empty() => PathBuf::from(value),
+            // The same binary as this one: a child built from anything else would be a different
+            // flint than the one the caller is talking to. `FLINT_BIN` is for a wrapper that wants
+            // to point at a specific build, and for the tests, which live outside the binary.
+            _ => std::env::current_exe().context("cannot find the flint binary to run")?,
+        };
+        let argv = task_argv(
+            &exe,
+            prompt,
+            &cwd,
+            readonly,
+            &provider,
+            &model,
+            schema_file.as_deref(),
+        );
+
+        let started = std::time::Instant::now();
+        let outcome = self.run_child(&argv, depth + 1, timeout_secs).await;
+        if let Some(path) = &schema_file {
+            let _ = std::fs::remove_file(path);
+        }
+        let (mut text, session) = outcome?;
+        text.push_str(&format!(
+            "\n\ndepth: {} (this run is {depth}), readonly: {}, waited: {:.0}s",
+            depth + 1,
+            readonly,
+            started.elapsed().as_secs_f64()
+        ));
+        if let Some(session) = session {
+            text.push_str(&format!("\nsession: {session}"));
+        }
+        Ok(text)
+    }
+}
+
+impl TaskTool {
+    /// Run the child, read its stream, and turn it into the one piece of text the model gets back.
+    ///
+    /// The stream is read as it arrives rather than through `output()`, for one reason: a child that
+    /// has to be stopped should be stopped the way a person stops one -- `/stop` on its stdin, which
+    /// leaves the half-answer it had drawn in its session file -- and killing it is the fallback, not
+    /// the first move. The answer is formatted answer-first, then the facts a caller needs to decide
+    /// what to do with it, so a model that reads only the top still gets the reason.
+    async fn run_child(
+        &self,
+        argv: &[String],
+        depth: u32,
+        timeout_secs: u64,
+    ) -> Result<(String, Option<String>)> {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+
+        let mut child = tokio::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .env("FLINT_DEPTH", depth.to_string())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .with_context(|| format!("running {}", argv[0]))?;
+
+        let stdout = child.stdout.take().expect("stdout was piped");
+        let stderr = child.stderr.take().expect("stderr was piped");
+        let reader = tokio::spawn(async move {
+            let lines = tokio::io::BufReader::new(stdout).lines();
+            let mut collected = Collected::default();
+            let mut lines = Box::pin(lines);
+            while let Ok(Some(line)) = lines.next_line().await {
+                collected.absorb(&line);
+            }
+            collected
+        });
+        let complaints = tokio::spawn(async move {
+            let mut text = String::new();
+            let mut stderr = stderr;
+            let _ = stderr.read_to_string(&mut text).await;
+            text
+        });
+
+        let stopped = tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs),
+            child.wait(),
+        )
+        .await;
+        let mut note = String::new();
+        let status = match stopped {
+            Ok(status) => status?,
+            Err(_) => {
+                // Graceful first. `/stop` is the word the terminal takes, and the child keeps what it
+                // had drawn; `kill` is only for a child that ignores it.
+                if let Some(stdin) = child.stdin.as_mut() {
+                    use tokio::io::AsyncWriteExt;
+                    let _ = stdin.write_all(b"/stop\n").await;
+                    let _ = stdin.flush().await;
+                }
+                match tokio::time::timeout(std::time::Duration::from_secs(20), child.wait()).await {
+                    Ok(status) => {
+                        note = format!("\nstopped after {timeout_secs}s: the child was told to stop\n");
+                        status?
+                    }
+                    Err(_) => {
+                        let _ = child.kill().await;
+                        note = format!("\nkilled after {timeout_secs}s: the child did not stop when asked\n");
+                        child.wait().await?
+                    }
+                }
+            }
+        };
+
+        let collected = reader.await.unwrap_or_default();
+        let stderr_text = complaints.await.unwrap_or_default();
+        let code = status.code().unwrap_or(-1);
+
+        let mut text = match collected.answer() {
+            Some(answer) => answer,
+            // Nothing on the stream at all: the reason is on stderr, and passing it on is the
+            // difference between "the child failed" and "the child refused before it started".
+            None => stderr_text.trim().to_string(),
+        };
+        if text.trim().is_empty() {
+            text = "(the child said nothing)".to_string();
+        }
+        text.push_str(&format!(
+            "\n\nexit code: {code} ({})",
+            task_exit_meaning(code)
+        ));
+        if let Some(outcome) = &collected.outcome {
+            text.push_str(&format!("\noutcome: {outcome}"));
+        }
+        if let Some(cause) = &collected.error_code {
+            text.push_str(&format!("\ncause: {cause}"));
+        }
+        if let Some(error) = &collected.error {
+            let first = error.lines().next().unwrap_or("").trim();
+            text.push_str(&format!("\nerror: {first}"));
+        }
+        if let Some(result) = &collected.result {
+            // The validated object, on one line: this is the half of "structured" that a shell
+            // pipeline cannot give back.
+            text.push_str(&format!("\nresult: {result}"));
+        }
+        for warning in collected.warnings.iter().take(3) {
+            text.push_str(&format!("\nwarning: {warning}"));
+        }
+        text.push_str(&note);
+        Ok((text, collected.session))
+    }
+}
+
+/// The frames worth keeping from a child's stream, gathered in one place.
+#[derive(Default)]
+struct Collected {
+    deltas: Vec<String>,
+    messages: Vec<String>,
+    result: Option<serde_json::Value>,
+    error: Option<String>,
+    error_code: Option<String>,
+    outcome: Option<String>,
+    session: Option<String>,
+    warnings: Vec<String>,
+}
+
+impl Collected {
+    /// Take one line of a child's `--json` stream. A line that is not JSON is kept as a warning
+    /// rather than dropped: the child promises one object per line, so damage is worth passing on.
+    fn absorb(&mut self, line: &str) {
+        let line = line.trim();
+        if line.is_empty() {
+            return;
+        }
+        let event: serde_json::Value = match serde_json::from_str(line) {
+            Ok(event) => event,
+            Err(_) => {
+                self.warnings
+                    .push(format!("unreadable line: {}", util::truncate(line, 120)));
+                return;
+            }
+        };
+        let text = |key: &str| event.get(key).and_then(|v| v.as_str()).map(str::to_string);
+        match event.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+            "message.delta" => {
+                if let Some(delta) = text("text") {
+                    self.deltas.push(delta);
+                }
+            }
+            "message.completed" => {
+                if let Some(message) = text("text") {
+                    self.messages.push(message);
+                }
+            }
+            "result" => self.result = event.get("json").cloned(),
+            "error" => {
+                self.error = text("message");
+                self.error_code = text("code");
+            }
+            "turn.completed" => self.outcome = text("outcome"),
+            "session.started" => self.session = text("session"),
+            "warning" => {
+                if let Some(message) = text("message") {
+                    self.warnings.push(message);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// What the child said, in order. The deltas are the whole turn -- prose before a tool call
+    /// included -- and `message.completed` is the fallback for a provider that streams none.
+    fn answer(&self) -> Option<String> {
+        let text = if self.deltas.is_empty() {
+            self.messages.join("\n")
+        } else {
+            self.deltas.concat()
+        };
+        if text.trim().is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+}
+
+#[cfg(test)]
+mod task_tests {
+    use super::*;
+    use std::path::Path;
+
+    /// The child's command line is the whole interface between two flints, so its shape is held
+    /// still here rather than only observed end to end.
+    #[test]
+    fn the_child_command_line_says_exactly_what_the_child_should_be() {
+        let exe = Path::new("/usr/local/bin/flint");
+        let cwd = Path::new("/work");
+        let plain = task_argv(exe, "look around", cwd, false, "deepseek", "deepseek-chat", None);
+        assert_eq!(
+            plain,
+            vec![
+                "/usr/local/bin/flint",
+                "-p",
+                "look around",
+                "--json",
+                "--cwd",
+                "/work",
+                "--provider",
+                "deepseek",
+                "--model",
+                "deepseek-chat",
+            ]
+        );
+        // One argument, not a command line: the prompt reaches the child as the bytes it is, which
+        // is the reason this is argv and not a string handed to a shell.
+        assert_eq!(plain[2], "look around");
+
+        let guarded = task_argv(
+            exe,
+            "p",
+            cwd,
+            true,
+            "p",
+            "m",
+            Some(Path::new("/tmp/s.json")),
+        );
+        assert!(guarded.contains(&"--readonly".to_string()));
+        assert_eq!(guarded.last().unwrap(), "/tmp/s.json");
+
+        // An endpoint flint does not know is left unspoken rather than passed as an empty string,
+        // which the child would take as a provider named "".
+        let bare = task_argv(exe, "p", cwd, false, "", "", None);
+        assert!(!bare.iter().any(|a| a == "--provider"));
+        assert!(!bare.iter().any(|a| a == "--model"));
+        assert!(!bare.iter().any(|a| a == "--readonly"));
+    }
+
+    #[test]
+    fn a_childs_stream_is_read_the_way_a_caller_reads_it() {
+        let mut collected = Collected::default();
+        for line in [
+            r#"{"type":"session.started","session":"C:\\flint\\sessions\\x.jsonl"}"#,
+            r#"{"type":"message.delta","text":"the answer "}"#,
+            r#"{"type":"message.delta","text":"is 42"}"#,
+            r#"not json at all"#,
+            r#"{"type":"turn.completed","outcome":"complete"}"#,
+            r#"{"type":"error","code":"insufficient_balance","message":"no money"}"#,
+            r#"{"type":"result","json":{"ok":true}}"#,
+        ] {
+            collected.absorb(line);
+        }
+        // Deltas are the answer, in order and joined: a caller that got only the last frame would
+        // lose the sentence before a tool call.
+        assert_eq!(collected.answer().as_deref(), Some("the answer is 42"));
+        assert_eq!(
+            collected.session.as_deref(),
+            Some(r"C:\flint\sessions\x.jsonl")
+        );
+        assert_eq!(collected.outcome.as_deref(), Some("complete"));
+        assert_eq!(collected.error_code.as_deref(), Some("insufficient_balance"));
+        assert_eq!(collected.result, Some(json!({"ok": true})));
+        // A line that is not JSON is reported, not dropped: the child promises one object per line.
+        assert_eq!(collected.warnings.len(), 1);
+        assert!(collected.warnings[0].contains("unreadable line"));
+
+        // No deltas at all: the completed message is the fallback, for a provider that streams none.
+        let mut quiet = Collected::default();
+        quiet.absorb(r#"{"type":"message.completed","text":"said once"}"#);
+        assert_eq!(quiet.answer().as_deref(), Some("said once"));
+        let empty = Collected::default();
+        assert_eq!(empty.answer(), None);
+    }
+
+    /// The codes a caller branches on. If one of these changes meaning, a caller's branch is wrong.
+    #[test]
+    fn an_exit_code_is_translated_into_the_words_a_caller_branches_on() {
+        assert_eq!(task_exit_meaning(0), "finished");
+        assert!(task_exit_meaning(65).contains("not usable"));
+        assert!(task_exit_meaning(69).contains("a person must act"));
+        assert!(task_exit_meaning(75).contains("again later"));
+        assert!(task_exit_meaning(130).contains("stopped"));
+        assert_eq!(task_exit_meaning(3), "unknown");
     }
 }
 

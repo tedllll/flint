@@ -52,10 +52,10 @@ depth bound, the mailbox default (a peer's words are shown to the human, never f
 someone opts in), and whether presence is `FLINT_HOME`-only.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 456 passing, 1 ignored (284 lib, 3 in
+As of the commit that carries this file, `cargo test` is 465 passing, 1 ignored (287 lib, 3 in
 the binary's own tests, 33 `agent_loop`, 58 `cli_output`, 22 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 5 the exit codes and the turn's outcome, 2 the
-balance, 1 what a caller's pipe must not come back out of), 7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 6 `who`)), `cargo clippy
+balance, 1 what a caller's pipe must not come back out of), 7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 6 `who`, 3 `task`)), `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
 pass, and `python examples/python/test_call.py` is 49 checks, all passing (one of them now waits
 out the fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from),
@@ -72,6 +72,20 @@ One measurement is worth carrying forward: the first version of the refresh thre
 joined on the way out, which made **every run take up to five seconds longer to exit** — the existing
 quota test, which has a timing bound, caught it at 5.019 s. That is why the thread waits on
 `recv_timeout`.
+
+**A flint can start another flint — stage 2 of `docs/agents.md`, and the "Subagents" entry in
+`ROADMAP.md` was adopted in the same commit.** The `task` tool (`TaskTool` in `src/tools.rs`) runs the
+same binary (`std::env::current_exe()`, `FLINT_BIN` to override) with `-p … --json`, reads the child's
+stream, and returns one block of text: the child's answer, then `exit code: N (meaning)`, `outcome`,
+`cause`, `error`, the validated `result` object when a schema matched, and `session: <path>`. Three
+properties are the point, and each has a test in `tests/task.rs` that was watched red first: the child
+is a **real process**, so its session file exists and holds the prompt and the answer (provenance); a
+`readonly` run **cannot be talked into a writing child** (the attempt is made in the test, and the same
+script with a writable parent does write, so the refusal is the flag and not the child's inability);
+and the chain is **bounded** by `FLINT_DEPTH` (maximum 2, set by the tool for its child and by nothing
+else, so a model cannot edit it out of its own command line). Not built: the background handle
+(`background: true`, `task_status`, `task_wait`, `task_stop`) and a session id in the presence record,
+so a child appears in `flint who` as a run in that directory rather than as *this* run's child.
 
 **A `--json` run now beats while it works.** `src/main.rs` spawns `beat_while_working` beside the
 turn: every five seconds it emits the `status` frame with the phrase the stream last described, plus

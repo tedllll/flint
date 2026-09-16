@@ -383,6 +383,35 @@ A long run is stopped gracefully: the server writes `/stop` to flint's stdin (th
 terminal takes) so the half-answer drawn so far stays in the session file, and kills only if flint
 ignores it. `examples/mcp/test_mcp.py` speaks the protocol at it and checks all of the above.
 
+### Subagents, without a new word for them
+
+flint can start another flint. Not a mode, not a second kind of process: the `task` tool runs the same
+binary with `-p … --json` — the same door a Python caller or an MCP client opens — and gives the answer
+back with `exit code: N (meaning)`, the outcome, the cause, and the child's session path. The model gets
+one block of text; a person can read the child's conversation afterwards, because it is a session file
+like any other.
+
+```jsonc
+// what the tool takes
+{"prompt": "…", "cwd": "…", "readonly": true, "model": "…", "provider": "…", "schema": {…}, "timeout_secs": 600}
+```
+
+Three things it is not, said here because each one is a reasonable expectation to have:
+
+- **It is not more context.** The child starts with no history from this conversation, so its value is
+  isolation and least privilege — a wide search, a lot of reading — never a bigger window. A `task`
+  call does not buy context, it spends it.
+- **It is not a sandbox.** The child runs as the same user with the same tools. `readonly` is the only
+  switch there is, and it is **monotonic**: a `readonly` run cannot be talked into a writing child, so
+  "explore in readonly" means what it says.
+- **It is not unlimited.** `FLINT_DEPTH` in the environment bounds the chain at two (a child and a
+  grandchild), set by the tool for its child and by nothing else — a bound a model can edit out of its
+  own command line is not a bound.
+
+Two runs working in one directory can see each other: `flint who` prints the live runs flint knows
+about, and, separately, what changed recently — a line that names no author, because a changed file is
+not evidence of who changed it. `flint who --all` lists runs in other directories too.
+
 ### Watching a run in a browser
 
 A terminal is a poor renderer for a long answer: the scroll region fights you, a tool call is

@@ -1535,20 +1535,21 @@ measured and what was not.
   deliberately beside the decision it contradicts rather than folded into it. Nothing in it is
   adopted; adopting any stage means editing this bullet in the same commit, because a plan of
   record that contradicts a plan document is how a repository starts lying to itself.
-- **Subagents** — flint is one conversation and one context window. Splitting it invents
-  coordination, budgets and merge problems that a rescue tool does not need. **Under review,
-  and not adopted**: `docs/agents.md` argues for the narrow version — a `task` tool that
-  starts another flint the same way a Python caller or an MCP client already does, with a
-  bounded depth and a `readonly` a child cannot loosen. Nothing changes until this bullet
-  says so, and whoever changes it keeps the reason above in the text: the parent's context is
-  still one window, and a subagent's value is isolation and least privilege rather than a
-  bigger window. The same file argues for the other half — two runs in one directory being
-  able to see each other, which is what the `git add -A` incident above needed and does not
-  contradict this bullet. **That half is built** (`flint who`, `src/live.rs`), and the
-  decision to adopt the narrow version of *this* bullet was taken on 2026-09-16 — the text
-  here still says "under review" on purpose, because the rule is that this bullet changes in
-  the same commit as the code that adopts it, and that code is the `task` tool, not the
-  presence record.
+- **Subagents** — the original decision: flint is one conversation and one context window.
+  Splitting it invents coordination, budgets and merge problems that a rescue tool does not
+  need. **Adopted in the narrow form on 2026-09-16, and the reason above survives it**: a
+  `task` tool that starts another flint the same way a Python caller or an MCP client already
+  does (`--json`, the same stream, the same exit codes), with a depth bound and a `readonly` a
+  child cannot loosen. What the bullet was right about is kept where the model reads it — the
+  tool's own description says the child starts with no history from here, so its value is
+  isolation and least privilege and **never a bigger window**: a `task` call does not buy
+  context, it spends it. What is *not* adopted is the version the bullet actually feared — no
+  shared context, no automatic fan-out, no merge step. One run may ask another run one question,
+  and the answer comes back with its exit code and its session path attached. The other half
+  `docs/agents.md` argues for, two runs in one directory being able to see each other, is built
+  too (`flint who`, `src/live.rs`) and does not contradict this bullet. Stages 3 and 4 of that
+  file — a mailbox, then profiles with parallel fan-out — are still plans, and each has to come
+  back through this list before it is adopted.
 - **MCP** — deferred, not refused: it is a protocol with real weight, and nothing here yet
   needs what it offers. **Being callable over MCP is the other direction and is built**:
   `examples/mcp/flint_server.py`.

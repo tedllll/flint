@@ -1,11 +1,11 @@
 # Agents as processes: spawning, finding, and talking to peers
 
-**Status: stage 1 is built; the MCP and Python doors are built; stages 2–4 are a plan.** — a running
-flint writes a presence record and `flint who` reads it (`src/live.rs`, `tests/who.rs`), so *being
-called* and *seeing each other* work today. Stage 2 deliberately contradicts the "Subagents" entry in
-`ROADMAP.md`. Read that entry beside this file; adopting any stage below means editing it in the same
-commit. The five decisions at the end of this file **were answered on 2026-09-16: every recommended
-value was adopted**, and each is marked below with what that means for the code.
+**Status: stages 1 and 2 are built; the MCP and Python doors are built; stages 3–4 are a plan.** — a
+running flint writes a presence record and `flint who` reads it (`src/live.rs`, `tests/who.rs`), and a
+running flint can start another flint with its `task` tool (`src/tools.rs`, `tests/task.rs`), so *being
+called*, *seeing each other* and *spawning* all work today. The five decisions at the end of this file
+**were answered on 2026-09-16: every recommended value was adopted**, and each is marked below with
+what that means for the code.
 
 Written because of three questions asked directly, and because the same afternoon produced the incident
 that makes the middle of this document concrete: two agents were working in this checkout at once, one
@@ -37,7 +37,7 @@ That equality is the design, not a coincidence: a feature that works from outsid
 |---|---|---|
 | `flint -p … --json` over a pipe | Python, a shell, an editor, another agent's shell tool | **Built.** `examples/python/flint_call.py`; every fact needed to branch is on the stream |
 | an MCP tool call | Codex, Claude Code, Cursor | **Built.** `examples/mcp/flint_server.py`, one tool, stdio |
-| a `task` tool inside flint | flint itself | **Planned**, stage 2 |
+| a `task` tool inside flint | flint itself | **Built.** `src/tools.rs` (`TaskTool`), `tests/task.rs`; one child per call, no background handle yet |
 
 The third door is the first two in Rust. It runs `std::env::current_exe()` with the same arguments,
 reads the same stream, and returns the same facts — which is the argument for building it *that* way
@@ -53,8 +53,9 @@ What makes it a tool rather than "the model can already do this with `bash`":
   not typed into a command line by a model that may get it wrong;
 - **`readonly` is monotonic**: a `readonly` run may not spawn a writing child, whether or not the model
   tries. That is the property that makes "an explorer subagent" mean something;
-- **depth is bounded** (stage 2), which today it is not: nothing stops a flint from starting a flint
-  that starts a flint, and the bill is real;
+- **depth is bounded**: `FLINT_DEPTH`, maximum 2, set by the tool for its child and by nothing else. It
+  was unbounded until this was built, and nothing stopped a flint from starting a flint that started a
+  flint: the bill is real, and so is the wall clock;
 - the child's session file is named in the result, so a value can be traced to the conversation that
   produced it and a human can read what actually happened.
 
@@ -155,11 +156,34 @@ that directory and how long ago, which answers "which conversation is live" for 
 otherwise see. Putting the session id in the record needs a hook where the writer is created, and it is
 a stage-2 addition rather than a reason to hold this one back.
 
-**Stage 2 — the `task` tool.** spawn one child (or the same tool with `background: true`), with
-`readonly`, `model`, `provider`, `cwd`, `schema` and a depth bound. Adopting it edits the "Subagents"
-entry in `ROADMAP.md` in the same commit, and the honest version of that edit keeps the original
-reason: the parent's context is still one window, and a subagent's value is isolation and least
-privilege, not a bigger window.
+**Stage 2 — the `task` tool.** One child per call, with `readonly`, `model`, `provider`, `cwd`,
+`schema`, a timeout and a depth bound. Adopting it edited the "Subagents" entry in `ROADMAP.md` in the
+same commit, keeping the original reason. — **Built**, and the differences from the sketch are the part
+worth reading:
+
+- **Nothing here is a background handle yet.** `background: true`, `task_status`, `task_wait` and
+  `task_stop` are not built: a `task` call blocks until the child ends, and the only stop is the
+  caller's timeout, which writes `/stop` to the child's stdin first and kills it only if that is
+  ignored. `/stop` rather than `kill` because the half-answer the child had drawn is still written to
+  its session file, and a person reading that later should find work, not a corpse. The handle is the
+  presence record, and it is available to a *person* through `flint who` even though the tool does not
+  return one.
+- **The child is the same binary** (`std::env::current_exe()`), not a path looked up on `PATH`:
+  a child built from a different flint than the caller is talking to is a different program. `FLINT_BIN`
+  overrides it, for a wrapper that wants a specific build and for the tests, which live outside the
+  binary.
+- **The endpoint is passed explicitly**, from the parent's resolved provider and model, because
+  `--provider`/`--model` on the parent's command line appear nowhere in the config — a child resolving
+  its own default would quietly be a different model.
+- **The refusal at the depth limit is a tool *result*, not an error.** "not started: this is already a
+  flint run at depth 2…" reads as an answer the model can act on, which is what it is; an error would
+  invite a retry that cannot succeed.
+- **The result is answer-first**, then `exit code: N (meaning)`, `outcome`, `cause`, `error`, the
+  validated `result` object on one line when a schema matched, and `session: <path>`. Everything a
+  caller branches on is in the text, because a tool result is text — there is no second channel.
+- **A session id in the presence record is still open.** The stage-1 note above stands: the record has
+  no session id, so a `task` child appears in `flint who` as a run in that directory rather than as
+  *this* run's child, and a parent cannot point at a handle for it.
 
 **Stage 3 — the mailbox.** `flint say`, `peer.message`, and the opt-in that lets a peer's words reach
 the model. Presumably a `.flint/` presence marker in the project as well, so two `FLINT_HOME`s can see
@@ -176,13 +200,15 @@ it is last on purpose, because everything above is useful without it.
 because a decision that is only in a conversation is not a decision.
 
 1. **Adopt stage 2, and edit the "Subagents" entry?** — **Yes, the narrow version.** A `task` tool that
-   starts another flint the way a Python caller or an MCP client does. The `ROADMAP.md` bullet still
-   reads "under review" and is edited **in the same commit as the code that adopts it**: nothing is
-   adopted by this document, and the original reason survives the edit (the parent's context is still
-   one window; a subagent's value is isolation and least privilege, not a bigger window).
+   starts another flint the way a Python caller or an MCP client does. Built, and the `ROADMAP.md`
+   bullet was edited in the same commit as the code that adopts it, with the original reason kept in
+   the text — the parent's context is still one window, and a subagent's value is isolation and least
+   privilege, not a bigger window. A plan document and a plan of record that disagree is how a
+   repository starts lying to itself, which is why they moved together.
 2. **The depth bound.** — **`FLINT_DEPTH`, maximum 2, an environment variable** rather than a flag, so
-   that a model cannot edit the bound out of its own command line. Not built yet; it arrives with the
-   `task` tool, because a bound on a feature that does not exist is a promise rather than a guard.
+   that a model cannot edit the bound out of its own command line. **Built**: the tool sets
+   `FLINT_DEPTH=<n+1>` on its child and is the only thing that writes it, and a run already at the
+   limit refuses with a sentence rather than a truncated attempt.
 3. **The mailbox default.** — **Shown to the human, never fed to the model**, until a person opts in
    per run. This is the one decision that is a safety property rather than a preference, and stage 3
    may not ship without it.
