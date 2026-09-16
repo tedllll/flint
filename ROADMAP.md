@@ -1503,7 +1503,11 @@ measured and what was not.
 - **A permission layer** — no approval prompts, no allow-list, no sandbox. An approval dialog
   in an emergency is friction at the worst moment, and a permission system that is not
   airtight is worse than a documented absence. `readonly` stays all-or-nothing, and the
-  README and `AGENTS.md` say plainly that flint can damage the machine.
+  README and `AGENTS.md` say plainly that flint can damage the machine. **[`docs/sandbox.md`](docs/sandbox.md)
+  argues against this entry and is not built**: a plan for grants instead of modes, kept
+  deliberately beside the decision it contradicts rather than folded into it. Nothing in it is
+  adopted; adopting any stage means editing this bullet in the same commit, because a plan of
+  record that contradicts a plan document is how a repository starts lying to itself.
 - **Subagents** — flint is one conversation and one context window. Splitting it invents
   coordination, budgets and merge problems that a rescue tool does not need.
 - **MCP** — deferred, not refused: it is a protocol with real weight, and nothing here yet

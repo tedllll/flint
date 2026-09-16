@@ -108,14 +108,16 @@ Four questions are being asked, and only one of them is a dial:
 |---|---|---|
 | Read | which paths may be read | `read-only` vs the others, roughly |
 | Write | which paths may be written | only as "the workspace" or "everywhere" |
-| Network | which hosts may be reached | **not at all** |
+| Network | which hosts may be reached | as a mode: **not at all** (DSH); as one boolean in Codex's ladder, now per-domain rules |
 | Process | which programs, with which environment | not at all (flint's `exec_is_readonly` is the closest thing, and it is a guess) |
 
-`workspace-write` answers the network question by inheriting whatever `read-only` had, which is
-"whatever the host allows" — a sandbox that promises a filesystem boundary and says nothing
-about egress. On Linux this is a hard fact rather than a design choice: **Landlock cannot
-express network policy.** `DOCUMENTED` (see §3.3), which is why the products that want egress
-control put a proxy in front of the sandbox instead of a syscall filter.
+`workspace-write` answers the network question by inheriting whatever `read-only` had: in DSH's
+mode vocabulary there is no network term at all (`VERIFIED`, §3.1), so a mode name cannot say
+"github.com and nothing else". Codex's ladder carried a single boolean for it
+(`network_access = false`, §3.3) and the June-2026 profiles replaced that boolean with per-domain
+rules — which is evidence that one bit was not enough. On Linux there is a harder version of the
+same fact: **Landlock cannot express network policy** at all, which is why the products that
+want egress control pair the sandbox with a proxy (§3.4).
 
 **So "I need to download something" is not a request the ladder can grant narrowly.** It is the
 canonical example of the user's complaint, and it is real.
@@ -242,9 +244,147 @@ Seatbelt strings and Linux Landlock strings it will never execute. That is one m
 ladder nobody can port. `UNVERIFIED` for the exact config key names and the extra writable
 roots / network toggles; §3.3 gathers what the documentation says.
 
-### 3.3 Other models worth copying from
+### 3.3 Codex, since 2026-06: permission profiles — the rungs replaced by rules
 
-*(This section is filled from the research pass described in §7; each claim carries a source.)*
+`DOCUMENTED`. OpenAI shipped **Permission profiles** (beta) for Codex, described by Codex
+engineering lead Thibault Sottiaux and reported by gihyo.jp on 2026-06-30
+([gihyo.jp](https://gihyo.jp/article/2026/06/codex-permission-profiles), pointing at
+`developers.openai.com/codex/permissions`; that page returned HTTP 403 to this document's
+fetcher, so the config excerpts below are quoted from the report rather than read from the
+vendor page — `DOCUMENTED`, not `MEASURED`).
+
+Before the feature, the knobs were the ladder plus two add-ons:
+
+```toml
+sandbox_mode = "workspace-write"
+approval_policy = "on-request"   # ask when a call crosses the sandbox boundary
+
+[sandbox_workspace_write]
+writable_roots = ["~/.agents"]
+network_access = false
+```
+
+Those two add-ons are already an admission that the ladder is incomplete — an extra writable
+root, and a network toggle — but they are global to the mode, and `.env`-style exclusions or
+per-host rules are not expressible at all. What replaced them:
+
+```toml
+approval_policy = "on-request"
+default_permissions = "project-edit"
+
+[permissions.project-edit.filesystem]
+":minimal" = "read"          # only what running an ordinary command needs
+"~/.agents" = "write"
+
+[permissions.project-edit.filesystem.":workspace_roots"]
+"." = "write"
+"**/*.env" = "deny"          # deny holds inside a wider write
+
+[permissions.project-edit.network]
+enabled = true
+
+[permissions.project-edit.network.domains]
+"api.openai.com" = "allow"   # localhost must be allowed explicitly
+```
+
+The facts worth taking from it, all from the report:
+
+- Filesystem rules map **paths to `read` / `write` / `deny`**, and the named scopes are
+  `:minimal`, `:root`, `:workspace_roots`, `:tmpdir`, `:slash_tmp`, absolute paths, `~/…`.
+  `:minimal` exists precisely because "the whole filesystem" and "the workspace" are both wrong
+  answers for a shell: a command needs *some* of the system to run at all.
+- **More specific overrides broader, and `deny` wins for the same path** — so a workspace-wide
+  `write` can still refuse `**/*.env`.
+- Network is its own table with `enabled` and per-host `allow` / `deny`; `*.example.com` covers
+  subdomains only, `**.example.com` covers the apex too; **deny outranks allow**; ports are not
+  part of a domain rule; and **localhost is protected by default**, which is a reminder that the
+  local machine is also a network destination.
+- Built-in profiles are `:read-only`, `:workspace`, `:danger-full-access` — the old ladder kept
+  as *presets over the rule system*, which is the migration path §4.3 should copy.
+- Administrators can pin the choice with `allowed_permission_profiles` in a requirements file,
+  treated as a complete allowlist.
+- Windows, from the same report's field notes: restricted read-only access failed with
+  `Restricted read-only access requires the elevated Windows sandbox backend` until
+  `[windows] sandbox = "elevated"` was set; and **the allowlist governs command resolution** —
+  a tool on `PATH` whose real directory is not readable does not run, npm globals under
+  `~/AppData/Roaming/npm` need `read`, and the npm cache needs `write`.
+
+**So §4 is not a speculative design.** It is the same move, at flint's scale: replace the mode
+with rules about the call. Where a spelling already exists in the wild (`:minimal`,
+`:workspace_roots`, `deny` outranking a wider allow, `*` vs `**`), flint should copy it rather
+than invent a synonym, because a user who has written a Codex profile once should recognise a
+flint one.
+
+### 3.4 Claude Code: two layers, and the axes said out loud
+
+`DOCUMENTED`: [sandboxing](https://code.claude.com/docs/en/sandboxing) and
+[permissions](https://code.claude.com/docs/en/permissions).
+
+- **Two layers with different jobs.** Permission rules decide whether a tool call runs at all
+  (evaluated before anything runs, from the command text and, in auto mode, a classifier's
+  judgment); sandboxing is OS-level enforcement of what a shell command may touch — "it applies
+  only to Bash, PowerShell, and Monitor commands and their child processes". The vendor's own
+  framing: "Path and domain restrictions … from both sandbox settings and permission rules are
+  merged into the final sandbox configuration."
+- **Rule grammar.** `Tool` or `Tool(specifier)` — `Bash(npm run *)`, `Read(./.env)`,
+  `WebFetch(domain:example.com)` — in `allow` / `ask` / `deny` lists. Order is
+  **deny → ask → allow**, first match wins, and "rule specificity doesn't change the order", so
+  an allow rule cannot carve an exception out of a deny. They also warn about the obvious trap:
+  a rule on the primary content field (`Bash(command:rm *)`) "would be bypassable by a compound
+  command", so it is ignored with a startup warning.
+- **Durability is a per-tool decision**, which is §4.5's `once` / `turn` / `always` with the
+  defaults already argued: a Bash command approval is saved "permanently per repository and
+  command"; a `WebFetch` domain approval "permanently per repository and domain"; a
+  **file-modification approval lasts "until session end"**. Saved rules land in
+  `.claude/settings.local.json` at the repository root — a hand-editable file, like the one §4
+  proposes.
+- **Cross-workspace is a directory list, not a mode**: the working directory plus
+  `additionalDirectories`, `--add-dir`, `/add-dir`, and `/cd` to move the primary directory.
+  Adding a directory grants file access only, not configuration.
+- **Filesystem and network are independent layers**: `sandbox.filesystem.disabled: true` keeps
+  network isolation while lifting filesystem isolation; `denyRead` / `denyWrite` hold inside a
+  wider allow, and a narrower `allowRead` re-opens part of a denied region. This is §1.3's claim,
+  implemented by a vendor.
+- **Enforcement**: macOS Seatbelt; Linux and WSL2 bubblewrap + socat, with an optional seccomp
+  filter from `@anthropic-ai/sandbox-runtime` for Unix-socket blocking. **Native Windows is not
+  supported** — the documented answer is WSL2. A sandboxed command gets a writable session temp
+  directory and `$TMPDIR` is set for it, which is DSH's temp-SID problem solved by a different
+  mechanism.
+- **The escape hatch is visible and named.** A denied command comes back to the model naming the
+  path or host that was denied, and the model may retry with `dangerouslyDisableSandbox`, which
+  goes through the ordinary permission flow; `allowUnsandboxedCommands: false` removes the
+  retry entirely ("Strict sandbox mode"). This is DSH's escalation with a worse name and a
+  better placement — the parameter is on the call rather than the mode.
+- **Fail open by default, unlike DSH.** If the sandbox cannot start, Claude Code warns and runs
+  unsandboxed unless `sandbox.failIfUnavailable: true`. DSH refuses to run unconfined at all.
+  Two products, opposite defaults, both defensible: this is a decision flint has to make and
+  write down, not copy.
+- **Its limitations section is the most honest page in either product**, and is the model for
+  §6: the built-in proxy does not terminate TLS by default, so the allow decision is made from
+  the client-supplied hostname and **domain fronting can reach hosts outside the allowlist**;
+  allowing `/var/run/docker.sock` through the sandbox is a bypass; writing to `$PATH`
+  directories or `.bashrc` is privilege escalation; and the summary sentence worth quoting in
+  flint's own prompt: "Effective sandboxing requires both filesystem and network isolation."
+
+### 3.5 The lessons, stated as design rules
+
+1. **Both leading products are replacing the ladder with per-path and per-domain rules.** The
+   user's complaint in §1.2 is not a preference; it is where the field moved in 2026.
+2. **Cross-workspace has a standard answer**: a list of directories. Nobody solved it with a
+   wider mode.
+3. **Duration is a real axis**, and the sensible defaults already exist: remembering a command
+   or a domain is cheap; remembering a file-write scope is not (Claude Code expires it at
+   session end).
+4. **`deny` must be first-class and must outrank a wider allow**, or a broad grant silently
+   re-exposes a secret.
+5. **Network gets its own mechanism** — a proxy with a domain allowlist. No filesystem
+   mechanism provides it, and Landlock cannot (§3.4, `DOCUMENTED`, and the reason bubblewrap is
+   paired with socat).
+6. **A shell needs *some* system paths to run.** `:minimal` exists because both "everything" and
+   "the workspace" break ordinary commands; §5's Stage 3 should budget for the discovery of
+   that list on each platform, not treat it as a detail.
+7. **Say what is not enforced.** Both vendors ship a limitations page for a reason; flint's
+   version is the sentence in the prompt (§4.6) plus §6 of this document.
 
 ---
 
@@ -255,28 +395,37 @@ roots / network toggles; §3.3 gathers what the documentation says.
 Replace the mode with a **grant**, make the grant a *set of facts about the call* rather than a
 rung on a ladder, and let exactly one function decide.
 
-### 4.2 Vocabulary
+### 4.2 Vocabulary: rules about paths and hosts, not rungs
 
-A grant is four independent, optional facts. Empty means "nothing extra":
+A policy is a list of rules, and each rule names *what* and *how much*:
 
 ```
-read:   workspace | roots:[path…] | any
-write:  none | workspace | roots:[path…] | any
-net:    off | hosts:[domain…] | any
-exec:   none | programs:[name…] | any
+filesystem:  <path or scope> = read | write | deny
+network:     <domain>        = allow | deny
+exec:        <program>       = allow | deny      (flint's own judgement; advisory, §4.6)
 ```
 
-The values are deliberately *data*, not names: `roots:[C:\work\other-repo]` is a grant that can
-be printed, compared, saved in `config.toml`, and shown to the model without translation. A
-name like `workspace-write` is a grant you have to look up.
+The scopes are Codex's published spellings, on purpose (§3.3): `:workspace_roots`, `:tmpdir`,
+`:minimal`, `:root`, `~/…`, absolute paths, and `*` / `**` globs. A user who has written a Codex
+profile once should recognise a flint one; inventing synonyms would make flint's own file the
+harder one to read.
 
-Two conventional grant sets are spelled out so the old vocabulary still means something:
+Precedence, borrowed for the same reason (§3.3, §3.4):
 
-| Old name | New spelling |
+- a narrower rule overrides a wider one;
+- **`deny` wins over `read` / `write` at the same path**, so a workspace-wide `write` cannot
+  silently re-expose `**/*.env`;
+- network `deny` outranks `allow`.
+
+The three familiar names survive as **presets over the rules** — which is exactly how Codex kept
+its ladder (`:read-only`, `:workspace`, `:danger-full-access`, §3.3), and it is what makes this
+a migration rather than a rewrite:
+
+| Old name | The rules it expands to |
 |---|---|
-| `readonly` | `write: none`, `net: off`, everything else `workspace`/`none` |
-| `workspace-write` (today's ladder) | `write: workspace + temp`, `net: off`, `read: workspace` |
-| `danger-full-access` | `write: any`, `net: any`, `read: any`, `exec: any` |
+| `readonly` | `:workspace_roots = read`, `:minimal = read`, network off, the same exec restrictions as today |
+| `workspace-write` | the above plus `:workspace_roots = write`, `:tmpdir = write` |
+| `danger-full-access` | `:root = write`, network enabled |
 
 `readonly = true` in an existing `config.toml` keeps working as the first row — the same
 back-compatibility rule the `verbose` key already follows (`ROADMAP.md:489`).
@@ -334,6 +483,12 @@ And three durations, because "for how long" is a separate question from "how muc
 `turn` is what makes the feature usable in practice: a build tool that needs the same root
 twelve times asks once.
 
+The defaults do not have to be invented — Claude Code already argues them per tool (§3.4):
+remembering a **command** or a **domain** is cheap, so those approvals are saved permanently for
+the repository; remembering a **file-write scope** is not, so a file-modification approval lasts
+only until the session ends. flint should start from the same split rather than giving every
+kind of grant the same lifetime.
+
 ### 4.6 Where each effect can actually be enforced
 
 Honesty requires three different labels, and the prompt has to carry them:
@@ -381,23 +536,36 @@ because "the workspace" is a boundary that a real toolchain does not respect.
 `VERIFIED` as code; not measured in a live `workspace-write` session on this machine, which is
 running `danger-full-access`.
 
-The grant model does not make this go away; it makes it *sayable*: `write: roots:[workspace,
-%USERPROFILE%\.cargo, %TEMP%]` is a request a human can read and grant once, instead of a reason
-to move to `danger-full-access` for the rest of the week. This is the single most common way
-people end up with no sandbox, and it is a granularity problem, not a discipline problem.
+The rule model does not make this go away; it makes it *sayable*: `:workspace_roots = write`,
+`~/.cargo = write`, `:tmpdir = write` is a request a human can read and grant once, instead of a
+reason to move to `danger-full-access` for the rest of the week. This is the single most common
+way people end up with no sandbox, and it is a granularity problem, not a discipline problem.
 
-**(c) The axis nobody gates.** Anything that reaches the network — `curl`, `git`, `npm`, the
-agent's own `fetch` tool.
+Codex hit the same wall from the other side and answered it in its own vocabulary (§3.3):
+`:minimal` — "the minimum system areas and runtime paths needed to run ordinary commands from a
+shell" — plus explicit `read` for package-manager global directories and explicit `write` for the
+npm cache. Their field notes record the failure mode exactly: a tool on `PATH` whose real
+directory is outside the read allowlist **does not run at all**. That is the cost of a path-based
+policy, and it is paid once per machine, in a file, rather than once per task, in a prompt.
 
-Both products' filesystem modes leave egress alone: DSH's mode vocabulary has no network term
-(`dsh-sandbox-policy/lib/index.js:74`), its writable-root derivation is purely paths
-(`dsh-sandbox/lib/index.js:155`), and its Windows runner is a token/ACL mechanism whose own
-header lists only file-effect boundaries (`dsh-sandbox-windows-acl/lib/runner.js:5`). On Linux
-this could not be otherwise: Landlock has no network policy (§3.3).
+**(c) The axis the mode vocabulary cannot name.** Anything that reaches the network — `curl`,
+`git`, `npm`, the agent's own `fetch` tool.
 
-**So the sandbox that promises to contain the agent does not contain the one action with an
-irreversible, off-machine effect, while it does refuse a build in the user's own directory.**
-That inversion is the "微妙" feeling, stated as precisely as the code allows.
+DSH's mode vocabulary has no network term (`dsh-sandbox-policy/lib/index.js:74`), its
+writable-root derivation is purely paths (`dsh-sandbox/lib/index.js:155`), and its Windows
+runner is a token/ACL mechanism whose own header lists only file-effect boundaries
+(`dsh-sandbox-windows-acl/lib/runner.js:5`). So under `workspace-write`, `curl` to anywhere
+passes unexamined while a write one directory outside the workspace is refused: **the step that
+leaves the machine is ungated, and the step that stays on it is not.** Codex is the
+counter-example that proves the rule needs its own vocabulary rather than a mode name — one
+boolean (`network_access = false`) in the ladder, per-domain `allow` / `deny` after June 2026
+(§3.3). And Claude Code documents why the axis cannot be skipped: "Without network isolation, a
+compromised agent could exfiltrate sensitive files like SSH keys" (§3.4).
+
+**A sandbox that promises to contain the agent while leaving egress alone has not contained the
+one action with an irreversible, off-machine effect** — and it will still refuse a build in the
+user's own directory. That inversion is the "微妙" feeling, stated as precisely as the code
+allows.
 
 ### 4.8 What the first version does *not* do
 
@@ -423,17 +591,22 @@ tests), not promises.
 
 ### Stage 0 — the policy as data (no OS work)
 
-Change `readonly: bool` into a grant set with a parsed, printed, hand-editable spelling.
+Change `readonly: bool` into a list of rules with a parsed, printed, hand-editable spelling.
 
-- `src/config.rs`: `sandbox` table (`write`, `read`, `net`, `exec`); `readonly = true` maps to
-  the old meaning; an unknown value is **refused rather than defaulted**, as with `verbose`.
-- `src/tools.rs`: `ToolBox::new` takes the grant set; the six enforcement sites ask
-  `decide()` instead of `if self.readonly`.
-- `src/agent.rs`: `prompt_note` states the grants in force and which of them are enforced.
+- `src/config.rs`: a `sandbox` table of `filesystem` rules (`<path or scope> = read | write |
+  deny`), a `network` table, and an `exec` list; the three old names expand to rule sets as
+  presets (§4.2). `readonly = true` maps to the old meaning; an unknown value or a malformed
+  rule is **refused rather than defaulted**, as with `verbose`.
+- Precedence is implemented once and tested: narrower over wider, `deny` over `write`/`read`,
+  network `deny` over `allow`.
+- `src/tools.rs`: `ToolBox::new` takes the rule set; the six enforcement sites ask `decide()`
+  instead of `if self.readonly`.
+- `src/agent.rs`: `prompt_note` states the rules in force and which of them are enforced (§4.6).
 - `/config` prints them; `/sandbox` becomes the switch (the sixth surface, `OnPage::Toggles`).
-- **Red first:** a config with `write = "workspace"` and a `write` tool call to a sibling
-  directory — refused with the sentence naming the path, not the word "readonly".
-- **Size:** 400–700 lines. **Buys:** the vocabulary, and the in-process floor. **Risk:** low.
+- **Red first:** three tests — a `write` to a sibling directory is refused with the sentence
+  naming the path; `**/*.env` stays denied under a workspace-wide `write`; `readonly = true` in
+  an old file still means what it meant.
+- **Size:** 500–800 lines. **Buys:** the vocabulary, and the in-process floor. **Risk:** low.
 
 ### Stage 1 — the per-call decision, and the ask
 
@@ -467,7 +640,18 @@ Change `readonly: bool` into a grant set with a parsed, printed, hand-editable s
 
 ### Stage 3 — the Windows boundary
 
-The first stage that is a real boundary for child processes, and the largest single risk.
+The first stage that is a real boundary for child processes, and the largest single risk. Two
+warnings from the field before it starts (`DOCUMENTED`, §3.3, §3.4):
+
+- Codex's own notes record that restricted read-only access on Windows needs an **elevated**
+  sandbox backend (`[windows] sandbox = "elevated"`), and that the path allowlist governs
+  command resolution, so `:minimal` has to be discovered per machine rather than guessed.
+- Claude Code supports **native Windows not at all** and documents WSL2 as the answer. A Windows
+  stage that cannot be tested in CI is a stage that cannot be claimed; the alternative is to
+  scope flint's Windows sandbox to what it can actually verify, or to document WSL2 as the
+  supported route and refuse the claim elsewhere.
+
+Then the work:
 
 - Restricted token (`CreateRestrictedToken`, WRITE_RESTRICTED plus capability SIDs), ACL grants
   on the writable roots, `CreateProcessAsUserW`, plus the traps DSH paid for: a distinct temp
@@ -475,8 +659,8 @@ The first stage that is a real boundary for child processes, and the largest sin
   failure is distinguishable from a command failure (§3.1).
 - Interacts with two things flint already has: `KillTree` (the child tree must die with the
   turn) and `run_program_streaming`'s stdio plumbing (the terminal is flint's, not the child's).
-- Fail closed, with DSH's sentence as the model: refuse to run unconfined and name the
-  alternatives.
+- Fail closed, with DSH's sentence as the model, or fail open with Claude Code's warning — pick
+  one, in writing, because the two vendors chose opposite defaults (§3.4).
 - **Red first:** a child that tries to write one directory outside its roots fails, and the same
   child writing inside succeeds — as two tests on a real machine. Windows CI currently "checks
   nothing on push" (`ROADMAP.md:1495`), so this stage needs that fixed first or it cannot be
@@ -485,9 +669,14 @@ The first stage that is a real boundary for child processes, and the largest sin
 
 ### Stage 4 — the other two platforms
 
-Linux (Landlock, and seccomp for the syscall surface) and macOS (`sandbox-exec` with a generated
-SBPL profile). Two more CI platforms before either claim means anything.
-**Size:** 700–1,400 lines. **Risk:** high, and `UNVERIFIED` from this machine.
+Linux and macOS. Two more CI platforms before either claim means anything, and a real choice on
+Linux that the two vendors made differently (`DOCUMENTED`, §3.4): **bubblewrap** (Claude Code's
+route — unprivileged user namespaces, `socat` for the network relay, and on Ubuntu 24.04 an
+AppArmor profile because the default policy blocks `bwrap` from creating them) versus **Landlock**
+(DSH's route — no privileges needed, but no network policy, so a proxy is still required for
+egress). macOS is Seatbelt via `sandbox-exec` with a generated SBPL profile.
+
+**Size:** 700–1,400 lines. **Risk:** high, `UNVERIFIED` from this machine.
 
 ### Stage 5 — network, only if it is a proxy
 
@@ -515,13 +704,29 @@ network rules in SBPL can). If a proxy is acceptable, it is its own document. If
 - It does not claim the estimates are measurements. `ROADMAP.md:1494` keeps five known defects
   honest by not repeating them; this file should keep its estimates honest the same way —
   strike them or replace them with real counts as each stage lands.
+- It does not claim that a boundary is a boundary. Both vendors ship a limitations page for
+  their sandboxes, and Claude Code's is the template (§3.4): the proxy does not terminate TLS by
+  default, so the allow decision rests on a **client-supplied hostname** and domain fronting can
+  reach hosts outside the allowlist; allowing `/var/run/docker.sock` is a bypass; write access to
+  a `$PATH` directory or `.bashrc` is privilege escalation. **flint's version of that list has to
+  be written before any enforcement claim is made, not after** — which is the same rule as
+  `docs/windows-tooling.md`'s: label what was measured, and say what was not.
 
 ---
 
-## 7. Sources still to be gathered
+## 7. Sources
 
-The external half of §3 (Codex's config surface, Claude Code's rule grammar and
-`additionalDirectories`, Deno's scoped permission flags, Flatpak portals, Android/macOS prompt
-models, and the published criticism of coarse modes) is being collected with sources; each
-claim added there carries a link, and anything that cannot be verified stays `UNVERIFIED` or
-comes out.
+Read for this document, in the order they matter:
+
+| What | Where | Label |
+|---|---|---|
+| The ladder's three modes, the escalation table, the fail-closed error, the workspace/temp roots | installed `@deepseek-ai/dsh` 0.1.5-rc.1 — `dsh-sandbox-policy`, `dsh-sandbox`, `dsh-permission-presets`, `dsh-user-approval`, `dsh-sandbox-windows-acl` | `VERIFIED` |
+| Codex's Permission profiles, the pre-profile `sandbox_mode` / `sandbox_workspace_write` shape, the precedence and domain rules, the Windows field notes | [gihyo.jp, 2026-06-30](https://gihyo.jp/article/2026/06/codex-permission-profiles) (the vendor page it points at, `developers.openai.com/codex/permissions`, returned HTTP 403 here) | `DOCUMENTED` |
+| `writable_roots` for `sandbox_workspace_write` before profiles existed | [openai/codex PR #2464](https://github.com/openai/codex/pull/2464) | `DOCUMENTED` |
+| Claude Code's two layers, rule grammar and evaluation order, per-tool approval durability, `additionalDirectories`, the filesystem/network layers, Seatbelt/bubblewrap, the escape hatch, the fail-open default, and the limitations | [Sandboxing](https://code.claude.com/docs/en/sandboxing), [Permissions](https://code.claude.com/docs/en/permissions) | `DOCUMENTED` |
+| The three platform implementations inside one binary, and the size of each shipped artifact | the `@openai/codex` 0.154.0 win32-x64 package on this machine, by PE section table and byte scans | `MEASURED` |
+
+**Not incorporated, and therefore not claimed anywhere above:** Deno's scoped permission flags,
+Flatpak/xdg-desktop-portal, the Android/macOS user-prompt models, and the usability literature on
+prompt fatigue. They are the natural reading before Stage 1 fixes a default approval duration and
+before Stage 2 chooses the lifetime of a remembered rule; nothing in §4 or §5 rests on them.

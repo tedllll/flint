@@ -50,6 +50,7 @@ whoever is changing the code — a person or a model driving it.
 | `docs/web-mode.md` | the browser view over a running flint: all three levels are built (read-only view, live feed, composer with a sidebar) and §11 records what was measured in a browser |
 | `docs/deepseek-search.md` | web search: what was measured about DeepSeek's search, and what it costs |
 | `docs/decisions.md` | why flint is built this way, decision by decision |
+| `docs/sandbox.md` | a plan for replacing permission modes with grants — **not built, and it argues against the "Not doing, and why" entry in `ROADMAP.md` on purpose**; read it as an argument, not as the state of the tree |
 | `ROADMAP.md` | the plan of record: the ordered queue, and what is deliberately not done |
 | `HANDOFF.md` | state of the project at the end of the last working session |
 
