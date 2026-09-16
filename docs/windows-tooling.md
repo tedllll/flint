@@ -415,9 +415,21 @@ were.
 
 `read` still hands the bytes over unchanged, and that is a decision rather than an
 unfinished item: the `\r` *is* in the text the model is shown, and a `read` that rewrote it
-would be hiding the very thing the `edit` above needs to know. `apply_patch` does not yet
-name the line endings when a hunk fails to match; that is the same one-sentence omission,
-and it is recorded here rather than fixed blind.
+would be hiding the very thing the `edit` above needs to know. `apply_patch` now names the
+line endings too, and doing it turned up the fact that makes the sentence necessary rather
+than helpful: **a patch cannot express a CRLF line at all.** The parser reads the patch with
+`str::lines`, which drops the `\r` before each `\n`, while the file's own lines keep theirs —
+so a hunk copied out of a CRLF file by a model that read it arrives without the `\r` and can
+never match, however carefully it was copied. Not normalised for the reason the `edit` above
+gives, and here the loose match would be worse: joining the result would rewrite every line of
+the file. So the sentence says what the reason is and names the tool that works — `edit`, whose
+`old_string` is raw text and *can* carry the `\r`.
+
+One detail of that message is worth keeping: the escapes in it are **literal text**, `\\r\\n` in
+the Rust source, not the bytes. The older `edit` hint wrote a real `\r\n` into the message, which
+ends the line early in the transcript and, for a `\r` not followed by `\n`, moves the cursor to
+column 0 and overwrites what the reader has already been shown. Both hints spell the two
+characters out now, and both tests assert the message holds no control character.
 
 ### 6.5 In-place writes are already the Windows-correct choice — `VERIFIED`, commented
 
@@ -582,8 +594,9 @@ it would be a large amount of code that is wrong in the cases that matter), `-En
 existing `readonly` switch.
 
 Still open, and left open on purpose rather than by oversight: a Unix process-group kill for
-backgrounded work (§6.1), and the line-ending sentence for `apply_patch` (§6.4). Both are
-recorded where they belong, with what is missing and why the fix is not free.
+backgrounded work (§6.1). It is recorded where it belongs, with what is missing and why the
+fix is not free. The other item on this list — the line-ending sentence for `apply_patch`
+(§6.4) — is built, and building it is what proved a patch cannot express a CRLF line at all.
 
 As always: write the failing test first, watch it fail for the right reason, then fix the
 code. The process-tree kill and the `\` normalisation are both cheap to test; the quoting

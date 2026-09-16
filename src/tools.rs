@@ -3194,10 +3194,15 @@ impl Tool for EditTool {
             // turn the model would otherwise spend guessing. Deliberately not normalised:
             // matching loosely would let an edit silently rewrite every line of the file,
             // which is a diff nobody asked for and the worst kind to review.
+            //
+            // The escapes are doubled on purpose: `\r` in a Rust literal is a carriage return,
+            // and one inside a message moves the cursor to column 0 of the answer strip, so
+            // the reader would see the sentence partly overwritten. The model needs the two
+            // characters to type, not the byte.
             let hint = if text.contains("\r\n") && old.contains('\n') && !old.contains("\r\n") {
-                " This file uses CRLF line endings: put \r\n between lines in old_string."
+                " This file uses CRLF line endings: put \\r\\n between lines in old_string."
             } else if !text.contains("\r\n") && old.contains("\r\n") {
-                " This file uses LF line endings: old_string has \r\n in it, which is not there."
+                " This file uses LF line endings: old_string has \\r\\n in it, which is not there."
             } else {
                 ""
             };
@@ -5806,6 +5811,16 @@ mod name_tests {
             message.contains("CRLF"),
             "the refusal must name the line endings: {message}"
         );
+        // The two characters to type, not the bytes: a real `\r` inside a message moves the
+        // cursor to column 0 of the answer strip and overwrites what is already on the line.
+        assert!(
+            message.contains("\\r\\n"),
+            "the hint must spell the escape out: {message:?}"
+        );
+        assert!(
+            !message.contains('\r') && !message.contains('\n'),
+            "a line-ending hint is one line of text: {message:?}"
+        );
 
         // The same edit with the `\r` in it works, and the file keeps its endings.
         tools
@@ -6836,5 +6851,80 @@ mod patch_tool_tests {
             .expect_err("read-only must refuse");
         assert!(format!("{err:#}").contains("readonly mode is ON"), "{err:#}");
         assert!(!dir.path().join("x").exists());
+    }
+
+    /// A patch cannot name a CRLF ending, so a CRLF file needs the sentence rather than a guess.
+    ///
+    /// The parser reads the patch with `str::lines`, which drops the `\r` before each `\n`, and the
+    /// file's own lines keep theirs -- so no hunk taken from this file can match, however carefully
+    /// it was copied. "The text to replace is not in the file" is true and useless; the sentence has
+    /// to say which tool does work here (`edit`, whose `old_string` is raw text and can carry the
+    /// `\r`) and must carry those escapes as *text*, because a real carriage return lands inside a
+    /// message that goes to the answer strip. Both are asserted, and the file is asserted unchanged,
+    /// because a refusal that half-applied would be worse than the confusion it replaces.
+    ///
+    /// Not `cfg(windows)`: the endings are in the file and the comparison is string code, so this is
+    /// about a file's bytes rather than about the platform the test runs on.
+    #[tokio::test]
+    async fn a_patch_against_a_crlf_file_says_so_and_names_the_tool_that_works() {
+        let dir = TempDir::new("patch-crlf");
+        std::fs::write(dir.path().join("dos.txt"), "one\r\ntwo\r\n").unwrap();
+        let tools = tools(dir.path());
+        tools
+            .invoke("read", &json!({ "path": "dos.txt" }))
+            .await
+            .expect("read first");
+
+        let text = "*** Begin Patch\n\
+                    *** Update File: dos.txt\n\
+                    -two\n\
+                    +three\n\
+                    *** End Patch\n";
+        let error = tools
+            .invoke("apply_patch", &json!({ "patch": text }))
+            .await
+            .expect_err("a patch cannot match a CRLF file");
+        let message = error.to_string();
+        assert!(
+            message.contains("CRLF"),
+            "the refusal must name the line endings: {message}"
+        );
+        assert!(
+            message.contains("`edit`"),
+            "and the tool that does work here: {message}"
+        );
+        assert!(
+            message.contains("\\r\\n"),
+            "the escapes must be text a model can type, not bytes: {message:?}"
+        );
+        assert!(
+            !message.contains('\r'),
+            "a carriage return in a message moves the cursor to column 0: {message:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("dos.txt")).unwrap(),
+            "one\r\ntwo\r\n",
+            "nothing may be written when a hunk does not match"
+        );
+
+        // An LF file is not blamed for line endings it does not have.
+        std::fs::write(dir.path().join("unix.txt"), "one\ntwo\n").unwrap();
+        tools
+            .invoke("read", &json!({ "path": "unix.txt" }))
+            .await
+            .expect("read first");
+        let text = "*** Begin Patch\n\
+                    *** Update File: unix.txt\n\
+                    -nope\n\
+                    +x\n\
+                    *** End Patch\n";
+        let error = tools
+            .invoke("apply_patch", &json!({ "patch": text }))
+            .await
+            .expect_err("no match is still an error");
+        assert!(
+            !error.to_string().contains("CRLF"),
+            "an LF file must not be blamed for line endings: {error}"
+        );
     }
 }

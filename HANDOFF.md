@@ -94,7 +94,7 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 524 passing, 1 ignored (312 lib, 3 in
+As of the commit that carries this file, `cargo test` is 525 passing, 1 ignored (313 lib, 3 in
 the binary's own tests, 33 `agent_loop`, 63 `cli_output`, 35 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
@@ -184,8 +184,10 @@ of the bullet rather than a hole in it. And `HANDOFF.md`'s own "the Windows half
 still unwritten" was stale by five steps: `docs/windows-tooling.md` §7 marks all five done, and the two
 tests that paragraph called unwritten exist and pass (`a_quoted_command_reaches_the_shell_verbatim`,
 `a_powershell_script_runs_from_the_file_it_was_written_to`, `a_killed_command_takes_its_children_with_it`).
-What is genuinely open there is the shorter list §7 ends with: a Unix process-group kill, and the
-line-ending sentence for `apply_patch`.
+What is genuinely open there is the shorter list §7 ends with: a Unix process-group kill. The other item
+on it, the line-ending sentence for `apply_patch`, is built — and building it measured that a patch
+cannot express a CRLF line at all (`str::lines` drops the `\r` before each `\n`, and the file's lines
+keep theirs), so the sentence names the reason and the tool that works, `edit`.
 
 **And the last "not measured" note in `docs/web-mode.md` §11 is now measured**: a report asked for
 *while a turn runs*. The gap was never the code — the wait is stashed (`Handover`) and answered once the
@@ -1428,9 +1430,10 @@ before being written, and the BOM and the policy switch both turned out to be re
 than prudent. The system prompt now states which PowerShell is on the machine and what it does
 with native arguments, which is the fact that stops a model writing `??` on 5.1.
 
-**Recorded rather than fixed**, because both need a test before they need code: a Unix
+**Recorded rather than fixed**, because it needs a test before it needs code: a Unix
 process-group kill for work a command backgrounds (there is no process group and no `setsid`,
-and closing it means `libc`), and the same line-ending sentence for `apply_patch`.
+and closing it means `libc`). The second item this paragraph used to carry — the same
+line-ending sentence for `apply_patch` — is built; see the paragraph above.
 
 **The terminal side was measured too** (`docs/windows.md` §1–§3, all four items of the
 checklist at its end). Two things came out of it that the next session should not re-derive:
@@ -1765,8 +1768,9 @@ unwritten exist and pass: `a_quoted_command_reaches_the_shell_verbatim` and
 `a_powershell_script_runs_from_the_file_it_was_written_to` (argument round trip, non-ASCII script text)
 in `tests/agent_loop.rs`, and `a_killed_command_takes_its_children_with_it` for the tree kill. What is
 genuinely still open is the shorter list §7 ends with: a Unix process-group kill for backgrounded work,
-and the line-ending sentence for `apply_patch` (§6.4). Both are recorded there with what is missing and
-why the fix is not free.
+recorded there with what is missing and why the fix is not free. The line-ending sentence for
+`apply_patch` (§6.4) was the other item on that list and is now built, with the fact it measured: a
+patch line cannot carry a `\r`, so the sentence names `edit` instead.
 
 **Windows terminal behaviour has now been measured, in a private console.** Read
 [`docs/windows.md`](docs/windows.md) first — it has the mechanisms, labelled by what was

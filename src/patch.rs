@@ -296,7 +296,8 @@ fn apply_hunk(text: &str, hunk: &Hunk) -> Result<String> {
     match found.len() {
         0 => bail!(
             "the text to replace is not in the file. Read the file and write the patch \
-             against what is actually there"
+             against what is actually there{}",
+            crlf_hint(text, old)
         ),
         1 => {}
         n => bail!(
@@ -310,6 +311,27 @@ fn apply_hunk(text: &str, hunk: &Hunk) -> Result<String> {
     out.extend(hunk.new.iter().cloned());
     out.extend(whole[start + old.len()..].iter().cloned());
     Ok(join_lines(&out))
+}
+
+/// The sentence a failed hunk needs when the reason is a line ending, and nothing otherwise.
+///
+/// A `\r` is invisible in a transcript, and for a patch it is worse than for an `edit`: the patch
+/// is read with `str::lines`, which drops the `\r` before every `\n`, so a hunk copied out of a
+/// CRLF file arrives without it and can never match. No wording of the patch fixes that, which is
+/// why the sentence names the tool that does work -- `edit`, whose `old_string` is raw text and can
+/// carry the `\r`. Not normalised here for the reason `edit` gives: matching loosely would rewrite
+/// every line of the file, and a whole-file diff is the worst kind to review.
+///
+/// One direction is enough. A hunk line ending in `\r` needs a doubled `\r` in the patch text to
+/// survive `str::lines`, so it is not a mistake worth a sentence.
+fn crlf_hint(file: &str, old: &[String]) -> &'static str {
+    if file.contains("\r\n") && !old.iter().any(|line| line.ends_with('\r')) {
+        " This file uses CRLF line endings, and a patch cannot name one: the parser drops the \
+         \\r before every \\n, so no line copied from this file matches. Use `edit` with \\r\\n \
+         inside old_string instead -- that does work here."
+    } else {
+        ""
+    }
 }
 
 /// Split on `\n`, dropping the terminator, and keeping the fact that the file ended with
