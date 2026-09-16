@@ -26,11 +26,15 @@ hears about *every* failure on the stream, including a refusal resolved before t
 been opened: the command line is read in `main`, a failure is written there as one `error` frame (from
 the same `error_frame` the end of a turn uses) and not to stderr, and the case where flint was refused
 *before* it had read `--json` is the honest residue — it is reported on stderr like any other bad
-command line. **Step 3 is half built**: `flint --list-sessions --json` prints the list as one object
+command line. **Step 3 is built**: `flint --list-sessions --json` prints the list as one object
 (`type`, `count`, `sessions[]`) with each row's id, path, directory, name, preview and label, built
 from the same `list_detailed` the printed listing uses so the numbering cannot drift, and the label
-rule now lives once (`SessionSummary::label`). `--result-file` is the other half and is next
-(after that: `@path` expansion, `--max-seconds`, the stream-integrity test, and the Python side).
+rule now lives once (`SessionSummary::label`); and `--result-file <path>` writes this run's answer to
+a file as well as to the stream — the answer text, or the validated object pretty-printed when a
+schema was given — with the one property that makes it safe to reuse a path across a batch: **the
+file is emptied when the run starts and filled only if this run answers**, so an empty file means
+"nothing answered" rather than an earlier run's answer looking like this one's. Next in the queue:
+step 4 (`@path` expansion), then `--max-seconds`, the stream-integrity test, and the Python side.
 Read it before touching `src/main.rs`'s argument handling. In short: DeepSeek says it with
 **402**, OpenAI-shaped endpoints say it with **429 `insufficient_quota`** — the same status as a rate
 limit — and Anthropic with a 400 and a sentence. flint decides "transient" from the status **and** the
@@ -65,11 +69,11 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 478 passing, 1 ignored (293 lib, 3 in
-the binary's own tests, 33 `agent_loop`, 59 `cli_output`, 23 `json_output` (7 structured
+As of the commit that carries this file, `cargo test` is 482 passing, 1 ignored (293 lib, 3 in
+the binary's own tests, 33 `agent_loop`, 59 `cli_output`, 27 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 5 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
-be able to read), 7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 6 `who`, 6 `task`, 2 `say`), `cargo clippy
+be able to read, 4 the answer written where the caller asked), 7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 6 `who`, 6 `task`, 2 `say`), `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
 pass, and `python examples/python/test_call.py` is 53 checks, all passing (one of them now waits
 out the fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from),
@@ -264,7 +268,7 @@ open, so the copy needs every flint window closed first — measured twice.
 
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
-cargo test                                        # 478 passing, 1 ignored
+cargo test                                        # 482 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed

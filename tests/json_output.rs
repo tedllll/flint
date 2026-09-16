@@ -345,6 +345,168 @@ async fn a_run_that_cannot_start_ends_the_stream_with_an_error() {
     );
 }
 
+/// The answer in a file, so a caller that only wants the answer does not have to read a stream.
+///
+/// Two shapes, and which one a run writes is decided by what was asked for: prose for a run with no
+/// schema, the validated object for one with a schema. Both are "the answer" in the sense the
+/// caller chose, and the exit code says what it is worth -- `complete`, `incomplete` or `stopped`.
+#[tokio::test]
+async fn a_result_file_holds_the_answer_the_caller_asked_for() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(SseFixture {
+            body: answers_in_two_fragments(),
+        })
+        .mount(&server)
+        .await;
+
+    let cwd = cwd_for("result-file");
+    let home = home_for("result-file", &server.uri(), &cwd);
+    let answer_file = cwd.join("answer.txt");
+
+    let (code, lines, stderr) = run_json(
+        &home,
+        &cwd,
+        &[
+            "-p",
+            "say hello",
+            "--json",
+            "--result-file",
+            &answer_file.to_string_lossy(),
+        ],
+    );
+
+    assert_eq!(code, 0, "the run failed: {stderr} {lines:?}");
+    let written = std::fs::read_to_string(&answer_file).expect("the result file");
+    assert_eq!(
+        written, "hello world",
+        "the file does not hold the answer, byte for byte"
+    );
+    // The same answer the stream carried: two readings of one run, not two answers.
+    assert_eq!(line_of(&lines, "message.completed")["text"], written);
+}
+
+/// With a schema, the file holds the *validated* value -- the thing the caller asked for -- as JSON.
+#[tokio::test]
+async fn a_result_file_holds_the_validated_object_when_a_schema_was_given() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(SseFixture {
+            body: sse_text(r#"{"trading_day":"2026-09-16"}"#),
+        })
+        .mount(&server)
+        .await;
+
+    let cwd = cwd_for("result-file-schema");
+    let home = home_for("result-file-schema", &server.uri(), &cwd);
+    let schema_file = cwd.join("schema.json");
+    std::fs::write(&schema_file, schema_run()).expect("schema file");
+    let answer_file = cwd.join("answer.json");
+
+    let (code, lines, stderr) = run_json(
+        &home,
+        &cwd,
+        &[
+            "-p",
+            "which trading day",
+            "--json",
+            "--schema",
+            &schema_file.to_string_lossy(),
+            "--result-file",
+            &answer_file.to_string_lossy(),
+        ],
+    );
+
+    assert_eq!(code, 0, "the run failed: {stderr} {lines:?}");
+    let written = std::fs::read_to_string(&answer_file).expect("the result file");
+    let parsed: Value = serde_json::from_str(&written).expect("the result file is not JSON");
+    assert_eq!(
+        parsed, line_of(&lines, "result")["json"],
+        "the file and the stream disagree about the answer"
+    );
+    assert_eq!(parsed["trading_day"], "2026-09-16");
+    // Hand-editable, like everything else flint writes down: not one long line.
+    assert!(written.contains('\n'), "the object is on one line: {written:?}");
+}
+
+/// A run that produced no answer leaves the file empty, even if it held something before.
+///
+/// This is the property the flag is worth having: an absent or empty file cannot be mistaken for a
+/// value, and a *stale* one is exactly a wrong value that looks right. So the file is claimed when
+/// the run starts -- emptied before anything can fail -- and filled only if this run answers.
+#[tokio::test]
+async fn a_result_file_is_emptied_before_the_run_and_stays_empty_when_nothing_was_answered() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(SseFixture {
+            body: answers_in_two_fragments(),
+        })
+        .mount(&server)
+        .await;
+
+    let cwd = cwd_for("result-file-stale");
+    let home = home_for("result-file-stale", &server.uri(), &cwd);
+    let answer_file = cwd.join("answer.txt");
+    std::fs::write(&answer_file, "AN ANSWER FROM AN EARLIER RUN").expect("stale file");
+
+    // A schema this build cannot check: refused while the arguments are resolved, so no turn ever
+    // runs and nothing is ever answered.
+    let (code, _lines, _stderr) = run_json(
+        &home,
+        &cwd,
+        &[
+            "-p",
+            "hello",
+            "--json",
+            "--schema",
+            r#"{"type":"object","pattern":1}"#,
+            "--result-file",
+            &answer_file.to_string_lossy(),
+        ],
+    );
+
+    assert_ne!(code, 0, "a run that never asked anything must not exit 0");
+    assert_eq!(
+        std::fs::read_to_string(&answer_file).expect("the result file"),
+        "",
+        "the earlier run's answer is still there to be read as this run's"
+    );
+}
+
+/// Without `--json` there is no stream to avoid, so the flag is refused rather than half-supported.
+#[tokio::test]
+async fn a_result_file_without_json_is_refused() {
+    let server = MockServer::start().await;
+    let cwd = cwd_for("result-file-plain");
+    let home = home_for("result-file-plain", &server.uri(), &cwd);
+    let answer_file = cwd.join("answer.txt");
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_flint"))
+        .args(["-p", "hello", "--result-file"])
+        .arg(&answer_file)
+        .arg("--cwd")
+        .arg(&cwd)
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .output()
+        .expect("failed to run flint");
+
+    assert_eq!(
+        out.status.code().unwrap_or(-1),
+        exit_codes::USAGE,
+        "a flag that cannot be honoured is the caller's command line"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        stderr.contains("--result-file") && stderr.contains("--json"),
+        "the refusal does not say what is missing: {stderr}"
+    );
+    assert!(
+        !answer_file.exists(),
+        "a refused run created the file it was told to write"
+    );
+}
+
 /// Without a prompt there is no run to describe, and the refusal still arrives as the one thing a
 /// `--json` caller reads.
 ///

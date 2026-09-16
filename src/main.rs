@@ -58,6 +58,15 @@ struct Args {
     /// Only meaningful with a prompt: an interactive session has no stream to write, and
     /// `exec` is plain by contract because its output is the child's own bytes.
     json: bool,
+    /// Write the run's answer to this path as well as to the stream.
+    ///
+    /// For the caller that wants the answer and nothing else: reading it out of a stream means
+    /// reassembling deltas or picking a line, and both are the caller re-implementing this run's
+    /// format. What is written is the answer *this* run has -- prose, or the validated object when a
+    /// schema was given -- and the file is emptied when the run starts, so what it holds is never an
+    /// earlier run's answer that looks like this one's. `--json` only: a run with no stream has
+    /// already put nothing but the answer on stdout, and redirecting it is the same thing.
+    result_file: Option<String>,
     list_sessions: bool,
     /// Ask the provider whether it can be used, and what is left in the account, then stop.
     ///
@@ -405,6 +414,30 @@ async fn real_main(args: Args) -> Result<i32> {
     if args.help {
         print_help(color, &Term::plain());
         return Ok(0);
+    }
+
+    // ---- the answer, where the caller asked for it ----
+    //
+    // Claimed here, before anything can fail, and emptied rather than merely created: a caller that
+    // reuses one path across a batch must not be able to read an earlier run's answer as this run's,
+    // and "the file is empty" is the one state that cannot be mistaken for a value. From here on the
+    // contract is: this run fills it if and only if it answers the prompt.
+    //
+    // Refused without `--json` rather than half-supported. The flag exists so a caller does not have
+    // to parse a stream; a run that writes no stream has already put nothing but the answer on
+    // stdout, so redirecting it is the same thing -- and a second way to write those bytes would be
+    // a second thing to keep in step, in a mode whose whole contract is "stdout is the answer".
+    if let Some(path) = args.result_file.clone() {
+        if !args.json || args.prompt.is_none() {
+            return usage(
+                "--result-file needs a prompt and --json: it exists so a caller does not have to \
+                 read the stream, and with no --json the answer is already everything on stdout \
+                 (redirect it instead).",
+            );
+        }
+        std::fs::File::create(&path)
+            .with_context(|| format!("--result-file {path}: cannot be written"))
+            .map_err(|e| -> anyhow::Error { Usage(format!("{e:#}")).into() })?;
     }
 
     // The directory this run works in, resolved once and absolutely.
@@ -774,6 +807,7 @@ async fn real_main(args: Args) -> Result<i32> {
             provider_error.as_deref(),
             prompt,
             &shaping,
+            args.result_file.as_deref().map(std::path::Path::new),
         )
         .await;
     }
@@ -3422,12 +3456,41 @@ async fn beat_while_working(progress: std::sync::Arc<std::sync::Mutex<Progress>>
     }
 }
 
+/// Write the answer where the caller asked for it, and report a failure to do so on the stream.
+///
+/// Called only when this run has an answer: the file was emptied when the run started, so a failure
+/// here leaves it empty -- which is what a caller must be able to read as "no answer", rather than
+/// as the answer it was hoping for.
+///
+/// A write that fails is not a warning. The caller named a file and is going to read *that*, so a run
+/// that answers on the stream and exits 0 would hand it an empty file and a success code; the frame
+/// names the cause (`result_file`) and the code is a failure. The answer itself is still on the
+/// stream, so nothing is lost -- only the shortcut is.
+fn write_result_file(path: &std::path::Path, text: &str, emit: &mut impl FnMut(String)) -> bool {
+    match std::fs::write(path, text) {
+        Ok(()) => true,
+        Err(e) => {
+            emit(ndjson::error_coded(
+                &format!(
+                    "the answer could not be written to {}: {e}. It is on this stream, and this run \
+                     did not put it where it was asked to.",
+                    path.display()
+                ),
+                "result_file",
+                false,
+            ));
+            false
+        }
+    }
+}
+
 async fn run_json_turn(
     agent: &mut agent::Agent,
     provider_cfg: &config::ProviderConfig,
     provider_error: Option<&str>,
     prompt: &str,
     shaping: &Shaping,
+    result_file: Option<&std::path::Path>,
 ) -> Result<i32> {
     let mut out = std::io::stdout();
     // Flushed per line: a consumer may be reading the stream as it arrives, and a
@@ -3572,6 +3635,17 @@ async fn run_json_turn(
                 agent.last_usage(),
                 ndjson::Outcome::Stopped,
             ));
+            // The half-answer goes where the caller asked for it too, on the same terms as the
+            // stream: the code (130) and the outcome say what it is worth, and a stopped run that
+            // wrote nothing while the caller watched it draw text would be the file disagreeing with
+            // the run. `answer` is empty here -- it is only filled by `Done`, which a stopped turn
+            // never reaches -- so the sink's own accumulation is what is written. A write that fails
+            // says so on the stream; the exit code stays 130, because what happened to this run is
+            // that the caller stopped it.
+            if let Some(path) = result_file {
+                let drawn = sink.answer_so_far().to_string();
+                write_result_file(path, &drawn, &mut emit);
+            }
             // No repair attempt and no validation: a caller that stopped the run is not waiting for
             // another one, and a half-written answer failing a schema is the expected outcome rather
             // than a problem to fix.
@@ -3594,7 +3668,23 @@ async fn run_json_turn(
             EXIT_OK
         };
         match result {
-            Ok(()) => emit(ndjson::turn_completed(agent.last_usage(), outcome)),
+            Ok(()) => {
+                emit(ndjson::turn_completed(agent.last_usage(), outcome));
+                // With no schema the answer *is* the text, and this is where it goes where the
+                // caller asked. With one, the answer is the validated object further down, and
+                // writing the prose here would put a shape in the file that the caller never asked
+                // for -- and, on a repair, the wrong attempt.
+                if shaping.schema.is_none() {
+                    if let Some(path) = result_file {
+                        // A failure to write is the caller's answer not arriving: it is said on the
+                        // stream and it is not exit 0, because a caller reading the file would
+                        // otherwise find it empty and be told the run succeeded.
+                        if !write_result_file(path, &answer, &mut emit) {
+                            return Ok(EXIT_FAILURE);
+                        }
+                    }
+                }
+            }
             // The failure goes on the stream as well as the exit code: a caller that reads
             // stdout should not have to also read stderr to find out what happened. The cause is
             // read from the error itself when flint knows it -- the provider attaches its own
@@ -3620,6 +3710,20 @@ async fn run_json_turn(
             Some(value) => match schema.validate(&value) {
                 problems if problems.is_empty() => {
                     emit(ndjson::result(&value, attempt));
+                    // The validated object, pretty-printed, is what a caller with a schema asked
+                    // for -- and it is written only here, where it has passed: a file holding an
+                    // answer the schema rejected would be the one thing `result` is built never to
+                    // expose. The same bytes the stream carries, re-indented for a reader.
+                    if let Some(path) = result_file {
+                        let text = format!(
+                            "{}\n",
+                            serde_json::to_string_pretty(&value)
+                                .unwrap_or_else(|_| value.to_string())
+                        );
+                        if !write_result_file(path, &text, &mut emit) {
+                            return Ok(EXIT_FAILURE);
+                        }
+                    }
                     return Ok(code);
                 }
                 problems => problems,
@@ -4451,6 +4555,12 @@ fn parse_args(argv: Vec<String>, stream_seen: &mut bool) -> Result<Args> {
                 args.json = true;
                 *stream_seen = true;
             }
+            "--result-file" => {
+                args.result_file = Some(
+                    iter.next()
+                        .ok_or_else(|| anyhow!("--result-file requires a path"))?,
+                )
+            }
             "--web" => args.web = true,
             "--port" => {
                 let value = iter
@@ -4620,6 +4730,10 @@ flint who [--all] [--json]       who else is working in this directory (flint on
                       for the schema itself. Recorded in the session, so --resume
                       holds the conversation to the same shape without repeating it
   --no-schema         answer in prose even if this session's file says otherwise
+  --result-file <path>  with -p --json: write the answer there as well as on the stream --
+                      the answer text, or the validated object when --schema was given.
+                      The file is emptied when the run starts, so it never holds an
+                      earlier run's answer; empty means this run answered nothing
   --no-color          disable ANSI colour (also honours NO_COLOR)
   -h, --help          this message
 

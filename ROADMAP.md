@@ -1156,7 +1156,7 @@ line no longer crosses the composer; **the page's own log, written by default** 
 the hand's code made the boot's first paint throw, taking the sidebar, the sessions and the feed
 with it; and `/stop`, the interrupt as a short word, reachable from the composer today.
 
-### 10. flint as a function a program can call — **in progress: steps 1 and 2 landed (B7 included), 3–7 queued**
+### 10. flint as a function a program can call — **in progress: steps 1–3 landed (B7 included), 4–7 queued**
 
 flint answers; it cannot yet be *trusted as a function*. A caller that acts on the result — writes a
 config, queues a job, retries a batch, feeds it data it did not author — has to know four things
@@ -1383,7 +1383,18 @@ What to build for it, in step 2:
    one place (`SessionSummary::label`) for the same reason — a rule written twice drifts once. The
    path is the field a caller cannot reconstruct, which is the point: a session lives in the
    subdirectory belonging to the directory it was held in, so joining an id onto `sessions/` names a
-   file that is not there. `--result-file` is the other half and is next.
+   file that is not there. — **`--result-file` is built too**, and its design is one sentence: *the
+   file is emptied when the run starts and filled only if this run answers the prompt.* That is what
+   makes it useful rather than dangerous — an empty file cannot be mistaken for a value, and a
+   *stale* file is a wrong value that looks right, which is exactly the accident a caller reusing one
+   path across a batch would have. It holds the answer the caller asked for: the prose answer text,
+   or the validated object (pretty-printed) when a schema was given, written only where the schema
+   passed, because a file holding a rejected answer would be the one thing the missing `result` line
+   exists to prevent. It requires `--json` and a prompt and is refused otherwise: with no stream the
+   answer is already everything on stdout, so redirecting it is the same thing, and a second way to
+   write those bytes in a mode whose whole contract is "stdout is the answer" is a second thing to
+   keep in step. A write that fails is a frame with the code `result_file` and a non-zero exit, not a
+   warning: the caller named a file and is going to read *that*. Step 3 is done.
 4. **`@path`** — a file named inside the prompt and inlined by flint before the request. This is how
    A1 is solved, and it is deliberately not "tell the model a path": content that must be seen has to
    *be* in the prompt, where it is not subject to the model's discretion, to `read`'s 2000-line
