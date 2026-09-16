@@ -1331,14 +1331,18 @@ fn a_warning_from_a_resumed_session_is_a_transcript_line_and_not_stderr() {
 /// ladder walks its 1s, 2s and 4s waits -- and the assertion is the same two-sided one, because a
 /// notice that went nowhere and a notice printed twice are different bugs.
 ///
-/// The second line is written only after the turn has had time to fail, unlike every other test
-/// here: piped input is *steering*, so a `/exit` that arrives while the turn is running drops the
-/// turn instead of leaving it -- measured, and it made the first version of this test pass for the
-/// wrong reason (nothing was ever retried).
+/// Two things here are shaped by measurement rather than taste. The output goes to *files*, because
+/// the ladder is waited for by reading what has been written so far and a pipe nobody is draining
+/// would hide exactly that. And `/exit` is written only once the ladder has been seen, because
+/// piped input is *steering*: the first version of this test sent `/exit` with the prompt, the turn
+/// was dropped before it retried once, and it passed every assertion by never reaching the code
+/// under test.
 #[cfg(debug_assertions)]
 #[test]
 fn the_retry_ladder_says_so_in_the_transcript_and_not_on_stderr() {
     let home = test_home("retry-line", "http://127.0.0.1:1/v1");
+    let screen_path = home.join("stdout.txt");
+    let errors_path = home.join("stderr.txt");
 
     let mut child = binary()
         .env("FLINT_HOME", &home)
@@ -1346,8 +1350,12 @@ fn the_retry_ladder_says_so_in_the_transcript_and_not_on_stderr() {
         .env("FLINT_TERM_SIZE", "80x24")
         .env_remove("NO_COLOR")
         .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::from(
+            std::fs::File::create(&screen_path).expect("create the screen file"),
+        ))
+        .stderr(std::process::Stdio::from(
+            std::fs::File::create(&errors_path).expect("create the stderr file"),
+        ))
         .spawn()
         .expect("failed to run flint");
     {
@@ -1357,22 +1365,31 @@ fn the_retry_ladder_says_so_in_the_transcript_and_not_on_stderr() {
             .write_all(b"are you there\n")
             .expect("failed to write stdin");
         stdin.flush().expect("flush");
-        // The ladder is 1s + 2s + 4s of waiting between four attempts, so this is comfortably past
-        // the end of the turn and well short of the test suite's patience.
-        std::thread::sleep(std::time::Duration::from_secs(10));
+
+        // The ladder is four attempts and 1s + 2s + 4s of waiting, so this is generous on a slow
+        // machine and short enough that a real hang is reported as one.
+        let read = |path: &std::path::Path| std::fs::read_to_string(path).unwrap_or_default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
+        while !read(&screen_path).contains("trying in") {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the ladder never retried; the screen held: {:?}",
+                read(&screen_path)
+            );
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
         stdin.write_all(b"/exit\n").expect("failed to write stdin");
     }
-    let out = child.wait_with_output().expect("flint did not finish");
-    let screen = String::from_utf8_lossy(&out.stdout).to_string();
-    let errors = String::from_utf8_lossy(&out.stderr).to_string();
+    let _ = child.wait_with_output().expect("flint did not finish");
+    let screen = std::fs::read_to_string(&screen_path).unwrap_or_default();
+    let errors = std::fs::read_to_string(&errors_path).unwrap_or_default();
     let _ = std::fs::remove_dir_all(&home);
 
     // "trying in", not "retrying in": the notice is one long line and the strip wraps it, so the
-    // captured bytes carry a `\r\n` and a repaint escape in the middle of the word. The phrase that
-    // survives the wrap is the one that is on a row of its own.
+    // captured bytes carry a `\r\n` and a repaint escape in the middle of the word.
     assert!(
         screen.contains("trying in"),
-        "the retry never reached the transcript: {screen:?}"
+        "the retry left the transcript between the wait and the exit: {screen:?}"
     );
     assert!(
         !errors.contains("trying in"),
