@@ -1175,3 +1175,338 @@ async fn a_childs_own_progress_reaches_the_parents_status_row() {
         "the parent's status row never said what the child was doing: {drawn:?}"
     );
 }
+
+/// One step of a scripted conversation.
+enum Step {
+    /// Answer with prose.
+    Say(&'static str),
+    /// Ask for a tool. `{pid}` is replaced by the child's pid, read out of the request: a model knows
+    /// which child it is talking about only because the tool result told it.
+    Call(&'static str, &'static str),
+}
+
+/// A scripted model that answers by *conversation* rather than by request number.
+///
+/// A background child asks the model whenever it likes, so "the parent's turn is request 3" stops
+/// being true the moment nothing waits for the child -- the child's request races the parent's next
+/// one. The first user message is what tells two conversations apart, and each conversation keeps its
+/// own count.
+struct Scripts {
+    steps: Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>,
+    /// (a phrase from that conversation's first user message, its steps, how long to hold each answer)
+    scripts: Vec<(&'static str, Vec<Step>, std::time::Duration)>,
+}
+
+impl Respond for Scripts {
+    fn respond(&self, req: &Request) -> ResponseTemplate {
+        let body = String::from_utf8_lossy(&req.body).to_string();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+        let first = parsed
+            .get("messages")
+            .and_then(|messages| messages.as_array())
+            .and_then(|messages| {
+                messages
+                    .iter()
+                    .find(|message| message.get("role").and_then(|r| r.as_str()) == Some("user"))
+            })
+            .and_then(|message| message.get("content").and_then(|c| c.as_str()))
+            .unwrap_or("")
+            .to_string();
+        let (phrase, steps, delay) = self
+            .scripts
+            .iter()
+            .find(|(phrase, ..)| first.contains(phrase))
+            .unwrap_or_else(|| panic!("no script for a conversation that began with: {first}"));
+        let n = {
+            let mut counts = self.steps.lock().expect("steps lock");
+            let count = counts.entry((*phrase).to_string()).or_insert(0);
+            let n = *count;
+            *count += 1;
+            n
+        };
+        let answer = match steps.get(n).or_else(|| steps.last()) {
+            Some(Step::Say(text)) => prose(text),
+            Some(Step::Call(tool, args)) => {
+                let args = if args.contains("{pid}") {
+                    let pid = pid_from_a_handle(&body).unwrap_or_else(|| {
+                        panic!("{tool} was given a pid placeholder and the request has no handle")
+                    });
+                    args.replace("{pid}", &pid.to_string())
+                } else {
+                    (*args).to_string()
+                };
+                tool_call(tool, &args)
+            }
+            None => prose("NOTHING SCRIPTED"),
+        };
+        ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_delay(*delay)
+            .set_body_string(answer)
+    }
+}
+
+/// The pid in the handle a background `task` hands back, which is the only place a script can get it.
+fn pid_from_a_handle(text: &str) -> Option<u32> {
+    let at = text.find("background: pid ")? + "background: pid ".len();
+    let digits: String = text[at..].chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// Run a flint and report when *it* exited, which is not the same moment its pipes close.
+///
+/// `run_flint` uses `output()`, and that waits for the last writer of stdout to go away -- which is
+/// the parent only while nothing it started holds the pipe. A background child is exactly the case
+/// where the two differ, so the test that is about "the parent did not wait" measures the parent's own
+/// exit rather than the harness's patience. Nothing is read from the streams here: the session file is
+/// where the test looks, as it does everywhere else.
+fn run_flint_until_exit(home: &Path, work: &Path) -> (i32, std::time::Duration) {
+    let mut child = binary()
+        .args([
+            "-p",
+            "ask the child",
+            "--json",
+            "--cwd",
+            &work.display().to_string(),
+        ])
+        .env("FLINT_HOME", home)
+        .env_remove("FLINT_DEPTH")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to run flint");
+    let clock = std::time::Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().expect("wait") {
+            return (status.code().unwrap_or(-1), clock.elapsed());
+        }
+        if clock.elapsed() > std::time::Duration::from_secs(90) {
+            let _ = child.kill();
+            panic!("the parent never exited");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+/// A background child is a handle: the parent finishes while the child works, and the answer is on
+/// disk afterwards.
+///
+/// This is the difference the whole `background` flag exists for. `task` waits, which is right for a
+/// job whose answer is the next thing you need and wrong for one that takes minutes -- and the
+/// alternative an agent had was `bash` with an ampersand, which loses the exit code, the session path
+/// and the stream. The three facts checked here are the ones a caller cannot reconstruct: the parent
+/// did not wait (the clock), the handle names the conversation (the session path), and the answer
+/// lands there after the parent is gone (the file).
+#[tokio::test]
+async fn a_background_child_is_a_handle_and_answers_after_the_parent_is_gone() {
+    let _solo = alone().await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(Scripts {
+            steps: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            scripts: vec![
+                (
+                    "ask the child",
+                    vec![
+                        // The parent starts a job and does not wait for it.
+                        Step::Call("task", r#"{"prompt":"SLOW JOB","background":true}"#),
+                        Step::Say("PARENT DONE"),
+                    ],
+                    std::time::Duration::ZERO,
+                ),
+                // Eight seconds of work, against a parent whose own run takes one.
+                (
+                    "SLOW JOB",
+                    vec![Step::Say("CHILD WAS SLOW")],
+                    std::time::Duration::from_secs(8),
+                ),
+            ],
+        })
+        .mount(&server)
+        .await;
+
+    let home = scratch("background", &server.uri());
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("work dir");
+
+    let (code, elapsed) = run_flint_until_exit(&home, &work);
+    assert_eq!(code, 0, "the parent ended badly");
+    // The child's answer is eight seconds away and the parent is done in one: a parent that had waited
+    // would be past this by the time it wrote its answer, which is what the clock says.
+    assert!(
+        elapsed < std::time::Duration::from_secs(6),
+        "the parent waited for a background child: {elapsed:?}"
+    );
+
+    // The parent's own conversation, found by what only it says: its prompt, and not a child's.
+    let mut parent = None;
+    for entry in walk(&home.join("sessions")) {
+        if entry.to_string_lossy().contains("children") {
+            continue;
+        }
+        let text = transcript(&entry);
+        if text.contains("ask the child") {
+            parent = Some(text);
+        }
+    }
+    let text = parent.expect("the parent's session was not found");
+    assert!(
+        text.contains("started in the background: pid "),
+        "no handle came back: {text}"
+    );
+
+    let child_session = sessions_named(&text)
+        .into_iter()
+        .find(|path| path.to_string_lossy().contains("children"))
+        .expect("the handle did not name the child's conversation");
+    assert!(
+        child_session.is_file(),
+        "the handle names a session that is not there: {child_session:?}"
+    );
+
+    // The child outlived the parent, and its answer is where the handle said it would be. Polled
+    // rather than read once: the point of a background child is that nobody is waiting for it, so the
+    // test has to be the one that waits.
+    let mut answer = String::new();
+    for _ in 0..120 {
+        answer = transcript(&child_session);
+        if answer.contains("CHILD WAS SLOW") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    assert!(
+        answer.contains("CHILD WAS SLOW"),
+        "the child never wrote its answer after the parent exited: {answer}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A handle is usable: a model can ask where a child is, and then collect what it said.
+///
+/// The pid is not something the scripted model could know -- it arrives in the tool result -- so the
+/// stub reads it back out of the request, which is exactly what a model does. That is the property
+/// under test: the handle is not a receipt to look at, it is an argument for the next call.
+#[tokio::test]
+async fn a_handle_says_where_a_child_is_and_then_collects_its_answer() {
+    let _solo = alone().await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(Scripts {
+            steps: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            scripts: vec![
+                (
+                    "ask the child",
+                    vec![
+                        Step::Call("task", r#"{"prompt":"SLOW JOB","background":true}"#),
+                        Step::Call("task_op", r#"{"action":"status"}"#),
+                        Step::Call("task_op", r#"{"action":"wait","pid":{pid}}"#),
+                        Step::Say("PARENT DONE"),
+                    ],
+                    std::time::Duration::ZERO,
+                ),
+                // Long enough that the status step sees it running and the wait step has to wait.
+                (
+                    "SLOW JOB",
+                    vec![Step::Say("THE SLOW ANSWER")],
+                    std::time::Duration::from_secs(3),
+                ),
+            ],
+        })
+        .mount(&server)
+        .await;
+
+    let home = scratch("handle", &server.uri());
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("work dir");
+
+    let (code, stdout, stderr) = run_flint(&home, &work, &[]);
+    assert_eq!(code, 0, "flint failed: {stderr}\n{stdout}");
+    let session = session_of(&stdout);
+    let text = transcript(&session);
+    assert!(
+        text.contains("PARENT DONE"),
+        "the parent did not finish: {stdout}"
+    );
+    // The status answer: where it is, and which job it is -- a pid alone would not tell a model that.
+    assert!(
+        text.contains("running for") && text.contains("asked: SLOW JOB"),
+        "the status answer does not say where the child is: {text}"
+    );
+    // And the wait answer, in the same shape a foreground `task` gives: the child's words, and the
+    // facts that decide what to do with them.
+    assert!(
+        text.contains("THE SLOW ANSWER"),
+        "the wait never gave back the child's answer: {text}"
+    );
+    assert!(
+        text.contains("exit code: 0 (finished)"),
+        "the wait gave back an answer with no exit code: {text}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A child that is going nowhere is asked to stop, and stops -- the one verb here that changes
+/// anything.
+///
+/// The word matters. `/stop` is what a person types at a run and what the timeout path already writes,
+/// so a child that hears it keeps the half of an answer it had drawn and exits 130; a kill would throw
+/// that away. This is also why the child's stdin lives in the registry rather than inside the future
+/// that spawned it: by the time a model asks a child to stop, that future is a returned tool result.
+#[tokio::test]
+async fn a_handle_can_ask_a_stuck_child_to_stop() {
+    let _solo = alone().await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(Scripts {
+            steps: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            scripts: vec![
+                (
+                    "ask the child",
+                    vec![
+                        Step::Call("task", r#"{"prompt":"STUCK JOB","background":true}"#),
+                        Step::Call("task_op", r#"{"action":"stop","pid":{pid}}"#),
+                        Step::Say("PARENT DONE"),
+                    ],
+                    std::time::Duration::ZERO,
+                ),
+                // A model call that never comes back, which is the state a stop is for.
+                (
+                    "STUCK JOB",
+                    vec![Step::Say("NEVER ANSWERED")],
+                    std::time::Duration::from_secs(60),
+                ),
+            ],
+        })
+        .mount(&server)
+        .await;
+
+    let home = scratch("stop", &server.uri());
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("work dir");
+
+    let (code, stdout, stderr) = run_flint(&home, &work, &[]);
+    assert_eq!(code, 0, "flint failed: {stderr}\n{stdout}");
+    let session = session_of(&stdout);
+    let text = transcript(&session);
+    assert!(
+        text.contains("PARENT DONE"),
+        "the parent did not finish: {stdout}"
+    );
+    assert!(
+        text.contains("asked to stop"),
+        "the stop said nothing about a child: {text}"
+    );
+    // 130 is "the run was stopped", and it is the child's own code: a child that had been killed would
+    // have none, and one that ran into its timeout would say so instead.
+    assert!(
+        text.contains("exit code: 130 (the run was stopped)"),
+        "the child did not stop the way a person stops one: {text}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}

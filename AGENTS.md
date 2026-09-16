@@ -32,7 +32,7 @@ whoever is changing the code — a person or a model driving it.
 | `src/agent.rs` | the tool loop: build the prompt, call the model, run tools, persist events |
 | `src/attach.rs` | `@path` in a one-shot prompt: which names are files, the inline block the model reads, and the 256 KB cap |
 | `src/provider.rs` | the OpenAI-compatible client, streaming, retries, usage |
-| `src/tools.rs` | the tool set, and the read-before-mutate gate |
+| `src/tools.rs` | the tool set (`task`/`tasks` for children, `task_op` for a child nobody waited for), and the read-before-mutate gate |
 | `src/patch.rs` | the `apply_patch` format, parsed and applied — pure functions |
 | `src/term.rs` | the inline viewport: scroll region, answer strip, status clock |
 | `src/display.rs` | how a tool call and its result read in the transcript |
@@ -43,7 +43,7 @@ whoever is changing the code — a person or a model driving it.
 | `src/search.rs` | web search: where the credential comes from, and DeepSeek's search endpoint |
 | `src/live.rs` | who else is working here: the presence record a run keeps while it lives, and the recent-changes signal that names no author |
 | `src/web.rs` | `--web`: the embedded viewer and the loopback listener that serves it |
-| `tests/` | `agent_loop` (stub provider), `cli_output` (real binary, raw bytes), `term_capture` (byte-exact terminal), `search_tool` (stub search endpoint), `balance` (the preflight, stub provider), `who` (the presence record and the changes that name no author), `task` (one flint starting another: argv, the child's stream, the depth bound, a readonly parent that cannot be talked into a writing child, a profile deciding the child's instructions and model, a fan-out whose children are shown to have started together, a child's own progress arriving on the parent's status row, what a dropped turn says about the child it left running -- in a session and on a `--json` stream, and a child's conversation being kept out of the person's list of conversations), `say` (the mailbox, and the assertion that a peer's words never reach a request body), `web_view` (the page's policy) |
+| `tests/` | `agent_loop` (stub provider), `cli_output` (real binary, raw bytes), `term_capture` (byte-exact terminal), `search_tool` (stub search endpoint), `balance` (the preflight, stub provider), `who` (the presence record and the changes that name no author), `task` (one flint starting another: argv, the child's stream, the depth bound, a readonly parent that cannot be talked into a writing child, a profile deciding the child's instructions and model, a fan-out whose children are shown to have started together, a child's own progress arriving on the parent's status row, what a dropped turn says about the child it left running -- in a session and on a `--json` stream, a child's conversation being kept out of the person's list of conversations, and the background handle: a parent that does not wait, a status that says where the child is, a wait that collects its answer, and a stop that ends it), `say` (the mailbox, and the assertion that a peer's words never reach a request body), `web_view` (the page's policy) |
 | `scripts/` | Node replay tools: `vtscreen.js`, `term-layout-test.js`, `layout-trace.js` |
 | `examples/python/` | the Python caller: `flint_call.py` (ask/ask_json, no dependencies), its stub and its checks |
 | `examples/mcp/` | flint as an MCP tool for Codex, Claude Code and Cursor: `flint_server.py` (stdlib only, one tool) and `test_mcp.py`, which speaks the protocol at it |
@@ -54,7 +54,7 @@ whoever is changing the code — a person or a model driving it.
 | `docs/deepseek-search.md` | web search: what was measured about DeepSeek's search, and what it costs |
 | `docs/decisions.md` | why flint is built this way, decision by decision |
 | `docs/sandbox.md` | a plan for replacing permission modes with grants — **not built, and it argues against the "Not doing, and why" entry in `ROADMAP.md` on purpose**; read it as an argument, not as the state of the tree |
-| `docs/agents.md` | the plan for runs that spawn, find and talk to each other (a `task` tool, presence, a mailbox, profiles) — stages 1, 2 and 4 are built and so is the mailbox half of stage 3 (`src/live.rs`, `TaskTool`/`TasksTool` in `src/tools.rs`, profiles in `src/context.rs`, `flint say`); the `.flint/` marker and the opt-in that would let a peer's words reach a model are not |
+| `docs/agents.md` | the plan for runs that spawn, find and talk to each other (a `task` tool, presence, a mailbox, profiles) — stages 1, 2 and 4 are built and so is the mailbox half of stage 3, including `background: true` and `task_op` (`src/live.rs`, `TaskTool`/`TasksTool`/`TaskOpTool` in `src/tools.rs`, profiles in `src/context.rs`, `flint say`); the `.flint/` marker and the opt-in that would let a peer's words reach a model are not |
 | `ROADMAP.md` | the plan of record: the ordered queue, and what is deliberately not done |
 | `HANDOFF.md` | state of the project at the end of the last working session |
 

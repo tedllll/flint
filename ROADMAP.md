@@ -1688,7 +1688,12 @@ measured and what was not.
   `sessions/<dir>/children/`, which no listing reads, so "mine" is decided by the layout rather than by
   a flag every reader would have to honour; the child's `meta` line names the parent (`parent`, set
   from `FLINT_PARENT`, which the tool writes for the child and nothing else does); and reading the
-  child's conversation is by path, or by `mv`-ing it up a level to adopt it.
+  child's conversation is by path, or by `mv`-ing it up a level to adopt it. **A child nobody waited
+  for is handled rather than abandoned**: `task` with `background: true` returns a handle (its pid and
+  its conversation), and `task_op` takes `status`, `wait` or `stop` for it — see "Background is the
+  same record" in [`docs/agents.md`](docs/agents.md) for why the handle is the parent's own job record
+  rather than the presence record, and for the measured fact that a caller reading stdout to EOF waits
+  for the whole process tree rather than for the run.
 - **MCP** — deferred, not refused: it is a protocol with real weight, and nothing here yet
   needs what it offers. **Being callable over MCP is the other direction and is built**:
   `examples/mcp/flint_server.py`.

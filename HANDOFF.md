@@ -78,7 +78,8 @@ in this checkout at once, one of them mid-write in `docs/sandbox.md`, and the ot
 half-written revision of it with `git add -A`). Its claim is that a subagent, a Python call, an MCP call
 and "a background process" are one thing — a run — seen through four doors, and that the MCP and Python
 doors are already built. **Stages 1, 2 and 4 are built, and so is the mailbox half of stage 3**
-(`flint who`, the `task` tool, `tasks`, profiles, `flint say`), the "Subagents" entry in `ROADMAP.md`
+(`flint who`, the `task` tool, `tasks`, profiles, `flint say`, and now `background: true` with `task_op`
+for a child nobody waited for), the "Subagents" entry in `ROADMAP.md`
 was edited in the same commit as the code that adopts it, and **the five decisions at the end of that
 file were answered on 2026-09-16 at the recommended values** — the depth bound (`FLINT_DEPTH`, maximum
 2), the mailbox default (a peer's words are shown to the human and never fed to the model, which is why
@@ -89,13 +90,13 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 508 passing, 1 ignored (305 lib, 3 in
+As of the commit that carries this file, `cargo test` is 511 passing, 1 ignored (305 lib, 3 in
 the binary's own tests, 33 `agent_loop`, 61 `cli_output`, 34 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
 be able to read, 4 the answer written where the caller asked, 3 the file inlined into the prompt,
 1 the stream checked on its bytes),
-7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 7 `who`, 10 `task`, 2 `say`), `cargo clippy
+7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 7 `who`, 13 `task`, 2 `say`), `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
 pass, and `python examples/python/test_call.py` is 117 checks, all passing (one of them waits
 out the fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from),
@@ -173,9 +174,48 @@ next turn in which `close_dangling_tool_calls` could say it. Four tests, each wa
 `a_childs_own_progress_reaches_the_parents_status_row` and `an_interrupted_task_says_what_it_left_running`
 in `tests/task.rs` (the second drives the real REPL through a pipe, steers mid-turn, then reads the
 parent's own session and stops the child by the pid the parent named), `a_childs_frames_are_reduced_to_what_it_is_doing_right_now`
-in `src/tools.rs`, and the stream test's budget shape in `tests/json_output.rs`. What is *still* missing
-is the handle itself — `task_status`, `task_wait`, `task_stop` — so collecting a child means reading the
-session the note names.
+in `src/tools.rs`, and the stream test's budget shape in `tests/json_output.rs`.
+
+**The handle itself is built, and building it moved three things out of the tool call.** `task` now
+takes `background: true` and returns at once with the child's pid and the conversation it is holding;
+`task_op` takes `action: "status" | "wait" | "stop"` and a `pid`, and answers in the same shape a
+foreground `task` does. It is **one** tool rather than the three the sketch named, because every schema
+is re-sent with every request and three verbs about one child do not deserve three schemas — and it is
+not folded into `task`, because a call that sometimes returns an answer and sometimes a receipt is one
+whose result a model has to guess at. The registry that the dropped-turn sentence already needed
+(`CHILDREN`) became the handle: it holds the child's stdin, the frames its reader absorbs, the session
+it named, and the exit status once it ends. Three consequences, each of which was a decision:
+
+- **The timeout moved off the waiter.** A background child has nobody waiting, so a `timeout_secs` that
+  only the waiter enforced was a budget that never came due. Every child now gets a detached
+  supervisor: it waits for the exit, writes `/stop` when the budget runs out, kills twenty seconds later
+  if that was ignored, and records the status for whoever asks — later, or never. A foreground `task`
+  became only a wait on a job that is already being watched.
+- **The child's stdin outlives the tool call.** It is kept in the job, because `/stop` is a line written
+  to a stdin the *parent* holds and by the time a model asks a child to stop, the future that spawned it
+  is a returned tool result. A background child therefore no longer sees its stdin close as the call
+  returns, which is what makes the stop possible at all.
+- **The handle is not the presence record**, which is what the plan sketched. A record can say a run is
+  alive; it cannot carry a pipe. So presence is for *seeing*: asked about a pid this run did not start,
+  `task_op status` reads the records and reports directory, endpoint, `readonly` and session, and says
+  plainly that it can be seen and not waited for or stopped. What `flint who` gained from the previous
+  commit — `Presence.session` — is exactly the field that answer needs.
+
+Three tests in `tests/task.rs`, all watched red first (with `background` temporarily ignored, all three
+fail on the assertion that owns them): a background child whose answer lands in its own session file
+after the parent has exited, a `task_op` status-then-wait pair where the scripted model reads the pid
+out of the tool result it was given, and a stop that ends a child stuck in a model call with exit 130 —
+a stop, not a kill, so the half-answer it had drawn survives. That last one needed a new stub shape: a
+scripted model that answers **by conversation** rather than by request number, because a background
+child's requests race the parent's and "the parent's turn is request 3" is no longer true.
+
+**Measured while writing those tests, and now written down in `docs/agents.md`:** the parent process
+was done in 0.4 s and the caller's read of its stdout hit EOF at 8.4 s, when the child finished. That is
+not a bug and not a Windows one — a spawned process inherits the standard output its parent was given,
+so anything that reads a run's stdout to EOF is waiting for the whole process tree rather than for the
+run. flint's own `bash` tool has always worked this way. The tests therefore measure the parent's own
+exit rather than the harness's patience (`run_flint_until_exit` in `tests/task.rs`), and a caller that
+wants to come back with the run it started should stop at the terminal frame rather than at EOF.
 
 **And a child's conversation no longer joins the person's list of conversations — the second report of
 that same evening.** "子代理的会话窗口居然可以被会话历史栏看到": a `task` child's session file was in

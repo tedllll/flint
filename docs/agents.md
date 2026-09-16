@@ -6,9 +6,9 @@ are built.** — a running flint writes a presence record and `flint who` reads 
 with `tasks` (`src/tools.rs`, `tests/task.rs`), a profile in `.flint/agents/` says how a child should
 start (`src/context.rs`), and a peer can leave it a message with `flint say` that is shown to the person
 and never sent to a model (`tests/say.rs`), so *being called*, *seeing each other*, *spawning*,
-*talking* and *naming a way to work* all work today. The five decisions at the end of this file **were
-answered on 2026-09-16: every recommended value was adopted**, and each is marked below with what that
-means for the code.
+*talking*, *naming a way to work* and *handling a run nobody waited for* all work today. The five
+decisions at the end of this file **were answered on 2026-09-16: every recommended value was adopted**,
+and each is marked below with what that means for the code.
 
 Written because of three questions asked directly, and because the same afternoon produced the incident
 that makes the middle of this document concrete: two agents were working in this checkout at once, one
@@ -40,7 +40,7 @@ That equality is the design, not a coincidence: a feature that works from outsid
 |---|---|---|
 | `flint -p … --json` over a pipe | Python, a shell, an editor, another agent's shell tool | **Built.** `examples/python/flint_call.py`; every fact needed to branch is on the stream |
 | an MCP tool call | Codex, Claude Code, Cursor | **Built.** `examples/mcp/flint_server.py`, one tool, stdio |
-| a `task` tool inside flint | flint itself | **Built.** `src/tools.rs` (`TaskTool`), `tests/task.rs`; one child per call, plus `tasks` for several at once. No background handle yet |
+| a `task` tool inside flint | flint itself | **Built.** `src/tools.rs` (`TaskTool`), `tests/task.rs`; one child per call, `tasks` for several at once, and `background: true` with `task_op` to look at, collect or stop a child nobody waited for |
 | a profile in `<project>/.flint/agents/<name>.md` | a person, once; a model or a person afterwards | **Built.** `src/context.rs`; the same child, started with instructions, a model and `readonly` already decided |
 
 The third door is the first two in Rust. It runs `std::env::current_exe()` with the same arguments,
@@ -151,6 +151,48 @@ that it started — but neither is a substitute for the three verbs: `task_statu
 collect, `task_stop` to stop paying. Until then, "collect" means reading the session file the note
 names, and "stop" means stopping that process by hand.
 
+**Built, and the sketch above was wrong in one place, which is the part worth reading.** The handle is
+*not* the presence record, and the reason is mechanical rather than a preference: `/stop` is a line
+written to the child's **stdin**, and only the process that spawned a child holds one. A presence record
+can say a run is alive; it cannot carry a pipe. So the handle is the **job** — the parent's own record
+of a child it started, held in memory (`CHILDREN` in `src/tools.rs`) next to the child's stdin, the
+frames its reader has absorbed, the session it named and the exit status once it ends. It is live
+process state, not derived state and not a cache: it is exactly the set of facts that stop existing when
+the process that owns them exits, and nothing on disk pretends otherwise.
+
+What presence is still for is the *looking*, and it is what makes the scope honest. `task_op` with
+`action: "status"` lists the children this run started; asked about a pid it did not start, it reads the
+presence records and answers with what those say — directory, endpoint, `readonly`, the conversation it
+is holding — and says plainly that it can be seen and not waited for or stopped. A person gets the whole
+listing from `flint who`.
+
+The three verbs became **one** tool with an `action`, not three tools. Every tool schema is re-sent with
+every request of every conversation, and three verbs about one child do not deserve three schemas; it is
+deliberately *not* folded into `task` either, because a call that sometimes answers and sometimes hands
+back a receipt is one whose result a model has to guess at. The names in the sketch (`task_status`,
+`task_wait`, `task_stop`) are therefore `task_op` with `action: "status" | "wait" | "stop"`.
+
+Three things fell out of building it that the sketch did not anticipate:
+
+- **The timeout had to move off the waiter.** A background child has nobody waiting, so a
+  `timeout_secs` that only the waiter enforced would have been a budget that never came due. Each child
+  now gets a detached supervisor: it waits for the exit, writes `/stop` when the budget runs out, kills
+  twenty seconds later if that was ignored, and records the exit status for whoever asks — later, or
+  never. A foreground `task` is now only a wait on a job that is already being watched, which is why a
+  `task` child whose turn was dropped still ends when its budget says.
+- **The child's stdin outlives the tool call.** It is kept in the job rather than inside the future that
+  spawned the child, because that future is a returned tool result by the time anyone asks a child to
+  stop. This is also why a background child no longer sees its stdin close when the call returns.
+- **A caller's pipe is not the parent's exit.** Measured while testing this: the parent process was done
+  in 0.4 s, and the caller's read of its stdout hit EOF at 8.4 s — when the child it had started
+  finished. That is not a flint bug and not a Windows one: a spawned process inherits the standard
+  output its parent was given (fd 1, or `hStdOutput`), so **anything that reads a run's stdout to EOF is
+  waiting for the whole process tree, not for the run**. flint's own `bash` tool has always worked this
+  way — a backgrounded command keeps the tool waiting on the pipe — which is why the tests measure the
+  parent's own exit rather than the harness's patience. A caller that wants to come back when the run it
+  started comes back should stop at the terminal frame (`turn.completed`, or the `result` object) rather
+  than at EOF; Python's `subprocess.communicate()` reads to EOF by design and will therefore wait.
+
 ## Stages
 
 **Stage 1 — presence and `flint who`.** A record per live run, refreshed on the heartbeat flint
@@ -178,13 +220,14 @@ a record that has said nothing yet.
 same commit, keeping the original reason. — **Built**, and the differences from the sketch are the part
 worth reading:
 
-- **Nothing here is a background handle yet.** `background: true`, `task_status`, `task_wait` and
-  `task_stop` are not built: a `task` call blocks until the child ends, and the only stop is the
-  caller's timeout, which writes `/stop` to the child's stdin first and kills it only if that is
-  ignored. `/stop` rather than `kill` because the half-answer the child had drawn is still written to
-  its session file, and a person reading that later should find work, not a corpse. The handle is the
-  presence record, and it is available to a *person* through `flint who` even though the tool does not
-  return one.
+- **The background handle is built, as one tool with an `action`.** `task` takes `background: true` and
+  returns at once with the child's pid and the conversation it is holding; `task_op` takes
+  `action: "status" | "wait" | "stop"`, and `pid` names which child. The three verbs did not become
+  three tools because every schema is re-sent with every request, and they did not go into `task`
+  because a call that sometimes returns an answer and sometimes a receipt is one whose result a model
+  has to guess at. What a caller gets is described under "Background is the same record", including the
+  two things building it changed: the timeout moved off the waiter into a detached supervisor, and the
+  child's stdin is kept in the job so that a later call can still write `/stop` to it.
 - **The child is the same binary** (`std::env::current_exe()`), not a path looked up on `PATH`:
   a child built from a different flint than the caller is talking to is a different program. `FLINT_BIN`
   overrides it, for a wrapper that wants a specific build and for the tests, which live outside the
@@ -201,9 +244,9 @@ worth reading:
 - **A session id in the presence record is built.** The stage-1 note above is now history: the record
   carries `session` as a **path** (written where the writer is created, updated where the page is told
   the run has moved), so a `task` child appears in `flint who` as a run *and* as the conversation it is
-  holding, and a reader no longer has to guess which file is live. What is still missing from the
-  handle is the part a model can use: nothing here can *wait* for that child or *stop* it, because a
-  process can only write `/stop` to a stdin it owns.
+  holding, and a reader no longer has to guess which file is live. That path is also how `task_op`
+  answers for a run this process did not start: the record says what it is and where its conversation
+  is, and says honestly that it cannot be waited for or stopped from here.
 - **A child's conversation is not one of the person's, and it says whose it is.** Reported from a real
   session: a `task` child's conversation appeared in `/sessions` and in the page's sidebar exactly like
   one the person had, and `--continue` — "the newest conversation in this directory" — resumed the
@@ -217,19 +260,18 @@ worth reading:
   conversation they want to keep. The file itself is a session like any other — same format, resumable
   by path — which is what keeps "a run is a run" true rather than a promise about the happy path.
 - **A child's own progress reaches the parent's status row, and a child left running is named.** Both
-  were added after a bug report, and both are the price of having no handle yet. A realistic `task`
+  were added after a bug report, before there was any handle. A realistic `task`
   runs for minutes; the parent's row said one unchanging word (`task`) for all of it, because the child
   was already describing what it was doing on its own `--json` stream and the parent was reading those
   frames and discarding them. Typing at a parent whose row is frozen is what a person does next, and
   because a typed line steers, the turn was dropped — and the child, a process of its own, kept going
   for minutes while the parent's record said the tool *"was requested but never ran"*. So: the child's
   `tool.started` and `status` frames are forwarded as `task: running search` (its answer is not — a
-  status row is not a second transcript), the placeholder a dropped turn writes says the result never
-  came back **and** describes the child that is still going, with its pid and the session its answer
-  will be written to, and the same sentence goes to the person's transcript and onto a `--json` stream
-  that is about to end. What is still missing is the handle itself: nothing here can *wait* for that
-  child or *stop* it (see "Background is the same record"), so the answer is collected by reading the
-  session file it names rather than by asking the parent.
+  status row is not a second transcript), and the placeholder a dropped turn writes says the result
+  never came back **and** describes the child that is still going, with its pid and the session its
+  answer will be written to. That sentence and the handle now read the same record, so a child that has
+  ended stops being described as "still going", and `task_op` can hand over the answer the sentence
+  promised.
 
 **Stage 3 — the mailbox.** `flint say`, `peer.message`, and the opt-in that lets a peer's words reach
 the model. Presumably a `.flint/` presence marker in the project as well, so two `FLINT_HOME`s can see

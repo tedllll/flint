@@ -124,6 +124,10 @@ impl ToolBox {
                     parent: None,
                 },
             }),
+            // The handle for a child nobody waited for. It starts nothing and costs nothing to offer:
+            // one schema with three words in it, against a `task` that has been able to leave a child
+            // running since the fan-out existed.
+            Box::new(TaskOpTool),
         ];
         // Always offered: reading a URL needs no credential, and this is the safe path to
         // the open web -- the alternative is `bash` and `curl`, which puts a page's raw
@@ -823,17 +827,53 @@ pub fn notice(message: &str) {
     }
 }
 
-/// A child this run started, from the moment it is spawned until its stream ends.
-struct Running {
+/// A child this run started, from the moment it is spawned until the last call that asks about it.
+///
+/// It used to be a note that a child was running -- for the one sentence a dropped turn has to be
+/// honest with. It is now the whole handle, because that sentence and a handle are the same fact: a
+/// run that starts a child and does not wait for it needs somewhere the answer will be, and the
+/// presence record says a process is alive without saying what it answered. Everything a later tool
+/// call needs is here: where its conversation is, whether it has ended, what it said, and the stdin
+/// that is the only way to ask it to stop.
+struct Job {
     pid: u32,
     label: String,
-    /// Where its session is, once it has said. Shared because the reader task learns it and the code
-    /// that has to be honest about a child reads it later, from somewhere else entirely.
-    session: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// What it was asked, cut short: a status listing that does not say which job this is makes a
+    /// person read the session file to tell two children apart.
+    prompt: String,
     started: std::time::Instant,
+    /// Set when the child ended, so "finished 40s ago" is answerable without waiting for anything.
+    ended: std::sync::Mutex<Option<std::time::Instant>>,
+    depth: u32,
+    readonly: bool,
+    /// The budget that is enforced on it whether or not anyone is waiting.
+    timeout_secs: u64,
+    /// The child's stdin, kept here rather than in the future that started it: `/stop` has to be
+    /// writable from a *later* turn, and the future that spawned the child is long gone by then.
+    stdin: std::sync::Mutex<Option<tokio::process::ChildStdin>>,
+    /// Where its session is, once it has said. Learned by the reader from `session.started`.
+    session: std::sync::Mutex<Option<String>>,
+    /// Told when it says, so a handle can name the conversation without polling for it.
+    session_known: tokio::sync::Notify,
+    /// What it answered, once it has ended. `None` means still running.
+    finished: std::sync::Mutex<Option<Finished>>,
+    /// Told when it ends, so a wait is a wake-up rather than a loop of sleeps.
+    done: tokio::sync::Notify,
+    /// The schema handed to it through a file, deleted once it has ended.
+    schema_file: std::sync::Mutex<Option<PathBuf>>,
 }
 
-/// The children this process has started and not yet reaped.
+/// How a child ended, and everything it said on the way.
+#[derive(Clone)]
+struct Finished {
+    code: i32,
+    /// The extra sentence the wait itself has to contribute: stopped after Ns, or killed.
+    note: String,
+    stderr: String,
+    collected: Collected,
+}
+
+/// The children this process has started.
 ///
 /// A global for the same reason the two sinks above are, and one more: the code that has to be honest
 /// about a child -- `Agent::close_dangling_tool_calls`, which repairs the conversation after the wait
@@ -841,31 +881,209 @@ struct Running {
 /// thing that was dropped. Measured on a real session: a `task` child outlived the turn that started
 /// it by minutes, and the parent's record said the tool "was requested but never ran". Both halves of
 /// that are wrong, and this is the only place the truth survives the drop.
-static CHILDREN: std::sync::OnceLock<std::sync::Mutex<Vec<Running>>> =
+///
+/// It is process state and not persisted state, which is the honest scope of a handle: the children
+/// *this* run started and has not forgotten. A run in another process is found through its presence
+/// record, which is why that record now carries the conversation as well as the pid.
+static CHILDREN: std::sync::OnceLock<std::sync::Mutex<Vec<std::sync::Arc<Job>>>> =
     std::sync::OnceLock::new();
 
-fn running_children() -> std::sync::MutexGuard<'static, Vec<Running>> {
+/// How many finished children are kept around to be asked about.///
+/// A long REPL session starts children forever, and each one held here holds its answer in memory.
+/// Eight is more than anyone collects by pid in one sitting, and a child that fell off the end is
+/// still on disk: its session file is the record, which is the rule everywhere else in this project.
+const KEEP_FINISHED: usize = 8;
+
+fn jobs() -> std::sync::MutexGuard<'static, Vec<std::sync::Arc<Job>>> {
     CHILDREN
         .get_or_init(|| std::sync::Mutex::new(Vec::new()))
         .lock()
         .unwrap_or_else(|e| e.into_inner())
 }
 
-/// Note a child as running, and hand back the slot its session path will be written into.
-fn running_now(pid: u32, label: &str) -> std::sync::Arc<std::sync::Mutex<Option<String>>> {
-    let session = std::sync::Arc::new(std::sync::Mutex::new(None));
-    running_children().push(Running {
-        pid,
-        label: label.to_string(),
-        session: std::sync::Arc::clone(&session),
-        started: std::time::Instant::now(),
-    });
-    session
+/// Every child this run started, running first, newest first.
+fn jobs_listed() -> Vec<std::sync::Arc<Job>> {
+    let mut jobs = jobs().clone();
+    jobs.sort_by_key(|job| (job.has_finished(), std::cmp::Reverse(job.started)));
+    jobs
 }
 
-/// The child is over, whatever it answered: nothing is left running to tell anyone about.
-fn no_longer_running(pid: u32) {
-    running_children().retain(|child| child.pid != pid);
+/// One child by pid, when this run is the one that started it.
+fn job_by_pid(pid: u32) -> Option<std::sync::Arc<Job>> {
+    jobs().iter().find(|job| job.pid == pid).cloned()
+}
+
+/// Forget the oldest finished children, so that a long session does not grow one answer per child.
+fn forget_old_finished() {
+    let mut jobs = jobs();
+    let mut finished: Vec<usize> = jobs
+        .iter()
+        .enumerate()
+        .filter(|(_, job)| job.has_finished())
+        .map(|(index, _)| index)
+        .collect();
+    if finished.len() <= KEEP_FINISHED {
+        return;
+    }
+    finished.sort_by_key(|index| jobs[*index].started);
+    let drop_count = finished.len() - KEEP_FINISHED;
+    for index in finished.into_iter().take(drop_count).rev() {
+        jobs.remove(index);
+    }
+}
+
+impl Job {
+    fn has_finished(&self) -> bool {
+        self.finished
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
+
+    fn session(&self) -> Option<String> {
+        self.session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// The one line a status listing gives for this child.
+    fn describe(&self) -> String {
+        let session = match self.session() {
+            Some(path) => format!("session {path}"),
+            None => "its session is not named yet".to_string(),
+        };
+        match self.finished.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            Some(finished) => format!(
+                "pid {}: {} -- ended with exit code {} ({}), {}; `wait` collects what it said",
+                self.pid,
+                self.label,
+                finished.code,
+                task_exit_meaning(finished.code),
+                session
+            ),
+            None => format!(
+                "pid {}: {} -- running for {}, {}; asked: {}",
+                self.pid,
+                self.label,
+                elapsed_label(self.started.elapsed()),
+                session,
+                util::truncate(&self.prompt, 80)
+            ),
+        }
+    }
+
+    /// Wait for the child to end, or give up after `limit`.
+    ///
+    /// The notify is registered before the value is read, so a child that ends between the two is
+    /// still seen: the wake-up is already armed when the check happens, which is what makes this a
+    /// wait rather than a race.
+    async fn wait(&self, limit: Option<std::time::Duration>) -> Option<Finished> {
+        let deadline = limit.map(|limit| tokio::time::Instant::now() + limit);
+        loop {
+            let notified = self.done.notified();
+            if let Some(finished) = self
+                .finished
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+            {
+                return Some(finished);
+            }
+            match deadline {
+                None => notified.await,
+                Some(deadline) => {
+                    if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Wait for the child to name its conversation, which it does before it asks the model anything.
+    async fn wait_session(&self, limit: std::time::Duration) -> Option<String> {
+        let deadline = tokio::time::Instant::now() + limit;
+        loop {
+            let notified = self.session_known.notified();
+            if let Some(path) = self.session() {
+                return Some(path);
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return None;
+            }
+        }
+    }
+
+    /// Ask the child to stop, the way a person stops a run.
+    ///
+    /// A request, not a kill: `/stop` is the word the terminal takes, and the child commits the half
+    /// of an answer it had drawn before it goes. A child that ignores it is ended by its own timeout,
+    /// which is enforced by the supervisor rather than by whoever happens to be waiting.
+    async fn ask_to_stop(&self) -> bool {
+        use tokio::io::AsyncWriteExt;
+        // Lifted out of the slot rather than borrowed across the write: a `std::sync::MutexGuard`
+        // held across an await would make the whole supervisor future `not Send`, and this is the one
+        // await in it. It goes back afterwards so that a second ask, or the supervisor's own timeout,
+        // can still reach the same child.
+        let mut stdin = match self.stdin.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            Some(stdin) => stdin,
+            None => return false,
+        };
+        let mut wrote = stdin.write_all(b"/stop\n").await.is_ok();
+        wrote = wrote && stdin.flush().await.is_ok();
+        *self.stdin.lock().unwrap_or_else(|e| e.into_inner()) = Some(stdin);
+        wrote
+    }
+
+    /// The child's answer, in the shape a caller reads.
+    fn render(&self, finished: &Finished) -> String {
+        let collected = &finished.collected;
+        let mut text = match collected.answer() {
+            Some(answer) => answer,
+            // Nothing on the stream at all: the reason is on stderr, and passing it on is the
+            // difference between "the child failed" and "the child refused before it started".
+            None => finished.stderr.trim().to_string(),
+        };
+        if text.trim().is_empty() {
+            text = "(the child said nothing)".to_string();
+        }
+        let code = finished.code;
+        text.push_str(&format!(
+            "\n\nexit code: {code} ({})",
+            task_exit_meaning(code)
+        ));
+        if let Some(outcome) = &collected.outcome {
+            text.push_str(&format!("\noutcome: {outcome}"));
+        }
+        if let Some(cause) = &collected.error_code {
+            text.push_str(&format!("\ncause: {cause}"));
+        }
+        if let Some(error) = &collected.error {
+            let first = error.lines().next().unwrap_or("").trim();
+            text.push_str(&format!("\nerror: {first}"));
+        }
+        if let Some(result) = &collected.result {
+            // The validated object, on one line: this is the half of "structured" that a shell
+            // pipeline cannot give back.
+            text.push_str(&format!("\nresult: {result}"));
+        }
+        for warning in collected.warnings.iter().take(3) {
+            text.push_str(&format!("\nwarning: {warning}"));
+        }
+        text.push_str(&finished.note);
+        text.push_str(&format!(
+            "\ndepth: {} (this run is {}), readonly: {}, waited: {:.0}s",
+            self.depth,
+            self.depth - 1,
+            self.readonly,
+            self.started.elapsed().as_secs_f64()
+        ));
+        if let Some(session) = collected.session.clone().or_else(|| self.session()) {
+            text.push_str(&format!("\nsession: {session}"));
+        }
+        text
+    }
 }
 
 /// The children this run has left running, in the words a caller needs. Empty when there are none.
@@ -876,21 +1094,17 @@ fn no_longer_running(pid: u32) {
 /// not to ask for the same work again, which is the mistake this exists to prevent: the tokens are
 /// already spent, and a model that cannot see that spends them twice.
 pub fn children_running() -> Vec<String> {
-    running_children()
+    jobs()
         .iter()
+        .filter(|job| !job.has_finished())
         .map(|child| {
-            let session = child
-                .session
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clone();
             let mut line = format!(
                 "a child this run started is still going on its own: {} (pid {}, running for {})",
                 child.label,
                 child.pid,
                 elapsed_label(child.started.elapsed())
             );
-            match session {
+            match child.session() {
                 Some(path) => line.push_str(&format!(
                     ". Its answer is being written to its own session, {path} -- read it there \
                      rather than asking for the same work again"
@@ -3166,6 +3380,9 @@ pub struct TaskConfig {
 /// A child that is ready to start.
 struct Child {
     argv: Vec<String>,
+    /// What it was asked, kept for the status listing: two children of one parent are told apart by
+    /// their jobs, not by their pids.
+    prompt: String,
     /// The depth it will run at, which is this run's depth plus one.
     depth: u32,
     /// The session that started it, passed as `FLINT_PARENT` rather than as an argument.
@@ -3424,6 +3641,7 @@ fn prepare_child(config: &TaskConfig, args: &Value, prompt: &str, index: usize) 
     );
     Ok(Child {
         argv,
+        prompt: prompt.to_string(),
         depth: task_depth() + 1,
         parent: config.parent.clone(),
         timeout_secs,
@@ -3477,6 +3695,10 @@ impl Tool for TaskTool {
             "timeout_secs": {
                 "type": "number",
                 "description": "Stop the child after this long (default 600). Stopping is `/stop`, so half an answer survives."
+            },
+            "background": {
+                "type": "boolean",
+                "description": "Start it and return at once with a handle (its pid and its session) instead of waiting. Collect the answer later with `task_op` action \"wait\". Use it when the job is minutes long and what you do next does not depend on it."
             }
         });
         // Only offered when this directory actually has profiles, and only the names that exist: an
@@ -3513,7 +3735,247 @@ impl Tool for TaskTool {
             return Ok(refusal);
         }
         let child = prepare_child(&self.config, args, prompt, 0)?;
-        run_child(child).await
+        // `background` is a *decision about waiting*, not about the child: the same run, the same
+        // session, the same bill. What changes is that this call hands back a handle instead of the
+        // answer, which is what a model needs when the job is minutes long and the next thing it
+        // wants to do does not depend on it.
+        let background = args
+            .get("background")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        let job = start_child(child)?;
+        if background {
+            Ok(background_handle(job).await)
+        } else {
+            finish_child(job).await
+        }
+    }
+}
+
+/// What became of a child this run started: look at it, wait for it, or ask it to stop.
+///
+/// The other half of `task`'s `background: true`, and deliberately *one* tool rather than three:
+/// every tool schema is re-sent with every request of every conversation, so three verbs about one
+/// child would cost three schemas to say one thing. It is deliberately not folded into `task`
+/// either -- a call that sometimes returns an answer and sometimes a receipt is one whose result a
+/// model has to guess at, and `background` is the only reason there would be to guess.
+///
+/// It is scoped to the children *this* run started, and that is not a shortcut: a process can only
+/// write `/stop` to a stdin it holds, and only the run that spawned a child holds one. Another run's
+/// child is visible through its presence record -- which is what `flint who` reads, and what the
+/// session path in that record is for -- and is handled there by a person, not from here.
+pub struct TaskOpTool;
+
+/// What the presence records say about a run this one did not start.
+fn foreign_run(pid: u32) -> Option<String> {
+    let listing = crate::live::scan();
+    let (record, state) = listing
+        .alive
+        .iter()
+        .find(|record| record.pid == pid)
+        .map(|record| (record, "still running"))
+        .or_else(|| {
+            listing
+                .stale
+                .iter()
+                .find(|record| record.pid == pid)
+                .map(|record| {
+                    (
+                        record,
+                        "stale: its process is gone and nothing removed its record",
+                    )
+                })
+        })?;
+    let session = if record.session.is_empty() {
+        "its session was never named".to_string()
+    } else {
+        format!("session {}", record.session)
+    };
+    Some(format!(
+        "pid {pid} is a flint run this one did not start, and it is {state}: {}, {}/{}, readonly: {}, \
+         last seen {}s ago, {session}. Only the run that started a child holds its stdin, so this one \
+         can be seen rather than waited for or stopped -- `flint who` names it for a person.",
+        record.cwd.display(),
+        record.provider,
+        record.model,
+        record.readonly,
+        crate::live::now_secs().saturating_sub(record.last_seen)
+    ))
+}
+
+/// Which child an action is about: the pid when one was named, otherwise the only one it could mean.
+fn job_for(pid: Option<u32>, action: &str) -> Result<std::sync::Arc<Job>> {
+    if let Some(pid) = pid {
+        if let Some(job) = job_by_pid(pid) {
+            return Ok(job);
+        }
+        return Err(anyhow!(
+            "no child of this run has pid {pid}. {}",
+            foreign_run(pid).unwrap_or_else(|| "Nothing on this machine says it is either: `flint \
+                                                 who` lists the runs that exist, and `task_op` \
+                                                 action \"status\" lists the children this run \
+                                                 started."
+                .to_string())
+        ));
+    }
+    let running: Vec<std::sync::Arc<Job>> = jobs()
+        .iter()
+        .filter(|job| !job.has_finished())
+        .cloned()
+        .collect();
+    // Nothing running: a finished child is still worth collecting, and there is only one thing a
+    // bare `wait` could mean when exactly one of them exists.
+    let candidates = if running.is_empty() {
+        jobs_listed()
+    } else {
+        running
+    };
+    match candidates.len() {
+        0 => Err(anyhow!(
+            "this run has started no children, so there is nothing to {action}. `task` starts one, \
+             and `task` with `background: true` starts one and returns at once."
+        )),
+        1 => Ok(candidates[0].clone()),
+        _ => Err(anyhow!(
+            "{} children of this run are in play: {} -- name one with `pid`.",
+            candidates.len(),
+            candidates
+                .iter()
+                .map(|job| job.pid.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+/// Every child this run started, in the words of the tool that has to answer for them.
+fn status_text(pid: Option<u32>) -> String {
+    match pid {
+        Some(pid) => match job_by_pid(pid) {
+            Some(job) => job.describe(),
+            None => foreign_run(pid).unwrap_or_else(|| {
+                format!(
+                    "no child of this run has pid {pid}, and nothing on this machine says it is \
+                     {pid}. `flint who` lists the runs that exist."
+                )
+            }),
+        },
+        None => {
+            let listed = jobs_listed();
+            if listed.is_empty() {
+                "this run has started no children. `task` starts one; `task` with \
+                 `background: true` starts one and returns at once with its pid."
+                    .to_string()
+            } else {
+                listed
+                    .iter()
+                    .map(|job| job.describe())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for TaskOpTool {
+    fn name(&self) -> &str {
+        "task_op"
+    }
+
+    fn description(&self) -> &str {
+        "See what became of a child this run started and did not wait for. `status` reports every \
+         child this run started, running first; `wait` collects one's answer, waiting for it if need \
+         be; `stop` asks one to stop, which keeps the half of an answer it had drawn. Only children \
+         *this* run started can be waited for or stopped -- a run in another process can be seen with \
+         `flint who`, not handled from here."
+    }
+
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["status", "wait", "stop"],
+                    "description": "status: where every child of this run is. wait: its answer, when it has one. stop: ask it to stop."
+                },
+                "pid": {
+                    "type": "number",
+                    "description": "Which child, as the handle from `task` gave it. Default: all of them for status, or the only one in play for wait and stop."
+                },
+                "timeout_secs": {
+                    "type": "number",
+                    "description": "wait: give up after this long (default 300) and report where it is. stop: how long it has to stop (default 20)."
+                }
+            },
+            "required": ["action"]
+        })
+    }
+
+    async fn call(&self, args: &Value) -> Result<String> {
+        let action = require_str(args, "action")?.trim().to_ascii_lowercase();
+        let pid = args
+            .get("pid")
+            .and_then(|value| value.as_u64())
+            .map(|pid| pid as u32);
+        let seconds = args
+            .get("timeout_secs")
+            .and_then(|value| value.as_u64())
+            .filter(|secs| *secs > 0);
+        match action.as_str() {
+            "status" => Ok(status_text(pid)),
+            "wait" => {
+                let job = job_for(pid, "wait for")?;
+                let limit = seconds.unwrap_or(300);
+                match job.wait(Some(Duration::from_secs(limit))).await {
+                    Some(finished) => Ok(job.render(&finished)),
+                    None => Ok(format!(
+                        "still running after {limit}s (its own budget is {}s, and it is stopped then \
+                         whatever anyone is waiting for).\n{}",
+                        job.timeout_secs,
+                        job.describe()
+                    )),
+                }
+            }
+            "stop" => {
+                let job = job_for(pid, "stop")?;
+                if job.has_finished() {
+                    return Ok(format!(
+                        "it had already ended, so there was nothing to stop; `wait` collects what it \
+                         said.\n{}",
+                        job.describe()
+                    ));
+                }
+                let asked = job.ask_to_stop().await;
+                if !asked {
+                    return Ok(format!(
+                        "could not ask pid {} to stop: its stdin is closed, which means it has just \
+                         ended.\n{}",
+                        job.pid,
+                        job.describe()
+                    ));
+                }
+                let limit = seconds.unwrap_or(20);
+                match job.wait(Some(Duration::from_secs(limit))).await {
+                    Some(finished) => Ok(format!(
+                        "asked to stop, and it did -- keeping the half of an answer it had drawn.\n{}",
+                        job.render(&finished)
+                    )),
+                    None => Ok(format!(
+                        "asked pid {} to stop; it is still going {}s later. It writes what it has \
+                         drawn and exits, and its own budget of {}s ends it either way.\n{}",
+                        job.pid,
+                        limit,
+                        job.timeout_secs,
+                        job.describe()
+                    )),
+                }
+            }
+            other => Err(anyhow!(
+                "task_op takes action \"status\", \"wait\" or \"stop\", not {other:?}"
+            )),
+        }
     }
 }
 
@@ -3640,7 +4102,17 @@ impl Tool for TasksTool {
             for child in batch {
                 let index = child.index;
                 let agent = child.agent.clone();
-                handles.push((index, agent, tokio::spawn(run_child(child))));
+                // Started here and finished in a task below: `start_child` registers the child and
+                // hands back the job, and every fan-out child runs in the background from the moment
+                // it is spawned -- what makes this a batch is N jobs at once, not N waits at once.
+                match start_child(child) {
+                    Ok(job) => handles.push((index, agent, tokio::spawn(finish_child(job)))),
+                    Err(error) => blocks.push((
+                        index,
+                        agent,
+                        format!("the child could not be run: {error:#}"),
+                    )),
+                }
             }
             for (index, agent, handle) in handles {
                 // A child that panicked is reported as a block of its own rather than dropped: an
@@ -3670,22 +4142,24 @@ impl Tool for TasksTool {
     }
 }
 
-/// Run the child, read its stream, and turn it into the one piece of text the model gets back.
+/// Start the child and hand back the job that follows it, without waiting for it.
+///
+/// This is the split that makes a background child possible at all: everything that has to happen
+/// *while* the child runs -- draining its stream, learning its session, enforcing its timeout, noticing
+/// that it ended -- belongs to detached tasks rather than to the caller, because the caller may be a
+/// tool call that returned immediately or a turn that was dropped. `finish_child` is then only a wait
+/// on a job that is already being watched.
 ///
 /// The stream is read as it arrives rather than through `output()`, for one reason: a child that
 /// has to be stopped should be stopped the way a person stops one -- `/stop` on its stdin, which
 /// leaves the half-answer it had drawn in its session file -- and killing it is the fallback, not
-/// the first move. The answer is formatted answer-first, then the facts a caller needs to decide
-/// what to do with it, so a model that reads only the top still gets the reason.
-///
-/// Takes the child by value so that it can be `tokio::spawn`ed: a fan-out runs these at the same
-/// time, and a borrow of the tool would tie them all to one call frame.
-async fn run_child(child: Child) -> Result<String> {
+/// the first move.
+fn start_child(child: Child) -> Result<std::sync::Arc<Job>> {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 
-    let started = std::time::Instant::now();
     // Before `argv` is moved out: the name this child is known by while it runs.
     let label = child.label();
+    let prompt = child.prompt.clone();
     let argv = child.argv;
     let mut command = tokio::process::Command::new(&argv[0]);
     command.args(&argv[1..]).env("FLINT_DEPTH", child.depth.to_string());
@@ -3717,14 +4191,34 @@ async fn run_child(child: Child) -> Result<String> {
     // request, and a status row that says the same word as before is the state this fixes.
     progress(&format!("{label}: starting"));
 
-    // Noted before its stream is read, because the whole point is to survive this future being
-    // dropped: after that, the detached reader below is the only thing still watching the child.
     let pid = process.id().unwrap_or(0);
-    let session = running_now(pid, &label);
-
+    let stdin = process.stdin.take();
     let stdout = process.stdout.take().expect("stdout was piped");
     let stderr = process.stderr.take().expect("stderr was piped");
+
+    // Registered before its stream is read, because the whole point is to survive this future being
+    // dropped: after that, the detached reader below is the only thing still watching the child.
+    let job = std::sync::Arc::new(Job {
+        pid,
+        label: label.clone(),
+        prompt,
+        started: std::time::Instant::now(),
+        ended: std::sync::Mutex::new(None),
+        depth: child.depth,
+        readonly: child.readonly,
+        timeout_secs: child.timeout_secs,
+        stdin: std::sync::Mutex::new(stdin),
+        session: std::sync::Mutex::new(None),
+        session_known: tokio::sync::Notify::new(),
+        finished: std::sync::Mutex::new(None),
+        done: tokio::sync::Notify::new(),
+        schema_file: std::sync::Mutex::new(child.schema_file.clone()),
+    });
+    forget_old_finished();
+    jobs().push(std::sync::Arc::clone(&job));
+
     let reader_label = label.clone();
+    let reader_job = std::sync::Arc::clone(&job);
     let reader = tokio::spawn(async move {
         let lines = tokio::io::BufReader::new(stdout).lines();
         let mut collected = Collected::default();
@@ -3734,13 +4228,14 @@ async fn run_child(child: Child) -> Result<String> {
                 progress(&note);
             }
             if let Some(path) = child_session(&line) {
-                *session.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
+                *reader_job
+                    .session
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(path);
+                reader_job.session_known.notify_waiters();
             }
             collected.absorb(&line);
         }
-        // Its stdout is closed, so it is over -- and this is the one place that still runs when the
-        // parent stopped waiting: `run_child`'s own future may have been dropped long before.
-        no_longer_running(pid);
         collected
     });
     let complaints = tokio::spawn(async move {
@@ -3750,89 +4245,132 @@ async fn run_child(child: Child) -> Result<String> {
         text
     });
 
+    // The supervisor: the timeout, the graceful stop and the kill belong to the child rather than to
+    // whoever is waiting for it, because a background child has nobody waiting -- an unwatched child
+    // with a `timeout_secs` that only the waiter could enforce would run until the machine was
+    // restarted, which is the opposite of what a timeout is for.
+    let timeout_secs = child.timeout_secs;
+    let supervisor_job = std::sync::Arc::clone(&job);
+    tokio::spawn(async move {
+        let (code, note) = supervise(&supervisor_job, &mut process, timeout_secs).await;
+        // After the process ends, never before: a reader drained too early loses the last lines, and
+        // the answer is written to the stream just before the exit.
+        let collected = reader.await.unwrap_or_default();
+        let stderr = complaints.await.unwrap_or_default();
+        if let Some(path) = supervisor_job
+            .schema_file
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            let _ = std::fs::remove_file(path);
+        }
+        *supervisor_job
+            .finished
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(Finished {
+            code,
+            note,
+            stderr,
+            collected,
+        });
+        *supervisor_job
+            .ended
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+        // Its stdout is closed and its exit status is known, so nothing is left running -- and this is
+        // the one place that still runs when the parent stopped waiting: the tool's own future may
+        // have been dropped long before, which is what a `task` child outliving its turn proved.
+        supervisor_job.stdin.lock().unwrap_or_else(|e| e.into_inner()).take();
+        supervisor_job.done.notify_waiters();
+    });
+
+    Ok(job)
+}
+
+/// Watch one child to the end: wait for it, stop it when its budget runs out, kill it if it will not go.
+async fn supervise(
+    job: &std::sync::Arc<Job>,
+    process: &mut tokio::process::Child,
+    timeout_secs: u64,
+) -> (i32, String) {
     let stopped = tokio::time::timeout(
-        std::time::Duration::from_secs(child.timeout_secs),
+        std::time::Duration::from_secs(timeout_secs),
         process.wait(),
     )
     .await;
-    let mut note = String::new();
-    let status = match stopped {
-        Ok(status) => status?,
+    match stopped {
+        Ok(status) => (status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1), String::new()),
         Err(_) => {
             // Graceful first. `/stop` is the word the terminal takes, and the child keeps what it
             // had drawn; `kill` is only for a child that ignores it.
-            if let Some(stdin) = process.stdin.as_mut() {
-                use tokio::io::AsyncWriteExt;
-                let _ = stdin.write_all(b"/stop\n").await;
-                let _ = stdin.flush().await;
-            }
-            let timeout_secs = child.timeout_secs;
+            job.ask_to_stop().await;
             match tokio::time::timeout(std::time::Duration::from_secs(20), process.wait()).await {
-                Ok(status) => {
-                    note = format!("\nstopped after {timeout_secs}s: the child was told to stop\n");
-                    status?
-                }
+                Ok(status) => (
+                    status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1),
+                    format!("\nstopped after {timeout_secs}s: the child was told to stop\n"),
+                ),
                 Err(_) => {
                     let _ = process.kill().await;
-                    note = format!(
-                        "\nkilled after {timeout_secs}s: the child did not stop when asked\n"
-                    );
-                    process.wait().await?
+                    let code = process
+                        .wait()
+                        .await
+                        .map(|s| s.code().unwrap_or(-1))
+                        .unwrap_or(-1);
+                    (
+                        code,
+                        format!("\nkilled after {timeout_secs}s: the child did not stop when asked\n"),
+                    )
                 }
             }
         }
-    };
+    }
+}
 
-    let collected = reader.await.unwrap_or_default();
-    let stderr_text = complaints.await.unwrap_or_default();
-    let code = status.code().unwrap_or(-1);
+/// Wait for a child that is already being watched, and hand back the one piece of text the model gets.
+///
+/// Takes the job by value so that a fan-out can spawn several of these at the same time: a borrow of
+/// the tool would tie them all to one call frame.
+async fn finish_child(job: std::sync::Arc<Job>) -> Result<String> {
+    // The supervisor owns the real budget, and it always terminates: a wait that outlived it would
+    // mean the supervisor task itself died, which is reported rather than waited on forever.
+    let limit = Some(std::time::Duration::from_secs(job.timeout_secs + 60));
+    match job.wait(limit).await {
+        Some(finished) => Ok(job.render(&finished)),
+        None => Ok(format!(
+            "the child was not reaped: pid {} is still running after {}s.\n{}",
+            job.pid,
+            job.timeout_secs + 60,
+            job.describe()
+        )),
+    }
+}
 
-    let mut text = match collected.answer() {
-        Some(answer) => answer,
-        // Nothing on the stream at all: the reason is on stderr, and passing it on is the
-        // difference between "the child failed" and "the child refused before it started".
-        None => stderr_text.trim().to_string(),
-    };
-    if text.trim().is_empty() {
-        text = "(the child said nothing)".to_string();
+/// What a `task` call that asked for `background: true` gets back: a handle, and what to do with it.
+async fn background_handle(job: std::sync::Arc<Job>) -> String {
+    // The child names its conversation before it asks the model anything, so this is a moment rather
+    // than a guess -- and a handle that cannot say where the answer will land is not a handle. The
+    // wait is bounded because a child that cannot start at all has nothing to name.
+    let session = job.wait_session(std::time::Duration::from_secs(5)).await;
+    let mut text = format!(
+        "started in the background: pid {} ({label}). It is running and this call is not waiting for \
+         it.\n",
+        job.pid,
+        label = job.label
+    );
+    match &session {
+        Some(path) => text.push_str(&format!("session: {path}\n")),
+        None => {
+            text.push_str("session: not named yet -- ask `task_op` with action \"status\" for it\n")
+        }
     }
     text.push_str(&format!(
-        "\n\nexit code: {code} ({})",
-        task_exit_meaning(code)
+        "Use `task_op` with action \"status\" to see where it is, \"wait\" to collect its answer \
+         (pid {}), or \"stop\" to ask it to stop. Its budget is {}s, and nobody has to be waiting for \
+         that to happen.\ndepth: {} (this run is {}), readonly: {}",
+        job.pid, job.timeout_secs, job.depth, job.depth - 1, job.readonly
     ));
-    if let Some(outcome) = &collected.outcome {
-        text.push_str(&format!("\noutcome: {outcome}"));
-    }
-    if let Some(cause) = &collected.error_code {
-        text.push_str(&format!("\ncause: {cause}"));
-    }
-    if let Some(error) = &collected.error {
-        let first = error.lines().next().unwrap_or("").trim();
-        text.push_str(&format!("\nerror: {first}"));
-    }
-    if let Some(result) = &collected.result {
-        // The validated object, on one line: this is the half of "structured" that a shell
-        // pipeline cannot give back.
-        text.push_str(&format!("\nresult: {result}"));
-    }
-    for warning in collected.warnings.iter().take(3) {
-        text.push_str(&format!("\nwarning: {warning}"));
-    }
-    text.push_str(&note);
-    text.push_str(&format!(
-        "\ndepth: {} (this run is {}), readonly: {}, waited: {:.0}s",
-        child.depth,
-        child.depth - 1,
-        child.readonly,
-        started.elapsed().as_secs_f64()
-    ));
-    if let Some(session) = collected.session {
-        text.push_str(&format!("\nsession: {session}"));
-    }
-    if let Some(path) = &child.schema_file {
-        let _ = std::fs::remove_file(path);
-    }
-    Ok(text)
+    text
 }
 
 /// How a child is named on the parent's status row while it runs.
@@ -3883,7 +4421,7 @@ fn child_session(line: &str) -> Option<String> {
 }
 
 /// The frames worth keeping from a child's stream, gathered in one place.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Collected {
     deltas: Vec<String>,
     messages: Vec<String>,
