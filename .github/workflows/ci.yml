@@ -59,13 +59,18 @@ jobs:
       # plus the assertion's own message is what says whether the test or the code is
       # wrong, so both are carried out. Ten annotations are kept per step, which is why
       # this is `head`ed rather than dumped.
+      #
+      # Both greps are `|| true` on purpose: a grep that matches nothing exits 1, which
+      # would turn this step red and add a second, unexplainable failure to the report.
+      # The thread line carries an id in parentheses on recent Rust (`thread 'x' (1234)
+      # panicked at`), which is why the pattern does not try to be exact.
       - name: Name the failing tests
         if: failure() && steps.test.outcome == 'failure'
         shell: bash
         run: |
           [ -f target/test-output.txt ] || exit 0
-          grep -E '^test .* FAILED$' target/test-output.txt | head -5 | sed 's/^/::error::/'
-          grep -A 4 -E "^thread '.*' panicked at" target/test-output.txt | head -20 | sed 's/^/::error::/'
+          grep -E '^test .* FAILED$' target/test-output.txt | head -5 | sed 's/^/::error::/' || true
+          grep -A 4 -E "^thread .* panicked at" target/test-output.txt | head -20 | sed 's/^/::error::/' || true
 
       # Silent is the standard this repository holds itself to, so a warning is
       # the failure. `cargo test` builds the targets; this is what actually reads
