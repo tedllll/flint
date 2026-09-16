@@ -52,6 +52,33 @@ fn drain(fd: libc::c_int) -> String {
     String::from_utf8_lossy(&out).to_string()
 }
 
+/// The same text with the terminal's escape sequences taken out.
+///
+/// The banner is coloured per piece (`flint` bold, `v0.1.0` dim, and so on), so the words are only
+/// contiguous on screen, never in the bytes a pty hands back. Learned from the first run of this
+/// test on CI, which failed the banner check while the banner was right there in the capture,
+/// separated by `ESC [ 1 m`.
+fn plain(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        // A CSI sequence: `ESC [` then parameters and intermediates, ending in a letter.
+        if chars.peek() == Some(&'[') {
+            chars.next();
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Seconds of CPU this process has burned, for the failure message.
 ///
 /// A run that hangs and a run that spins look the same to a stopwatch and completely different in
@@ -128,16 +155,18 @@ fn a_terminal_that_goes_away_ends_the_run() {
     // slow runner fail here, with a message about the wrong thing.
     let mut screen = String::new();
     let drawn = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while !screen.contains("flint v0.1.0") {
+    while !plain(&screen).contains("flint v0.1.0") {
         screen.push_str(&drain(master));
         assert!(
             child.try_wait().expect("try_wait").is_none(),
-            "the run ended before it drew anything, so this proves nothing: {screen:?}"
+            "the run ended before it drew anything, so this proves nothing: {:?}",
+            plain(&screen)
         );
         assert!(
             std::time::Instant::now() < drawn,
             "the run never drew its banner, so the interactive path was not the one under test: \
-             {screen:?}"
+             {:?}",
+            plain(&screen)
         );
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
