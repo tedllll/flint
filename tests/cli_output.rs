@@ -638,6 +638,95 @@ async fn two_projects_in_one_home_keep_their_conversations_apart() {
     );
 }
 
+/// The same listing, as data, for the caller that cannot read a printed line.
+///
+/// `--list-sessions` prints `N  id  label`, which a program can split -- but only by knowing a
+/// format that exists for a person, and the label is a rule (a name, else the first thing said) that
+/// a caller would then be re-implementing. The JSON form carries the fields the listing is made of,
+/// including the session *path*, which is the internal detail `ROADMAP.md` §10 says a caller must not
+/// have to reconstruct: a session is no longer necessarily directly in `sessions/`.
+#[test]
+fn the_session_list_has_a_machine_readable_form() {
+    let home = test_home("sessions-json", "http://127.0.0.1:1/v1");
+    let sessions = home.join("sessions");
+    write_session(
+        &sessions,
+        "111-1.jsonl",
+        &[
+            &meta_line("111-1"),
+            r#"{"type":"chat","message":{"role":"user","content":"the codex config is broken"}}"#,
+            r#"{"type":"title","name":"codex config"}"#,
+        ],
+        10,
+    );
+    write_session(
+        &sessions,
+        "222-2.jsonl",
+        &[
+            &meta_line("222-2"),
+            r#"{"type":"chat","message":{"role":"user","content":"update dsh please"}}"#,
+        ],
+        20,
+    );
+    std::fs::create_dir_all(sessions.join("archive")).expect("archive dir");
+    write_session(
+        &sessions.join("archive"),
+        "333-3.jsonl",
+        &[
+            &meta_line("333-3"),
+            r#"{"type":"chat","message":{"role":"user","content":"long forgotten"}}"#,
+        ],
+        30,
+    );
+
+    let out = binary()
+        .args(["--list-sessions", "--json"])
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .output()
+        .expect("failed to run flint");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "listing failed: {stderr}");
+
+    // One object, on one line, with a `type`: the same rule every other `--json` answer follows, so
+    // a reader that already handles `who --json` needs no new case.
+    let mut lines = stdout.lines();
+    let first = lines.next().expect("no listing at all");
+    assert!(
+        lines.next().is_none(),
+        "the listing is more than one line of JSON: {stdout:?}"
+    );
+    let listing: serde_json::Value = serde_json::from_str(first).expect("the listing is not JSON");
+    assert_eq!(listing["type"], "sessions");
+    assert_eq!(listing["count"], 2, "the archived session is in the count: {listing}");
+    let rows = listing["sessions"].as_array().expect("an array of sessions");
+    assert_eq!(rows.len(), 2, "{listing}");
+
+    // Newest first, and the index is the number `--resume` takes -- the same number the printed
+    // listing puts in front of the same session, because both are the same list.
+    assert_eq!(rows[0]["id"], "111-1", "{listing}");
+    assert_eq!(rows[0]["index"], 1, "{listing}");
+    assert_eq!(rows[1]["index"], 2, "{listing}");
+    // The label rule lives in one place: a session with a name is labelled by it, one without by
+    // what was said first.
+    assert_eq!(rows[0]["label"], "codex config", "{listing}");
+    assert_eq!(rows[0]["title"], "codex config", "{listing}");
+    assert_eq!(rows[1]["label"], "update dsh please", "{listing}");
+
+    // The path is the field a caller cannot reconstruct, and it has to be a file that is there.
+    let path = rows[0]["path"].as_str().expect("a session path");
+    assert!(
+        std::path::Path::new(path).is_file(),
+        "the path in the listing is not a file: {path}"
+    );
+    assert!(
+        !stdout.contains("long forgotten"),
+        "an archived session is in the JSON listing: {stdout:?}"
+    );
+    assert!(stderr.is_empty(), "the listing wrote to stderr: {stderr:?}");
+}
+
 /// `--cwd` naming something that is not a directory is refused, and nothing is created.
 ///
 /// The alternative -- letting the run start and watching every tool fail -- reads as flint being

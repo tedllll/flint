@@ -109,6 +109,7 @@ flint balance --json             # the same answer for a program
 flint who                        # who else is working in this directory, and what changed
 flint say "the tree is yours"    # leave whoever is working here a message (they see it; the model does not)
 flint --list-sessions            # numbered, so --resume N works
+flint --list-sessions --json     # the same list as data, each row with its session path
 flint --name "codex config"      # name the conversation you are in
 flint --archive 3                # file it away, out of the list
 flint --delete 4                 # remove the session file

@@ -469,7 +469,38 @@ async fn real_main(args: Args) -> Result<i32> {
 
     // ---- list sessions ----
     if args.list_sessions {
-        let sessions = session::list(&config::sessions_dir())?;
+        let sessions = session::list_detailed(&config::sessions_dir())?;
+        // The machine-readable listing. It is built from the same `list_detailed` the printed one
+        // is, so the two can never disagree about the order or about which number `--resume` takes
+        // -- and it carries the session *path*, which is the internal detail a caller cannot
+        // reconstruct: a session lives in the subdirectory belonging to the directory it was held
+        // in, so joining an id onto `sessions/` names a file that is not there.
+        if args.json {
+            let rows: Vec<serde_json::Value> = sessions
+                .iter()
+                .enumerate()
+                .map(|(index, s)| {
+                    serde_json::json!({
+                        "index": index + 1,
+                        "id": s.id,
+                        "path": s.path.to_string_lossy(),
+                        "cwd": s.cwd,
+                        "title": s.title,
+                        "preview": s.preview,
+                        "version": s.version,
+                        "label": s.label(),
+                    })
+                })
+                .collect();
+            // One object with a `type`, like `who --json` and `balance --json`: a caller that
+            // already reads one of those needs no new case, and an empty listing is an empty array
+            // rather than a sentence a program would have to recognise.
+            println!(
+                "{}",
+                serde_json::json!({ "type": "sessions", "count": rows.len(), "sessions": rows })
+            );
+            return Ok(0);
+        }
         if sessions.is_empty() {
             println!("(no sessions yet)");
         }
@@ -477,8 +508,8 @@ async fn real_main(args: Args) -> Result<i32> {
         // one session per line. The *first* field is still the id -- the session
         // is the id, exactly as before -- and the number in front is what
         // `--resume N` takes.
-        for (index, (id, summary)) in sessions.iter().enumerate() {
-            println!("{}  {id}  {summary}", index + 1);
+        for (index, summary) in sessions.iter().enumerate() {
+            println!("{}  {}  {}", index + 1, summary.id, summary.label());
         }
         return Ok(0);
     }
@@ -4570,6 +4601,7 @@ flint who [--all] [--json]       who else is working in this directory (flint on
                                    never sent to a model
   flint debug prompt-input [msg]   print the request that would be sent, and send nothing
   flint --list-sessions            list saved sessions, numbered for --resume
+                                   (--json: one object, with each session's path)
   flint --name <text>              name this conversation (also: /name)
   flint --archive <n|id>           file a session away, out of the list
   flint --delete <n|id>            delete a session file

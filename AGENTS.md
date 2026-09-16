@@ -164,10 +164,12 @@ file, including `AGENTS.md` and the skill catalog, after something has changed i
 
 `/usage` shows the size of the last prompt. `/sessions` lists what exists (it reads only
 the two ends of each file), `/name`, `/archive` and `/delete` manage the open one, and
-`flint --list-sessions` does the listing without a model. A session file is one JSON object
-per line; an unknown event type is skipped in silence, and a line that names a *known* type
-but cannot be parsed is reported as damage rather than ignored. `docs/session-format.md` is
-the reference for the format itself, including what can be edited by hand.
+`flint --list-sessions` does the listing without a model (`--json` prints it as one object for a
+program, each row carrying the session's path — the field a caller cannot reconstruct, since a
+conversation lives in the subdirectory belonging to the directory it was held in). A session file is
+one JSON object per line; an unknown event type is skipped in silence, and a line that names a *known*
+type but cannot be parsed is reported as damage rather than ignored. `docs/session-format.md` is the
+reference for the format itself, including what can be edited by hand.
 
 ## There is no permission layer
 

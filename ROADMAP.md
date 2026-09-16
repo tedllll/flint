@@ -1375,7 +1375,15 @@ What to build for it, in step 2:
 
 3. **`--result-file`** (the answer written where the caller asked, so no caller parses a stream to
    get it) and **`--list-sessions --json`** (so a caller does not reimplement the session-directory
-   naming, which is an internal detail).
+   naming, which is an internal detail). — **The listing half is built**: `flint --list-sessions
+   --json` prints one object (`type`, `count`, `sessions[]`), each row carrying the number `--resume`
+   takes, the id, the **path**, the directory it was held in, the name, the preview and the label.
+   Two details are the design: the rows come from the same `list_detailed` the printed listing uses,
+   so the two can never disagree about the order or the numbering, and the label rule now lives in
+   one place (`SessionSummary::label`) for the same reason — a rule written twice drifts once. The
+   path is the field a caller cannot reconstruct, which is the point: a session lives in the
+   subdirectory belonging to the directory it was held in, so joining an id onto `sessions/` names a
+   file that is not there. `--result-file` is the other half and is next.
 4. **`@path`** — a file named inside the prompt and inlined by flint before the request. This is how
    A1 is solved, and it is deliberately not "tell the model a path": content that must be seen has to
    *be* in the prompt, where it is not subject to the model's discretion, to `read`'s 2000-line

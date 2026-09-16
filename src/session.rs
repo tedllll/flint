@@ -426,6 +426,21 @@ pub struct SessionSummary {
     pub cwd: String,
 }
 
+impl SessionSummary {
+    /// How this session is named in a listing: the name it was given, or how it started.
+    ///
+    /// One function because there are two listings now -- the printed one and `--list-sessions
+    /// --json` -- and a rule that exists twice is a rule that drifts once: a caller reading the JSON
+    /// would be comparing its own idea of the label against the one a person sees.
+    pub fn label(&self) -> String {
+        match self.title.as_deref().map(str::trim) {
+            Some(name) if !name.is_empty() => name.to_string(),
+            _ if !self.preview.is_empty() => self.preview.clone(),
+            _ => "(empty)".to_string(),
+        }
+    }
+}
+
 /// Bytes read from each end of a file to summarise it.
 ///
 /// The head carries `Meta` and the first thing the user said; the tail carries any
@@ -698,11 +713,7 @@ pub fn list(dir: &Path) -> Result<Vec<(String, String)>> {
     Ok(list_detailed(dir)?
         .into_iter()
         .map(|s| {
-            let label = match s.title.as_deref().map(str::trim) {
-                Some(name) if !name.is_empty() => name.to_string(),
-                _ if !s.preview.is_empty() => s.preview.clone(),
-                _ => "(empty)".to_string(),
-            };
+            let label = s.label();
             (s.id, label)
         })
         .collect())
