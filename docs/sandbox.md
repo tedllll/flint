@@ -10,6 +10,39 @@ model built out of *grants* instead of *modes* would look like, and the order to
 commit, because a plan that leaves the plan of record contradicting it is how a repository
 starts lying to itself.
 
+## The plan in one page
+
+flint has one switch: `readonly`, on or off for the whole session. Tasks do not come in two
+sizes. A download needs the network **and** a writable directory outside the project; a sibling
+checkout needs **one path**, not the machine. The ladder cannot express either, so the choice is
+always "refuse" or "everything" — which is the complaint this plan exists to answer.
+
+So: replace the switch with **rules about the call** — which paths may be read, written or must
+be refused, which hosts may be reached — and later, a question when a call needs something the
+rules do not already give. The three familiar names survive as **presets over the rules**, so
+nothing that works today stops working.
+
+| Stage | What is built | After it, you can… | Size | Risk |
+|---|---|---|---|---|
+| **0** | the rules, as config data | write `[sandbox.filesystem]` rules; `deny` one file inside a writable tree; keep `readonly = true` working | 500–800 | low |
+| **1** | the per-call decision, and the question | be asked once for the missing thing, instead of flipping a session-wide switch | 400–700 | medium |
+| **2** | durations, and `always` | answer "for this turn" or "always", with the durable answer in `config.toml` | 300–600 | low-medium |
+| **3** | the Windows boundary | a `bash` child that really cannot write outside its roots | 600–1,200 | high |
+| **4** | the Linux and macOS boundaries | the same on the other two platforms | 700–1,400 | high |
+| **5** | egress, only as a proxy | reach one allowlisted host and nothing else | — | — |
+
+**Stages 0 and 1 are the centre of gravity.** They are cross-platform, need no OS support, and
+every humane property in §1.4 comes from them. Stages 3–5 are the expensive half; each is a
+project on its own platform, and the platform decides whether it can be verified at all. Do 0,
+then 1, then decide. Nothing here requires all six.
+
+**Start with Stage 0, and its section in §5 is the specification** — the config syntax, the
+decision function, every place in flint it has to reach, the five tests that must fail first and
+the gate that must stay green. If you are here to build, read §5 beside §4.2 (`deny` and
+specificity), §4.3 (one decision, one sentence) and §4.6 (what is enforced and what is only
+promised). §1 and §3 are the argument and the prior art: they are why the plan is shaped this
+way, and they read fine afterwards.
+
 ## How to read the labels
 
 As in [`docs/windows-tooling.md`](windows-tooling.md):
@@ -50,6 +83,11 @@ and the word is spoken by six surfaces that have to agree: the config key, `--re
 (`src/main.rs:413`), `/readonly` (`src/main.rs:2614`), `/config` (`src/main.rs:2777`), the
 page's `state` frame (`src/main.rs:3780`), and the `ToolBox` the tools are built from
 (`src/tools.rs:45`).
+
+That is the diagnosis. The same facts, attached to what changes at each of them, are the table in
+Stage 0 — one `bool` reaching five tool structs and six reporting surfaces is the actual size of
+"replace it with rules", and it is why Stage 0 is a refactor plus a pure module rather than a
+rewrite.
 
 That agreement is not a stylistic preference, it is this repository's scar tissue. `VERIFIED`,
 `ROADMAP.md:455`:
@@ -100,6 +138,31 @@ model is even taught to do it in the same turn, in a long verbatim paragraph
 (`dsh-tool-bash/lib/index.js:129`). **All of that care is spent on a lever whose only settings
 are "everything" and "nothing" for the thing that was actually denied.**
 
+**The field record, which is stronger than the argument.** Both products' issue trackers are full
+of people describing this exact inversion, and the vendors' own fixes are per-path rules. Quoted
+in [`docs/research-permissions-prior-art.md`](research-permissions-prior-art.md), which labels
+every quote by how it was read:
+
+- The three-rung problem in eight words (opencode#18441): "allow → too permissive; ask → too
+  noisy; deny → no access at all".
+- The middle being too tight, measured by the vendor's own response: a user reported that `uv`
+  could not write its cache and "Codex gets confused … and begins running unpredictable hacky
+  commands" (codex#2444); a maintainer answered with the config key that fixes it —
+  `sandbox_workspace_write.writable_roots = ["/Users/YOU/.cache"]` — within the hour, and the
+  documentation PR for it merged the same day ([#2464](https://github.com/openai/codex/pull/2464)).
+  **The middle ground the field needed was a list of paths.**
+- Failing that, the middle mode gets abandoned: codex#30712, on Windows, where `apply_patch` did
+  not work under the sandbox, so agents "fall back to shell-based file rewrites inside the
+  project, which bypasses the sandbox" — and the reporter's conclusion: "In neither sandbox mode
+  provided a functional workflow, I knowingly accepted the risks of Full access."
+- Fatigue manufactures the wide grant: codex#22181, "Approval-fatigued users habitually pick (p) to
+  silence prompts". Anthropic names the same disease and its cure in one post: "Constantly
+  clicking 'approve' … can lead to 'approval fatigue'", and sandboxing "safely reduces permission
+  prompts by 84%".
+
+So the ladder does not fail because users are careless. It fails because its granularity is wrong
+for the tasks, and the first thing every vendor did about it was let a path be named.
+
 ### 1.3 The axes are real, and the ladder collapses them
 
 Four questions are being asked, and only one of them is a dial:
@@ -115,9 +178,10 @@ Four questions are being asked, and only one of them is a dial:
 mode vocabulary there is no network term at all (`VERIFIED`, §3.1), so a mode name cannot say
 "github.com and nothing else". Codex's ladder carried a single boolean for it
 (`network_access = false`, §3.3) and the June-2026 profiles replaced that boolean with per-domain
-rules — which is evidence that one bit was not enough. On Linux there is a harder version of the
-same fact: **Landlock cannot express network policy** at all, which is why the products that
-want egress control pair the sandbox with a proxy (§3.4).
+rules — which is evidence that one bit was not enough. Linux is the harder case, and the reason
+egress control there is a userspace proxy rather than a kernel filter: **Landlock's network rules
+are keyed on a port, not on an address** (§7, kernel documentation) — it can say "outbound TCP
+to port 443" but not "only api.github.com", and seccomp cannot see hostnames either.
 
 **So "I need to download something" is not a request the ladder can grant narrowly.** It is the
 canonical example of the user's complaint, and it is real.
@@ -315,6 +379,26 @@ with rules about the call. Where a spelling already exists in the wild (`:minima
 than invent a synonym, because a user who has written a Codex profile once should recognise a
 flint one.
 
+**Four more facts from the same research that this plan uses.**
+
+- The two Codex generations **do not compose**: "Configure either `default_permissions` and
+  `[permissions]`, or `sandbox_mode` / `sandbox_workspace_write`, but not both." §4.2 does the
+  opposite on purpose — the three old names expand *into* rules — because two vocabularies side by
+  side is what forces a "not both" rule, and a preset that expands is a rule set the user can then
+  narrow.
+- The approval policy is now `on-request` / `never` / `granular` (`untrusted` retired, `on-failure`
+  deprecated), and a denial can be retried **exactly once**: `/approve` "applies to the exact
+  denied action, not similar future actions". There is a circuit breaker at 3 consecutive and 10
+  denials in 50 — the same shape as Claude Code's non-configurable 3-and-20 (§3.4). Two vendors
+  independently putting a loop guard on *denials* rather than on tool calls is worth copying in
+  Stage 1.
+- `network.enabled` in a profile **does not start the proxy**: "To enforce profile domain rules,
+  also set `features.network_proxy = true`." A network rule that is written and not enforced is
+  §1.1's lie in its purest form, and it is the exact failure Stage 5 must have a test for.
+- A maintainer, on review noise, states this document's thesis better than §1 does: "If too many
+  mundane actions need review, fix the boundary first instead of teaching the reviewer to approve
+  noisy escalations forever."
+
 ### 3.4 Claude Code: two layers, and the axes said out loud
 
 `DOCUMENTED`: [sandboxing](https://code.claude.com/docs/en/sandboxing) and
@@ -377,14 +461,88 @@ flint one.
    session end).
 4. **`deny` must be first-class and must outrank a wider allow**, or a broad grant silently
    re-exposes a secret.
-5. **Network gets its own mechanism** — a proxy with a domain allowlist. No filesystem
-   mechanism provides it, and Landlock cannot (§3.4, `DOCUMENTED`, and the reason bubblewrap is
-   paired with socat).
+5. **Network gets its own mechanism** — a proxy with a domain allowlist. No filesystem mechanism
+   provides it, and neither does the Linux network layer: Landlock's network rules are keyed on
+   ports and seccomp cannot see hostnames, so per-host control means a userspace proxy (§3.4 for
+   the proxy, §7 for the kernel documentation).
 6. **A shell needs *some* system paths to run.** `:minimal` exists because both "everything" and
    "the workspace" break ordinary commands; §5's Stage 3 should budget for the discovery of
    that list on each platform, not treat it as a detail.
 7. **Say what is not enforced.** Both vendors ship a limitations page for a reason; flint's
    version is the sentence in the prompt (§4.6) plus §6 of this document.
+
+Rule 4 is the one the next subsection complicates: the conflict order above is not the only one
+shipping, and one of the alternatives is better for the escape hatch. §3.6 also carries the
+evidence behind rules 3, 5 and 7 — the duration designs, the port-only network layer, and what a
+denial looks like when nobody writes one.
+
+### 3.6 The capability models, and what they add to these rules
+
+The full note, with the quotes and URLs, is
+[`docs/sandbox-alternatives-research.md`](sandbox-alternatives-research.md). Six things in it
+change or harden the plan above.
+
+**1. Per-host network policy is not a kernel primitive anywhere.** Deno is the only surveyed
+system where it is first-class (`--allow-net=example.com:443`, with `--deny-net` taking
+precedence over the allow flags). Landlock reaches **ports**, not addresses (§7). Windows has one
+capability SID (`internetClient`) — present or absent — or WFP at driver level. Flatpak's
+`--share=network` is a boolean that additionally exposes every host service listening on an
+abstract Unix socket. So a proxy is not a convenience, it is *the* mechanism — with Claude Code's
+own caveat that the proxy trusts the client-supplied hostname (§3.4).
+
+**2. A monotonic sandbox needs a broker outside it.** A Landlock domain, a Windows restricted
+token and an SBPL profile cannot be widened once created — Landlock: "there is no way to remove
+its security policy; only adding more restrictions is allowed"; Chromium: "Rules can only be
+added before each target process is spawned, and cannot be modified while a target is running".
+Every shipping system that asks the user at runtime therefore puts the decision *outside* the
+confined process: Deno's `DENO_PERMISSION_BROKER_PATH`, Chromium's privileged parent proxying one
+API call at a time, `xdg-desktop-portal` serving the Flatpak document portal. **That is exactly
+flint's shape in §4.3** — `decide()` in the parent, the child confined by the OS — and it is the
+strongest architectural argument in this document for it.
+
+**3. The unit of grant can be an object, and that is the honest answer to "one file outside the
+workspace".** Flatpak's document portal is the only surveyed mechanism whose unit is the object:
+the user picks a file, the application receives an fd-backed handle under `/run/user/$UID/doc/`,
+and read/write/delete/grant are per-application bits that can be revoked and marked transient or
+persistent. §4.2's rules are class-based — a path prefix, a host — because that is what a config
+file and a shell can express. The object-level grant is the better shape for a one-off, and it is
+recorded as an open question (§4.8) rather than quietly omitted.
+
+**4. Denial text is part of the mechanism, not a nicety.** Seatbelt's raw failure from the field
+is `sysmond service not found` — nothing in it says "sandbox"; Codex ships a `--log-denials` flag
+precisely because the default does not say; Claude Code builds the sentence itself, "naming the
+path or host the sandbox denied". A model whose denials read like ordinary errors will retry,
+argue, and finally get the sandbox turned off. This is the external argument for `Decision.reason`
+and `Decision.missing` in §4.3.
+
+**5. Prompt fatigue is measured, and the numbers are worse than intuition.** Felt et al., SOUPS
+2012: 17% of participants paid attention to permissions at install time, and 3% could answer three
+comprehension questions correctly. Wijesekera et al., USENIX Security 2015: habituation —
+"if users are asked to make security decisions too frequently and in benign situations, they may
+become habituated and approve all future requests"; at least 80% of participants would have
+preferred to block at least one request, and **60% of permission requests occurred while the
+phone screen was off**. The supported response is fewer *decisions*, not fewer permissions: ask
+only where the alternative is denial (§4.4), name the missing thing, give the answer a duration
+(§4.5), and let the durable answer land in a hand-editable file.
+
+**6. Every fine-grained model collapses at the subprocess boundary, in writing.** Deno's own
+documentation: `--allow-run` and `--allow-ffi` are "equivalent to --allow-all when deciding
+whether to trust the code you are running", and one user was driven back to `--allow-all` by
+exactly that ([deno#26839](https://github.com/denoland/deno/issues/26839): "I was very dismayed to
+find that I had to replace all of my fine grained permissions with --allow-all"). Windows:
+"there is no practical way to prevent code in the sandbox from calling a system service", and a
+handle leaked before `LowerToken()` is an escape. So §4.6's split between what flint enforces and
+what the OS enforces is not timidity — it is the state of the art, described by the people who
+built it.
+
+Two facts from that note also confirm costs already budgeted above. Microsoft's own
+write-restricted-token explainer says "Writes are only possible by virtue of the service SID, the
+logon SID, Everyone SID, or write-restricted SID" and "**Reads are unaffected**" — which is why
+§4.6's table puts read confinement in a different column from write confinement. And on the same
+page, the cost of enumerating what a program writes: "You have to determine all write accesses
+your code will need and make sure you explicitly grant that access… Is it expensive? You bet it
+is." That is why Stage 3 in §5 budgets for discovering `:minimal` per machine rather than
+assuming it.
 
 ---
 
@@ -416,6 +574,23 @@ Precedence, borrowed for the same reason (§3.3, §3.4):
 - **`deny` wins over `read` / `write` at the same path**, so a workspace-wide `write` cannot
   silently re-expose `**/*.env`;
 - network `deny` outranks `allow`.
+
+**The conflict order is a decision, and the shipping systems disagree** (§7,
+[prior art](research-permissions-prior-art.md)), so it is worth naming the alternatives rather
+than inheriting one:
+
+| Order | Who ships it | What it buys |
+|---|---|---|
+| `deny` always wins | Cursor ("Deny rules take precedence over allow rules"); this plan | a broad allow can never silently re-expose a secret |
+| first match wins, deny → ask → allow | Claude Code ("rule specificity doesn't change the order") | predictable, and an allow cannot carve an exception out of a deny |
+| last match wins | OpenCode (with a catch-all `*` written first) | the specific rule is usually the one written last |
+| numeric priority, highest wins | Gemini (`tier + priority/1000`) | a built-in allow-all can sit at a *low* priority, so any user rule outranks it — an escape hatch that is a rule rather than a mode |
+
+flint should take "`deny` wins at the same path" for filesystem rules: it is the safe default, and
+it is what the one product with a deny list does. Gemini's priority idea deserves a second look
+*before* Stage 0 fixes the parser, because it is the only surveyed design in which "allow
+everything" is an ordinary rule that a more specific rule can beat, instead of a mode that
+discards the rules — which is exactly the escape hatch §4.4 needs to keep honest.
 
 The three familiar names survive as **presets over the rules** — which is exactly how Codex kept
 its ladder (`:read-only`, `:workspace`, `:danger-full-access`, §3.3), and it is what makes this
@@ -451,7 +626,7 @@ denied: write C:\work\other-repo\out.txt is outside this run's write scope
 
 ### 4.4 Why `ask` is now defensible
 
-`ROADMAP.md:1445` refuses approval prompts because "an approval dialog in an emergency is
+`ROADMAP.md:1503` refuses approval prompts because "an approval dialog in an emergency is
 friction at the worst moment". That objection is to a prompt on the **happy path** — a system
 that interrupts ordinary work. A grant-based model has a different property: **`ask` is only
 ever reached where `deny` was the alternative.** Nothing that is already allowed becomes a
@@ -459,7 +634,10 @@ question. The interruption is the price of a widening the user did not pre-autho
 alternative at that exact moment is not "it just works" — it is "it fails".
 
 That is the whole argument, and it should be written into `ROADMAP.md` when this is adopted,
-because it is a change of position, not a detail.
+because it is a change of position, not a detail. What makes it more than a preference is the
+measured half of §3.6: prompts are answered badly in bulk (17% attention, 3% comprehension), so
+the design goal is not fewer permissions but fewer *decisions* — and "only where the alternative
+is denial" is the smallest number of decisions that still grants anything narrow.
 
 ### 4.5 Widening by exactly the missing amount
 
@@ -489,6 +667,33 @@ the repository; remembering a **file-write scope** is not, so a file-modificatio
 only until the session ends. flint should start from the same split rather than giving every
 kind of grant the same lifetime.
 
+One platform constraint belongs here rather than in §5: **a Landlock ruleset is monotonic** —
+once a thread is landlocked it can only be restricted further, never loosened (§7). A widening
+therefore cannot be applied to a sandbox that is already running; it has to be resolved *before*
+the child is spawned. flint's shape already fits that (one process per call, through
+`run_program_streaming`), but a design that imagined widening a long-lived shell session would
+not.
+
+**What the duration vocabulary should be, taken from what shipped** (see
+[prior art](research-permissions-prior-art.md)):
+
+- Gemini names exactly three answers — "Allow once" / "Allow for this session" / "Allow for all
+  future sessions" — and **the saved rule remembers the mode it was granted in**, under a
+  hierarchy `plan < default < autoEdit < yolo`. So a grant given while the policy was loose does
+  not silently survive into a stricter one. flint's `once` / `turn` / `always` should carry the
+  same fact: a remembered grant records what it was granted under, and a policy change re-asks
+  rather than inherits.
+- OpenCode has the detail worth stealing: the prompt offers once / always-for-this-session, and
+  **the tool supplies the pattern that "always" would cover** — "bash approvals typically
+  whitelist a safe command prefix like `git status*`". That removes the worst part of a durable
+  grant: neither the user nor the model has to invent its scope.
+- The invariant that keeps a remembered rule honest, from Claude Code: a prompt may only offer
+  "don't ask again" when it "can show you everything that rule would allow". **If flint cannot
+  print the rule it is about to save, Stage 2 must not offer to save it.**
+- A loop guard belongs on denials, not on tool calls: Codex breaks the cycle at 3 consecutive and
+  10-in-50 denials, Claude Code at 3 and 20 (§3.3, §3.4). Without one, a model that keeps
+  retrying a denied call turns a policy into a hang.
+
 ### 4.6 Where each effect can actually be enforced
 
 Honesty requires three different labels, and the prompt has to carry them:
@@ -511,6 +716,13 @@ Suggested shape of that line, modelled on DSH's but honest about the split:
 > processes from `bash`/`exec` are NOT confined on this host). Network: unrestricted for child
 > processes. To widen: retry the exact call once with `sandbox_permissions` naming the missing
 > grant; the user is asked.
+
+**And a run has to be labelled, not merely described.** Claude Code retitles the prompt for a
+command it could not sandbox — "Bash command (unsandboxed)" instead of "Bash command" — so a human
+can tell which commands ran outside the boundary (§3.4). flint's transcript should carry the same
+mark on a tool line that ran unconfined, because the alternative is a transcript that reads as if
+everything were contained. It is cheap, it belongs to `src/display.rs`, and it is the difference
+between a policy and a claim.
 
 ### 4.7 Three worked examples
 
@@ -580,6 +792,13 @@ Parked deliberately, with the reason, so that the next reader does not re-litiga
   closing them (`runner.js:23`); a plan that claims otherwise would be lying.
 - **No TOCTOU promise.** Deciding a path and then spawning a child leaves a window; the OS
   stage narrows it, the in-process stage cannot close it.
+- **No object-level grant.** Flatpak's document portal — the user picks one file, the application
+  receives an fd-backed handle it can be given read/write/delete bits on, revocable, transient or
+  persistent (§3.6) — is the better shape for "this one file outside the workspace", and it is the
+  only surveyed mechanism whose unit of grant is the object rather than a class. It is not a fifth
+  stage of this plan: it needs a broker and a handle-passing path through `bash`, which is a
+  second design. What this plan does instead is make the class-based grant narrow enough
+  (`C:\work\other-repo` rather than the whole machine) that the difference is survivable.
 
 ---
 
@@ -589,41 +808,142 @@ Each stage is useful alone, each has the test that goes red first, and each can 
 without stranding the previous one. Line counts are estimates in flint's style (logic plus its
 tests), not promises.
 
+Every stage is laid out the same way, so a reader can find the same four things in the same
+order: **After this stage** (what changes for the person using flint), **the work** (where it
+goes, by file), **Done when** (the tests that must fail first and then pass), and **Not in this
+stage** (what it deliberately leaves out, so the next reader does not assume it is missing).
+
 ### Stage 0 — the policy as data (no OS work)
 
-Change `readonly: bool` into a list of rules with a parsed, printed, hand-editable spelling.
+**After this stage:** a `config.toml` can name the paths that are writable and the paths that
+are refused outright, `deny` beats a wider `write`, and every surface that reports the policy
+reports the same thing. Nothing about the OS, the terminal or the model changes; `readonly` in an
+old config still does exactly what it did.
 
-- `src/config.rs`: a `sandbox` table of `filesystem` rules (`<path or scope> = read | write |
-  deny`), a `network` table, and an `exec` list; the three old names expand to rule sets as
-  presets (§4.2). `readonly = true` maps to the old meaning; an unknown value or a malformed
-  rule is **refused rather than defaulted**, as with `verbose`.
-- Precedence is implemented once and tested: narrower over wider, `deny` over `write`/`read`,
-  network `deny` over `allow`.
-- `src/tools.rs`: `ToolBox::new` takes the rule set; the six enforcement sites ask `decide()`
-  instead of `if self.readonly`.
-- `src/agent.rs`: `prompt_note` states the rules in force and which of them are enforced (§4.6).
-- `/config` prints them; `/sandbox` becomes the switch (the sixth surface, `OnPage::Toggles`).
-- **Red first:** three tests — a `write` to a sibling directory is refused with the sentence
-  naming the path; `**/*.env` stays denied under a workspace-wide `write`; `readonly = true` in
-  an old file still means what it meant.
-- **Size:** 500–800 lines. **Buys:** the vocabulary, and the in-process floor. **Risk:** low.
+**The rule language — the whole user-visible surface of this stage:**
+
+```toml
+[sandbox]
+mode = "workspace"                     # optional preset: read-only | workspace | danger-full-access
+
+[sandbox.filesystem]
+":workspace_roots" = "write"           # the working directory
+":minimal" = "read"                    # the system paths a shell needs to run at all (§3.5 rule 6)
+":tmpdir" = "write"                    # the temp directory; rewritten for children in Stage 3
+"**/*.env" = "deny"                    # wins over any wider write — §4.2
+"C:\\work\\other-repo" = "write"        # the sibling checkout, named exactly
+
+[sandbox.network]
+"crates.io" = "allow"
+"*" = "deny"
+```
+
+Access words are `read`, `write`, `deny`; the scope tokens are `:workspace_roots`, `:minimal`,
+`:tmpdir`, `:slash_tmp`, `:root`; globs are `*` (one component) and `**` (any depth). The
+spellings are Codex's on purpose (§3.6, rule 1): somebody who has written one Codex profile
+should recognise a flint one. **An unknown access word, an unknown token or a malformed glob is
+refused at load, naming the key** — not defaulted, following the `verbose` precedent
+(`ROADMAP.md:489`).
+
+**The decision, in code.** One function, and everything else asks it:
+
+```rust
+// src/sandbox.rs — pure, no I/O, no OS calls
+pub struct Policy { filesystem: Vec<FsRule>, network: Vec<NetRule> }
+
+pub enum Outcome { Allow, Deny }        // Ask arrives in Stage 1; Stage 0 never returns it
+pub struct Decision { pub outcome: Outcome, pub missing: Option<String>, pub reason: String }
+
+impl Policy {
+    pub fn decide_read(&self, path: &Path) -> Decision;
+    pub fn decide_write(&self, path: &Path) -> Decision;
+    pub fn decide_network(&self, host: &str) -> Decision;
+    pub fn is_read_only(&self) -> bool;  // the question `/readonly` asks today
+}
+```
+
+`missing` and `reason` are built in Stage 0 even though nothing asks yet, because §1.1's scar is
+a surface that reported a rule nothing enforced: the sentence is written **where the decision is
+made**, not where it is printed, so no front end can invent a different one.
+
+**The work, place by place.** This is the part that is easy to underestimate: `readonly` is a
+`bool` copied into five tool structs, and it is reported on six surfaces.
+
+| Place | Today | Stage 0 |
+|---|---|---|
+| `src/sandbox.rs` | does not exist | new module: rules, parsing, specificity, `deny` precedence, `decide()` |
+| `src/config.rs:183` | `pub readonly: bool` | a `sandbox` key beside it; `readonly = true` resolves to the read-only preset |
+| `src/agent.rs:155,216,227` | `readonly: bool`, `ToolBox::new(config, readonly, cwd)` | carries a `Policy`; `Agent::readonly()` (`:331`) stays a derived getter so the REPL is untouched |
+| `src/tools.rs:45,60,65,73,78,83,101` | `ToolBox::new` copies the bool into five tools | one `Policy`, shared |
+| `src/tools.rs:505,1590,1773,2081,2157,2266` | five tool structs hold `readonly: bool` | hold the `Policy` |
+| `src/tools.rs:2110,2188,2302` | `write`/`edit`/`patch` refuse when `readonly` | call `decide_write(path)`; the refusal **names the path and the rule that refused it** |
+| `src/tools.rs:1452,1707,1845` | `bash`/`pwsh`/`exec` refuse via `is_readonly_command` | unchanged when the policy is read-only — a command *string* has no paths to judge, so Stage 0 does not pretend it does (§4.6) |
+| `src/main.rs:413–416` | `cfg.readonly \|\| args.readonly` | the same, expressed as the read-only preset, so `--readonly` keeps its "only ever turns it on" meaning |
+| `src/main.rs:2614`, `/readonly` | toggles `cfg.readonly` | toggles the preset; if a hand-written rule contradicts the toggle, it is **reported, not overwritten** (the comment at `:2632` records the bug this must not bring back) |
+| `src/main.rs:2777`, `/config` | prints `readonly = true/false` | prints the rules in force, and marks which are enforced and which are advisory on this host (§4.6) |
+| `src/main.rs:3780`, the page's `state` frame | `{"name":"readonly","values":[…],"value":…}` | shape unchanged; the value reports the preset, so the page needs no new code |
+| `src/context.rs:123`, `prompt_note` | describes `readonly` | states the rules in force, and that they bind flint's own tools and not `bash`'s children |
+
+**Done when:** each of these is a test written first, watched fail for the right reason:
+
+1. a `write` outside the rules is refused, and the message names the path;
+2. `"**/*.env" = "deny"` stays denied under a workspace-wide `write` — `deny` wins;
+3. a narrower `write` beats a wider `read` — specificity;
+4. `readonly = true` in an old config refuses exactly what it refused before, and `/config`
+   prints it as the preset it now is;
+5. a malformed rule is refused at load, naming the key;
+6. `cargo test`, `cargo clippy --all-targets` (silent) and `node scripts/term-layout-test.js`
+   are green.
+
+**Not in this stage:** any question, any duration, any OS boundary, any enforcement for child
+processes. What Stage 0 confines is flint's own `write`, `edit` and `apply_patch`; the prompt
+says so in those words.
+
+**Size:** 500–800 lines, tests included. **Risk:** low — one bool becomes one shared `Policy`,
+plus a pure module that is testable on every platform today.
 
 ### Stage 1 — the per-call decision, and the ask
 
-- `decide()` in one module with its `Decision` type; the transcript shows the reason a call was
-  denied, and the page shows it too (the `state`/`command` frames already exist).
-- `InputReader::ask` carries the prompt for the terminal REPL; a one-shot `-p` run has no human,
-  so `ask` decays to `deny` with a sentence saying so, unless a `--yes` style flag pre-grants
-  it. `--web` gets the same question through the composer's input path.
-- **Red first:** three tests — allow is silent, deny explains, ask is answered "once" and the
-  *next* identical call asks again.
+**After this stage:** a call that needs something the rules do not already give is **asked about
+once** — in the terminal, in `-p`, or in the page — instead of the answer being a session-wide
+switch. Stage 0's refusal already names the missing grant; this stage makes that grant
+answerable.
+
+- `decide()` grows a reachable `Ask`; the transcript shows the reason a call was denied or
+  asked about, and the page shows it too (the `state`/`command` frames already exist).
+- The three front ends: `InputReader::ask` (`src/main.rs:949`) carries the prompt for the REPL; a
+  one-shot `-p` run has no human, so `ask` decays to `deny` with a sentence saying so, unless a
+  `--yes` style flag pre-grants it; `--web` gets the same question through the composer's input
+  path. `Ask` is only returned where `Deny` was the alternative (§4.4), so nothing already
+  allowed becomes a question.
+- The same `Decision` is what the tool obeys, what the transcript shows and what `/config`
+  reports (§4.3): one truth per fact, which is the rule Stage 0 set up.
+- The question offers only what it can print: if the rule an `always` answer would save cannot be
+  shown in the question, the question does not offer `always` (§4.5). Durations themselves are
+  Stage 2; here the answer covers the current call.
+- A denial circuit breaker — stop asking after N consecutive or M-in-window denials and say why
+  (§4.5) — because a model that keeps retrying turns a policy into a hang.
+- A tool line that ran unconfined carries the mark in the transcript (§4.6).
+- A workspace-trust question is the one cheap place to enumerate a grant set *before* any work
+  starts ("this folder would grant: workspace write, temp write, no network"), and it is the
+  natural home for the durable answer.
+- **Done when:** allow is silent; deny explains and names the missing grant; the answer is what
+  the tool actually obeys; the *next* identical call asks again (nothing is remembered yet); a
+  `-p` run with no human denies in one sentence instead of hanging.
+- **Not in this stage:** remembering an answer.
 - **Size:** 400–700 lines. **Buys:** the humane half. **Risk:** medium — the three front ends
   are where "who can answer" gets decided, and `docs/web-mode.md` §4 argues against a second
   policy surface.
 
 ### Stage 2 — grants with duration, and `always`
 
-- `once` / `turn` / `always`; `always` writes `[[sandbox.grants]]` into `config.toml`.
+**After this stage:** an answer can be remembered — for this turn, or for good — and the durable
+one is a line in `config.toml` that can be read and edited by hand. This is the feature people
+actually keep switched on, because it is the one that stops the asking (§3.6, rule 5).
+
+- `once` / `turn` / `always`; `always` writes `[[sandbox.grants]]` into `config.toml`, and the
+  saved rule records **what it was granted under**, so a later, stricter policy re-asks rather
+  than inherits the old answer (§4.5).
 - Session-scoped grants are session events, and `docs/session-format.md` already has the shape
   for exactly this: a `sandbox` line carrying the whole grant set, **the last one in the file
   being the set in force**, the way `switch` is the model in force and `schema` is the answer
@@ -632,13 +952,21 @@ Change `readonly: bool` into a list of rules with a parsed, printed, hand-editab
   damage rather than ignored. The grants go in the line rather than a path to a file, for the
   reason `schema` gives: a session pointing at somebody's disk stops being readable when that
   file changes, and the promise of the format is that the file is the truth.
+- The tool supplies the pattern that `always` would cover, so neither the user nor the model has
+  to invent its scope (§4.5).
 - `/sandbox show` prints the standing grants and where each came from.
-- **Red first:** a grant given "for this turn" is gone at the next prompt; a grant given
+- **Done when:** a grant given "for this turn" is gone at the next prompt; a grant given
   "always" survives a process restart, and `/config` names the file it came from; a session file
   with a `sandbox` line from a newer build still resumes.
-- **Size:** 300–600 lines. **Buys:** the feature people actually keep on. **Risk:** low-medium.
+- **Not in this stage:** any OS boundary, and any grant that a rule in `config.toml` cannot
+  express.
+- **Size:** 300–600 lines. **Risk:** low-medium.
 
 ### Stage 3 — the Windows boundary
+
+**After this stage:** on Windows, a child process flint starts cannot write outside the roots the
+policy names, and that boundary is the operating system's rather than flint's word. It is the
+first stage where §4.6's sentence changes from "advisory" to "enforced" for children.
 
 The first stage that is a real boundary for child processes, and the largest single risk. Two
 warnings from the field before it starts (`DOCUMENTED`, §3.3, §3.4):
@@ -661,28 +989,59 @@ Then the work:
   turn) and `run_program_streaming`'s stdio plumbing (the terminal is flint's, not the child's).
 - Fail closed, with DSH's sentence as the model, or fail open with Claude Code's warning — pick
   one, in writing, because the two vendors chose opposite defaults (§3.4).
-- **Red first:** a child that tries to write one directory outside its roots fails, and the same
+- **Done when:** a child that tries to write one directory outside its roots fails, and the same
   child writing inside succeeds — as two tests on a real machine. Windows CI currently "checks
   nothing on push" (`ROADMAP.md:1495`), so this stage needs that fixed first or it cannot be
   verified honestly.
+- **Not in this stage:** Linux, macOS, and egress control. A boundary that exists on one platform
+  and is labelled as one-platform in the prompt is still worth having, and it is the only way to
+  find out what the other two will cost.
 - **Size:** 600–1,200 lines, most of it `unsafe` and empirical. **Risk:** high.
 
 ### Stage 4 — the other two platforms
 
+**After this stage:** the same boundary on the other two platforms, each with the mechanism that
+platform actually provides — and a written answer for the cases where it provides none.
+
 Linux and macOS. Two more CI platforms before either claim means anything, and a real choice on
 Linux that the two vendors made differently (`DOCUMENTED`, §3.4): **bubblewrap** (Claude Code's
 route — unprivileged user namespaces, `socat` for the network relay, and on Ubuntu 24.04 an
-AppArmor profile because the default policy blocks `bwrap` from creating them) versus **Landlock**
-(DSH's route — no privileges needed, but no network policy, so a proxy is still required for
-egress). macOS is Seatbelt via `sandbox-exec` with a generated SBPL profile.
+AppArmor profile because the default policy blocks `bwrap` from creating them) versus
+**Landlock** (DSH's route — no privileges needed, network rules since ABI v4 for TCP and v10 for
+UDP but keyed on **ports**, so per-host egress still means a proxy). macOS is Seatbelt via
+`sandbox-exec` with a generated SBPL profile.
 
-**Size:** 700–1,400 lines. **Risk:** high, `UNVERIFIED` from this machine.
+**Landlock is monotonic, and that is a design constraint, not a footnote**: a landlocked thread
+can only be restricted further, never loosened (§7). So a widening can never be applied to a
+running sandbox — it has to be resolved *before* the child is spawned. flint already has that
+shape (one process per call, through `run_program_streaming`), which is why §4.5's `once`/`turn`
+durations are implementable at all.
+
+**Done when:** a child refused outside its roots on each platform, in that platform's CI, and a
+written answer for every case where the platform offers no mechanism — including the one this
+survey expects on macOS, where the interface is deprecated and undocumented (§3.6, §7).
+
+**Size:** 700–1,400 lines. **Risk:** high, `UNVERIFIED` from this machine. **Not in this stage:**
+egress — this stage confines the filesystem, and the network stays what Stage 3 made it.
 
 ### Stage 5 — network, only if it is a proxy
 
-Egress control that is not a proxy is not portable (Windows: WFP; Linux: Landlock cannot; macOS:
-network rules in SBPL can). If a proxy is acceptable, it is its own document. If it is not,
-`net: off` stays **advisory for children** and the prompt says so.
+**After this stage:** a child can reach one allowlisted host and nothing else, and the allowlist
+is the same list the policy already prints.
+
+**Done when:** a child that reaches an allowlisted host succeeds and one that reaches any other
+host fails, both as tests against the proxy — and the prompt's sentence changes from "advisory"
+to "enforced" for the network, which is the only thing that makes this stage worth building.
+
+**Not in this stage, and not in any stage:** a claim that flint filters by address without a
+proxy. Egress control that is not a proxy is not portable (Windows: WFP; Linux: Landlock reaches
+ports, not hosts; macOS: SBPL can name hosts, but `sandbox-exec` is deprecated). If a proxy is
+acceptable, it is its own document. If it is not, `net: off` stays **advisory for children** and
+the prompt says so — which is the honest end state, not a failure.
+
+**Size:** deliberately unestimated. This stage is not a line count but a decision — whether flint
+is willing to run a second process and route children through it — and the estimate is only
+honest after that decision, in a document of its own.
 
 ### What every stage must keep true
 
@@ -725,8 +1084,26 @@ Read for this document, in the order they matter:
 | `writable_roots` for `sandbox_workspace_write` before profiles existed | [openai/codex PR #2464](https://github.com/openai/codex/pull/2464) | `DOCUMENTED` |
 | Claude Code's two layers, rule grammar and evaluation order, per-tool approval durability, `additionalDirectories`, the filesystem/network layers, Seatbelt/bubblewrap, the escape hatch, the fail-open default, and the limitations | [Sandboxing](https://code.claude.com/docs/en/sandboxing), [Permissions](https://code.claude.com/docs/en/permissions) | `DOCUMENTED` |
 | The three platform implementations inside one binary, and the size of each shipped artifact | the `@openai/codex` 0.154.0 win32-x64 package on this machine, by PE section table and byte scans | `MEASURED` |
+| Landlock's network rules are keyed on a **port** (ABI v4 for TCP, v10 for UDP), and a ruleset is monotonic — "there is no way to remove its security policy; only adding more restrictions is allowed" | [Landlock userspace API](https://docs.kernel.org/userspace-api/landlock.html), [Landlock security](https://docs.kernel.org/security/landlock.html) | `DOCUMENTED` |
 
-**Not incorporated, and therefore not claimed anywhere above:** Deno's scoped permission flags,
-Flatpak/xdg-desktop-portal, the Android/macOS user-prompt models, and the usability literature on
-prompt fatigue. They are the natural reading before Stage 1 fixes a default approval duration and
-before Stage 2 chooses the lifetime of a remembered rule; nothing in §4 or §5 rests on them.
+**Corrections made in place.** An earlier version of this file said Landlock "cannot express
+network policy" (§1.3, §3.5, Stage 4, Stage 5). That was wrong twice: network rules do exist, and
+a ruleset cannot be loosened. The kernel documentation is now the source for both claims, and
+both are stated as what it says rather than as what this document first assumed. Recorded here
+rather than quietly edited, for the reason [`docs/windows-tooling.md`](windows-tooling.md) gives
+about its own wrong predictions.
+
+Two research notes hold the material this document summarises, and both are worth reading in full
+before the stages that use them:
+
+| What | Where |
+|---|---|
+| The capability and scope models: Deno's scoped flags and its permission broker, Flatpak's document portal, Landlock's ABI, Windows restricted tokens / AppContainer / WFP, Seatbelt's undocumented profiles, and the prompt-fatigue studies | [`docs/sandbox-alternatives-research.md`](sandbox-alternatives-research.md) — read before Stage 3 and Stage 4 |
+| Prior art across coding-agent CLIs: Codex's two non-composable generations, Claude Code's six modes in three layers, Gemini's policy engine, Cursor's rule tokens, OpenCode's session grants, Amp, Aider — and the issue-tracker record of the ladder failing in practice (§1.2) | [`docs/research-permissions-prior-art.md`](research-permissions-prior-art.md) — read before Stage 0, which is where the conflict order gets frozen |
+
+**Still not incorporated, and therefore not claimed anywhere above:** the Android and Apple
+permission-model wording (both vendor sites returned only JavaScript shells to the fetcher),
+Chromium's macOS Seatbelt design note (a pointer, not a read), SBPL's network syntax (no primary
+source found), and "The Attacker Moves Second" (read only through a summary). No peer-reviewed
+study of agent sandbox escapes was found at all, so §3.6's escape evidence is issue trackers and
+vendor documentation — weaker, and labelled as what it is.
