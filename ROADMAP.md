@@ -1475,9 +1475,14 @@ What to build for it, in step 2:
    `on_delta` are called from the reading thread as the frames arrive, and that is *measured* — the
    first fragment of a stalled run reaches the callback a second before the run is stopped, which a
    reader that parsed at the end could not do; `history()`/`messages()` read the file, and a line that
-   is not an event raises `DamagedSession` rather than being skipped. The rest of this step —
-   `paths=`/`attach=`/`inline=`, `require_read` and `map_calls(workers=)` with the balance breaker —
-   is not built.
+   is not an event raises `DamagedSession` rather than being skipped. **`attach=`/`paths=`/`inline=`
+   and `require_read=` are built too**: `attach=` travels as a real `@` name and is checked afterwards
+   against `turn.started`'s `attachments` (raising `NotAttached`), `paths=` writes the names into the
+   prompt as prose and promises nothing, `inline=` is the prompt, and `require_read=` is checked
+   against the `read` tool's `tool.args` frames (raising `NotRead`) — all three differences are visible
+   in the checks because the stub logs the request bodies, which is the only place they are
+   distinguishable; both refusals carry the `Turn` and `Chat` keeps the conversation. `map_calls(workers=)`
+   with the balance breaker is the rest of this step, and it is not built.
 
 #### What other people's wrappers already learned
 

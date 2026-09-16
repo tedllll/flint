@@ -125,6 +125,16 @@ FLINT = _binary()
 # kindness to the caller.
 STOP_GRACE = 10.0
 
+# The most command line this module will build. The prompt travels as an *argument*, so the prompt, the
+# `@` names and the paths are one string to the operating system, and Windows cuts that string at 32767
+# characters (`CreateProcess`). Measured rather than imagined: a 33k prompt fails before flint exists,
+# with `FileNotFoundError [WinError 206]` and nothing about which argument caused it -- which is exactly
+# the kind of failure a caller cannot act on. The bound is 30000 everywhere rather than the Windows
+# number, because a bound a caller can rely on is worth more than a fact about one machine; Unix would
+# carry far more, and `attach=` is the better door there too: flint reads the file itself and the model
+# is given the same text, in the same `<file>` block a hand-typed `@` produces.
+COMMAND_LINE_LIMIT = 30_000
+
 
 @dataclass
 class Turn:
@@ -358,6 +368,207 @@ def _absorb(turn: Turn, line: str) -> dict | None:
     return event
 
 
+class NotAttached(RuntimeError):
+    """A file the caller asked for with `attach=` is not in the prompt.
+
+    Raised after the run, and it is a refusal on purpose. `attach=` is a *promise* -- the file's text is
+    in the prompt because flint read it -- and the alternative failure is the one that cannot be lived
+    with: a model answering about a file it was never given, in the same confident voice it uses when it
+    has read one. `.missing` is what did not arrive and `.turn` is the run that happened anyway.
+    """
+
+    def __init__(self, message: str, missing: list[str], turn: "Turn"):
+        super().__init__(message)
+        self.missing = missing
+        self.turn = turn
+
+
+class NotRead(RuntimeError):
+    """A file the caller named in `require_read=` was never read in this turn.
+
+    `paths=` mentions a path and hopes; `require_read=` is the case where hoping is not enough and the
+    caller wants to *know*. What is checked is the tool call: the stream's `tool.args` for the `read`
+    tool, resolved against the working directory. A file read through `bash` -- `cat`, a script that
+    opens it -- does not count, and that is the honest boundary rather than a limitation to paper over:
+    the check is evidence of a read, and a command line containing a path is not evidence of anything.
+    `.missing` is what was not read and `.turn` is the run, answer included.
+    """
+
+    def __init__(self, message: str, missing: list[str], turn: "Turn"):
+        super().__init__(message)
+        self.missing = missing
+        self.turn = turn
+
+
+def _norm(path: str) -> str:
+    """One path in the form two sides can be compared in.
+
+    Case-folded and absolute, because the same file is `C:\\work\\A.TXT` to one side and
+    `c:\\work\\a.txt` to the other, and a comparison that says they differ is worse than no check: it
+    refuses a promise that was kept.
+    """
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _resolve(cwd: str, path: str | os.PathLike) -> str:
+    """A path as flint will resolve it: against `cwd`, not this interpreter's own directory."""
+    return os.path.normpath(os.path.join(cwd, os.fspath(path)))
+
+
+def _token(path: str) -> str:
+    """The `@` name for a path, quoted when it has to be.
+
+    flint's scanner ends an unquoted name at whitespace (`src/attach.rs`), so a path with a space in it
+    is only a name when it is quoted -- and a path containing a quote is not expressible at all, which
+    is worth refusing here rather than sending a prompt whose token means something else.
+    """
+    if '"' in path:
+        raise ValueError(
+            f"a path with a quote in it cannot be written as an `@` name: {path!r}. "
+            "Rename it, or read it into `inline=` yourself"
+        )
+    return f'@"{path}"' if any(c.isspace() for c in path) else f"@{path}"
+
+
+def attached(turn: "Turn") -> list[dict]:
+    """What flint inlined into this turn's prompt: `token`, `path`, `bytes` and `lines` per file.
+
+    Read from `turn.started`, which is the only place the fact lives -- the stream deliberately does not
+    carry the expanded prompt, because the caller already has those bytes on disk. An empty list is the
+    useful answer: it is how a name that matched nothing looks, rather than a model quietly answering
+    about a path.
+    """
+    for event in turn.of_type("turn.started"):
+        return list(event.get("attachments") or [])
+    return []
+
+
+def verify_attached(turn: "Turn", paths: list[str], *, cwd: str) -> None:
+    """Refuse a turn whose prompt did not get files the caller promised it would.
+
+    The check `attach=` performs, exposed for a caller that assembled its own `@` names. Skipped when
+    the run never started a turn, because then there is nothing to have attached and the run's own error
+    is the answer the caller needs -- a missing key is not a missing attachment.
+    """
+    if not paths or not turn.of_type("turn.started"):
+        return
+    arrived = {_norm(os.path.join(cwd, a.get("path", ""))) for a in attached(turn)}
+    missing = [p for p in paths if _norm(_resolve(cwd, p)) not in arrived]
+    if missing:
+        raise NotAttached(
+            f"attach= promised {missing} and flint did not inline "
+            f"{'it' if len(missing) == 1 else 'them'}"
+            + (f" (it inlined {[a.get('path') for a in attached(turn)]})" if attached(turn) else "")
+            + f"; the run ended as {turn.outcome or turn.error or turn.returncode}",
+            missing,
+            turn,
+        )
+
+
+def read_paths(turn: "Turn", *, cwd: str) -> set[str]:
+    """Every path this turn read with the `read` tool, normalised for comparison.
+
+    From the stream's own tool frames -- `tool.args` carries the arguments as JSON, under `file_path`
+    (the name the schema asks for) or `path` (the older name flint still accepts).
+    """
+    read = set()
+    for event in turn.of_type("tool.args"):
+        if event.get("name") != "read":
+            continue
+        try:
+            arguments = json.loads(event.get("arguments") or "{}")
+        except ValueError:
+            continue
+        named = arguments.get("file_path") or arguments.get("path")
+        if isinstance(named, str) and named:
+            read.add(_norm(_resolve(cwd, named)))
+    return read
+
+
+def verify_read(turn: "Turn", paths: list[str], *, cwd: str) -> None:
+    """Refuse a turn that did not read files the caller required it to. `require_read=`'s check."""
+    if not paths or not turn.of_type("turn.started"):
+        return
+    read = read_paths(turn, cwd=cwd)
+    missing = [os.fspath(p) for p in paths if _norm(_resolve(cwd, p)) not in read]
+    if missing:
+        raise NotRead(
+            f"require_read= asked for {missing} to be read and this turn never read "
+            f"{'it' if len(missing) == 1 else 'them'}"
+            + (f" (it read {sorted(read)})" if read else " (it read nothing)")
+            + f"; the run ended as {turn.outcome or turn.error or turn.returncode}",
+            missing,
+            turn,
+        )
+
+
+def _prepare_prompt(
+    prompt: str,
+    *,
+    cwd: str,
+    attach: list | None,
+    paths: list | None,
+    inline: list | None,
+) -> tuple[str, list[str]]:
+    """The prompt flint will be given, and the files `attach=` promised.
+
+    Three arguments, three different promises, and folding them into one would leave the caller unable
+    to say which is which:
+
+    - `attach=[path]` is a **promise**: flint reads the file and its text is in the prompt. It travels
+      as a real `@` name, so the model sees the same `<file>` block a hand-typed `@` produces, and the
+      caller can check the fact afterwards (`attached`, and `ask` checks it for them).
+    - `paths=[path]` is a **hope**: the names go into the prompt and the model decides whether to read
+      them. It costs nothing up front and one tool call if the model takes the hint, which is the right
+      door for "these might matter" rather than "read this".
+    - `inline=[text]` is a **promise by construction**: the text is in the prompt because it *is* the
+      prompt. Nothing is read from disk, so there is no `@` name and no `<file>` block; it is for text
+      the caller has in memory, and `attach=` is better for anything already on disk.
+    """
+    parts = [prompt]
+    for index, text in enumerate(inline or []):
+        if not isinstance(text, str):
+            raise TypeError(f"inline[{index}] is {type(text).__name__}, not str")
+        parts.append(
+            "The caller put this text into the prompt themselves (there is no file behind it):\n"
+            f"<inline>\n{text}\n</inline>"
+        )
+    if paths:
+        parts.append(
+            "Paths that may be relevant, named by the caller: "
+            + ", ".join(os.fspath(p) for p in paths)
+        )
+    promised: list[str] = []
+    if attach:
+        names = []
+        for path in attach:
+            resolved = _resolve(cwd, path)
+            if not os.path.isfile(resolved):
+                raise FileNotFoundError(
+                    f"attach= names a file that is not there: {resolved}"
+                )
+            promised.append(resolved)
+            names.append(_token(resolved))
+        parts.append("Files the caller attached: " + " ".join(names))
+    return "\n\n".join(parts), promised
+
+
+def _check_command_line(argv: list[str]) -> None:
+    """Refuse a command line this machine cannot carry, before flint is started.
+
+    Called with the arguments as they will be passed and before any temporary file is written, so a
+    refusal leaves nothing behind. See `COMMAND_LINE_LIMIT` for why the number is what it is and what
+    the caller is meant to do instead.
+    """
+    total = sum(len(arg) + 1 for arg in argv)
+    if total > COMMAND_LINE_LIMIT:
+        raise ValueError(
+            f"this call's command line is {total} characters, over the {COMMAND_LINE_LIMIT} this "
+            "module allows: put the text in a file and pass it as attach=[path], which flint reads "
+            "itself, instead of putting it in the prompt or in inline=[...]"
+        )
+
+
 def ask(
     prompt: str,
     *,
@@ -373,6 +584,10 @@ def ask(
     no_schema: bool = False,
     on_event: Callable[[dict], None] | None = None,
     on_delta: Callable[[str], None] | None = None,
+    attach: list | None = None,
+    paths: list | None = None,
+    inline: list | None = None,
+    require_read: list | None = None,
 ) -> Turn:
     """Run one turn in `cwd` and return it.
 
@@ -400,12 +615,24 @@ def ask(
     and passed as `--schema`, because a schema handed over inline has to survive the shell on some
     machines and a temp file always does. `no_schema` is `--no-schema`, how a resumed conversation
     is asked for prose again. `ask_json` is the shorthand for the case where you want the object.
+
+    `attach`, `paths` and `inline` are three ways to put a file in the prompt, and they make three
+    different promises -- see `_prepare_prompt`. `attach=[path]` is the one to reach for: flint reads
+    the file and its text is in the prompt, which is the only one of the three that does not depend on
+    the model agreeing. It raises `NotAttached` if the promise did not hold. `require_read=[path]`
+    checks the other direction -- what the run *did* -- and raises `NotRead` unless the file was read
+    with the `read` tool. Both refusals happen after the run, and both carry the `Turn`, because the
+    conversation is real and its answer may be worth keeping.
     """
     project = os.path.abspath(os.fspath(cwd))
     if not os.path.isdir(project):
         raise NotADirectoryError(f"cwd is not a directory: {project}")
 
-    argv = [FLINT, "-p", prompt, "--json", "--cwd", project]
+    text, promised = _prepare_prompt(
+        prompt, cwd=project, attach=attach, paths=paths, inline=inline
+    )
+
+    argv = [FLINT, "-p", text, "--json", "--cwd", project]
     if continue_last:
         argv.append("--continue")
     if resume:
@@ -421,6 +648,11 @@ def ask(
     env = dict(os.environ)
     if home:
         env["FLINT_HOME"] = home
+
+    # Checked before the schema file below, so a refusal leaves no temporary file behind, and before
+    # the process, so it costs nothing: the schema's path is thirty characters and never what makes a
+    # prompt too long.
+    _check_command_line(argv)
 
     # A schema goes through a file rather than inline. Inline looks simpler and works from Python
     # (there is no shell in the way here, unlike a hand-typed command) but it breaks the moment
@@ -539,6 +771,11 @@ def ask(
         # Raised now rather than at the frame that caused it: by here the run has ended and the
         # process is reaped, so nothing of this call is left behind on the machine.
         raise callback_error
+    # The promises, checked against what the run reported rather than against what was asked for. This
+    # is the order they belong in: the answer is collected first, so a refusal carries it instead of
+    # throwing away work that is already committed to the session and already paid for.
+    verify_attached(turn, promised, cwd=project)
+    verify_read(turn, list(require_read or []), cwd=project)
     return turn
 
 
@@ -630,28 +867,51 @@ class Chat:
         extra: list[str] | None = None,
         on_event: Callable[[dict], None] | None = None,
         on_delta: Callable[[str], None] | None = None,
+        attach: list | None = None,
+        paths: list | None = None,
+        inline: list | None = None,
+        require_read: list | None = None,
     ) -> Turn:
         """Say one thing in this conversation and return the turn.
 
         Everything `ask` takes that describes *this call* is here; everything that describes the
         conversation was settled in the constructor. `schema` and `no_schema` are per call because
         flint records the shape in force in the session and one question in a conversation may want a
-        checked answer while the next wants prose.
+        checked answer while the next wants prose. `attach`, `paths`, `inline` and `require_read` are
+        per call for the same reason: what this question needs is not what the last one needed.
+
+        A refusal (`NotAttached`, `NotRead`) is raised *after* the conversation has been recorded and
+        the session pinned, because the run happened: the answer is on disk, and a second call has to
+        continue this conversation rather than start another one beside it.
         """
-        turn = ask(
-            prompt,
-            cwd=self.cwd,
-            resume=self.session,
-            provider=self.provider,
-            model=self.model,
-            home=self.home,
-            timeout=self.timeout if timeout is None else timeout,
-            extra=self.extra + list(extra or []),
-            schema=schema,
-            no_schema=no_schema,
-            on_event=on_event,
-            on_delta=on_delta,
-        )
+        try:
+            turn = ask(
+                prompt,
+                cwd=self.cwd,
+                resume=self.session,
+                provider=self.provider,
+                model=self.model,
+                home=self.home,
+                timeout=self.timeout if timeout is None else timeout,
+                extra=self.extra + list(extra or []),
+                schema=schema,
+                no_schema=no_schema,
+                on_event=on_event,
+                on_delta=on_delta,
+                attach=attach,
+                paths=paths,
+                inline=inline,
+                require_read=require_read,
+            )
+        except (NotAttached, NotRead) as refused:
+            # The run happened even though the promise did not, so the conversation exists and its
+            # answer is worth keeping. Recording it before the exception goes on is what stops the
+            # *next* call from writing a second conversation while this one holds the answer the
+            # caller was refused.
+            self.turns.append(refused.turn)
+            if self.session is None:
+                self.session = refused.turn.session
+            raise
         if self.session is None:
             # The first call is the one that names the conversation. `turn.session` is what flint
             # opened, taken from `session.started` -- the file, not a guess about where it would be.
@@ -742,7 +1002,10 @@ def ask_json(
     validated against that schema by flint -- locally, because the only JSON mode the provider
     surface agrees on promises the reply parses and nothing about its shape.
 
-    Everything else (`home`, `continue_last`, `resume`, `timeout`, `extra`) is `ask`'s.
+    Everything else (`home`, `continue_last`, `resume`, `timeout`, `extra`, `attach`, `paths`,
+    `inline`, `require_read`) is `ask`'s -- and so is every check it makes, which are worth having
+    here too: a structured answer about a file that was never attached is exactly as wrong as a prose
+    one, and harder to notice.
     """
     turn = ask(prompt, cwd=cwd, schema=schema, **options)
     if turn.result is None:

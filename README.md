@@ -416,8 +416,16 @@ check carries on with nothing. `cwd=` is required and is what separates conversa
 same calls for a conversation rather than a question: it pins the session path on the first call,
 passes it to `--resume` afterwards (so two callers in one directory cannot land in each other's
 history), takes `on_delta=` for rendering an answer as it is written, and reads the record back with
-`history()`. `docs/python.md` is the whole story, and `examples/python/timing_demo.py` shows both
-behaviours as measured output.
+`history()`.
+
+Putting a file in the prompt is three arguments, because they make three different promises:
+`attach=[path]` is a promise (flint reads the file and its text is in the prompt, and `ask` raises
+`NotAttached` if it is not), `paths=[path]` is a hope (the names go in and the model decides whether to
+read them), and `inline=[text]` is a promise by construction (the text *is* the prompt).
+`require_read=[path]` checks the other direction — what the run *did*, from the `read` tool's frames —
+and raises `NotRead` otherwise. Both refusals carry the `Turn`, and `Chat` keeps the conversation, so a
+refused promise is not a lost answer. `docs/python.md` is the whole story, and
+`examples/python/timing_demo.py` shows both blocking behaviours as measured output.
 
 ### Being used by another agent (MCP)
 

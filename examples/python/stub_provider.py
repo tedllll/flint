@@ -3,18 +3,43 @@
 First request: the model "decides" to run a bash command (so the tool round is exercised).
 Second request: the model "answers". Everything is served as SSE, the same shape
 `tests/agent_loop.rs` uses with wiremock.
+
+Two things here exist for checks that need more than one scripted conversation:
+
+- `FLINT_STUB_LOG` names a file and every request body is appended to it, one JSON object per line.
+  The stream says what flint did; the request says what the *model* was given, which is the only place
+  the difference between a file attached, a file named, and a file inlined can be seen.
+- A prompt containing `[[read: <path>]]` is answered with a real `read` tool call for that path, and
+  then answered for real. A fake model needs a rule for what it "decides", and this one is visible in
+  the conversation rather than hidden in this file's argv -- which is what makes `require_read`'s
+  positive case a *run that read something* rather than a hand-built event.
 """
 
 import json
+import os
+import re
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 CALLS = {"n": 0}
+# How many answers this stub has given to each conversation, keyed by its first user message, so what
+# it does for one conversation does not depend on how many others ran before it.
+ANSWERS: dict[str, int] = {}
 # Set by the `stall` argument: write one fragment and then say nothing, for ever. That is the shape a
 # stop has to be tested against -- an answer drawn but unfinished -- and it cannot be produced by a
 # response with a fixed body, which is what the rest of this file serves.
 STALL = False
+LOG = os.environ.get("FLINT_STUB_LOG")
+READ_MARKER = re.compile(r"\[\[read:\s*(?P<path>[^\]]+?)\s*\]\]")
+
+
+def first_user(body):
+    """The conversation's opening question, which is what this stub keys a script by."""
+    for message in body.get("messages", []):
+        if message.get("role") == "user":
+            return message.get("content") or ""
+    return ""
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -58,6 +83,12 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         body = json.loads(self.rfile.read(length) or b"{}")
         CALLS["n"] += 1
+        if LOG:
+            with open(LOG, "a", encoding="utf-8") as out:
+                out.write(json.dumps(body, ensure_ascii=False) + "\n")
+        prompt = first_user(body)
+        answered = ANSWERS.get(prompt, 0)
+        ANSWERS[prompt] = answered + 1
         # A schema run asks for JSON in the request itself (`response_format`), and the answer has to
         # oblige or the run is testing flint's retry ladder instead of its structured output. Checked
         # before the counter below, so this does not disturb the tool-call sequence the other checks
@@ -86,7 +117,26 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
             time.sleep(120)
             return
-        if CALLS["n"] == 1:
+        # The `[[read: …]]` rule first: it is a conversation of its own, and answering its second
+        # request is what makes `require_read`'s positive case a run that really read a file.
+        marker = READ_MARKER.search(prompt)
+        if marker and answered == 0:
+            chunks = [
+                {"choices": [{"delta": {"tool_calls": [
+                    {"index": 0, "id": "call_read_1", "type": "function",
+                     "function": {"name": "read",
+                                  "arguments": json.dumps(
+                                      {"path": marker.group("path").strip()})}}]}}]},
+                {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+                {"choices": [], "usage": {"prompt_tokens": 31, "completion_tokens": 7}},
+            ]
+        elif marker:
+            chunks = [
+                {"choices": [{"delta": {"content": "看过了。"}}]},
+                {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+                {"choices": [], "usage": {"prompt_tokens": 64, "completion_tokens": 4}},
+            ]
+        elif CALLS["n"] == 1:
             chunks = [
                 {"choices": [{"delta": {"content": "我先看一下。"}}]},
                 {"choices": [{"delta": {"tool_calls": [

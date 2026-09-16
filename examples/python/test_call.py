@@ -34,6 +34,26 @@ def check(name, condition, detail=""):
         FAILURES.append(name)
 
 
+def attempt(thunk):
+    """Run a call and hand back `(result, exception)` rather than raising.
+
+    A suite that stops at the first problem hides every problem after it, and the refusals this file
+    checks are raised *out* of `ask` on purpose (`NotAttached`, `NotRead`): the check that follows
+    reports the exception as the failure it is instead of a traceback ending the run.
+    """
+    try:
+        return thunk(), None
+    except Exception as exc:  # noqa: BLE001 -- the exception is the check's subject
+        return None, exc
+
+
+def why(result, blew_up):
+    """The detail line for a check whose call may have raised."""
+    if blew_up is not None:
+        return f"{type(blew_up).__name__}: {blew_up}"
+    return f"rc={result.returncode}" if result is not None else "no result"
+
+
 def free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -51,6 +71,37 @@ def session_files(home):
     return sorted(root.glob("*.jsonl")) + sorted(root.glob("*/*.jsonl"))
 
 
+def request_log(home):
+    """Every request body the stub was sent, in order.
+
+    The stream says what flint did; this says what the *model* was given, which is the only place the
+    difference between the three ways of putting a file in a prompt is visible: `attach=` puts the
+    text in, `paths=` puts a name in, `inline=` is the prompt.
+    """
+    path = Path(home) / "requests.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def last_request(home):
+    """The last request's messages, joined: what the model was given, as text.
+
+    The messages rather than the whole body, because the body also holds the tool schemas and the JSON
+    encoding of the path separators on Windows -- a check that searched the raw JSON would pass on a
+    schema's mention of a word and fail on a path that really was in the prompt.
+    """
+    entries = request_log(home)
+    if not entries:
+        return ""
+    parts = []
+    for message in entries[-1].get("messages", []):
+        content = message.get("content")
+        if isinstance(content, str):
+            parts.append(content)
+    return "\n".join(parts)
+
+
 def main():
     scratch = Path(tempfile.mkdtemp(prefix="flint-py-"))
     (scratch / "sessions").mkdir(parents=True, exist_ok=True)
@@ -60,6 +111,10 @@ def main():
         stdout=subprocess.PIPE,
         text=True,
         encoding="utf-8",
+        # Every request body the stub is sent, so a check can see what the *model* was given rather
+        # than only what flint said it did. That is the difference between `attach=`, `paths=` and
+        # `inline=`, and it is not visible in the stream.
+        env={**os.environ, "FLINT_STUB_LOG": str(scratch / "requests.jsonl")},
     )
     stub.stdout.readline()  # "stub listening on ..."
     (scratch / "config.toml").write_text(
@@ -384,6 +439,142 @@ def main():
         check("a second Chat on the same path reads the same record",
               Chat(cwd=str(scratch), home=str(scratch), session=chat.session).messages()
               == chat.messages())
+        print("\n13. three ways to put a file in a prompt, and only two of them are promises")
+        # `attach=` is a promise: flint reads the file and its text is in the prompt. `paths=` is a
+        # hope: the names are in the prompt and the model decides whether to read them. `inline=` is a
+        # promise by construction: the text *is* the prompt. Folding them into one argument would leave
+        # the caller unable to say which is which, which is the whole reason they are three.
+        from flint_call import (  # noqa: E402
+            Chat, NotAttached, NotRead, Turn, attached, verify_attached)
+
+        notes = scratch / "notes.txt"
+        notes.write_text("THE-NOTES-MARKER\n", encoding="utf-8")
+
+        promised, blew_up = attempt(
+            lambda: ask("what does the attachment say?", attach=[notes],
+                        home=str(scratch), cwd=str(scratch))
+        )
+        check("attach= ran", promised is not None and promised.returncode == 0,
+              why(promised, blew_up))
+        check("and flint really inlined it, as a `@` name",
+              promised is not None and [os.path.normcase(a["path"]) for a in attached(promised)]
+              == [os.path.normcase(str(notes))],
+              repr(attached(promised) if promised else None))
+        check("so the model was given the file's text, not its name",
+              "THE-NOTES-MARKER" in last_request(scratch),
+              last_request(scratch)[-300:])
+        ask("maybe look at notes.txt?", paths=[notes], home=str(scratch), cwd=str(scratch))
+        body = last_request(scratch)
+        check("paths= names the path to the model", str(notes) in body, body[:200])
+        check("and leaves the reading of it to the model", "THE-NOTES-MARKER" not in body,
+              "the file's text was in the prompt, which is `attach=`'s job")
+
+        ask("answer from this text", inline=["INLINE-MARKER"], home=str(scratch), cwd=str(scratch))
+        check("inline= is in the prompt because it is the prompt",
+              "INLINE-MARKER" in last_request(scratch), last_request(scratch)[-300:])
+
+        before_refusal = len(request_log(scratch))
+        try:
+            ask("never mind", attach=[scratch / "nope.txt"], home=str(scratch), cwd=str(scratch))
+            check("attach= refuses a file that is not there", False, "no exception")
+        except FileNotFoundError as exc:
+            check("attach= refuses a file that is not there", "nope.txt" in str(exc), str(exc))
+        check("and refuses it without starting a run",
+              len(request_log(scratch)) == before_refusal, "a request was sent anyway")
+
+        # The wall is the operating system's, and it is the whole command line: a prompt that does not
+        # fit fails before flint exists, with an error that names no argument (measured -- see §11).
+        # `attach=` is the way through, so the refusal has to say so.
+        try:
+            ask("anything", inline=["x" * 40000], home=str(scratch), cwd=str(scratch))
+            check("a prompt too big for a command line is refused here", False, "no exception")
+        except ValueError as exc:
+            check("a prompt too big for a command line is refused here",
+                  "attach=" in str(exc), str(exc))
+        check("and that refusal also spends nothing",
+              len(request_log(scratch)) == before_refusal, "a request was sent anyway")
+
+        # A file past flint's own inline cap is refused by the run itself, with the reason on the
+        # stream a caller reads: the promise is kept by saying it cannot be, not by dropping the file.
+        huge = scratch / "huge.txt"
+        huge.write_text("y" * (300 * 1024), encoding="utf-8")
+        over, blew_up = attempt(
+            lambda: ask("read the attachment", attach=[huge],
+                        home=str(scratch), cwd=str(scratch))
+        )
+        check("a file past the inline cap fails the run",
+              over is not None and over.returncode != 0, why(over, blew_up))
+        check("and the stream says why", over is not None and "bytes" in (over.error or ""),
+              repr(over.error if over else None)[:200])
+        huge.unlink()
+
+        print("\n14. `require_read` is checked against what the run did")
+        read_path = scratch / "to-read.txt"
+        read_path.write_text("READ-MARKER\n", encoding="utf-8")
+        read_turn, blew_up = attempt(
+            lambda: ask(f"[[read: {read_path}]] what is in it?", require_read=[read_path],
+                        home=str(scratch), cwd=str(scratch))
+        )
+        check("a run that read the file passes",
+              read_turn is not None and read_turn.returncode == 0, why(read_turn, blew_up))
+        check("and the stream is where that was seen",
+              read_turn is not None and any(
+                  e["type"] == "tool.args" and e.get("name") == "read" for e in read_turn.events),
+              str([e.get("name") for e in (read_turn.events if read_turn else [])
+                   if e["type"] == "tool.args"]))
+
+        try:
+            ask("answer without looking", require_read=[read_path],
+                home=str(scratch), cwd=str(scratch))
+            check("a run that did not read it is refused", False, "no exception")
+        except NotRead as exc:
+            check("a run that did not read it is refused", "to-read.txt" in str(exc), str(exc))
+            check("and the refusal carries the turn, so the answer is not lost",
+                  bool(exc.turn and exc.turn.answer), repr(exc.turn.answer if exc.turn else None))
+
+        # The promise is checked against what flint *says* it attached, so a flint that stopped
+        # inlining would be an error here rather than a model answering about a file it never saw.
+        # Fabricated rather than driven, because there is no way to make today's flint stay silent:
+        # that is the case the check exists for.
+        silent = Turn()
+        silent.events.append({"type": "turn.started", "prompt": "see @notes.txt"})
+        try:
+            verify_attached(silent, [str(notes)], cwd=str(scratch))
+            check("an attachment that never arrived is refused", False, "no exception")
+        except NotAttached as exc:
+            check("an attachment that never arrived is refused",
+                  "notes.txt" in str(exc), str(exc))
+
+        # A path with a quote in it cannot be written as an `@` name at all -- flint's scanner ends a
+        # quoted name at the first quote, so the token would mean a different file -- and it is refused
+        # before a prompt is built rather than sent as something else. Through `_token` rather than
+        # through `ask`, because Windows cannot have such a file and the guard is for the machines that
+        # can: the alternative was no guard, and a prompt whose token names the wrong thing.
+        import flint_call  # noqa: E402
+
+        try:
+            flint_call._token('/tmp/a"b.txt')
+            check("a path a prompt cannot express is refused", False, "no exception")
+        except ValueError as exc:
+            check("a path a prompt cannot express is refused", "quote" in str(exc), str(exc))
+
+        print("\n15. a refused promise still pins the conversation")
+        # A promise that fails after the run is not a run that did not happen: the conversation is real
+        # and the answer is in the file, so `Chat` records it before the exception goes on. Otherwise
+        # the next call would start a *second* conversation while the first holds what was refused.
+        chat_refused = Chat(cwd=str(scratch), home=str(scratch))
+        try:
+            chat_refused.ask("answer without looking", require_read=[read_path])
+            check("the refusal reached the caller", False, "no exception")
+        except NotRead:
+            check("the refusal reached the caller", True)
+        check("and the conversation was pinned anyway", bool(chat_refused.session),
+              str(chat_refused.session))
+        files_before = len(session_files(scratch))
+        chat_refused.ask("and now answer anyway")
+        check("so the next call continues it rather than starting one",
+              len(session_files(scratch)) == files_before,
+              f"{files_before} -> {len(session_files(scratch))}")
     finally:
         stub.terminate()
         try:

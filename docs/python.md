@@ -134,6 +134,58 @@ a hung one if you are reading the stream yourself rather than waiting for `ask()
 [README](../README.md#machine-interface): dispatch on `type` and ignore what you do not know, so a
 newer flint does not break a caller.
 
+## Putting a file in the prompt, and knowing whether it got there
+
+`@path` in a prompt is how flint inlines a file: the text goes into the prompt in a `<file>` block
+before the model is called, so nothing the model does can leave it out. Typing the name yourself works,
+and it has one failure mode a program cannot live with — a name that matched nothing stays in the prompt
+as *prose*, and the model answers about a file it never saw in the same confident voice it uses when it
+read one. So there are three arguments, and the difference between them is what they promise:
+
+```python
+turn = ask("what changed in @src/provider.rs?", cwd="/path/to/project")     # your own prompt
+turn = ask("summarise this", cwd="/path/to/project", attach=["rules.csv"]) # a promise
+turn = ask("check the numbers", cwd="/path/to/project", paths=["a.csv", "b.csv"])  # a hope
+turn = ask("answer from this", cwd="/path/to/project", inline=["text in memory"])  # the prompt
+```
+
+| Argument | What it puts in the prompt | What it promises |
+|---|---|---|
+| `attach=[path]` | the file's text, as a real `@` name | **the text is there**, and `ask` refuses if it is not |
+| `paths=[path]` | the names, as a sentence | nothing: the model may read them, or may not |
+| `inline=[text]` | the text | **the text is there** — because it *is* the prompt |
+
+`attach=` is the one to reach for, and it is checked in both directions. A path that is not a file
+raises `FileNotFoundError` before flint is started, so nothing is spent on a typo; a file that flint
+refuses to inline (past its 256 KB cap, or not valid UTF-8) fails the run with the reason on the
+stream; and a prompt flint somehow did not inline raises `NotAttached`, checked against
+`turn.started`'s `attachments` rather than against what was asked for. `attached(turn)` and
+`verify_attached(turn, paths, cwd=...)` are that check, exposed, for a caller that assembled its own
+`@` names.
+
+`require_read=` is the other direction, for the case where hoping is not enough:
+
+```python
+turn = ask("…", cwd="/path/to/project", require_read=["src/provider.rs"])
+```
+
+It is checked against what the run *did* — the `read` tool's `tool.args` frames, resolved against the
+working directory — and raises `NotRead` if the file was never read. Reading it through `bash`
+(`cat`, a script) does **not** count: the check is evidence of a read, and a command line containing a
+path is not evidence of anything.
+
+Both refusals happen *after* the run, and both carry the `Turn` in `.turn`, because the run did happen:
+the answer is on disk and already paid for. `Chat` records that turn and pins the session before the
+exception goes on, so the next call continues the conversation rather than starting a second one beside
+it.
+
+Two limits are worth knowing before you hit them. flint inlines at most 256 KB per prompt, reported by
+the run rather than silently dropped. And the prompt travels as a *command-line argument*, which Windows
+cuts at 32767 characters: `flint_call` refuses a call over 30000 characters itself, and the message
+says to use `attach=`, which is the way through — flint reads the file, so the argument stays four
+characters no matter how big the document is. Without that check the caller gets
+`FileNotFoundError [WinError 206]` from `subprocess`, naming no argument at all.
+
 ## Structured output
 
 `ask_json(prompt, cwd=..., schema={...})` returns the object from flint's `result` line. flint
@@ -195,7 +247,7 @@ explicit yes.
 
 ```console
 $ cargo build
-$ python examples/python/test_call.py       # 49 checks against a local stub, no key, no cost
+$ python examples/python/test_call.py       # 95 checks against a local stub, no key, no cost
 $ python examples/python/timing_demo.py     # what blocking and failure actually look like
 $ python examples/python/ask_schema.py      # needs DEEPSEEK_API_KEY; spends real tokens
 ```
@@ -205,6 +257,12 @@ scratch `FLINT_HOME` at it, which is the same trick `tests/agent_loop.rs` uses w
 runs the binary **built from this checkout** when there is one — a check that runs yesterday's
 installed flint passes for the wrong reason, which is not hypothetical: the session-layout
 expectations here were first written while `PATH` still held a build from before the layout changed.
+
+The stub is told to log every request body it is sent (`FLINT_STUB_LOG`), because the stream says what
+flint did and the request says what the **model** was given — the only place `attach=`, `paths=` and
+`inline=` are distinguishable from each other. A prompt containing `[[read: <path>]]` is answered with
+a real `read` tool call and then answered for real, so `require_read=`'s positive case is a run that
+read something rather than a hand-built event.
 
 On Windows, set `PYTHONIOENCODING=utf-8`: this machine's ANSI code page is CP936, and the default
 would mangle the answer.

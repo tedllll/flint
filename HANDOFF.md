@@ -95,9 +95,31 @@ be able to read, 4 the answer written where the caller asked, 3 the file inlined
 1 the stream checked on its bytes),
 7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 6 `who`, 10 `task`, 2 `say`), `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
-pass, and `python examples/python/test_call.py` is 75 checks, all passing (one of them waits
+pass, and `python examples/python/test_call.py` is 95 checks, all passing (one of them waits
 out the fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from),
 and `python examples/mcp/test_mcp.py` passes its own 23.
+
+**The Python caller's promises are built — the first half of `ROADMAP.md` §10 step 7's remainder.**
+`ask()`/`Chat.ask()`/`ask_json()` take `attach=`, `paths=`, `inline=` and `require_read=`, and the
+three ways of putting a file in a prompt are three arguments because they make three different
+promises: `attach=[path]` is a promise (it travels as a real `@` name, and `ask` raises `NotAttached`
+if `turn.started`'s `attachments` does not name it), `paths=[path]` is a hope (the names go into the
+prompt as prose and the model decides), `inline=[text]` is a promise by construction (the text *is*
+the prompt). `require_read=[path]` checks the other direction — what the run *did* — from the `read`
+tool's `tool.args` frames, resolved against the working directory, and raises `NotRead`; a file read
+through `bash` deliberately does not count, because a command line containing a path is not evidence of
+a read. Both refusals happen *after* the run and carry the `Turn`, and `Chat` records that turn and
+pins the session before re-raising, so a refused promise is not a lost answer. A call whose command
+line would exceed 30000 characters is refused by the module itself (measured first: a 33k prompt dies
+in `CreateProcess` as `FileNotFoundError [WinError 206]`, naming no argument), and the message points
+at `attach=`, which is the way through — flint reads the file and the argument stays four characters.
+The checks needed the stub to see more: it now logs every request body (`FLINT_STUB_LOG`), which is the
+only place `attach=`/`paths=`/`inline=` are distinguishable, and it answers a prompt containing
+`[[read: <path>]]` with a real `read` tool call, so `require_read`'s positive case is a run that read
+something rather than a hand-built event. Five sections of `test_call.py` (20 checks, 75 → 95), and
+each new promise was mutation-checked: making `verify_read` or `verify_attached` a no-op, dropping the
+names from `paths=`, and attaching the file's path instead of its `@` name each fail the check that
+owns them. Still to come in step 7: `map_calls(workers=)` and the balance breaker.
 
 **The `task` bug report of 2026-09-16 is fixed, and it was the missing background handle seen from the
 other side.** A person started a child, the parent's status row went on saying `task` and nothing else
