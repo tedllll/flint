@@ -39,6 +39,18 @@ loop stays in the child, answers instead of transcripts, a byte-stable descripti
 prompt cache survives a release). The Python caller's `balance()` is the other half of B6: ask before
 the batch instead of discovering an empty account on call one.
 
+**Open and newly written down**: `docs/agents.md` is the plan for runs that spawn, find and talk to
+each other — prompted by three questions asked directly, and by the incident it opens with (two agents
+in this checkout at once, one of them mid-write in `docs/sandbox.md`, and the other committing a
+half-written revision of it with `git add -A`). Its claim is that a subagent, a Python call, an MCP call
+and "a background process" are one thing — a run — seen through four doors, and that the MCP and Python
+doors are already built. Stage 1 is presence plus `flint who` (touches no standing decision, and is what
+would have prevented the incident); stage 2 is a `task` tool and **contradicts the "Subagents" entry in
+`ROADMAP.md`**, which now says "under review" and must be edited in the same commit as any code that
+adopts it. Five decisions are waiting on the repository's owner, listed at the end of that file — the
+depth bound, the mailbox default (a peer's words are shown to the human, never fed to the model, unless
+someone opts in), and whether presence is `FLINT_HOME`-only.
+
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
 As of the commit that carries this file, `cargo test` is 449 passing, 1 ignored (280 lib, 3 in
 the binary's own tests, 33 `agent_loop`, 58 `cli_output`, 22 `json_output` (7 structured

@@ -1533,9 +1533,18 @@ measured and what was not.
   adopted; adopting any stage means editing this bullet in the same commit, because a plan of
   record that contradicts a plan document is how a repository starts lying to itself.
 - **Subagents** — flint is one conversation and one context window. Splitting it invents
-  coordination, budgets and merge problems that a rescue tool does not need.
+  coordination, budgets and merge problems that a rescue tool does not need. **Under review,
+  and not adopted**: `docs/agents.md` argues for the narrow version — a `task` tool that
+  starts another flint the same way a Python caller or an MCP client already does, with a
+  bounded depth and a `readonly` a child cannot loosen. Nothing changes until this bullet
+  says so, and whoever changes it keeps the reason above in the text: the parent's context is
+  still one window, and a subagent's value is isolation and least privilege rather than a
+  bigger window. The same file argues for the other half — two runs in one directory being
+  able to see each other, which is what the `git add -A` incident above needed and does not
+  contradict this bullet.
 - **MCP** — deferred, not refused: it is a protocol with real weight, and nothing here yet
-  needs what it offers.
+  needs what it offers. **Being callable over MCP is the other direction and is built**:
+  `examples/mcp/flint_server.py`.
 - **`flint doctor`** — a second program inside the first, with its own failures, to check
   things flint can already check by running them.
 - **An index, a cache, a database, compression** — anything that makes the state on disk

@@ -52,6 +52,7 @@ whoever is changing the code — a person or a model driving it.
 | `docs/deepseek-search.md` | web search: what was measured about DeepSeek's search, and what it costs |
 | `docs/decisions.md` | why flint is built this way, decision by decision |
 | `docs/sandbox.md` | a plan for replacing permission modes with grants — **not built, and it argues against the "Not doing, and why" entry in `ROADMAP.md` on purpose**; read it as an argument, not as the state of the tree |
+| `docs/agents.md` | the plan for runs that spawn, find and talk to each other (a `task` tool, presence, a mailbox) — the MCP and Python halves are built, the rest is stages, and stage 2 contradicts the "Subagents" entry in `ROADMAP.md` on purpose |
 | `ROADMAP.md` | the plan of record: the ordered queue, and what is deliberately not done |
 | `HANDOFF.md` | state of the project at the end of the last working session |
 
