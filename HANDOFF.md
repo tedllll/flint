@@ -87,7 +87,7 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 505 passing, 1 ignored (303 lib, 3 in
+As of the commit that carries this file, `cargo test` is 506 passing, 1 ignored (304 lib, 3 in
 the binary's own tests, 33 `agent_loop`, 61 `cli_output`, 34 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
@@ -98,6 +98,24 @@ be able to read, 4 the answer written where the caller asked, 3 the file inlined
 pass, and `python examples/python/test_call.py` is 95 checks, all passing (one of them waits
 out the fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from),
 and `python examples/mcp/test_mcp.py` passes its own 23.
+
+**A batch of concurrent runs found a real fault in the session file naming, and it is fixed.** The
+id was `<seconds>-<milliseconds>`, and six `map_calls` runs started at once proposed **the same id
+five times over** — they were started within a millisecond of each other and did the same work before
+reaching `new_id` — and the older `append` answered "the file is already there" by opening it for
+append, so five conversations went into one file. One writer per file is the property every listing,
+`--continue` and the archive rule leans on, so this was not a cosmetic fault. Two changes, because
+there were two faults: `new_id` now ends in the process id, so two runs cannot propose the same name
+(`session.started` names the file *before* the first write, so a name that had to move at write time
+would be a frame that lied); and taking the name is now a claim — `create_new` is what decides who
+writes `meta`, and a taken name moves that writer to the next millisecond instead of merging with a
+stranger's conversation, with `meta.id` moving with it. `append`, `title`, `schema` and `switched` are
+`&mut self` for that second half. The Rust test was watched red first
+(`a_writer_that_finds_its_name_taken_takes_another`, which forces the collision rather than waiting
+for one); the integration proof is the Python batch check, which failed with
+*"and each one is its own conversation"* — six turns, two files — and passes now. Also learned and
+written into `AGENTS.md`: `cargo test --lib` does not rebuild `target/debug/flint.exe`, so a Python
+check run without `cargo build` first tests the previous binary and its bugs.
 
 **The Python caller's promises are built — the first half of `ROADMAP.md` §10 step 7's remainder.**
 `ask()`/`Chat.ask()`/`ask_json()` take `attach=`, `paths=`, `inline=` and `require_read=`, and the

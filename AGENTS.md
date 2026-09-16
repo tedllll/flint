@@ -68,8 +68,8 @@ in a scratch directory for the same reason.
 | Path | What it is |
 |---|---|
 | `<FLINT_HOME>/config.toml` | the configuration; created on first run |
-| `<FLINT_HOME>/sessions/<dir>/<stamp>-<n>.jsonl` | one conversation per file, append-only, in the directory belonging to the working directory it was held in (older sessions sit directly in `sessions/`, and are still found). A file is created by the first thing said in it, so opening flint and typing nothing leaves nothing |
-| `<FLINT_HOME>/sessions/<dir>/children/<stamp>-<n>.jsonl` | the conversation of a run another run started (a `task`/`tasks` child, or the same thing from Python or MCP). A session file like any other — same format, readable, resumable by path — and one level deeper on purpose: no listing reads that directory, so `/sessions`, `--list-sessions`, the page's sidebar and `--continue` show a person their own conversations and nothing else. Its `meta` line names the parent in `parent`. `mv` it up a level to adopt it |
+| `<FLINT_HOME>/sessions/<dir>/<stamp>-<ms>-<pid>.jsonl` | one conversation per file, append-only, in the directory belonging to the working directory it was held in (older sessions sit directly in `sessions/`, and are still found). A file is created by the first thing said in it, so opening flint and typing nothing leaves nothing; creating it is what claims the name, and the process id in it is what stops two runs that start in the same millisecond from proposing the same one |
+| `<FLINT_HOME>/sessions/<dir>/children/<stamp>-<ms>-<pid>.jsonl` | the conversation of a run another run started (a `task`/`tasks` child, or the same thing from Python or MCP). A session file like any other — same format, readable, resumable by path — and one level deeper on purpose: no listing reads that directory, so `/sessions`, `--list-sessions`, the page's sidebar and `--continue` show a person their own conversations and nothing else. Its `meta` line names the parent in `parent`. `mv` it up a level to adopt it |
 | `<FLINT_HOME>/sessions/archive/` | conversations filed away with `/archive` (a project's archive is `sessions/<dir>/archive/`) |
 | `<FLINT_HOME>/spill/<session>/<n>.txt` | tool output too long for one request, in full |
 | `<FLINT_HOME>/engines/<provider>.log` | a local engine's output, and the only place a failed start says why |
@@ -242,6 +242,11 @@ Two traps worth knowing on Windows:
   the `Compiling` line, or touch the restored files.
 - **A running `flint` holds the release binary open**, so `cargo build --release` fails to
   replace it. Close sessions before rebuilding.
+- **`cargo test --lib` does not rebuild `target/debug/flint.exe`**, and the Python and Node
+  checks run that binary by preference (they are written against the build in this checkout,
+  on purpose). Editing Rust and going straight to `python examples/python/test_call.py`
+  tests the previous binary and reports its bugs — measured, and it cost one red herring
+  during the session-id fix. Run `cargo build` first.
 
 ## Commits and pushes
 

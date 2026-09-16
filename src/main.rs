@@ -772,7 +772,7 @@ async fn real_main(args: Args) -> Result<i32> {
     // whose context held the conversation but whose session did not is the `/model` bug again --
     // a transcript on screen that no file contains, and a page tailing a session that starts
     // mid-sentence.
-    let writer = match (&resumed, &forked) {
+    let mut writer = match (&resumed, &forked) {
         (Some(path), _) => Some(session::SessionWriter::resume(path)?),
         (None, Some((messages, title))) => Some(session::SessionWriter::seed(
             &config::sessions_dir(),
@@ -811,7 +811,7 @@ async fn real_main(args: Args) -> Result<i32> {
     // conversation or continued it. Done here, before the writer is handed to the agent,
     // so the name is on disk before the first turn is asked for.
     if let Some(name) = args.name.as_deref() {
-        if let Some(writer) = &writer {
+        if let Some(writer) = &mut writer {
             writer.title(name)?;
         }
     }
@@ -1988,7 +1988,7 @@ fn continue_conversation(
     old: &agent::Agent,
 ) -> Result<agent::Agent> {
     let cwd = old.cwd().clone();
-    let writer = match old.session_path().filter(|path| path.exists()) {
+    let mut writer = match old.session_path().filter(|path| path.exists()) {
         Some(path) => session::SessionWriter::resume(&path)?,
         // A session that has said nothing yet has no file -- sessions are created by their first
         // event -- so continuing is starting: the same conversation, still with nothing in it.

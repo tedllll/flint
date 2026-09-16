@@ -17,15 +17,21 @@ looks in both places. A conversation another run started is one level further do
 `sessions/<dir>/children/`, and the reader looks there for nothing: that is what keeps a
 child's conversation out of everybody's list of their own. See `parent` under `meta` below.
 
-The id is the file name: a Unix timestamp and a counter, `1789290356-957.jsonl`. Nothing
-else identifies a session, so `cp` is how you fork one and `mv` is how you rename the file.
+The id is the file name: `<seconds>-<milliseconds>-<pid>`, e.g. `1789290356-957-41232.jsonl`.
+Seconds first so ids sort by time, and the process id last so two runs that start in the same
+millisecond cannot propose the same name — which they did: six concurrent calls from
+`examples/python/flint_call.py` wrote five conversations into one file before the pid was in there.
+Nothing else identifies a session, so `cp` is how you fork one and `mv` is how you rename the file.
 
 The file is created by the **first event in it**, not when flint starts. A run that says
 nothing — the page opened and closed again, a `--continue` that found no conversation — leaves
 no file behind, and a run refused before it says anything (no key, an endpoint that cannot be
 reached) leaves nothing either. That is why `meta` is still the first line of every file that
 exists: whoever creates the file writes `meta` into it first, and a file whose first line is
-not `meta` is a conversation with no model and no working directory attached to it.
+not `meta` is a conversation with no model and no working directory attached to it. Creating the
+file is also what claims the name (`create_new`): a name that turns out to be taken moves that
+writer to the next millisecond rather than appending to somebody else's conversation, and the
+`id` it writes moves with it, because the id in the file has to be the id *of* the file.
 
 ## One event per line
 

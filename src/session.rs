@@ -133,9 +133,10 @@ pub struct SessionWriter {
     path: PathBuf,
     /// The `meta` line this writer would put in the file, if it is the one that creates it.
     ///
-    /// `None` when resuming, because the file is already there and already has one. Held rather than
-    /// written at construction because a session file appears when the first thing is *said*, not
-    /// when flint is opened -- see `append`.
+    /// `None` once the file exists: when resuming, because the file is already there and already has
+    /// one, and after the first write, because *this* writer is the one that made it. Held rather than
+    /// written at construction because a session file appears when the first thing is *said*, not when
+    /// flint is opened -- see `append`.
     meta: Option<SessionEvent>,
 }
 
@@ -216,7 +217,7 @@ impl SessionWriter {
         title: Option<&str>,
         parent: Option<&str>,
     ) -> Result<Self> {
-        let writer = Self::create(dir, cwd, provider, model, parent)?;
+        let mut writer = Self::create(dir, cwd, provider, model, parent)?;
         for message in messages {
             // The system prompt is not part of the conversation: it is rebuilt for every run
             // from the machine flint is on, so a copy written here would come back through
@@ -271,47 +272,107 @@ impl SessionWriter {
     /// that is refused before it says anything (no key, an endpoint that cannot be reached) now
     /// leaves nothing behind at all, not even the directory.
     ///
-    /// `create_new` decides whether this write is the first, rather than a flag: whoever creates the
-    /// file is the one that puts `meta` in it, and nothing has to be remembered about whether that
-    /// happened. A flag is wrong the moment a writer is handed on -- a switch builds a new agent for
-    /// the same conversation -- and `meta` is the one line a file must not be missing.
-    pub fn append(&self, event: &SessionEvent) -> Result<()> {
+    /// Creating the file is also what *claims* it: `create_new` is the only portable way to ask the
+    /// operating system "is this name mine?", and the answer decides both whether this writer puts
+    /// `meta` in it and which file the conversation goes to (see `claim`). `&mut self` for that second
+    /// half: a name that was taken moves this writer to another one, and the move has to stick.
+    pub fn append(&mut self, event: &SessionEvent) -> Result<()> {
+        let line = serde_json::to_string(event).context("cannot serialize session event")?;
+        let mut file = self.claim()?;
+        writeln!(file, "{line}").context("cannot write session event")?;
+        file.flush().context("cannot flush session event")?;
+        Ok(())
+    }
+
+    /// Open the file this writer appends to, taking the name if it is still free.
+    ///
+    /// A taken name is not an error and it is not a merge: the writer steps to the next one and tries
+    /// again, which is what a person does with a filename. It comes up because a name is a clock
+    /// reading, and the older version of this function answered "the file is already there" by opening
+    /// it for append -- so six concurrent Python calls (started by `map_calls`, which is what found
+    /// this) wrote five conversations into one file. `new_id` now puts the process id in the name,
+    /// which makes that particular collision impossible; this is the claim that makes *any* collision
+    /// impossible, which is the property the rest of the module leans on.
+    ///
+    /// A *resumed* writer has nothing to claim: `meta` is `None` because the file already exists and
+    /// already has its line, and opening it for append is the whole point of resuming.
+    fn claim(&mut self) -> Result<std::fs::File> {
         // The directory goes first, and on every write rather than once: a writer can be resuming a
         // file in a directory that is not there (a home moved by hand) and the cost is one `mkdir`
         // against the open, write and flush that follow it.
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir).context("cannot create sessions directory")?;
         }
-        let line = serde_json::to_string(event).context("cannot serialize session event")?;
-        let mut file = match OpenOptions::new()
-            .create_new(true)
-            .append(true)
-            .open(&self.path)
-        {
-            Ok(file) => {
-                if let Some(meta) = &self.meta {
-                    let meta =
-                        serde_json::to_string(meta).context("cannot serialize session event")?;
-                    writeln!(&file, "{meta}").context("cannot write session event")?;
-                }
-                file
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => OpenOptions::new()
+        if self.meta.is_none() {
+            return OpenOptions::new()
                 .append(true)
                 .open(&self.path)
-                .with_context(|| format!("cannot open session file {}", self.path.display()))?,
-            Err(e) => {
-                return Err(e)
-                    .with_context(|| format!("cannot open session file {}", self.path.display()))
+                .with_context(|| format!("cannot open session file {}", self.path.display()));
+        }
+        // Bounded rather than a plain loop: the only way to run out is a directory with a thousand
+        // sessions in one millisecond, and spinning for ever is the wrong answer to that.
+        for _ in 0..1000 {
+            match OpenOptions::new()
+                .create_new(true)
+                .append(true)
+                .open(&self.path)
+            {
+                Ok(file) => {
+                    if let Some(meta) = &self.meta {
+                        let meta =
+                            serde_json::to_string(meta).context("cannot serialize session event")?;
+                        writeln!(&file, "{meta}").context("cannot write session event")?;
+                    }
+                    // Claimed. `meta` is also the flag that says "not claimed yet", so it goes last.
+                    self.meta = None;
+                    return Ok(file);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => self.step()?,
+                Err(e) => {
+                    return Err(e)
+                        .with_context(|| format!("cannot open session file {}", self.path.display()))
+                }
             }
-        };
-        writeln!(file, "{line}").context("cannot write session event")?;
-        file.flush().context("cannot flush session event")?;
+        }
+        anyhow::bail!(
+            "no free session file name near {}: a thousand names in one millisecond are taken",
+            self.path.display()
+        )
+    }
+
+    /// Move to the next name, when the one this writer proposed was already somebody else's.
+    ///
+    /// The name is `<seconds>-<millis>-<pid>`, and the *millisecond* is the part that moves: the id
+    /// stays a clock reading with a process on the end rather than turning into a counter nobody can
+    /// read, neighbouring ids stay neighbours in time, and a person reading a listing sees the shape
+    /// they always did. `meta.id` moves with the name, because the id in the file has to be the id *of*
+    /// the file -- `--resume`, `--list-sessions` and the stream's `session.started` all name the stem,
+    /// and a file whose `meta` disagreed with its own name is a bug with no upside.
+    ///
+    /// Unreachable between runs, because the pid in the name already makes two of them differ; kept
+    /// because "unreachable" is a claim about the clock and the process table, and this is the one
+    /// property the rest of the module leans on.
+    fn step(&mut self) -> Result<()> {
+        let stem = self
+            .path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let no_counter = || format!("session file name has no millisecond to step: {stem}");
+        let (seconds, rest) = stem.split_once('-').with_context(no_counter)?;
+        let (millis, pid) = rest.split_once('-').with_context(no_counter)?;
+        let next = millis.parse::<u64>().with_context(no_counter)? + 1;
+        let id = format!("{seconds}-{next}-{pid}");
+        self.path.set_file_name(format!("{id}.jsonl"));
+        if let Some(SessionEvent::Meta { id: written, .. }) = &mut self.meta {
+            *written = id;
+        }
         Ok(())
     }
 
     /// Name the conversation. Appending is what keeps the file append-only.
-    pub fn title(&self, name: &str) -> Result<()> {
+    pub fn title(&mut self, name: &str) -> Result<()> {
         self.append(&SessionEvent::Title {
             name: name.to_string(),
         })
@@ -322,7 +383,7 @@ impl SessionWriter {
     /// `None` writes a cleared schema, for a run resumed with `--no-schema`. Append-only like
     /// everything else, so the last line is the contract in force and the history of contracts is
     /// still readable.
-    pub fn schema(&self, schema: Option<&serde_json::Value>) -> Result<()> {
+    pub fn schema(&mut self, schema: Option<&serde_json::Value>) -> Result<()> {
         self.append(&SessionEvent::Schema {
             schema: schema.cloned(),
         })
@@ -335,7 +396,7 @@ impl SessionWriter {
     /// is in force. Switching used to seed a second file holding the whole conversation, which made
     /// one conversation into two files -- two rows in the page's sidebar, two numbers in `/sessions`,
     /// and half a conversation behind either of them.
-    pub fn switched(&self, provider: &str, model: &str) -> Result<()> {
+    pub fn switched(&mut self, provider: &str, model: &str) -> Result<()> {
         self.append(&SessionEvent::Switch {
             provider: provider.to_string(),
             model: model.to_string(),
@@ -846,11 +907,27 @@ fn collect_sessions(
     Ok(())
 }
 
+/// The name of a new conversation: when it started, and which process started it.
+///
+/// The clock alone is not enough, and that is measured rather than imagined: six flint runs started at
+/// once by `map_calls` in `examples/python/flint_call.py` proposed **the same id five times over**,
+/// because they were started within a millisecond of each other and did the same work before reaching
+/// here. The process id makes that impossible between runs, which matters even though `claim` would
+/// catch it: `session.started` tells a caller *which file* before the first write, so a name that had
+/// to move at write time would be a frame that lied.
+///
+/// Seconds first so ids sort by time, milliseconds next so they sort within a second, and the pid last
+/// because it is the part nobody reads.
 fn new_id() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
-    format!("{}-{}", now.as_secs(), now.subsec_millis())
+    format!(
+        "{}-{}-{}",
+        now.as_secs(),
+        now.subsec_millis(),
+        std::process::id()
+    )
 }
 
 /// When the session started, as `epoch:<seconds>`.
@@ -1044,9 +1121,9 @@ mod tests {
         let root = TempDir::new("session-children");
         let project = TempDir::new("session-children-project");
 
-        let mine = SessionWriter::create(&root.0, &project.0, "p", "m", None).expect("create");
+        let mut mine = SessionWriter::create(&root.0, &project.0, "p", "m", None).expect("create");
         mine.title("mine").expect("title");
-        let child = SessionWriter::create(&root.0, &project.0, "p", "m", Some("1789456770-557"))
+        let mut child = SessionWriter::create(&root.0, &project.0, "p", "m", Some("1789456770-557"))
             .expect("create");
         child.title("the child's").expect("title");
 
@@ -1088,7 +1165,7 @@ mod tests {
         let root = TempDir::new("session-layout");
         let project = TempDir::new("session-layout-project");
         let other = TempDir::new("session-layout-other");
-        let writer = SessionWriter::create(&root.0, &project.0, "p", "m", None).expect("create");
+        let mut writer = SessionWriter::create(&root.0, &project.0, "p", "m", None).expect("create");
         let path = writer.path().to_path_buf();
         writer.title("a name").expect("title");
         assert_eq!(
@@ -1106,6 +1183,48 @@ mod tests {
         assert_eq!(latest_for(&root.0, &other.0).expect("latest"), None);
     }
 
+    /// Two runs that propose the same name must not write one conversation.
+    ///
+    /// The id is the clock, so this is not a hypothetical: six Python calls started at once produced
+    /// **two** session files with five conversations in one of them, because the second writer's whole
+    /// decision about the file was "it is already there, append to it" -- and one writer per file is
+    /// the property everything else here is built on. Measured on 2026-09-16 while building
+    /// `map_calls` in `examples/python/flint_call.py`, which is what found it.
+    #[test]
+    fn a_writer_that_finds_its_name_taken_takes_another() {
+        let root = TempDir::new("collide");
+        let project = TempDir::new("collide-project");
+        let mut first = SessionWriter::create(&root.0, &project.0, "p", "m", None).expect("create");
+        first.title("first").expect("title");
+        let first_path = first.path().to_path_buf();
+        // The same millisecond, which is exactly what two runs starting together produce.
+        let mut second = SessionWriter::create(&root.0, &project.0, "p", "m", None).expect("create");
+        second.path = first_path.clone();
+        second.title("second").expect("title");
+
+        assert_ne!(second.path(), first_path, "a taken name was taken anyway");
+        assert!(second.path().exists(), "{}", second.path().display());
+        let first_text = std::fs::read_to_string(&first_path).expect("read the first");
+        assert!(first_text.contains("first"), "{first_text}");
+        assert!(
+            !first_text.contains("second"),
+            "two conversations in one file: {first_text}"
+        );
+        let second_text = std::fs::read_to_string(second.path()).expect("read the second");
+        let second_path = second.path().to_path_buf();
+        assert!(second_text.contains("second"), "{second_text}");
+        assert!(!second_text.contains("first"), "{second_text}");
+        // And the id in the file is the id *of* the file: a listing, `--resume` and the stream's
+        // `session.started` all name the stem, so a `meta` that kept the old one would be its own bug.
+        for (path, text) in [(&first_path, &first_text), (&second_path, &second_text)] {
+            let stem = path.file_stem().and_then(|s| s.to_str()).expect("stem");
+            assert!(
+                text.contains(&format!("\"id\":\"{stem}\"")),
+                "the file is not named after its own id: {text}"
+            );
+        }
+    }
+
     /// A new session writes nothing until something is said.
     ///
     /// Reported from the page, which is where it is most obvious: opening `--web` created a session
@@ -1117,7 +1236,7 @@ mod tests {
     fn a_session_file_appears_when_something_is_said() {
         let root = TempDir::new("lazy-create");
         let project = TempDir::new("lazy-create-project");
-        let writer = SessionWriter::create(&root.0, &project.0, "p", "m", None).expect("create");
+        let mut writer = SessionWriter::create(&root.0, &project.0, "p", "m", None).expect("create");
         assert!(
             !writer.path().exists(),
             "a session file was written before anything was said: {}",
@@ -1148,7 +1267,7 @@ mod tests {
         );
 
         // Resuming does not write a second `meta`: the file already has one.
-        let resumed = SessionWriter::resume(writer.path()).expect("resume");
+        let mut resumed = SessionWriter::resume(writer.path()).expect("resume");
         resumed.title("a name").expect("title");
         let text = std::fs::read_to_string(writer.path()).expect("read the session");
         assert_eq!(
@@ -1173,7 +1292,7 @@ mod tests {
         use crate::event::Message;
 
         let dir = TempDir::new("switch");
-        let writer = SessionWriter::create(&dir.0, Path::new("/tmp"), "p", "m", None).unwrap();
+        let mut writer = SessionWriter::create(&dir.0, Path::new("/tmp"), "p", "m", None).unwrap();
         writer
             .append(&SessionEvent::Chat {
                 message: Message::User {
@@ -1210,7 +1329,7 @@ mod tests {
     #[test]
     fn the_writer_records_the_current_format_version() {
         let dir = TempDir::new("version");
-        let writer = SessionWriter::create(&dir.0, Path::new("/tmp"), "p", "m", None).unwrap();
+        let mut writer = SessionWriter::create(&dir.0, Path::new("/tmp"), "p", "m", None).unwrap();
         // Named, because a session file exists from the first thing said -- see
         // `a_session_file_appears_when_something_is_said`.
         writer.title("a name").unwrap();

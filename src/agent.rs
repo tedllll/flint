@@ -295,8 +295,8 @@ impl Agent {
     /// Called by the run that was *told* a shape -- `--schema` or `--no-schema` -- and not by a run
     /// that merely inherited one, so a file gains a line when someone decides something and stays
     /// quiet when nobody did. `None` records that the shape was dropped.
-    pub fn record_schema(&self, schema: Option<&serde_json::Value>) -> Result<()> {
-        match &self.writer {
+    pub fn record_schema(&mut self, schema: Option<&serde_json::Value>) -> Result<()> {
+        match &mut self.writer {
             Some(writer) => writer.schema(schema),
             // No file to write to (a run with no session, a `--fork` before seeding): the schema is
             // still in force for this run, it is just not being kept anywhere.
@@ -416,7 +416,7 @@ impl Agent {
 
     /// Name this conversation, by appending a `title` event.
     pub fn name_session(&mut self, name: &str) -> Result<()> {
-        match &self.writer {
+        match &mut self.writer {
             Some(writer) => writer.title(name),
             None => anyhow::bail!("this conversation is not being saved"),
         }

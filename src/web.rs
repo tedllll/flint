@@ -1796,7 +1796,7 @@ mod tests {
         // the layout. It is a session like any other and it is not one of the person's: reported from a
         // real session, where a `task` child's conversation was in this sidebar beside the parent's,
         // with nothing to say which was which.
-        let child = crate::session::SessionWriter::create(
+        let mut child = crate::session::SessionWriter::create(
             &dir,
             std::path::Path::new("/tmp"),
             "p",
