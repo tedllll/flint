@@ -287,6 +287,12 @@ fn is_marker_definition(line: &str) -> bool {
 /// so finding one inside a string or comment means something was mis-decoded. Matching
 /// on a fixed list of complete corrupted strings is not enough -- that was the first
 /// version of this test, and it missed `閻劍鍩沗 entirely.
+///
+/// The extensions are the ones this repository writes text into, `.html` included: the page the
+/// listener serves is where a person reads flint's words, so damage there is the same defect one
+/// file over -- and it went unscanned for as long as this list did not name it. Measured
+/// 2026-09-17: with a middle dot in `web/view.html` replaced by the CP936 artifact it decodes to,
+/// this test passed while `"html"` was missing from the list and failed once it was added.
 #[test]
 fn the_source_tree_contains_no_mojibake() {
     // Characters CP936 produces when it swallows a UTF-8 multi-byte sequence. Any of
@@ -321,7 +327,7 @@ fn the_source_tree_contains_no_mojibake() {
             }
             let is_text = matches!(
                 path.extension().and_then(|e| e.to_str()),
-                Some("rs" | "js" | "md" | "toml" | "yml" | "yaml")
+                Some("rs" | "js" | "md" | "toml" | "yml" | "yaml" | "html")
             );
             if !is_text {
                 continue;
