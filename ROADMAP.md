@@ -64,12 +64,18 @@ has a DeepSeek key. The credential is inherited from a DeepSeek provider when th
 named explicitly in `[search]` when there is not; the tool is offered only when it can work.
 Measured record, including cost: [`docs/deepseek-search.md`](docs/deepseek-search.md).
 
-**What it deliberately leaves undone:** `fetch`. Search returns sources, and reading one is
-the next step a model wants — today the only way is `bash` and `curl`, which loses the page to
-the truncation budget and shows the model raw HTML. `fetch` is the bigger and riskier half of
-this pair: it is the first tool that brings outside content into a context belonging to a
-program that can run commands, and it needs the SSRF defence `docs/deepseek-search.md` §4
-describes before it is worth having.
+**The other half of the pair, `fetch`, is built as well — and this file said otherwise for several
+sessions.** The paragraph that stood here described `fetch` as deliberately left undone while
+`src/fetch.rs` had been in the tree since 2026-09-13 (`d5f0462`). Reading a source is the next thing
+a model wants after search names it, and without the tool the only way was `bash` and `curl`, which
+puts a page's raw markup against `max_tool_output` — measured at 94,879 bytes for one search result
+page against a 30,000-character budget, so the model saw the `<head>` and the footer and the part
+worth reading was exactly what was discarded. The design record is the module doc in `src/fetch.rs`,
+and its one rule is why it is not a `curl` wrapper: **a fetch may only reach the public internet.**
+The host is resolved once, *every* answer is checked, and the connection is pinned to an address that
+was checked, because a second resolution is what a rebinding attack is. That is a boundary around the
+tool and not around flint — `bash` still reaches whatever the machine can — and what it buys is that
+the safe path is the easy one.
 
 ### 4. Machine-readable runs — **done**
 

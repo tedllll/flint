@@ -150,6 +150,29 @@ claimed Rust 1.97.1; the model cross-checked against `rustc --version` and `endo
 found 1.98.1, and said which of its sources was stale. That is the labelling in §2 doing its
 job, and it is the reason the summary is returned with its sources rather than on its own.
 
+### `fetch`, the other half, is built too
+
+`src/fetch.rs`, since 2026-09-13. This is the number that argues for it: a search result page
+was **94,879 bytes**, against a `max_tool_output` budget of **30,000 characters** — so a model
+that reads a source with `bash` and `curl` sees the `<head>` and the footer, and the part worth
+reading is exactly what falls off the end. `fetch` strips the markup, bounds the text at 20,000
+characters *from the front* (a page's end is a footer, unlike a build log's), and says in the
+result where it came from, what type it was and whether it was truncated.
+
+It is not a `curl` wrapper, and the difference is one rule: **a fetch may only reach the public
+internet.** flint runs on machines with a private network behind them and a metadata service on
+it, and "the model asked for this URL" is not a reason to go there. So the host is resolved once,
+*every* answer is checked (including the NAT64 and IPv4-mapped forms an IPv4 check gets walked
+around by), and the connection is pinned to an address that was checked — a second resolution is
+what a rebinding attack is, and there is not one. Each redirect is resolved and checked again,
+the scheme must be HTTP or HTTPS, and the body is read under a 5 MB bound. This is a boundary
+around the tool, not around flint: `bash` still reaches whatever the machine can. What it buys is
+that the safe path is the easy one.
+
+The design record is the module doc in `src/fetch.rs`, the tests are in the same file (the
+refusals by construction, and the HTML-to-text half against pages written in the test), and the
+user-facing description is in `README.md`.
+
 ## 6. Still not measured
 
 - Whether `max_uses` has any effect at all, or what it counts.
