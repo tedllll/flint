@@ -1308,30 +1308,39 @@ and `MAX_ATTEMPTS` is 4 with a 1+2+4+8-second backoff. So
 
 What to build for it, in step 2:
 
+**Done**, in the commit that carries this file, except the last two bullets:
+
 - `error.code` gains `insufficient_balance` (mapped per provider from the body, not the status), and
-  the **transient decision is made after reading the body** — the bug above is that it is made before.
+  the **transient decision is made after reading the body** — the bug above was that it was made
+  before. `provider::ProviderFailure` is the type that carries it, `classify` is the table, and its
+  unit test asserts the pair that proves the point: the same `429` body-classified two ways.
 - the `error` frame gains **`retryable: true|false`**, which is B3's missing signal and now has its
-  first hard case: quota is `false`, a rate limit is `true`.
+  first hard case: quota is `false`, a rate limit is `true`. Done, together with the code — and 75
+  (`EX_TEMPFAIL`) stopped being a number flint declared and never used: a failure the provider calls
+  retryable exits 75 once the ladder has run out.
 - its **exit code is 69**, not 75: 75 means "retry, this is temporary" and quota means the opposite
   ("stop, a person must pay"). The precise cause is in `error.code`, so the code stays a class. If a
   shell-level branch between "top up" and "fix the key" is ever wanted, that is a new number and a
-  deliberate decision, not something to slip in here.
+  deliberate decision, not something to slip in here. Done as decided.
 - **`flint balance`** (or a check before a `-p` run) as the concrete first use of the preflight in A4:
   DeepSeek's [`GET /user/balance`](https://api-docs.deepseek.com/api/get-user-balance) returns
   `is_available` — defined as "whether the user's balance is sufficient for API calls" — plus
   `total_balance`, `granted_balance` and `topped_up_balance`. A batch can then be told before it
-  starts, and a strategy that only has a few calls left can be told how many.
+  starts, and a strategy that only has a few calls left can be told how many. **Not built**: it is a
+  new command and a new request shape, so it belongs in a commit of its own.
 - **the batch-level circuit breaker is the caller's**, and that is a feature of step 7 rather than of
   flint: the first `insufficient_balance` should cancel the rest of the batch and raise, because flint
   cannot know that twenty other calls are queued behind this one. flint's whole job is to make the
-  cause sayable; the Python side is what turns it into "stop everything".
+  cause sayable; the Python side is what turns it into "stop everything". **Half built**: the cause is
+  sayable now (`Turn.error_code`, `Turn.error_retryable`), the `map_calls` that acts on it is step 7.
 - **flint never switches provider by itself.** DeepSeek's own advice for a 429 is to use another
   provider for a while; for a system whose answers become recorded values, a silent change of model is
   a provenance fault, not a resilience feature.
 - **tests**, which wiremock already supports: one stub per shape (402, 429 with `insufficient_quota`,
   429 with `rate_limit_exceeded`), asserting that the quota cases are attempted **exactly once** and
   the rate-limit case is retried. The pair is the proof that the status code alone is not the
-  classification.
+  classification. Done: two end-to-end tests (`expect(1)` is the attempt assertion) and a unit test
+  over `classify` that asserts the same-status pair directly.
 
 3. **`--result-file`** (the answer written where the caller asked, so no caller parses a stream to
    get it) and **`--list-sessions --json`** (so a caller does not reimplement the session-directory

@@ -93,7 +93,8 @@ a hung one if you are reading the stream yourself rather than waiting for `ask()
 | `turns` | how many turns the run asked for (one, unless a schema needed repairs) |
 | `ok` | `returncode == 0 and error is None` — false for a stopped or unfinished run |
 | `complete` | `ok` and the outcome is not `incomplete`/`stopped`: the answer is whole |
-| `returncode` | flint's exit code: 2 usage, 65 unusable answer, 69 provider, 130 stopped, 1 unclassified |
+| `error_code`, `error_retryable` | the cause when flint knows one, and whether waiting could help |
+| `returncode` | flint's exit code: 2 usage, 65 unusable answer, 69 a person must act, 75 retry later, 130 stopped, 1 unclassified |
 | `events` | every line, untouched, for anything this dataclass does not name |
 
 `of_type(*types)` picks events out by type. The vocabulary is flint's, and it is documented in the
@@ -117,11 +118,31 @@ Python dicts are written to a temporary file rather than passed inline. Inline w
 there is no shell in the way — but it breaks the moment the same call is run through one, and a path
 cannot be mangled by anything.
 
+## When the money runs out
+
+An exhausted balance is the failure worth writing code for, because it is the one that keeps looking
+like something else. Three providers report it three ways — DeepSeek as `402`, OpenAI-shaped endpoints
+as a `429` `insufficient_quota` (the same status as a rate limit), Anthropic as a `400` with a
+sentence — and flint now reads the body and gives all three one name:
+
+```python
+turn = ask("…", cwd="/path/to/project")
+if turn.error_code == "insufficient_balance":
+    raise SystemExit("out of credit: top up before the next batch")
+if turn.error_retryable:
+    time.sleep(30)          # 75: the retries ran out, and asking again later is right
+```
+
+`error_retryable` is the field to loop on, and the exit code says the same thing to a shell (`69`
+a person must act, `75` try later, `1` unclassified). In a batch, a balance failure should stop the
+whole batch rather than the one call: `map_calls` cannot know that twenty other calls are queued
+behind this one, and flint cannot know either — so the caller is where that decision belongs.
+
 ## Running the checks here
 
 ```console
 $ cargo build
-$ python examples/python/test_call.py       # 39 checks against a local stub, no key, no cost
+$ python examples/python/test_call.py       # 41 checks against a local stub, no key, no cost
 $ python examples/python/timing_demo.py     # what blocking and failure actually look like
 $ python examples/python/ask_schema.py      # needs DEEPSEEK_API_KEY; spends real tokens
 ```

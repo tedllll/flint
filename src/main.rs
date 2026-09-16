@@ -3239,7 +3239,9 @@ async fn run_json_turn(
     // that is still thinking -- and a caller reading the stream would wait for a
     // `turn.completed` that is never coming.
     if let Err(e) = ensure_usable(provider_cfg) {
-        emit(ndjson::error(&format!("{e:#}")));
+        // `no_key` specifically: this check is the key one, and a caller that reads the code can tell
+        // "a person must paste a key" from "a person must add funds" without reading either sentence.
+        emit(ndjson::error_coded(&format!("{e:#}"), "no_key", false));
         // Nothing was asked of the model, and no retry of this question will change the answer: the
         // provider has to be fixed first.
         return Ok(EXIT_UNAVAILABLE);
@@ -3373,18 +3375,18 @@ async fn run_json_turn(
         match result {
             Ok(()) => emit(ndjson::turn_completed(agent.last_usage(), outcome)),
             // The failure goes on the stream as well as the exit code: a caller that reads
-            // stdout should not have to also read stderr to find out what happened. The code is
-            // `UNAVAILABLE` when the provider was already known not to be configured -- the run
-            // failing then is that fault arriving late, and a caller that retries the same question
-            // gets the same nothing -- and unclassified otherwise, because guessing the cause at the
-            // edge is what this whole change is against.
+            // stdout should not have to also read stderr to find out what happened. The cause is
+            // read from the error itself when flint knows it -- the provider attaches its own
+            // classification, which is the only place that can tell a rate limit from an empty
+            // account -- and a failure with no classification says so by carrying no code, rather
+            // than naming the wrong cause at the edge.
             Err(e) => {
-                emit(ndjson::error(&format!("{e:#}")));
-                return Ok(if provider_error.is_some() {
-                    EXIT_UNAVAILABLE
-                } else {
-                    EXIT_FAILURE
-                });
+                let failure = e.downcast_ref::<provider::ProviderFailure>();
+                match failure {
+                    Some(f) => emit(ndjson::error_coded(&format!("{e:#}"), f.code, f.retryable)),
+                    None => emit(ndjson::error(&format!("{e:#}"))),
+                }
+                return Ok(exit_code_for(failure, provider_error.is_some()));
             }
         }
 
@@ -4372,6 +4374,38 @@ fn print_help(color: bool, term: &Term) {
     ));
 }
 
+/// Which exit code a failed run deserves, from the cause when flint knows it.
+///
+/// A table in one place rather than a chain of conditions at the call site: this is the part a caller
+/// branches on, so it should be readable and testable by itself. The two numbers that carry weight:
+///
+/// - **69 `EX_UNAVAILABLE`**: nothing about this question changes the answer. No key, credentials the
+///   provider rejected, an account with nothing in it. A person has to act.
+/// - **75 `EX_TEMPFAIL`**: the retries already ran out, so asking again later is exactly right. The
+///   convention has a code for that, and it was declared and unused until the provider started saying
+///   which failures are worth retrying.
+///
+/// `1` means "flint does not know", which is the honest answer rather than a cause that has not been
+/// established.
+fn exit_code_for(failure: Option<&provider::ProviderFailure>, provider_was_unusable: bool) -> i32 {
+    let Some(failure) = failure else {
+        // The provider was already known not to be configured when the run began, so this failure is
+        // that fault arriving late rather than a new one.
+        return if provider_was_unusable {
+            EXIT_UNAVAILABLE
+        } else {
+            EXIT_FAILURE
+        };
+    };
+    if failure.retryable {
+        return EXIT_TEMPFAIL;
+    }
+    match failure.code {
+        "insufficient_balance" | "auth" | "no_key" => EXIT_UNAVAILABLE,
+        _ => EXIT_FAILURE,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4412,8 +4446,52 @@ mod tests {
         }
     }
 
-    /// A line that was already waiting does not erase the question it interrupts.
+    /// The code a caller branches on comes from the cause, not from the fact that something failed.
     ///
+    /// Written as a table because it *is* one: each row is a decision about what a program should do
+    /// next, and the two rows that were worth a code of their own are the ones where the wrong advice
+    /// is expensive -- an empty account retried for ever, or a temporary fault abandoned.
+    #[test]
+    fn the_cause_decides_the_exit_code() {
+        let failure = |code: &'static str, retryable: bool| provider::ProviderFailure {
+            code,
+            retryable,
+            message: format!("a {code} failure"),
+        };
+
+        // A person has to do something: add funds, fix the key.
+        for code in ["insufficient_balance", "auth", "no_key"] {
+            assert_eq!(
+                exit_code_for(Some(&failure(code, false)), false),
+                EXIT_UNAVAILABLE,
+                "{code} is not a generic failure"
+            );
+        }
+        // The retries already ran out, so trying again later is the right advice.
+        for code in ["rate_limit", "server", "network"] {
+            assert_eq!(
+                exit_code_for(Some(&failure(code, true)), false),
+                EXIT_TEMPFAIL,
+                "{code} is worth another try, and the code has to say so"
+            );
+        }
+        // Retryable outranks the name: a 5xx that said "insufficient_quota" is still the quota.
+        assert_eq!(
+            exit_code_for(Some(&failure("insufficient_balance", true)), false),
+            EXIT_TEMPFAIL,
+            "the retryable flag is the provider's answer, not a hint"
+        );
+        // Nothing established a cause: say so rather than name one.
+        assert_eq!(exit_code_for(Some(&failure("unknown", false)), false), EXIT_FAILURE);
+        assert_eq!(exit_code_for(None, false), EXIT_FAILURE);
+        assert_eq!(
+            exit_code_for(None, true),
+            EXIT_UNAVAILABLE,
+            "a provider known to be unconfigured is the same fault arriving late"
+        );
+    }
+
+    /// A line that was already waiting does not erase the question it interrupts.    ///
     /// The hole ROADMAP §9 measured by accident and deliberately left alone: a line already in the
     /// channel when a turn starts used to be read *before the turn's future was ever polled*, and the
     /// turn's user message is pushed by that first poll -- so a `/model x` quick enough to beat it (or

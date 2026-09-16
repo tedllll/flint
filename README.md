@@ -210,16 +210,28 @@ The vocabulary is closed and small: `session.started`, `turn.started`, `message.
   | Code | Meaning |
   |---|---|
   | `0` | the turn finished |
-  | `1` | a failure flint has not classified (a network fault, and anything else not yet named) |
+  | `1` | a failure flint has not classified — it means "I do not know", not a named cause |
   | `2` | the command line is wrong — nothing was asked of the model |
   | `65` | the answer is not usable: a schema that never matched, or a turn that ran out of steps |
-  | `69` | the provider cannot be used at all (no key, or an endpoint that is not there) |
+  | `69` | a person has to act: no key, credentials the provider rejected, or an account with nothing in it |
+  | `75` | the retries ran out and asking again later is the right move (a rate limit, a broken server, a network fault) |
   | `130` | the run was interrupted — `/stop` on the pipe, or Ctrl-C on a terminal |
 
   The numbers are `sysexits.h`'s, because a program branches on the code and one code for
   everything says nothing: *"a CLI that always exits 0 (or always 1) hides this signal, forcing
-  agents to parse error text with regex"*. `1` is what is left, and it is honest about being
-  unclassified rather than named wrongly.
+  agents to parse error text with regex"*.
+
+- **A failure names its cause when flint knows it.** The `error` line carries `code` and
+  `retryable` — `{"type":"error","message":"…","code":"insufficient_balance","retryable":false}` —
+  and omits both when nothing established a cause, rather than guessing at the edge. That last field
+  is the question a caller actually has: *may I try again, or must a person do something first.* The
+  case that made it necessary is money, because the status code cannot tell it apart from a rate
+  limit: an OpenAI-shaped endpoint reports an exhausted quota as a **429**, the same status as "slow
+  down", and flint used to retry it four times with a 1+2+4+8-second backoff — fifteen seconds to be
+  told the same thing, twenty-five minutes across a hundred calls. DeepSeek says it with **402**,
+  Anthropic with a **400** and a sentence, and all three are now the one code
+  `insufficient_balance`. Reading the body is what makes that possible; the status alone is not the
+  classification.
 - **A silent run is not a dead one.** Between `tool.started` and `tool.completed` nothing happens
   for as long as the tool runs, and from a pipe that is the same thing as a crashed process. So a
   run that is working and not talking says so every five seconds:

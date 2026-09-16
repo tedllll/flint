@@ -44,16 +44,22 @@ result           json, attempts           a schema run's checked answer, once it
     warning          message
     turn.completed   prompt_tokens, completion_tokens, outcome
                                               how the turn ended: complete | incomplete | stopped
-    error            message                  the run failed; the exit code says which kind
+    error            message, code?, retryable?
+                                              the run failed; `code` names the cause when known
+                                              (`insufficient_balance`, `rate_limit`, `auth`, `no_key`,
+                                              `server`, `bad_request`, `network`), `retryable` says
+                                              whether waiting could help
     command          input, text, panel?      a slash command's answer, not part of a turn
 
 Notes that matter in practice:
 
 * `-p` is required for `--json`: without it flint is interactive and writes no stream.
-* `turn.error` is set and `returncode` is not 0 when the run failed. The code classifies it:
-  2 is the command line, 65 an answer that is not usable, 69 a provider that cannot be used,
-  130 a run this caller stopped, 1 a failure flint has not classified. Check the code as well as
-  `error`: a program branches on the code, and the message is for a person.
+* `turn.error` is set and `returncode` is not 0 when the run failed. The code classifies it: 2 is
+  the command line, 65 an answer that is not usable, 69 something a person must fix (no key, an
+  empty account), 75 worth trying again later, 130 a run this caller stopped, 1 unclassified.
+  `turn.error_code` and `turn.error_retryable` carry the same two facts from the `error` line, and
+  are `None` when flint has no cause to name. Ask `error_retryable` before looping: retrying an
+  `insufficient_balance` costs money and returns the same nothing.
 * `turn.outcome` is how the turn ended, and it is the only place that says whether the answer is
   whole. `incomplete` means flint stopped asking at the `max_steps` limit; `stopped` means this
   caller's timeout arrived first. `turn.complete` folds that together with `ok`.
@@ -113,6 +119,14 @@ class Turn:
     text: str = ""              # every `message.delta` fragment, concatenated
     messages: list[str] = field(default_factory=list)  # `message.completed`, once per turn
     error: str | None = None
+    # The cause, when flint knows one: `insufficient_balance`, `rate_limit`, `auth`, `no_key`,
+    # `server`, `bad_request`, `network`. `None` from an older flint, and `None` for a failure nothing
+    # established a cause for -- which is not the same as a cause named wrongly, and is why the field
+    # is absent rather than "unknown".
+    error_code: str | None = None
+    # Whether another attempt could plausibly help. The question a looping caller actually has: an
+    # exhausted balance is `False`, and retrying it costs money to be told the same nothing.
+    error_retryable: bool | None = None
     warnings: list[str] = field(default_factory=list)
     session: str | None = None
     cwd: str | None = None
@@ -327,6 +341,10 @@ def ask(
             turn.messages.append(event.get("text", ""))
         elif kind == "error":
             turn.error = event.get("message", "")
+            # Absent, not null, when flint has no cause to name: `.get` keeps that distinction,
+            # because "no classification" and "classified as nothing" are different answers.
+            turn.error_code = event.get("code")
+            turn.error_retryable = event.get("retryable")
         elif kind == "warning":
             turn.warnings.append(event.get("message", ""))
         elif kind == "turn.completed":

@@ -136,11 +136,13 @@ def main():
         )
         bad = ask("hello", home=str(dead), cwd=str(HERE), timeout=120)
         check("non-zero exit", bad.returncode != 0, f"rc={bad.returncode}")
-        # `1`, not 69 or 75: this provider *is* configured, so "unavailable" would be the wrong
-        # claim, and telling a network failure from a rate limit needs the typed errors that are
-        # `ROADMAP.md` §10 step 2. The code says "something went wrong", which is all flint can
-        # honestly say about it today -- and it is no longer the same code as a typo in an argument.
-        check("an unclassified failure, for now", bad.returncode == 1, f"rc={bad.returncode}")
+        # 75, `EX_TEMPFAIL`: the retries ran out and asking again later is the right advice. This is
+        # what the typed provider failures bought -- a dead endpoint is retryable, an empty account is
+        # not, and a caller can tell them apart without reading either message. The call takes about
+        # fifteen seconds, which is the retry ladder (1+2+4+8) doing its job for the last time.
+        check("a retryable failure says so", bad.returncode == 75, f"rc={bad.returncode}")
+        check("and names its cause", bad.error_code == "network", str(bad.error_code))
+        check("with `retryable` set", bad.error_retryable is True, str(bad.error_retryable))
         check("an error event arrived", bool(bad.error), repr(bad.error)[:160])
         check("and no answer was invented", bad.answer == "", repr(bad.answer))
         shutil.rmtree(dead, ignore_errors=True)

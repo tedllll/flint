@@ -140,18 +140,95 @@ fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or(text)
 }
 
-/// Why one attempt failed, and whether another attempt could plausibly help.
+/// Why a provider call failed, and what a caller can do about it.
 ///
-/// The split is the whole point of the type: an HTTP 503 or a dropped socket is worth
-/// retrying, while a 401 or a malformed request will fail identically every time, and
-/// retrying it just makes the user wait longer for the same error.
-enum AttemptError {
-    /// The connection did not carry the request, or the stream died mid-response.
-    Transport(String),
-    /// The server answered with a status worth retrying (429, 5xx).
-    Status(String),
-    /// Anything else: bad credentials, a bad request, a parse failure.
-    Fatal(anyhow::Error),
+/// A type rather than a sentence, for the same reason `Usage` in `main` is one: the classification
+/// has to be made where the response was read, and read back from the error itself afterwards
+/// rather than guessed from the message. `retryable` rides along because whether waiting helps is a
+/// fact about *this* failure -- and because deciding it from the status code alone is exactly how an
+/// exhausted balance gets retried four times. See `classify`.
+#[derive(Debug, Clone)]
+pub struct ProviderFailure {
+    /// A stable name for the cause, for a program: `insufficient_balance`, `rate_limit`, `auth`,
+    /// `server`, `bad_request`, `network`, `unknown`.
+    pub code: &'static str,
+    /// Whether another attempt could plausibly help.
+    pub retryable: bool,
+    /// What the provider said, and where.
+    pub message: String,
+}
+
+impl ProviderFailure {
+    /// The request did not get out, or the answer stopped arriving.
+    ///
+    /// Retryable: a dropped socket usually clears. Note that a balance running out *mid-answer*
+    /// arrives here too, because a provider that cuts the stream does not say why -- and that is
+    /// precisely why the turn's `outcome` matters more than this code in that case.
+    fn network(message: impl Into<String>) -> Self {
+        Self {
+            code: "network",
+            retryable: true,
+            message: message.into(),
+        }
+    }
+
+    /// A response the provider answered, classified from the status *and* the body.
+    fn from_response(provider: &str, status: reqwest::StatusCode, body: &str) -> Self {
+        let (code, retryable) = classify(status, body);
+        Self {
+            code,
+            retryable,
+            message: format!(
+                "provider '{}' returned HTTP {}: {}",
+                provider,
+                status,
+                crate::util::truncate(body.trim(), 800)
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for ProviderFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ProviderFailure {}
+
+/// What a non-2xx response means, read from the status *and* the body.
+///
+/// The body has to be read because the status is not the classification, and the case that proves it
+/// is money: an OpenAI-shaped endpoint reports an exhausted quota as `429`, which is the same status
+/// a rate limit arrives with, and flattening the two means retrying a failure that cannot succeed --
+/// four attempts and fifteen seconds of backoff per call, in a batch that will hit it a hundred
+/// times. DeepSeek says it with `402`, Anthropic with a `400` and a sentence, and all three are the
+/// same fact about the account.
+///
+/// The fallback keeps the old behaviour (`status_is_transient`) rather than inventing a stricter one:
+/// a status nobody has taught this function about still gets the retries it got before, so the only
+/// failure that stops being retried is the one that provably cannot succeed.
+fn classify(status: reqwest::StatusCode, body: &str) -> (&'static str, bool) {
+    let said = body.to_ascii_lowercase();
+    let money = said.contains("insufficient_quota")
+        || said.contains("insufficient balance")
+        || said.contains("credit balance is too low");
+    if status == reqwest::StatusCode::PAYMENT_REQUIRED || money {
+        return ("insufficient_balance", false);
+    }
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return ("auth", false);
+    }
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return ("rate_limit", true);
+    }
+    if status.is_server_error() {
+        return ("server", true);
+    }
+    if status.is_client_error() {
+        return ("bad_request", false);
+    }
+    ("unknown", status_is_transient(status))
 }
 
 /// Whether a status is worth another attempt.
@@ -365,12 +442,15 @@ impl Provider {
 
             match outcome {
                 Ok(()) => return Ok(()),
-                Err(e) => {
-                    let retryable = matches!(e, AttemptError::Transport(_) | AttemptError::Status(_));
-                    last_error = Some(match e {
-                        AttemptError::Transport(m) | AttemptError::Status(m) => anyhow::anyhow!(m),
-                        AttemptError::Fatal(e) => e,
-                    });
+                Err(failure) => {
+                    // The classification is carried, not flattened into a string: `main` reads it to
+                    // choose the exit code and to name the cause on the stream, and a caller that has
+                    // to match text to learn that the account is empty is the fault this type exists
+                    // to remove. `retryable` is asked of the failure rather than re-derived here,
+                    // because only the code that read the response can tell a rate limit from an
+                    // empty account -- they arrive as the same status.
+                    let retryable = failure.retryable;
+                    last_error = Some(anyhow::Error::new(failure));
 
                     // Only *text* stops a retry. Reasoning goes to the status line, which is
                     // a word and a clock that get repainted anyway -- and on a reasoning
@@ -379,13 +459,15 @@ impl Provider {
                     // longest producing an answer.
                     if drawn {
                         let why = last_error
-                            .as_ref()
-                            .map(|e| format!("{e:#}"))
-                            .unwrap_or_default();
-                        return Err(anyhow::anyhow!(
-                            "{why}\n(the answer had already begun to arrive, so it was not \
-                             retried -- a second attempt would have been written after the \
-                             first. What arrived is above; ask again for the rest.)"
+                            .take()
+                            .unwrap_or_else(|| anyhow::anyhow!("the provider gave no response"));
+                        // Same reason as below: the sentence is context, not a replacement for the
+                        // classification -- this can be a balance that ran out mid-answer, and `main`
+                        // still has to see which kind of failure it was.
+                        return Err(why.context(
+                            "the answer had already begun to arrive, so it was not retried -- a \
+                             second attempt would have been written after the first. What arrived \
+                             is above; ask again for the rest.",
                         ));
                     }
 
@@ -409,14 +491,17 @@ impl Provider {
             }
         }
 
-        let mut err = last_error.unwrap_or_else(|| anyhow::anyhow!("the provider gave no response"));
-        if attempt > 1 {
-            err = anyhow::anyhow!(
-                "{err:#}\n(gave up after {attempt} attempts -- the network or the provider \
-                 stayed unreachable)"
-            );
-        }
-        Err(err)
+        let err = last_error.unwrap_or_else(|| anyhow::anyhow!("the provider gave no response"));
+        // `.context` rather than formatting the note into the message: the note is for a person
+        // reading a terminal, and the classification underneath is for `main`, which has to still be
+        // able to find it after the retries gave up.
+        Err(if attempt > 1 {
+            err.context(format!(
+                "gave up after {attempt} attempts -- the network or the provider stayed unreachable"
+            ))
+        } else {
+            err
+        })
     }
 
     /// One attempt at the request, buffering its events instead of emitting them.
@@ -427,7 +512,7 @@ impl Provider {
         &self,
         req: reqwest::RequestBuilder,
         on_event: &mut dyn FnMut(Event),
-    ) -> std::result::Result<(), AttemptError> {
+    ) -> std::result::Result<(), ProviderFailure> {
         // A dead network has to be *named*, and so does the proxy in front of it. The
         // reader's question is whether to wait, fix the cable, start the proxy, or clear
         // the proxy setting -- and reqwest's bare "error sending request" answers none
@@ -436,7 +521,7 @@ impl Provider {
             Ok(Ok(resp)) => resp,
             Ok(Err(e)) => {
                 let endpoint = self.config.endpoint();
-                return Err(AttemptError::Transport(format!(
+                return Err(ProviderFailure::network(format!(
                     "no network -- the request to {endpoint} did not get out.{}{e:#}",
                     self.proxy_note()
                         .map(|n| format!("\n{n}\n  "))
@@ -444,7 +529,7 @@ impl Provider {
                 )));
             }
             Err(_) => {
-                return Err(AttemptError::Transport(format!(
+                return Err(ProviderFailure::network(format!(
                     "no response from {} after 180s -- the connection was established but \
                      the server never answered. Usually the network dropped, or a proxy is \
                      swallowing the request.{}",
@@ -457,17 +542,7 @@ impl Provider {
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            let message = format!(
-                "provider '{}' returned HTTP {}: {}",
-                self.config.name,
-                status,
-                crate::util::truncate(text.trim(), 800)
-            );
-            return Err(if status_is_transient(status) {
-                AttemptError::Status(message)
-            } else {
-                AttemptError::Fatal(anyhow::anyhow!(message))
-            });
+            return Err(ProviderFailure::from_response(&self.config.name, status, &text));
         }
 
         let mut stream = resp.bytes_stream();
@@ -476,7 +551,7 @@ impl Provider {
 
         while let Some(chunk) = stream.next().await {
             let bytes = chunk.map_err(|e| {
-                AttemptError::Transport(format!(
+                ProviderFailure::network(format!(
                     "the connection to {} dropped while the answer was streaming: {e}",
                     self.config.endpoint()
                 ))
@@ -510,7 +585,7 @@ impl Provider {
         // success. Found while making the same code stream: `parser.done` was only ever used
         // to leave the read loop early, never asked afterwards.
         if !parser.done {
-            return Err(AttemptError::Transport(format!(
+            return Err(ProviderFailure::network(format!(
                 "the response from {} ended before it was finished -- no completion signal \
                  arrived, so what came back is only part of an answer",
                 self.config.endpoint()
@@ -714,6 +789,59 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// The status is not the classification, and this is the case that proves it.
+    ///
+    /// Three providers say "there is no money" three ways, and two of them use a status that means
+    /// something else as well. Reading only the status is how an exhausted quota got retried four
+    /// times with a fifteen-second ladder, in a batch where every call pays it again.
+    #[test]
+    fn the_body_says_what_the_status_cannot() {
+        use reqwest::StatusCode as S;
+
+        // The same status, two different answers: this pair is the whole reason `classify` exists.
+        assert_eq!(
+            classify(S::TOO_MANY_REQUESTS, r#"{"error":{"code":"insufficient_quota"}}"#),
+            ("insufficient_balance", false),
+            "an exhausted quota is not a rate limit"
+        );
+        assert_eq!(
+            classify(S::TOO_MANY_REQUESTS, r#"{"error":{"code":"rate_limit_exceeded"}}"#),
+            ("rate_limit", true)
+        );
+        // DeepSeek's own status, and the body a person would read.
+        assert_eq!(
+            classify(S::PAYMENT_REQUIRED, r#"{"error":{"message":"Insufficient Balance"}}"#),
+            ("insufficient_balance", false)
+        );
+        // Anthropic: a 400 and a sentence, which is why the body has to be searched.
+        assert_eq!(
+            classify(S::BAD_REQUEST, "Your credit balance is too low to access the API"),
+            ("insufficient_balance", false)
+        );
+        // The ones that were already right, kept right: a key problem is not worth retrying, and a
+        // broken server is.
+        assert_eq!(classify(S::UNAUTHORIZED, "{}"), ("auth", false));
+        assert_eq!(classify(S::FORBIDDEN, "{}"), ("auth", false));
+        assert_eq!(classify(S::SERVICE_UNAVAILABLE, "{}"), ("server", true));
+        assert_eq!(classify(S::BAD_REQUEST, "{}"), ("bad_request", false));
+        assert_eq!(classify(S::NOT_FOUND, "{}"), ("bad_request", false));
+        assert_eq!(
+            classify(S::from_u16(418).expect("a teapot"), "{}"),
+            ("bad_request", false)
+        );
+        // A status nobody taught this about -- a redirect where a stream was expected, say -- is
+        // retried exactly as it was before: the only failure that stops being retried is the one that
+        // provably cannot succeed.
+        assert_eq!(
+            classify(S::MOVED_PERMANENTLY, "{}"),
+            ("unknown", false)
+        );
+        assert_eq!(
+            classify(S::INTERNAL_SERVER_ERROR, "{}"),
+            ("server", true)
+        );
     }
 
     /// The exact wire shape the API requires for an assistant turn that calls a

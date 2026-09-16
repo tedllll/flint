@@ -727,6 +727,77 @@ mod exit_codes {
         assert_eq!(code, USAGE, "an unknown flag is not a failure of the model");
     }
 
+    /// An exhausted balance is not a rate limit, even when the provider uses the same status for
+    /// both. This is the case that forced the classification to read the body: OpenAI-shaped
+    /// endpoints report "you are out of money" as a `429`, and flint retried it four times with a
+    /// 1+2+4+8-second backoff -- fifteen seconds to be told the same thing, twenty-five minutes
+    /// across a hundred calls in a batch. The attempt count is the assertion that matters.
+    #[tokio::test]
+    async fn an_exhausted_quota_is_not_retried() {
+        let server = MockServer::start().await;
+        let cwd = cwd_for("code-quota");
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(429).set_body_string(
+                r#"{"error":{"message":"You exceeded your current quota","type":"insufficient_quota","code":"insufficient_quota"}}"#,
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let home = home_for("code-quota", &server.uri(), &cwd);
+        std::fs::create_dir_all(&cwd).expect("working directory");
+
+        let began = std::time::Instant::now();
+        let (code, lines, stderr) = run_json(&home, &cwd, &["-p", "hello", "--json"]);
+        let took = began.elapsed();
+        let _ = std::fs::remove_dir_all(&home);
+
+        let error = line_of(&lines, "error");
+        assert_eq!(
+            error["code"], "insufficient_balance",
+            "the cause of the failure is not named: {stderr} {lines:?}"
+        );
+        assert_eq!(
+            error["retryable"], false,
+            "a caller is told to retry something that cannot succeed: {lines:?}"
+        );
+        assert_eq!(
+            code, UNAVAILABLE,
+            "an empty account is not a generic failure: {lines:?}"
+        );
+        assert!(
+            took < std::time::Duration::from_secs(5),
+            "the quota failure was retried: it took {took:?}"
+        );
+    }
+
+    /// DeepSeek says the same thing with a status of its own, and it has always been left alone --
+    /// but a caller could only recognise it by matching the message text.
+    #[tokio::test]
+    async fn a_402_says_the_balance_is_gone() {
+        let server = MockServer::start().await;
+        let cwd = cwd_for("code-402");
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(402).set_body_string(
+                r#"{"error":{"message":"Insufficient Balance","type":"unknown_error","code":"invalid_request_error"}}"#,
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let home = home_for("code-402", &server.uri(), &cwd);
+        std::fs::create_dir_all(&cwd).expect("working directory");
+
+        let (code, lines, stderr) = run_json(&home, &cwd, &["-p", "hello", "--json"]);
+        let _ = std::fs::remove_dir_all(&home);
+
+        let error = line_of(&lines, "error");
+        assert_eq!(
+            error["code"], "insufficient_balance",
+            "DeepSeek's own status is not classified: {stderr} {lines:?}"
+        );
+        assert_eq!(error["retryable"], false, "{lines:?}");
+        assert_eq!(code, UNAVAILABLE, "{lines:?}");
+    }
+
     /// A schema flint cannot check is a command-line mistake, not an answer that failed: nothing was
     /// asked, and changing the schema fixes it.
     #[test]

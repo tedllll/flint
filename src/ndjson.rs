@@ -188,6 +188,23 @@ pub fn error(message: &str) -> String {
     frame("error", json!({ "message": message }))
 }
 
+/// A failure whose cause flint knows, told in the vocabulary a program reads.
+///
+/// `code` is the cause (`insufficient_balance`, `rate_limit`, `auth`, `no_key`, …) and `retryable` is
+/// the question a caller actually has: may I try again, or must a person do something first. They are
+/// absent on the plain [`error`], deliberately -- a frame with no classification is honest about
+/// having none, where a `code: "unknown"` on every failure would look like knowledge.
+///
+/// This exists because the alternative was matching on the message text, which is what a caller had
+/// to do to find out that an account was empty: three providers say that one fact three ways, and two
+/// of them say it with a status that means something else as well.
+pub fn error_coded(message: &str, code: &str, retryable: bool) -> String {
+    frame(
+        "error",
+        json!({ "message": message, "code": code, "retryable": retryable }),
+    )
+}
+
 pub fn warning(message: &str) -> String {
     frame("warning", json!({ "message": message }))
 }

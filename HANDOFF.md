@@ -13,9 +13,13 @@ told apart, what is a hole), the reference points it was measured against (Claud
 build it in. Step 1 landed the turn's `outcome` and the exit codes, and fixed the C1 bug (a `/stop`ped
 run exited 0 while carrying a truncated answer — now 130).
 
-**Step 2 is `error.code` produced where the cause is known, and its first job is money**: §10 **B6**
-was added after the fact, from a report of hitting an empty balance repeatedly, and it is a bug fix as
-much as a classification. Read it before touching `src/provider.rs`. In short: DeepSeek says it with
+**Step 2 is `error.code` produced where the cause is known. Its first job was money, and it is done**:
+§10 **B6** was added after the fact, from a report of hitting an empty balance repeatedly, and it was a
+bug fix as much as a classification. `provider::ProviderFailure` now carries `code` and `retryable`
+out of the code that read the response, `classify` reads the body as well as the status, the `error`
+frame names the cause, and the exit code follows the cause (`69` for money or credentials, `75` for a
+failure the retries could not outlast). **Still open in B6**: `flint balance` (the preflight) and the
+`map_calls` circuit breaker, which belongs to step 7. Read it before touching `src/provider.rs`. In short: DeepSeek says it with
 **402**, OpenAI-shaped endpoints say it with **429 `insufficient_quota`** — the same status as a rate
 limit — and Anthropic with a 400 and a sentence. flint currently decides "transient" from the status
 *before* reading the body, so a quota 429 is retried four times with a 1+2+4+8-second backoff and the
@@ -29,12 +33,13 @@ things it settled: the `error`-and-`outcome` combination that needs documenting 
 `duration_ms` on `turn.completed`.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 437 passing, 1 ignored (279 lib, 2 in
-the binary's own tests, 33 `agent_loop`, 58 `cli_output`, 19 `json_output` (7 structured
-output, 1 the heartbeat, 2 the stop channel, 5 the exit codes and the turn's outcome), 4
-`search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`), `cargo clippy
+As of the commit that carries this file, `cargo test` is 441 passing, 1 ignored (280 lib, 3 in
+the binary's own tests, 33 `agent_loop`, 58 `cli_output`, 21 `json_output` (7 structured
+output, 1 the heartbeat, 2 the stop channel, 5 the exit codes and the turn's outcome, 2 the
+balance), 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`), `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
-pass, and `python examples/python/test_call.py` is 39 checks, all passing.
+pass, and `python examples/python/test_call.py` is 41 checks, all passing (one of them now waits
+out the fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from).
 
 **A `--json` run now beats while it works.** `src/main.rs` spawns `beat_while_working` beside the
 turn: every five seconds it emits the `status` frame with the phrase the stream last described, plus
