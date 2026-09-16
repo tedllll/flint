@@ -1710,7 +1710,19 @@ and C6 is the note that the documentation has to say so).
   feed it. The example is now a second *caller* rather than a second version, and a test refuses a copy
   coming back (`the_example_renders_with_the_repls_sink`: no `match event` in the example). That the
   extraction changed no output is what the byte-exact `term_capture` suite is for, and it passed
-  unchanged. This was the last item on this list.
+  unchanged.
+- **The mojibake scan knows one generation of damage.** `the_source_tree_contains_no_mojibake` matches
+  a list of characters *one* bad CP936 round trip produces, and it skips `///` lines by design (the
+  marker table has to name what it looks for). A **second** round trip over already-damaged text
+  produces characters the list does not hold, and this session made some by accident — rewriting
+  `tests/cli_output.rs` through PowerShell's `Get-Content`/`WriteAllText` — while the guard stayed
+  silent; it took `git checkout` and a re-apply to notice. Two ways to close it, and the first is the
+  one worth doing: assert that every non-ASCII character in a scanned file is one this repository
+  intends (a whitelist per file, since the layout script and some documents are written in Chinese),
+  rather than extending a blacklist of artifacts with the artifacts of artifacts. The second is to add
+  the observed second-generation characters to `MARKERS`, which is whack-a-mole and honest about it.
+  `.html` was the other hole in this test and is closed (`web/view.html` is scanned now, measured with
+  a middle dot replaced by its artifact).
 
 ## Known unfinished
 

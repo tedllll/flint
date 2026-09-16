@@ -1493,6 +1493,27 @@ windows on the desktop before the harness was rewritten to stand a `.cmd` file i
 browser. Nothing was damaged, but the lesson is general — a measurement that launches the
 thing under test can do it for real.
 
+**The mojibake scan had a hole, and this session fell into it.** Rewriting `tests/cli_output.rs`
+through PowerShell 5.1 (`Get-Content -Raw` → `[System.IO.File]::WriteAllText`) round-tripped the file
+through CP936 and turned comments and fixtures into mojibake — and `the_source_tree_contains_no_mojibake`,
+the test written for exactly this, **stayed silent**. Two reasons, and they are separate:
+
+- **The page was not scanned at all.** The extension list was `rs`, `js`, `md`, `toml`, `yml`, `yaml`;
+  `web/view.html` is `.html`, so the one file a person reads flint's words in through a browser was
+  outside the guard. **Closed 2026-09-17**, red-first: with a middle dot in the page's composer hint
+  replaced by the CP936 artifact it decodes to, the test passed without `"html"` in the list and fails
+  with it. Nothing had to be exempted — the page's non-ASCII is an em dash, a middle dot, a section
+  sign, an ellipsis and two ballot marks.
+- **The marker list knows one generation of damage.** It matches what *one* bad round trip produces;
+  a second round trip over already-damaged text produces characters it does not hold. That is what
+  happened here (the file already held second-generation characters from an earlier accident), and it
+  is why the damage was only caught by reading the diff. **Not fixed**: `ROADMAP.md`'s "Small, agreed,
+  unscheduled" now carries it, with the whitelist-of-intended-characters as the way worth doing.
+
+The practical rule that came out of it, for the next session: **do not rewrite a source file with
+PowerShell's text cmdlets or `WriteAllText`.** They round-trip through the console code page. The `edit`
+and `write` tools write UTF-8 and are safe; `git checkout -- <file>` then re-applying is the repair.
+
 **The step 7 measurement pass, and the four defects it found.** `docs/web-mode.md` §11 has the
 numbers; the short version is that three of the four had one cause — `paint` rebuilt the whole
 transcript on every frame, so every node on screen was a new node, and the scroll position, which
