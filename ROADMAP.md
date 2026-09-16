@@ -316,7 +316,7 @@ on the screen's last row scrolls the whole transcript up by one. The visible eff
 answer being eaten a row at a time with holes appearing in history, and it was only caught by
 replaying the capture frame by frame.
 
-### 7. Web mode: a window onto the running process — **levels 1 and 2 built**
+### 7. Web mode: a window onto the running process — **all three levels built**
 
 [`docs/web-mode.md`](docs/web-mode.md) is the design, and the decision at its centre is that
 `--web` is **a window, not a mode**: flint starts exactly as it does now and additionally
@@ -1156,7 +1156,7 @@ line no longer crosses the composer; **the page's own log, written by default** 
 the hand's code made the boot's first paint throw, taking the sidebar, the sessions and the feed
 with it; and `/stop`, the interrupt as a short word, reachable from the composer today.
 
-### 10. flint as a function a program can call — **planned**
+### 10. flint as a function a program can call — **in progress: steps 1 and 2 landed, 3–7 queued**
 
 flint answers; it cannot yet be *trusted as a function*. A caller that acts on the result — writes a
 config, queues a job, retries a batch, feeds it data it did not author — has to know four things
@@ -1170,14 +1170,15 @@ this class: every one of them is invisible from a terminal.
 | The property | Who works this way | flint |
 |---|---|---|
 | the answer is separated from the noise | `simonw/llm`, `mods -r` | ✓ stdout is only the stream |
-| the result says **why the run ended** | Claude Code `-p --output-format json`, whose `subtype` is `success`, `error_max_budget_usd`, … | ✗ |
+| the result says **why the run ended** | Claude Code `-p --output-format json`, whose `subtype` is `success`, `error_max_budget_usd`, … | ✓ `outcome` on `turn.completed` (step 1) |
 | structured output is a field, not prose | the same: `structured_output` beside `result` | ✓ the `result` frame |
-| cost and duration are part of the result | the same: `total_cost_usd`, `duration_ms`, `model_usage` | ✗ |
+| cost and duration are part of the result | the same: `total_cost_usd`, `duration_ms`, `model_usage` | ✗ `duration_ms` is the cheap half of it (B5) |
 | the conversation can be named and resumed | the same: `session_id`, `--resume` | ✓ |
-| the exit code classifies the failure | `sysexits.h`: 2 usage, 65 data error, 69 unavailable, 75 retryable. "A CLI that always exits 0 (or always 1) hides this signal, forcing agents to parse error text with regex" | ✗ 0 and 1 only |
+| the exit code classifies the failure | `sysexits.h`: 2 usage, 65 data error, 69 unavailable, 75 retryable. "A CLI that always exits 0 (or always 1) hides this signal, forcing agents to parse error text with regex" | ✓ 0, 1 unclassified, 2, 65, 69, 75, 130 (steps 1–2) |
 
-That last row is the whole section in one line. flint currently does exactly what the convention was
-written to warn against.
+At the time this section was written, flint did exactly what that last row warns against, and the row
+was the section in one line. It no longer is: four of the six properties are in, and the one still
+missing is the one about money — what a run *cost* rather than what it answered.
 
 #### A. Cannot be done at all
 
@@ -1208,18 +1209,19 @@ decision, not a gap.
 
 #### B. Cannot be told apart
 
-1. **Why the run ended — the one that matters most.** `turn.completed` carries two token counts and
-   nothing else. `error` carries a message and nothing else. The step limit is a `warning` string.
+1. **Why the run ended — the one that matters most.** *Done in step 1.* `turn.completed` carries two
+   token counts and nothing else. `error` carries a message and nothing else. The step limit is a
+   `warning` string.
    So to a program, a complete answer, a truncated answer, a refusal and a tool failure that still
    produced prose are the *same shape*. Measured, and it is exactly the trap: with
    `{"type": "string"}` as the schema, `{"last_trading_day": "error: 无法确定"}` validates — the type
    is right, it is a string, and it says the model could not tell. A caller acting on that value has
    a bug that nothing in the interface reported.
-2. **One exit code for everything.** Usage errors, a missing key, an unreachable endpoint, a rate
-   limit, a schema that never matched and a run with no answer all exit 1. Callers branch on exit
-   codes; the only alternative offered is matching text.
-3. **Retryable or not.** No signal distinguishes "try again in ten seconds" from "this will fail
-   identically forever, fix the input".
+2. **One exit code for everything.** *Done in step 1.* Usage errors, a missing key, an unreachable
+   endpoint, a rate limit, a schema that never matched and a run with no answer all exit 1. Callers
+   branch on exit codes; the only alternative offered is matching text.
+3. **Retryable or not.** *Done in step 2, with the balance bug as the case that forced it.* No signal
+   distinguishes "try again in ten seconds" from "this will fail identically forever, fix the input".
 4. **Whether the turn changed anything.** Tool calls are visible individually, but no summary says
    which files were written or which commands ran. For a caller deciding whether it is safe to
    proceed, that is the first question, and today it is answered by reading the whole event stream.
@@ -1274,13 +1276,17 @@ stopped run, because it was true before — that was the bug). B7 above is what 
 1. ~~**An outcome, and exit codes that classify.**~~ Done. The shape of it: the outcome is a field on
    the turn's end rather than a new event type, because the end of the stream already exists and a
    field costs consumers nothing; `EXIT_TEMPFAIL` (75) is declared and unused until step 2 gives it
-   something to mean.
+   something to mean — **which step 2 did**: a failure the provider calls retryable exits `75` once the
+   ladder has run out.
 2. **`error.code`**, produced where the cause is known — in `provider` for no key, network and status
    codes; in `agent` for a schema that never matched; in `main` for arguments. Classified by matching
-   on the error's text at the edge would be the same fragility this is meant to remove. **Its first
-   job is the balance/quota cause below**, which is a bug fix as much as a classification: today an
-   OpenAI-shaped `429 insufficient_quota` is retried four times with backoff (see §10 B6), and the
-   only way a caller can recognise "there is no money" is to match the message text.
+   on the error's text at the edge would be the same fragility this is meant to remove. **Done**,
+   except for two things the work turned up rather than planned: `flint balance` (below, and it is the
+   preflight in A4) and **B7** (a refusal made before the stream opens still reaches only stderr).
+   **Its first job was the balance/quota cause below**, which was a bug fix as much as a
+   classification: an OpenAI-shaped `429 insufficient_quota` used to be retried four times with
+   backoff (see §10 B6), and the only way a caller could recognise "there is no money" was to match
+   the message text.
 
 #### B6. Balance and quota, which the first draft of this section missed
 
