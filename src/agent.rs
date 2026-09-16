@@ -403,9 +403,20 @@ impl Agent {
         if let Some(text) = user_input {
             history.push(Message::user(text));
         }
+        let mut view = prune_tool_output(&history);
+        // The two things a real request carries that the session file does not: what a peer said, and
+        // what flint has to report about jobs that ended. Both are *shown* here without being consumed
+        // -- a preview that delivered them would change the next real request, and delivering a peer's
+        // words twice is one of the things the relay promises not to do.
+        if let Some(relay) = peer_relay(&self.peer_inbox) {
+            view.push(relay);
+        }
+        if let Some(report) = job_report(&crate::tools::settled_unreported(false)) {
+            view.push(report);
+        }
         crate::provider::request_body(
             self.provider.model(),
-            &prune_tool_output(&history),
+            &view,
             &self.tools.specs(),
             // The preview has to carry it: `flint debug prompt-input` on a schema run is how you see
             // that the shape went into the prompt *and* into `response_format`, and a preview that
@@ -509,6 +520,23 @@ impl Agent {
         let said = std::mem::take(&mut self.peer_inbox);
         if let Some(relay) = peer_relay(&said) {
             view.push(relay);
+        }
+        view
+    }
+
+    /// The request view with any job that ended since the last request reported.
+    ///
+    /// The default `task` is to start a child and not wait for it, which would be a way to lose an
+    /// answer if nothing ever said the child had ended: a model that has moved on has no reason to
+    /// poll, and the answer costs what it costs whether or not anybody reads it. So flint says so
+    /// itself, once, in the request that follows -- the same treatment a peer's words get, and a view
+    /// for the same reason: the session file is the record of what *happened*, and a conversation
+    /// resumed from it is not told about a job that ended days ago. Marking it here is what makes it
+    /// once: the next request finds it reported and says nothing.
+    fn with_jobs(&mut self, mut view: Vec<Message>) -> Vec<Message> {
+        let lines = crate::tools::settled_unreported(true);
+        if let Some(report) = job_report(&lines) {
+            view.push(report);
         }
         view
     }
@@ -808,6 +836,8 @@ impl Agent {
         // for the same reason: the file keeps the `peer` event, the request carries the words, and a
         // run resumed from that file starts without them.
         let sent = self.with_peers(sent);
+        // ...and word of any job this run started that has ended unread, for the same reason again.
+        let sent = self.with_jobs(sent);
 
         // Its own borrow of one field, so the closure can write to it while `self.provider`
         // is borrowed for the call. See `Agent::drawn`.
@@ -943,6 +973,27 @@ fn peer_relay(said: &[(String, String)]) -> Option<Message> {
     for (from, text) in said {
         let who = if from.trim().is_empty() { "someone" } else { from.trim() };
         block.push_str(&format!("\n\n{who} says: {text}"));
+    }
+    Some(Message::user(&block))
+}
+
+/// The sentence that tells the model a job it started has ended and nobody has read what it produced.
+///
+/// Labelled as flint's own bookkeeping in the first line, because it is the one message in a
+/// conversation that neither the person nor the model wrote, and a model that mistakes it for the
+/// person speaking would answer it instead of using it. Free-standing for `peer_relay`'s reason: the
+/// wording is the part that matters, and it can be tested without an agent, a provider or a session.
+fn job_report(lines: &[String]) -> Option<Message> {
+    if lines.is_empty() {
+        return None;
+    }
+    let mut block = String::from(
+        "[a note from flint, not from the person: work this run started and did not wait for has \
+         ended since the last message]",
+    );
+    for line in lines {
+        block.push_str("\n\n");
+        block.push_str(line);
     }
     Some(Message::user(&block))
 }

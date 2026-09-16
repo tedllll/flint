@@ -229,8 +229,10 @@ async fn a_child_run_is_a_real_run_and_its_answer_comes_back_with_its_provenance
         .respond_with(Scripted {
             step: step.clone(),
             bodies: vec![
-                // The parent asks for a child.
-                tool_call("task", r#"{"prompt":"what is in the box?"}"#),
+                // The parent asks for a child *and waits for it*: this test is about the answer
+                // arriving with its provenance, so the door that hands the answer over is the one it
+                // takes. `background: false` is explicit because the default is now the handle.
+                tool_call("task", r#"{"prompt":"what is in the box?","background":false}"#),
                 // The child answers -- and it is the child's second request overall, because the
                 // stub cannot tell the two runs apart except by order.
                 prose("CHILD FOUND THE ANSWER"),
@@ -497,8 +499,12 @@ async fn a_profile_is_what_decides_the_instructions_the_model_and_readonly() {
             seen: seen.clone(),
             delay: std::time::Duration::ZERO,
             bodies: vec![
-                // The parent names the profile.
-                tool_call("task", r#"{"prompt":"look around","agent":"explorer"}"#),
+                // The parent names the profile, and waits: the point here is what the profile did to
+                // the child, which is only visible in the child's own turn.
+                tool_call(
+                    "task",
+                    r#"{"prompt":"look around","agent":"explorer","background":false}"#,
+                ),
                 // The child, being readonly, is asked to write -- which is the only way to see from
                 // outside that the profile's `readonly: true` arrived.
                 tool_call("write", r#"{"path":"child.txt","content":"should not exist"}"#),
@@ -810,7 +816,9 @@ impl Respond for HeldChild {
     fn respond(&self, _req: &Request) -> ResponseTemplate {
         let n = self.step.fetch_add(1, Ordering::SeqCst);
         let body = match n {
-            0 => tool_call("task", r#"{"prompt":"look around"}"#),
+            // Waiting, because this test drops the *wait*: the parent is inside `task` when the person
+            // types, which is the reported incident, and a background child would have returned already.
+            0 => tool_call("task", r#"{"prompt":"look around","background":false}"#),
             1 => prose("CHILD EVENTUALLY ANSWERS"),
             _ => prose(self.then),
         };
@@ -1119,8 +1127,9 @@ async fn a_childs_own_progress_reaches_the_parents_status_row() {
             step: step.clone(),
             delay: std::time::Duration::from_secs(2),
             bodies: vec![
-                // The parent asks for a child.
-                tool_call("task", r#"{"prompt":"look around"}"#),
+                // Waiting: a status row about a child is only drawn while the parent is there to draw
+                // it, and this test is about what the row says while the child works.
+                tool_call("task", r#"{"prompt":"look around","background":false}"#),
                 // The child asks for a listing, which is the frame the parent has to pass on.
                 tool_call("list", r#"{"path":"."}"#),
                 // The child answers...
@@ -1195,11 +1204,37 @@ struct Scripts {
     steps: Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>,
     /// (a phrase from that conversation's first user message, its steps, how long to hold each answer)
     scripts: Vec<(&'static str, Vec<Step>, std::time::Duration)>,
+    /// Every request body that arrived, in order, whichever conversation sent it.
+    ///
+    /// The only place a *view* is observable. A note flint adds to a request is not in the session
+    /// file by construction -- that is what makes it a view -- so "the model was told" can only be
+    /// asserted against the bytes the stub received.
+    seen: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+/// A `Scripts` responder, built by name so a test can also hold the list of request bodies.
+impl Scripts {
+    fn new(scripts: Vec<(&'static str, Vec<Step>, std::time::Duration)>) -> Scripts {
+        Scripts {
+            steps: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            scripts,
+            seen: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    /// The request bodies that have arrived so far, in order.
+    fn seen(&self) -> Arc<std::sync::Mutex<Vec<String>>> {
+        Arc::clone(&self.seen)
+    }
 }
 
 impl Respond for Scripts {
     fn respond(&self, req: &Request) -> ResponseTemplate {
         let body = String::from_utf8_lossy(&req.body).to_string();
+        self.seen
+            .lock()
+            .expect("seen lock")
+            .push(body.clone());
         let parsed: serde_json::Value =
             serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
         let first = parsed
@@ -1290,41 +1325,44 @@ fn run_flint_until_exit(home: &Path, work: &Path) -> (i32, std::time::Duration) 
     }
 }
 
-/// A background child is a handle: the parent finishes while the child works, and the answer is on
+/// A child is a handle *by default*: the parent finishes while the child works, and the answer is on
 /// disk afterwards.
 ///
-/// This is the difference the whole `background` flag exists for. `task` waits, which is right for a
-/// job whose answer is the next thing you need and wrong for one that takes minutes -- and the
-/// alternative an agent had was `bash` with an ampersand, which loses the exit code, the session path
-/// and the stream. The three facts checked here are the ones a caller cannot reconstruct: the parent
-/// did not wait (the clock), the handle names the conversation (the session path), and the answer
-/// lands there after the parent is gone (the file).
+/// The scripted model says nothing about waiting, so this is the default path and not the opt-in one.
+/// It is the right default for a child because a child is a whole run: its answer is being written to
+/// a conversation of its own whether or not anybody waits, so waiting buys nothing the file does not
+/// already hold -- and it costs the person the use of their session for as long as the child takes.
+/// A model that needs the answer before it can continue says `background: false`, and the test below
+/// this one is that door. The alternative an agent had was `bash` with an ampersand, which loses the
+/// exit code, the session path and the stream.
+///
+/// The three facts checked here are the ones a caller cannot reconstruct: the parent did not wait (the
+/// clock), the handle names the conversation (the session path), and the answer lands there after the
+/// parent is gone (the file).
 #[tokio::test]
 async fn a_background_child_is_a_handle_and_answers_after_the_parent_is_gone() {
     let _solo = alone().await;
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
-        .respond_with(Scripts {
-            steps: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            scripts: vec![
-                (
-                    "ask the child",
-                    vec![
-                        // The parent starts a job and does not wait for it.
-                        Step::Call("task", r#"{"prompt":"SLOW JOB","background":true}"#),
-                        Step::Say("PARENT DONE"),
-                    ],
-                    std::time::Duration::ZERO,
-                ),
-                // Eight seconds of work, against a parent whose own run takes one.
-                (
-                    "SLOW JOB",
-                    vec![Step::Say("CHILD WAS SLOW")],
-                    std::time::Duration::from_secs(8),
-                ),
-            ],
-        })
+        .respond_with(Scripts::new(vec![
+            (
+                "ask the child",
+                vec![
+                    // The parent starts a job and does not wait for it -- by saying nothing about
+                    // waiting, which is the default.
+                    Step::Call("task", r#"{"prompt":"SLOW JOB"}"#),
+                    Step::Say("PARENT DONE"),
+                ],
+                std::time::Duration::ZERO,
+            ),
+            // Eight seconds of work, against a parent whose own run takes one.
+            (
+                "SLOW JOB",
+                vec![Step::Say("CHILD WAS SLOW")],
+                std::time::Duration::from_secs(8),
+            ),
+        ]))
         .mount(&server)
         .await;
 
@@ -1396,27 +1434,24 @@ async fn a_handle_says_where_a_child_is_and_then_collects_its_answer() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
-        .respond_with(Scripts {
-            steps: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            scripts: vec![
-                (
-                    "ask the child",
-                    vec![
-                        Step::Call("task", r#"{"prompt":"SLOW JOB","background":true}"#),
-                        Step::Call("task_op", r#"{"action":"status"}"#),
-                        Step::Call("task_op", r#"{"action":"wait","pid":{pid}}"#),
-                        Step::Say("PARENT DONE"),
-                    ],
-                    std::time::Duration::ZERO,
-                ),
-                // Long enough that the status step sees it running and the wait step has to wait.
-                (
-                    "SLOW JOB",
-                    vec![Step::Say("THE SLOW ANSWER")],
-                    std::time::Duration::from_secs(3),
-                ),
-            ],
-        })
+        .respond_with(Scripts::new(vec![
+            (
+                "ask the child",
+                vec![
+                    Step::Call("task", r#"{"prompt":"SLOW JOB"}"#),
+                    Step::Call("task_op", r#"{"action":"status"}"#),
+                    Step::Call("task_op", r#"{"action":"wait","pid":{pid}}"#),
+                    Step::Say("PARENT DONE"),
+                ],
+                std::time::Duration::ZERO,
+            ),
+            // Long enough that the status step sees it running and the wait step has to wait.
+            (
+                "SLOW JOB",
+                vec![Step::Say("THE SLOW ANSWER")],
+                std::time::Duration::from_secs(3),
+            ),
+        ]))
         .mount(&server)
         .await;
 
@@ -1463,26 +1498,23 @@ async fn a_handle_can_ask_a_stuck_child_to_stop() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
-        .respond_with(Scripts {
-            steps: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            scripts: vec![
-                (
-                    "ask the child",
-                    vec![
-                        Step::Call("task", r#"{"prompt":"STUCK JOB","background":true}"#),
-                        Step::Call("task_op", r#"{"action":"stop","pid":{pid}}"#),
-                        Step::Say("PARENT DONE"),
-                    ],
-                    std::time::Duration::ZERO,
-                ),
-                // A model call that never comes back, which is the state a stop is for.
-                (
-                    "STUCK JOB",
-                    vec![Step::Say("NEVER ANSWERED")],
-                    std::time::Duration::from_secs(60),
-                ),
-            ],
-        })
+        .respond_with(Scripts::new(vec![
+            (
+                "ask the child",
+                vec![
+                    Step::Call("task", r#"{"prompt":"STUCK JOB"}"#),
+                    Step::Call("task_op", r#"{"action":"stop","pid":{pid}}"#),
+                    Step::Say("PARENT DONE"),
+                ],
+                std::time::Duration::ZERO,
+            ),
+            // A model call that never comes back, which is the state a stop is for.
+            (
+                "STUCK JOB",
+                vec![Step::Say("NEVER ANSWERED")],
+                std::time::Duration::from_secs(60),
+            ),
+        ]))
         .mount(&server)
         .await;
 
@@ -1507,6 +1539,160 @@ async fn a_handle_can_ask_a_stuck_child_to_stop() {
     assert!(
         text.contains("exit code: 130 (the run was stopped)"),
         "the child did not stop the way a person stops one: {text}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Waiting is a decision, and this is where a model makes it: `background: false` and the answer comes
+/// back in the tool result, exactly as a call with no flag used to behave.
+///
+/// The two doors have to stay distinguishable in what the model *reads*, not only in when it reads it:
+/// a handle where an answer was expected is a model that goes on to invent the answer, and an answer
+/// where a handle was expected is one that never learns the job is still going. So the handle's own
+/// words are asserted absent.
+#[tokio::test]
+async fn a_model_that_needs_the_answer_asks_to_wait() {
+    let _solo = alone().await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(Scripts::new(vec![
+            (
+                "ask the child",
+                vec![
+                    Step::Call("task", r#"{"prompt":"QUICK JOB","background":false}"#),
+                    Step::Say("PARENT DONE"),
+                ],
+                std::time::Duration::ZERO,
+            ),
+            (
+                "QUICK JOB",
+                vec![Step::Say("THE QUICK ANSWER")],
+                std::time::Duration::from_secs(1),
+            ),
+        ]))
+        .mount(&server)
+        .await;
+
+    let home = scratch("waiting", &server.uri());
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("work dir");
+
+    let (code, stdout, stderr) = run_flint(&home, &work, &[]);
+    assert_eq!(code, 0, "flint failed: {stderr}\n{stdout}");
+    let text = transcript(&session_of(&stdout));
+    assert!(
+        text.contains("THE QUICK ANSWER"),
+        "a call that asked to wait came back without the answer: {text}"
+    );
+    assert!(
+        !text.contains("started in the background"),
+        "a call that asked to wait handed back a handle instead: {text}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A job that ends while the model is still working is reported to it once, and the report is a *view*.
+///
+/// Without this the default is a trap: a model that starts a child and does not wait learns nothing
+/// when it ends, so the only way to find out would be to poll -- and a model that has moved on has no
+/// reason to. The report is injected into the next request and nowhere else, which is what keeps the
+/// session file the record of what *happened*: a conversation resumed from it is not told again about
+/// a job that ended days ago, and the note never becomes a message somebody appears to have sent.
+///
+/// The scripted model is deliberately slow (two seconds a turn), the child deliberately quick, and the
+/// parent given two more turns to take: "once" is a claim about a request *after* the one that carried
+/// the report, so a script that ends on that request could not tell once from every-time.
+#[tokio::test]
+async fn a_child_that_ends_while_its_parent_works_is_reported_to_it_once() {
+    let _solo = alone().await;
+    let server = MockServer::start().await;
+    let parent = Scripts::new(vec![
+        (
+            "ask the child",
+            vec![
+                Step::Call("task", r#"{"prompt":"QUICK JOB"}"#),
+                // Something for the parent to do while the child finishes. Cheap and portable: the
+                // point is that a turn goes on happening, not what the command prints.
+                Step::Call("bash", r#"{"command":"echo still here"}"#),
+                Step::Call("bash", r#"{"command":"echo and here"}"#),
+                Step::Say("PARENT DONE"),
+            ],
+            std::time::Duration::from_secs(2),
+        ),
+        (
+            "QUICK JOB",
+            vec![Step::Say("CHILD QUICK")],
+            std::time::Duration::from_secs(1),
+        ),
+    ]);
+    let seen = parent.seen();
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(parent)
+        .mount(&server)
+        .await;
+
+    let home = scratch("reported", &server.uri());
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("work dir");
+
+    let (code, stdout, stderr) = run_flint(&home, &work, &[]);
+    assert_eq!(code, 0, "flint failed: {stderr}\n{stdout}");
+
+    let bodies = seen.lock().expect("seen lock").clone();
+    // The stub sees every conversation, so the parent's are picked out by its own first question.
+    let parent_bodies: Vec<&String> = bodies
+        .iter()
+        .filter(|body| body.contains("ask the child"))
+        .collect();
+    let told: Vec<usize> = parent_bodies
+        .iter()
+        .enumerate()
+        .filter(|(_, body)| body.contains("not from the person"))
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(
+        told.len(),
+        1,
+        "the model was told {} times that the job ended, out of {} requests: {told:?}",
+        told.len(),
+        parent_bodies.len()
+    );
+    // Never the first: the job cannot have ended before the call that started it. And never twice:
+    // the parent is given a turn after the one that carried the report, which is where a report that
+    // repeated itself would show up.
+    assert!(
+        told[0] > 0 && told[0] < parent_bodies.len() - 1,
+        "the report arrived in the parent's request {} of {}: {told:?}",
+        told[0],
+        parent_bodies.len()
+    );
+    let note = &parent_bodies[told[0]];
+    assert!(
+        note.contains("exit code"),
+        "the report does not say the job ended: {note}"
+    );
+
+    // And it names the job the way the handle named it, which is the only way a model can act on it.
+    let text = transcript(&session_of(&stdout));
+    let pid = pid_from_a_handle(&text).expect("the handle names a pid");
+    assert!(
+        note.contains(&format!("pid {pid}")),
+        "the report does not name the job it is about: {note}"
+    );
+
+    // The report is a view: the conversation on disk does not hold it, so a resumed run is not told
+    // about it a second time and no reader mistakes it for something the person said.
+    assert!(
+        !text.contains("not from the person"),
+        "the report was written into the session file: {text}"
+    );
+    // The person, though, is told the moment it happens -- they are the one who can decide what to do
+    // about a job that ended. stderr is where a non-interactive run's notices go.
+    assert!(
+        stderr.contains("finished"),
+        "the person was never told the job ended: {stderr}"
     );
     let _ = std::fs::remove_dir_all(&home);
 }

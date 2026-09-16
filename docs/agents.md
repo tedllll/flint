@@ -42,7 +42,7 @@ That equality is the design, not a coincidence: a feature that works from outsid
 |---|---|---|
 | `flint -p … --json` over a pipe | Python, a shell, an editor, another agent's shell tool | **Built.** `examples/python/flint_call.py`; every fact needed to branch is on the stream |
 | an MCP tool call | Codex, Claude Code, Cursor | **Built.** `examples/mcp/flint_server.py`, one tool, stdio |
-| a `task` tool inside flint | flint itself | **Built.** `src/tools.rs` (`TaskTool`), `tests/task.rs`; one child per call, `tasks` for several at once, and `background: true` with `task_op` to look at, collect or stop a child nobody waited for |
+| a `task` tool inside flint | flint itself | **Built.** `src/tools.rs` (`TaskTool`), `tests/task.rs`; one child per call, `tasks` for several at once, and a handle by default -- pid and the conversation the answer is being written to -- with `task_op` to look at, collect or stop a job nobody waited for (`background: false` is the door that waits) |
 | a profile in `<project>/.flint/agents/<name>.md` | a person, once; a model or a person afterwards | **Built.** `src/context.rs`; the same child, started with instructions, a model and `readonly` already decided |
 
 The third door is the first two in Rust. It runs `std::env::current_exe()` with the same arguments,
@@ -195,6 +195,47 @@ Three things fell out of building it that the sketch did not anticipate:
   started comes back should stop at the terminal frame (`turn.completed`, or the `result` object) rather
   than at EOF; Python's `subprocess.communicate()` reads to EOF by design and will therefore wait.
 
+**Built since: the handle is the default, and a job that ends reports itself.** This is the correction a
+person made after using it (2026-09-16): *"my subagent cannot run in the background -- the main session
+calls it and can only wait."* The mechanism was there and tested; the default was the problem, and the
+evidence is in that person's own session files: two `task` calls in one conversation, **neither** of
+them carrying `background`, one of which the person interrupted by typing -- which drops the turn -- and
+whose tool result is the literal sentence `interrupted by the user: tool 'task' was requested but never
+ran`. A model reads the tool description, and that description ended with "this tool waits for it".
+
+So `task` now starts a child and returns a handle unless the call says `background: false`, and that
+needed a second thing to be safe, because a default that starts work nobody is waiting for is a default
+that can *lose the work*: a model that has moved on has no reason to poll, and a child costs what it
+costs whether or not its answer is ever read. So a job that ends is reported, once, in two lanes:
+
+- **the person is told immediately** (`notice`), in the transcript they are already reading: what ended,
+  its exit code, and where its answer is. A child that ends while they are watching used to be
+  invisible until they happened to ask.
+- **the model is told in its next request**, as one user-role message labelled `[a note from flint, not
+  from the person: …]` listing every job that ended unread, with the pid and the verb that collects it.
+
+The lanes are the same fact for two readers, so neither marks the other's work done, and the *third*
+reader -- `task_op wait`, `task_op stop`, or a `stop` on a job that had already ended -- counts as a
+read and suppresses the notice, which is what makes "once" true rather than "every request from now
+on". The bookkeeping is one `AtomicBool` on the job (`reported`), and the report goes into the request
+**view** beside the peer relay and never into `history`: the session file stays the record of what
+happened, and a conversation resumed from it is not told about a job that ended days ago. The tests hold
+all of it: the default (the parent exits in under six seconds against an eight-second child), the door
+that waits (`background: false`, where a handle would be a lie), the report (exactly once -- the test
+gives the parent a turn *after* the one that carried it, and the mutation that removes the `reported`
+check makes it fail with "told 2 times"), and the person's notice on stderr.
+
+**The shape was read off DSH's job runtime rather than invented**, which is worth recording because two
+of its decisions were adopted and one was refused. Adopted: **the same verbs for every kind of job**
+(DSH's `job_output`/`job_list`/`job_kill` are kind-independent, and flint's single `task_op` with
+`status`/`wait`/`stop` is the same idea in one schema), and **a settled job is announced exactly once,
+suppressed by any read or kill**. Refused: **waking an idle owner with a turn of its own**. DSH does
+that because its agents run unattended goal loops; flint's REPL has a person at the keyboard, and
+starting a model turn nobody asked for is a bill nobody agreed to. The person is told instead, and the
+model learns on its next request -- which is the same information, one prompt cheaper. (The second half
+of the extension, background *commands*, is not built: `bash`/`pwsh`/`exec` still wait, because a
+command's output is usually the input to the next step. When it is built it goes on this same record.)
+
 ## Stages
 
 **Stage 1 — presence and `flint who`.** A record per live run, refreshed on the heartbeat flint
@@ -222,14 +263,16 @@ a record that has said nothing yet.
 same commit, keeping the original reason. — **Built**, and the differences from the sketch are the part
 worth reading:
 
-- **The background handle is built, as one tool with an `action`.** `task` takes `background: true` and
-  returns at once with the child's pid and the conversation it is holding; `task_op` takes
+- **The background handle is built, as one tool with an `action`.** `task` hands back a handle at once —
+  the child's pid and the conversation it is holding — and `task_op` takes
   `action: "status" | "wait" | "stop"`, and `pid` names which child. The three verbs did not become
   three tools because every schema is re-sent with every request, and they did not go into `task`
   because a call that sometimes returns an answer and sometimes a receipt is one whose result a model
   has to guess at. What a caller gets is described under "Background is the same record", including the
   two things building it changed: the timeout moved off the waiter into a detached supervisor, and the
-  child's stdin is kept in the job so that a later call can still write `/stop` to it.
+  child's stdin is kept in the job so that a later call can still write `/stop` to it. **The handle is
+  the default and `background: false` is the door that waits** — see the note at the end of that
+  section for why the default moved and what had to be built for the move to be safe.
 - **The child is the same binary** (`std::env::current_exe()`), not a path looked up on `PATH`:
   a child built from a different flint than the caller is talking to is a different program. `FLINT_BIN`
   overrides it, for a wrapper that wants a specific build and for the tests, which live outside the

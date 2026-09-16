@@ -846,6 +846,16 @@ struct Job {
     ended: std::sync::Mutex<Option<std::time::Instant>>,
     depth: u32,
     readonly: bool,
+    /// Whether this run started it *without waiting* -- which is what makes ending worth a notice of
+    /// its own: a job somebody is waiting for hands its answer over in the tool result, and a line
+    /// about it as well would be the same news twice.
+    background: bool,
+    /// Whether what it produced has been read or handed over already.
+    ///
+    /// The one piece of bookkeeping DSH's job runtime has and this did not: an exit is news once. A
+    /// `wait`, a `stop` and the report itself all set it, so a model that collected the answer is not
+    /// told the job ended afterwards, and a model that was told is not told again on the next request.
+    reported: std::sync::atomic::AtomicBool,
     /// The budget that is enforced on it whether or not anyone is waiting.
     timeout_secs: u64,
     /// The child's stdin, kept here rather than in the future that started it: `/stop` has to be
@@ -973,11 +983,24 @@ impl Job {
         }
     }
 
+    /// Register the fact that somebody has read what this job produced.
+    fn mark_reported(&self) {
+        self.reported
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn was_reported(&self) -> bool {
+        self.reported.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Wait for the child to end, or give up after `limit`.
     ///
     /// The notify is registered before the value is read, so a child that ends between the two is
     /// still seen: the wake-up is already armed when the check happens, which is what makes this a
     /// wait rather than a race.
+    ///
+    /// Getting an answer out of this *is* reading it, so it counts as reported: everything that
+    /// reports a finished job goes through here, and a second telling would be noise.
     async fn wait(&self, limit: Option<std::time::Duration>) -> Option<Finished> {
         let deadline = limit.map(|limit| tokio::time::Instant::now() + limit);
         loop {
@@ -988,6 +1011,7 @@ impl Job {
                 .unwrap_or_else(|e| e.into_inner())
                 .clone()
             {
+                self.mark_reported();
                 return Some(finished);
             }
             match deadline {
@@ -1115,6 +1139,87 @@ pub fn children_running() -> Vec<String> {
             line
         })
         .collect()
+}
+
+/// What a job that has *ended* contributes, to the model and to the person.
+impl Job {
+    /// The line a settled job contributes to the report the model is given on its next request.
+    ///
+    /// Written for a model that has moved on: what ended, whether it worked, how to get the answer,
+    /// and where the answer is in case the verb is not what it wants. It names the pid because the pid
+    /// is the handle it was given -- a report about "a job" would leave it looking for one.
+    fn settle_line(&self) -> String {
+        let Some(finished) = self
+            .finished
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        else {
+            return String::new();
+        };
+        let mut line = format!(
+            "pid {} ({}) finished: exit code {} ({}), after {}. Nothing has collected what it said; \
+             `task_op` action \"wait\" with pid {} gets it",
+            self.pid,
+            self.label,
+            finished.code,
+            task_exit_meaning(finished.code),
+            elapsed_label(self.started.elapsed()),
+            self.pid
+        );
+        match self.session() {
+            Some(path) => line.push_str(&format!(". Its conversation: {path}.")),
+            None => line.push('.'),
+        }
+        line
+    }
+
+    /// The same news for the person, who has no tools to call.
+    ///
+    /// Deliberately says no verb and no pid-as-a-handle: it is a line in their transcript, and what a
+    /// person does about a job that ended is say something. The pid is still there because it is how
+    /// the same job is named in every other thing they can see (`flint who`, a process listing).
+    fn finished_notice(&self) -> String {
+        let code = self
+            .finished
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|finished| finished.code)
+            .unwrap_or(-1);
+        let mut line = format!(
+            "{} (pid {}) finished -- exit code {} ({})",
+            self.label,
+            self.pid,
+            code,
+            task_exit_meaning(code)
+        );
+        match self.session() {
+            Some(path) => line.push_str(&format!("; its answer is in {path}")),
+            None => line.push_str("; it never named a conversation"),
+        }
+        line
+    }
+}
+
+/// The jobs this run started that have ended and that nobody has read, one line each.
+///
+/// This is the notice DSH's job runtime calls a completion notice, in the shape a request can carry
+/// it: a settled job the model was never told about. `mark` is the difference between asking what
+/// would be said and saying it -- the request that carries the report marks it, so the next request is
+/// not told the same thing again, while `flint debug prompt-input` asks without marking, which is what
+/// a preview has to be.
+pub fn settled_unreported(mark: bool) -> Vec<String> {
+    let mut lines = Vec::new();
+    for job in jobs().iter() {
+        if job.has_finished() && !job.was_reported() {
+            lines.push(job.settle_line());
+            if mark {
+                job.mark_reported();
+            }
+        }
+    }
+    lines
 }
 
 impl CommandOutcome {
@@ -3393,6 +3498,9 @@ struct Child {
     parent: Option<String>,
     timeout_secs: u64,
     readonly: bool,
+    /// Whether this run started it without waiting. Carried on the child's own job record, because the
+    /// decision outlives the call that made it: the notice at the end depends on it.
+    background: bool,
     /// The profile that shaped it, if one did.
     agent: Option<String>,
     /// Where its job sits in a fan-out, for the header of its block.
@@ -3646,6 +3754,9 @@ fn prepare_child(config: &TaskConfig, args: &Value, prompt: &str, index: usize) 
         parent: config.parent.clone(),
         timeout_secs,
         readonly,
+        // A fan-out collects every answer in one result, so its children are children somebody is
+        // waiting for. `task` decides its own, from the call.
+        background: false,
         agent,
         index,
         schema_file,
@@ -3664,8 +3775,12 @@ impl Tool for TaskTool {
          whose transcript you do not want in this conversation. The other flint starts fresh: it \
          cannot see this conversation, so the prompt has to stand alone. `agent` names a profile \
          from this directory's `.flint/agents/`, which decides the instructions, the model and \
-         whether the child may write. It is a whole model run, so it costs what a run costs, and \
-         this tool waits for it. `readonly` here forces it there."
+         whether the child may write. It is a whole model run, so it costs what a run costs. \
+         This starts it and returns at once with a handle -- pid and the conversation its answer is \
+         being written to -- instead of waiting for it, because a job that takes minutes must not \
+         make this session unusable. You are told when it ends and can collect its answer with \
+         `task_op` action \"wait\". Use `background: false` when the next thing you do depends on \
+         the answer and there is nothing else to get on with. `readonly` here forces it there."
     }
 
     fn task_config(&mut self) -> Option<&mut TaskConfig> {
@@ -3698,7 +3813,10 @@ impl Tool for TaskTool {
             },
             "background": {
                 "type": "boolean",
-                "description": "Start it and return at once with a handle (its pid and its session) instead of waiting. Collect the answer later with `task_op` action \"wait\". Use it when the job is minutes long and what you do next does not depend on it."
+                "description": "Default true: start it and return at once with a handle (its pid and \
+                     its conversation) instead of waiting. Collect the answer with `task_op` action \
+                     \"wait\", and see where it is with \"status\". Set it to false only when what you \
+                     do next depends on the answer."
             }
         });
         // Only offered when this directory actually has profiles, and only the names that exist: an
@@ -3734,15 +3852,23 @@ impl Tool for TaskTool {
         if let Some(refusal) = depth_refusal() {
             return Ok(refusal);
         }
-        let child = prepare_child(&self.config, args, prompt, 0)?;
+        let mut child = prepare_child(&self.config, args, prompt, 0)?;
         // `background` is a *decision about waiting*, not about the child: the same run, the same
         // session, the same bill. What changes is that this call hands back a handle instead of the
-        // answer, which is what a model needs when the job is minutes long and the next thing it
-        // wants to do does not depend on it.
+        // answer, and the default is the handle.
+        //
+        // It did not used to be, and the measured cost of the old default is in this repository's
+        // history: a person asked for a wide search, the model called `task`, and the parent session
+        // was unusable until the child finished -- and typing to interrupt it (which is what a person
+        // does next) drops the turn instead. A child is a whole run: its answer is being written to a
+        // conversation of its own whether or not anybody waits, so waiting buys nothing the file does
+        // not already hold. A model that needs the answer *now* says `background: false`, and that is
+        // the door the old behaviour is still available through.
         let background = args
             .get("background")
             .and_then(|value| value.as_bool())
-            .unwrap_or(false);
+            .unwrap_or(true);
+        child.background = background;
         let job = start_child(child)?;
         if background {
             Ok(background_handle(job).await)
@@ -3754,7 +3880,8 @@ impl Tool for TaskTool {
 
 /// What became of a child this run started: look at it, wait for it, or ask it to stop.
 ///
-/// The other half of `task`'s `background: true`, and deliberately *one* tool rather than three:
+/// The other half of `task`, which now hands back a handle by default, and deliberately *one* tool
+/// rather than three:
 /// every tool schema is re-sent with every request of every conversation, so three verbs about one
 /// child would cost three schemas to say one thing. It is deliberately not folded into `task`
 /// either -- a call that sometimes returns an answer and sometimes a receipt is one whose result a
@@ -3832,8 +3959,8 @@ fn job_for(pid: Option<u32>, action: &str) -> Result<std::sync::Arc<Job>> {
     };
     match candidates.len() {
         0 => Err(anyhow!(
-            "this run has started no children, so there is nothing to {action}. `task` starts one, \
-             and `task` with `background: true` starts one and returns at once."
+            "this run has started no children, so there is nothing to {action}. `task` starts one \
+             and comes back with its pid at once."
         )),
         1 => Ok(candidates[0].clone()),
         _ => Err(anyhow!(
@@ -3863,8 +3990,8 @@ fn status_text(pid: Option<u32>) -> String {
         None => {
             let listed = jobs_listed();
             if listed.is_empty() {
-                "this run has started no children. `task` starts one; `task` with \
-                 `background: true` starts one and returns at once with its pid."
+                "this run has started no children. `task` starts one and comes back at once with \
+                 its pid; it only waits when the call says `background: false`."
                     .to_string()
             } else {
                 listed
@@ -3941,6 +4068,9 @@ impl Tool for TaskOpTool {
             "stop" => {
                 let job = job_for(pid, "stop")?;
                 if job.has_finished() {
+                    // Reading this line is reading the job: it has ended, so the report on the next
+                    // request would be news this call has just delivered.
+                    job.mark_reported();
                     return Ok(format!(
                         "it had already ended, so there was nothing to stop; `wait` collects what it \
                          said.\n{}",
@@ -4206,6 +4336,8 @@ fn start_child(child: Child) -> Result<std::sync::Arc<Job>> {
         ended: std::sync::Mutex::new(None),
         depth: child.depth,
         readonly: child.readonly,
+        background: child.background,
+        reported: std::sync::atomic::AtomicBool::new(false),
         timeout_secs: child.timeout_secs,
         stdin: std::sync::Mutex::new(stdin),
         session: std::sync::Mutex::new(None),
@@ -4283,6 +4415,13 @@ fn start_child(child: Child) -> Result<std::sync::Arc<Job>> {
         // have been dropped long before, which is what a `task` child outliving its turn proved.
         supervisor_job.stdin.lock().unwrap_or_else(|e| e.into_inner()).take();
         supervisor_job.done.notify_waiters();
+        // Tell the person, whose session this is. Only for a job nobody was waiting for -- a child
+        // waited on hands its answer over in the tool result, and the same news twice is noise -- and
+        // only if nobody has read it: this lane and the report the model gets on its next request are
+        // two readers of one fact, so neither marks the other's work done.
+        if supervisor_job.background && !supervisor_job.was_reported() {
+            notice(&supervisor_job.finished_notice());
+        }
     });
 
     Ok(job)
@@ -4346,7 +4485,7 @@ async fn finish_child(job: std::sync::Arc<Job>) -> Result<String> {
     }
 }
 
-/// What a `task` call that asked for `background: true` gets back: a handle, and what to do with it.
+/// What a `task` call gets back now that it does not wait: a handle, and what to do with it.
 async fn background_handle(job: std::sync::Arc<Job>) -> String {
     // The child names its conversation before it asks the model anything, so this is a moment rather
     // than a guess -- and a handle that cannot say where the answer will land is not a handle. The
@@ -4367,7 +4506,8 @@ async fn background_handle(job: std::sync::Arc<Job>) -> String {
     text.push_str(&format!(
         "Use `task_op` with action \"status\" to see where it is, \"wait\" to collect its answer \
          (pid {}), or \"stop\" to ask it to stop. Its budget is {}s, and nobody has to be waiting for \
-         that to happen.\ndepth: {} (this run is {}), readonly: {}",
+         that to happen. You will be told when it ends even if you do not ask.\n\
+         depth: {} (this run is {}), readonly: {}",
         job.pid, job.timeout_secs, job.depth, job.depth - 1, job.readonly
     ));
     text

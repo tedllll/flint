@@ -482,7 +482,8 @@ like any other — it lives under `children/` so it does not join your own list 
 ```jsonc
 // what the tool takes
 {"prompt": "…", "cwd": "…", "readonly": true, "model": "…", "provider": "…", "schema": {…}, "timeout_secs": 600,
- "agent": "explorer"}   // optional: a profile, which brings its own instructions, model and readonly
+ "agent": "explorer",    // optional: a profile, which brings its own instructions, model and readonly
+ "background": false}    // optional: wait here for the answer instead of taking the handle
 ```
 
 A **profile** is a file — `<project>/.flint/agents/<name>.md`, or `<FLINT_HOME>/agents/<name>.md` for one
@@ -513,6 +514,37 @@ once by default), and returns one block per job with the same provenance `task` 
 shared context: the children cannot see this conversation or each other, so a set of jobs that depend on
 each other is the wrong set of jobs for it.
 
+**A `task` comes back at once with a handle, and says when the job ends.** Waiting for a child was the
+old default and it was wrong in practice: the parent sat there for minutes — measured in a real session,
+where the person typed at the frozen parent, which drops the turn, so the tool result became
+`interrupted by the user: tool 'task' was requested but never ran` while the child kept working and
+billing. So the call returns the child's pid and the conversation its answer is being written to, and
+the work happens off to the side. A model that needs the answer *now* says `"background": false` and
+waits; otherwise it carries on and is told, in its next request, that a job finished — one line per job,
+with the pid and the verb that collects it. You are told too, in the transcript, as soon as it ends.
+The collecting verb is one tool with an action:
+
+```jsonc
+{"action": "status"}                  // this run's jobs: running, or ended with their exit code
+{"action": "wait",   "pid": 12345}    // block until it ends, and take the answer
+{"action": "stop",   "pid": 12345}    // ask it to stop (the graceful 'stop' the MCP door uses)
+```
+
+"Exactly once" is the property: a job that ended is reported once, and a `wait` or a `stop` counts as
+having collected it, so nothing is repeated at every request afterwards. A job this run did not start
+can still be seen — `status` reads the presence record and says what it is and where its conversation
+is — but it says plainly that it cannot be waited for or stopped from here, because the pipe a `stop`
+needs belongs to whoever spawned it.
+
+While a `task` call waits, the child's own work shows on the parent's status row — `task: running
+search`, `explorer: waiting for the model` — because the child is already saying what it is doing on its
+own `--json` stream and a row that says one unchanging word for two minutes is a row that tells nobody
+whether anything is happening. Typing at the parent still interrupts the turn (that is what typing
+does), but the child is a process of its own and does **not** stop: the turn that was dropped records
+what it left running, with the child's pid and the session its answer will land in, so the work is
+collected rather than repeated. A `task` child outliving the turn that started it is real — measured,
+by way of a bug report — so the honest thing is to say so rather than to claim the tool never ran.
+
 Three things it is not, said here because each one is a reasonable expectation to have:
 
 - **It is not more context.** The child starts with no history from this conversation, so its value is
@@ -528,15 +560,6 @@ Three things it is not, said here because each one is a reasonable expectation t
 Two runs working in one directory can see each other: `flint who` prints the live runs flint knows
 about, and, separately, what changed recently — a line that names no author, because a changed file is
 not evidence of who changed it. `flint who --all` lists runs in other directories too.
-
-While the parent waits, the child's own work shows on its status row — `task: running search`,
-`explorer: waiting for the model` — because the child is already saying what it is doing on its own
-`--json` stream and a row that says one unchanging word for two minutes is a row that tells nobody
-whether anything is happening. Typing at the parent still interrupts the turn (that is what typing
-does), but the child is a process of its own and does **not** stop: the turn that was dropped records
-what it left running, with the child's pid and the session its answer will land in, so the work is
-collected rather than repeated. A `task` child outliving the turn that started it is real — measured,
-by way of a bug report — so the honest thing is to say so rather than to claim the tool never ran.
 
 And they can say something to each other:
 

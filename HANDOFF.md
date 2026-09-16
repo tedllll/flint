@@ -93,17 +93,46 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 516 passing, 1 ignored (306 lib, 3 in
+As of the commit that carries this file, `cargo test` is 518 passing, 1 ignored (306 lib, 3 in
 the binary's own tests, 33 `agent_loop`, 63 `cli_output`, 35 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
 be able to read, 4 the answer written where the caller asked, 3 the file inlined into the prompt,
 1 the stream checked on its bytes, 1 how long a turn took),
-7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 7 `who`, 13 `task`, 3 `say`), `cargo clippy
+7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 7 `who`, 15 `task`, 3 `say`), `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
 pass, and `python examples/python/test_call.py` is 118 checks, all passing (one of them waits
 out the fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from),
 and `python examples/mcp/test_mcp.py` passes its own 23.
+
+**A `task` child is started in the background by default now, and a job that ends says so — the default
+was the bug.** Reported directly ("my subagent cannot run in the background; the main session calls it
+and can only wait"), and confirmed in the person's own session files rather than taken on trust: one
+conversation, two `task` calls, **neither** carrying `background`, one of them interrupted by typing at
+the frozen parent -- which drops the turn -- with the literal tool result
+`interrupted by the user: tool 'task' was requested but never ran`. The mechanism (supervisor, handle,
+`task_op`) was built and tested; what was wrong is that the tool's description ended with "this tool
+waits for it", so a model never asked for the handle. So `task` returns the child's pid and conversation
+at once unless the call says `background: false`, and the second half is what makes that safe rather
+than a way to lose work: a job that ends is **reported exactly once** -- to the person in the transcript
+(`tools::notice`, which used to be silent for a child nobody asked about) and to the model as one
+user-role message labelled `[a note from flint, not from the person: …]` in its next request, listing
+each ended-unread job with the pid and the verb that collects it. `wait`, `stop`, and a `stop` on a job
+that had already ended all count as collecting it, which is what makes "once" true instead of "every
+request from here on"; the bookkeeping is one `AtomicBool` on the job. The report is a *view*
+(`Agent::with_jobs`, beside the peer relay, never `history`), so a conversation resumed from the file is
+not told about a job that ended days ago. The shape came from reading DSH's job runtime: the
+kind-independent verbs and the once-only, read-suppressed notice are adopted, and **waking an idle owner
+with a turn of its own is refused** -- flint's REPL has a person at the keyboard and a model turn nobody
+asked for is a bill nobody agreed to. Tests, all watched red first: the default (a parent that exits in
+under six seconds against an eight-second child), the explicit `background: false` door (where a handle
+would be a lie), the report landing in exactly one request -- the parent was given a turn *after* the one
+that carried it, and the mutation that drops the `reported` check fails with "the model was told 2
+times, out of 4 requests: [2, 3]" -- and the person's notice on stderr. Five existing tests that had
+quietly assumed `task` waits now say `background: false` with a comment saying what each one is about.
+**Not built yet, on purpose**: `bash`/`pwsh`/`exec` still wait, because a command's output is usually
+the input to the next step; when background commands land they go on this same job record, under this
+same verb (`task_op` becomes `job_op`, since it stops being only about children).
 
 **A run can now be asked to hear its peers, which is the opt-in decision 3 was holding open.**
 `--hear-peers` for a run, `/hear-peers [on|off]` while one is open, and the same switch on the page

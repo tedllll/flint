@@ -1709,11 +1709,17 @@ measured and what was not.
   a flag every reader would have to honour; the child's `meta` line names the parent (`parent`, set
   from `FLINT_PARENT`, which the tool writes for the child and nothing else does); and reading the
   child's conversation is by path, or by `mv`-ing it up a level to adopt it. **A child nobody waited
-  for is handled rather than abandoned**: `task` with `background: true` returns a handle (its pid and
-  its conversation), and `task_op` takes `status`, `wait` or `stop` for it — see "Background is the
-  same record" in [`docs/agents.md`](docs/agents.md) for why the handle is the parent's own job record
-  rather than the presence record, and for the measured fact that a caller reading stdout to EOF waits
-  for the whole process tree rather than for the run.
+  for is the default rather than an option**: `task` hands back a handle (its pid and its conversation)
+  unless the call says `background: false`, because the first version made the parent sit still for
+  minutes and a real session shows what that costs — the person typed at the frozen parent, the turn was
+  dropped, and the record said the tool *never ran* while the child kept spending. `task_op` takes
+  `status`, `wait` or `stop` for such a job, and a job that ends is reported exactly once — to
+  the person when it ends, and to the model in its next request — with any `wait`/`stop` counting as
+  having collected it, so a default that starts work nobody is waiting for cannot lose the work. See
+  "Background is the same record" in [`docs/agents.md`](docs/agents.md) for why the handle is the
+  parent's own job record rather than the presence record, for the measured fact that a caller reading
+  stdout to EOF waits for the whole process tree rather than for the run, and for the two decisions taken
+  from DSH's job runtime and the one refused (flint will not spend a model turn nobody asked for).
 - **MCP** — deferred, not refused: it is a protocol with real weight, and nothing here yet
   needs what it offers. **Being callable over MCP is the other direction and is built**:
   `examples/mcp/flint_server.py`.
