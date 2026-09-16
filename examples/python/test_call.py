@@ -227,6 +227,27 @@ def main():
                 stall.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 stall.kill()
+
+        print("\n9. the preflight: asking before spending")
+        # The stub answers `/user/balance`, which is what makes flint ask the money question at all:
+        # the check is behavioural, so a stub that 404s it would exercise the `/models` fallback
+        # instead. The amounts are odd on purpose -- a round figure is one a default could fake.
+        from flint_call import balance  # noqa: E402  (kept beside its use, like the rest)
+
+        ready = balance(home=str(scratch))
+        check("the provider is usable", ready.ok, f"rc={ready.returncode} err={ready.error}")
+        check("and it says what was checked", ready.checked == "balance", str(ready.checked))
+        check("with the amount, not a guess", ready.total == "41.50", str(ready.total))
+        check("the currency comes with it", ready.currency == "CNY", str(ready.currency))
+        check("the granted part is separate from the topped-up part",
+              ready.granted == "1.50" and ready.topped_up == "40.00",
+              f"{ready.granted} / {ready.topped_up}")
+        check("and it says which provider answered", ready.provider == "stub", str(ready.provider))
+        # A provider that cannot even be resolved answers nothing at all, and that must not read as
+        # ready: the empty answer is the failure mode this command is written against.
+        missing = balance(provider="not-a-provider", home=str(scratch))
+        check("an unresolvable provider is not `ok`", not missing.ok, str(missing.returncode))
+        check("and it says why from stderr", bool(missing.error), repr(missing.error))
     finally:
         stub.terminate()
         try:

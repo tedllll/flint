@@ -54,6 +54,9 @@ result           json, attempts           a schema run's checked answer, once it
 Notes that matter in practice:
 
 * `-p` is required for `--json`: without it flint is interactive and writes no stream.
+* `balance()` asks before a batch whether the provider can be used at all: one request, no
+  completion, and `usable is None` when the endpoint answered neither its balance nor `/models` --
+  which is not a yes.
 * `turn.error` is set and `returncode` is not 0 when the run failed. The code classifies it: 2 is
   the command line, 65 an answer that is not usable, 69 something a person must fix (no key, an
   empty account), 75 worth trying again later, 130 a run this caller stopped, 1 unclassified.
@@ -189,6 +192,97 @@ class Turn:
 
     def of_type(self, *types: str) -> list[dict]:
         return [e for e in self.events if e.get("type") in types]
+
+
+@dataclass
+class Balance:
+    """What `flint balance` answered: whether the provider can be used, and what is left.
+
+    `usable` is `True`, `False` or **`None`** -- and the third is the one that has to be handled, not
+    defaulted away. `None` means the endpoint answered neither its balance nor `/models`, which a
+    local engine that serves only `/chat/completions` does all the time; treating that as "fine, go
+    ahead" is exactly the wrong-value mistake the command exists to avoid. `checked` says what was
+    actually asked, because "usable, 110.00 CNY left" and "usable, /models answered" are different
+    statements and only one of them is about money."""
+
+    returncode: int = 0
+    usable: bool | None = None
+    checked: str | None = None
+    provider: str | None = None
+    currency: str | None = None
+    total: str | None = None
+    granted: str | None = None
+    topped_up: str | None = None
+    error: str | None = None
+    error_code: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        """Whether the provider is ready to be used, with no doubt left.
+
+        `None` is not `ok`: the whole point of asking before a batch is that a batch which starts is
+        expensive, so "could not tell" must not read as yes. Ask `usable is None` to treat it
+        differently -- some callers will reasonably run anyway, and that is their decision to make
+        explicitly."""
+        return self.returncode == 0 and self.usable is True
+
+    @property
+    def broke(self) -> bool:
+        """Whether a person has to do something: no key, rejected credentials, an empty account."""
+        return self.returncode == 69
+
+
+def balance(
+    *,
+    provider: str | None = None,
+    home: str | os.PathLike | None = None,
+) -> Balance:
+    """Ask whether the provider can be used, before spending anything on a batch.
+
+    The cause is the same one a failed run reports -- `insufficient_balance`, `no_key`, `auth` -- and
+    it costs one request that sends no completion. The intended shape of a batch:
+
+        ready = balance()
+        if ready.broke:
+            raise SystemExit(f"not starting: {ready.error}")
+        if not ready.ok:
+            print(f"warning: proceeding without knowing ({ready.checked}): {ready.error}")
+
+    The exit codes are flint's own: `0` usable, `69` a person must act, `75` the check could not get
+    out, `1` reached but undecidable. See `ROADMAP.md` §10 B6 for why a missing answer is not a yes.
+    `home` does what it does in `ask`: another `FLINT_HOME`, which is how a test keeps its config."""
+    argv = [FLINT, "balance", "--json"]
+    if provider:
+        argv += ["--provider", provider]
+
+    env = dict(os.environ)
+    if home:
+        env["FLINT_HOME"] = home
+
+    proc = subprocess.run(
+        argv, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env
+    )
+    result = Balance(returncode=proc.returncode)
+    for line in proc.stdout.splitlines():
+        if not line.strip():
+            continue
+        event = json.loads(line)
+        if event.get("type") == "balance":
+            result.usable = event.get("usable")
+            result.checked = event.get("checked")
+            result.provider = event.get("provider")
+            result.currency = event.get("currency")
+            result.total = event.get("total_balance")
+            result.granted = event.get("granted_balance")
+            result.topped_up = event.get("topped_up_balance")
+        elif event.get("type") == "error":
+            result.error = event.get("message")
+            result.error_code = event.get("code")
+    if result.error is None and not proc.stdout.strip():
+        # No stream at all: the provider could not even be resolved (a bad `--provider`, an unreadable
+        # config). stderr is the only place that says so, and an empty answer must not read as ready.
+        result.error = proc.stderr.strip() or f"flint balance exited {proc.returncode} with no answer"
+    return result
 
 
 def ask(

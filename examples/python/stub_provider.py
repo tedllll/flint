@@ -23,6 +23,37 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):  # keep the test output readable
         pass
 
+    def do_GET(self):
+        """The preflight's two questions, so `balance()` can be tested without a key.
+
+        Answered here rather than not at all because the endpoint a DeepSeek-shaped provider is
+        recognised by is *behaviour*: flint asks `/user/balance`, and a stub that returns 404 for it
+        exercises the fallback instead of the money path. The amounts are deliberately odd numbers --
+        a round figure is one a test can pass by printing a default.
+        """
+        if self.path.endswith("/user/balance"):
+            body = json.dumps({
+                "is_available": True,
+                "balance_infos": [{
+                    "currency": "CNY",
+                    "total_balance": "41.50",
+                    "granted_balance": "1.50",
+                    "topped_up_balance": "40.00",
+                }],
+            }).encode("utf-8")
+        elif self.path.endswith("/models"):
+            body = json.dumps({"data": [{"id": "stub-model"}]}).encode("utf-8")
+        else:
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
         body = json.loads(self.rfile.read(length) or b"{}")

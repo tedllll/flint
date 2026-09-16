@@ -138,11 +138,31 @@ a person must act, `75` try later, `1` unclassified). In a batch, a balance fail
 whole batch rather than the one call: `map_calls` cannot know that twenty other calls are queued
 behind this one, and flint cannot know either — so the caller is where that decision belongs.
 
+**Better than discovering it on the first call is not discovering it at all.** `balance()` is the
+preflight — `flint balance --json`, one request, no completion, no tokens:
+
+```python
+from flint_call import balance
+
+ready = balance()
+if ready.broke:                       # 69: no key, rejected credentials, an empty account
+    raise SystemExit(f"not starting: {ready.error}")
+if not ready.ok:                      # usable is None -- the endpoint answered neither question
+    print(f"proceeding without knowing ({ready.checked}): {ready.error}")
+print(f"{ready.total} {ready.currency} left")   # absent unless the provider publishes it
+```
+
+`ready.usable` is `True`, `False` or `None`, and the third is not a yes: `None` is what a local engine
+that serves only `/chat/completions` produces, and it means nothing was checked — not the key, not the
+account. `ready.checked` says what was actually asked (`balance`, `models`, or `none`), so "usable,
+110.00 CNY left" is never confused with "usable, `/models` answered". `ready.ok` is true only for an
+explicit yes.
+
 ## Running the checks here
 
 ```console
 $ cargo build
-$ python examples/python/test_call.py       # 41 checks against a local stub, no key, no cost
+$ python examples/python/test_call.py       # 49 checks against a local stub, no key, no cost
 $ python examples/python/timing_demo.py     # what blocking and failure actually look like
 $ python examples/python/ask_schema.py      # needs DEEPSEEK_API_KEY; spends real tokens
 ```

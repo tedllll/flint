@@ -42,7 +42,7 @@ the binary's own tests, 33 `agent_loop`, 58 `cli_output`, 22 `json_output` (7 st
 output, 1 the heartbeat, 2 the stop channel, 5 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of), 7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`), `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
-pass, and `python examples/python/test_call.py` is 41 checks, all passing (one of them now waits
+pass, and `python examples/python/test_call.py` is 49 checks, all passing (one of them now waits
 out the fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from).
 
 **A `--json` run now beats while it works.** `src/main.rs` spawns `beat_while_working` beside the
