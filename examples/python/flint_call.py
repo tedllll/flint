@@ -12,6 +12,13 @@ back the events.
                 continue_last=True)                          # the same conversation
     print(turn2.answer, turn2.session)
 
+    # Or hold one conversation over many calls, streamed as it is written:
+    from flint_call import Chat
+    chat = Chat(cwd="/path/to/your/project")
+    chat.ask("read @rules.csv", on_delta=lambda text: print(text, end="", flush=True))
+    chat.ask("and the third row?")                           # the same file, by path
+    print(chat.history()[-1])
+
     # Or ask for a shape and get the object, checked by flint before you see it:
     day = ask_json("MA2610 的最后交易日是哪天？", cwd="/path/to/project", schema={
         "type": "object",
@@ -66,6 +73,11 @@ Notes that matter in practice:
 * `turn.outcome` is how the turn ended, and it is the only place that says whether the answer is
   whole. `incomplete` means flint stopped asking at the `max_steps` limit; `stopped` means this
   caller's timeout arrived first. `turn.complete` folds that together with `ok`.
+* `Chat` is the same calls for a conversation: it pins the session path on the first call and passes
+  it to `--resume` on every later one, so two callers in one directory cannot land in each other's
+  history; `chat.history()` reads the record back from that file.
+* `on_event` and `on_delta` are called as the frames arrive, so an answer can be rendered while it is
+  written. Both are views on the same frames the returned `Turn` holds.
 * There is no approval hook. A tool runs when the model asks for it, so `tool.started` is a
   *record*, not a chance to object. `readonly` is the only switch, and it is all-or-nothing.
 * Tool output longer than `max_tool_output` spills to `<FLINT_HOME>/spill/...` and the event
@@ -83,6 +95,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 def _binary() -> str:
     """Which flint to run.
@@ -288,6 +301,63 @@ def balance(
     return result
 
 
+def _absorb(turn: Turn, line: str) -> dict | None:
+    """Fold one line of the stream into `turn`, and hand it back for a callback.
+
+    Split out of `ask` because it has to happen as the line arrives rather than after the run: the
+    callbacks and the collected turn are the same frames, and parsing them twice -- or parsing them
+    late -- is how a caller ends up with a `Turn` that disagrees with what it was shown.
+
+    `None` means there was nothing to fold in: a blank line, or a line that is not JSON, which is a
+    bug worth seeing rather than a frame to interpret (one object per line is the contract).
+    """
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        turn.warnings.append(f"unparsable line: {line[:200]}")
+        return None
+    turn.events.append(event)
+    kind = event.get("type")
+    if kind == "message.delta":
+        turn.text += event.get("text", "")
+    elif kind == "message.completed":
+        turn.messages.append(event.get("text", ""))
+    elif kind == "error":
+        turn.error = event.get("message", "")
+        # Absent, not null, when flint has no cause to name: `.get` keeps that distinction,
+        # because "no classification" and "classified as nothing" are different answers.
+        turn.error_code = event.get("code")
+        turn.error_retryable = event.get("retryable")
+    elif kind == "warning":
+        turn.warnings.append(event.get("message", ""))
+    elif kind == "turn.completed":
+        # The end of a turn is the only place that says how it ended and whether the answer is
+        # whole, which is not something a caller can work out from the text it received. The
+        # token counts live on the same line, so this branch is also where the usage goes.
+        turn.outcome = event.get("outcome")
+        turn.usage = {
+            "prompt_tokens": event.get("prompt_tokens", 0),
+            "completion_tokens": event.get("completion_tokens", 0),
+        }
+    elif kind == "session.started":
+        turn.session = event.get("session")
+        turn.cwd = event.get("cwd")
+        turn.model = event.get("model")
+    elif kind == "usage":
+        turn.usage = event
+    elif kind == "turn.started":
+        turn.turns += 1
+    elif kind == "result":
+        turn.result = event.get("json")
+        turn.attempts = event.get("attempts")
+    elif kind in ("tool.started", "tool.args", "tool.completed"):
+        turn.tools.append(event)
+    return event
+
+
 def ask(
     prompt: str,
     *,
@@ -301,6 +371,8 @@ def ask(
     extra: list[str] | None = None,
     schema: dict | str | None = None,
     no_schema: bool = False,
+    on_event: Callable[[dict], None] | None = None,
+    on_delta: Callable[[str], None] | None = None,
 ) -> Turn:
     """Run one turn in `cwd` and return it.
 
@@ -313,6 +385,16 @@ def ask(
     `continue_last` is flint's `--continue` (the most recent conversation for this directory);
     `resume` names one -- a session id or a path. `home` points flint at another `FLINT_HOME`,
     which is how a test keeps its sessions and config to itself; left out, flint uses its own.
+    `Chat` is the wrapper for a caller that wants one conversation over many calls: it passes a
+    path rather than `--continue`, so two callers in one directory cannot land in each other's
+    history.
+
+    `on_event` is called with every frame as it arrives, and `on_delta` with each `message.delta`
+    fragment's text -- so an answer can be rendered while it is being written instead of after the
+    process has ended. Both are called from the thread reading the stream, one frame at a time, and
+    the `Turn` that is returned holds the same frames: a callback is a view, not a second channel.
+    A callback that raises is the caller's bug and is not allowed to leave a flint running -- the run
+    is asked to stop like any other and the exception is raised once it has ended.
 
     `schema` asks for a checked answer: a dict (or a JSON string) is written to a temporary file
     and passed as `--schema`, because a schema handed over inline has to survive the shell on some
@@ -375,10 +457,39 @@ def ask(
                 sink(line)
             sink(None)
 
-        lines: list[str] = []
         errors: list[str] = []
         threading.Thread(target=pump, args=(proc.stdout, out.put), daemon=True).start()
         threading.Thread(target=pump, args=(proc.stderr, errors.append), daemon=True).start()
+
+        # Built before the run rather than after it, because the frames are folded in as they arrive:
+        # that is what lets a caller render an answer while it is being written, and it is why the
+        # returned `Turn` and the callbacks cannot disagree -- they are the same objects.
+        turn = Turn()
+        callback_error: BaseException | None = None
+
+        def deliver(event: dict) -> None:
+            """Hand one frame to the caller's callbacks, if it has any.
+
+            A callback that raises is the caller's bug, and it still must not leave a flint running:
+            the run is asked to stop, exactly as a timeout asks, and the exception is raised once the
+            process has ended. Stopping rather than killing for the same reason `timeout` does -- the
+            half-answer is committed to the session and a person reading it later finds work.
+            """
+            nonlocal callback_error
+            if callback_error is not None or (on_event is None and on_delta is None):
+                return
+            try:
+                if on_event is not None:
+                    on_event(event)
+                if on_delta is not None and event.get("type") == "message.delta":
+                    on_delta(event.get("text", ""))
+            except BaseException as exc:
+                callback_error = exc
+                try:
+                    proc.stdin.write("/stop\n")
+                    proc.stdin.flush()
+                except (BrokenPipeError, ValueError):
+                    pass
 
         # `timeout` is when the run is *asked to stop*, not when it is killed. flint takes `/stop` on
         # stdin -- the interrupt that works when there is no key to press -- and keeps what it had
@@ -410,7 +521,9 @@ def ask(
                 continue
             if line is None:
                 break
-            lines.append(line)
+            event = _absorb(turn, line)
+            if event is not None:
+                deliver(event)
         proc.wait()
         returncode = proc.returncode
         # The end marker the pump sends is not stderr: the same pump feeds both pipes.
@@ -419,54 +532,183 @@ def ask(
         if schema_file:
             os.unlink(schema_file)
 
-    turn = Turn(returncode=returncode, stderr=stderr, stopped=stopped)
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            # One object per line is the contract; anything else is a bug worth seeing.
-            turn.warnings.append(f"unparsable line: {line[:200]}")
-            continue
-        turn.events.append(event)
-        kind = event.get("type")
-        if kind == "message.delta":
-            turn.text += event.get("text", "")
-        elif kind == "message.completed":
-            turn.messages.append(event.get("text", ""))
-        elif kind == "error":
-            turn.error = event.get("message", "")
-            # Absent, not null, when flint has no cause to name: `.get` keeps that distinction,
-            # because "no classification" and "classified as nothing" are different answers.
-            turn.error_code = event.get("code")
-            turn.error_retryable = event.get("retryable")
-        elif kind == "warning":
-            turn.warnings.append(event.get("message", ""))
-        elif kind == "turn.completed":
-            # The end of a turn is the only place that says how it ended and whether the answer is
-            # whole, which is not something a caller can work out from the text it received. The
-            # token counts live on the same line, so this branch is also where the usage goes.
-            turn.outcome = event.get("outcome")
-            turn.usage = {
-                "prompt_tokens": event.get("prompt_tokens", 0),
-                "completion_tokens": event.get("completion_tokens", 0),
-            }
-        elif kind == "session.started":
-            turn.session = event.get("session")
-            turn.cwd = event.get("cwd")
-            turn.model = event.get("model")
-        elif kind == "usage":
-            turn.usage = event
-        elif kind == "turn.started":
-            turn.turns += 1
-        elif kind == "result":
-            turn.result = event.get("json")
-            turn.attempts = event.get("attempts")
-        elif kind in ("tool.started", "tool.args", "tool.completed"):
-            turn.tools.append(event)
+    turn.returncode = returncode
+    turn.stderr = stderr
+    turn.stopped = stopped
+    if callback_error is not None:
+        # Raised now rather than at the frame that caused it: by here the run has ended and the
+        # process is reaped, so nothing of this call is left behind on the machine.
+        raise callback_error
     return turn
+
+
+class SessionMoved(RuntimeError):
+    """A pinned conversation was resumed, and flint opened a different session file.
+
+    Raised by `Chat`, and it is a refusal rather than a warning on purpose: the whole reason `Chat`
+    pins a path is that "the newest session for this directory" is a race the moment two callers share
+    a directory. If the file that was opened is not the file that was asked for, the answer about to
+    come back belongs to another conversation, and a caller that carries on has silently mixed two.
+    `SessionMoved.session` is what flint actually opened, for a caller that wants to look at it.
+    """
+
+    def __init__(self, message: str, session: str | None):
+        super().__init__(message)
+        self.session = session
+
+
+class DamagedSession(ValueError):
+    """A session file has a line in it that is not an event.
+
+    The reader rules are `docs/session-format.md`'s: an unknown `type` is skipped in silence -- that
+    is what lets the format grow -- while a line that is not JSON at all, or an event with no `type`,
+    is damage and is reported. Skipping it would hand back a conversation with a hole in it, which is
+    the shape of bug this whole project is written against.
+    """
+
+    def __init__(self, message: str, path: str, line: int):
+        super().__init__(message)
+        self.path = path
+        self.line = line
+
+
+class Chat:
+    """One conversation over many calls, pinned to one session file.
+
+    `ask` is enough for a single question, and `continue_last=True` is enough for a few in a row --
+    until two callers work in one directory, which is exactly when "the newest session here" stops
+    being a name for the conversation you mean. This class removes that from the caller's life: the
+    first call creates the session and reports its path on `session.started`, and every call after it
+    passes that path to `--resume`, so the file is decided once rather than re-derived every time.
+
+        chat = Chat(cwd="/path/to/project", home="/tmp/scratch")
+        chat.ask("read @rules.csv and tell me the columns")
+        chat.ask("now the third row")            # same conversation, by path
+        print(chat.history()[-1])                # the record, as the file has it
+
+    It is not a service and not a cache: there is no background process, every call is a fresh flint,
+    and `history()` reads the file rather than remembering anything. A `Chat` that is dropped and
+    recreated with `session=` continues the same conversation, because the session file is the state.
+    """
+
+    def __init__(
+        self,
+        *,
+        cwd: str | os.PathLike,
+        session: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        home: str | None = None,
+        timeout: float = 600.0,
+        extra: list[str] | None = None,
+    ):
+        self.cwd = os.path.abspath(os.fspath(cwd))
+        if not os.path.isdir(self.cwd):
+            raise NotADirectoryError(f"cwd is not a directory: {self.cwd}")
+        # A path flint will accept as `--resume`: an existing conversation this Chat continues, or
+        # `None` for a new one whose path is learned from the first call's `session.started`.
+        self.session = session
+        self.provider = provider
+        self.model = model
+        self.home = home
+        self.timeout = timeout
+        self.extra = list(extra or [])
+        self.turns: list[Turn] = []
+
+    @property
+    def answer(self) -> str:
+        """What the last turn said, or "" before the first one."""
+        return self.turns[-1].answer if self.turns else ""
+
+    def ask(
+        self,
+        prompt: str,
+        *,
+        schema: dict | str | None = None,
+        no_schema: bool = False,
+        timeout: float | None = None,
+        extra: list[str] | None = None,
+        on_event: Callable[[dict], None] | None = None,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> Turn:
+        """Say one thing in this conversation and return the turn.
+
+        Everything `ask` takes that describes *this call* is here; everything that describes the
+        conversation was settled in the constructor. `schema` and `no_schema` are per call because
+        flint records the shape in force in the session and one question in a conversation may want a
+        checked answer while the next wants prose.
+        """
+        turn = ask(
+            prompt,
+            cwd=self.cwd,
+            resume=self.session,
+            provider=self.provider,
+            model=self.model,
+            home=self.home,
+            timeout=self.timeout if timeout is None else timeout,
+            extra=self.extra + list(extra or []),
+            schema=schema,
+            no_schema=no_schema,
+            on_event=on_event,
+            on_delta=on_delta,
+        )
+        if self.session is None:
+            # The first call is the one that names the conversation. `turn.session` is what flint
+            # opened, taken from `session.started` -- the file, not a guess about where it would be.
+            self.session = turn.session
+        elif turn.session != self.session:
+            raise SessionMoved(
+                f"asked to continue {self.session}, and flint opened {turn.session}: refusing to "
+                "treat the answer as part of this conversation",
+                turn.session,
+            )
+        self.turns.append(turn)
+        return turn
+
+    def history(self) -> list[dict]:
+        """Every event in the session file, in order.
+
+        The file is the state, so this is a read and not a memory: it works for a `Chat` created with
+        `session=` a moment ago and sees what a *different* process appended to the same conversation.
+        Unknown event types are passed through -- the caller filters -- while a line that is not an
+        event raises `DamagedSession`, because a conversation with a hole in it is worse than an
+        exception. An empty list means the file is empty or the conversation has not been written to
+        yet, which is the state of a `Chat` before its first `ask`.
+        """
+        if not self.session:
+            return []
+        return read_session(self.session)
+
+    def messages(self) -> list[dict]:
+        """The conversation as the model sees it: the `chat` events' messages, in order.
+
+        Two things are missing from it on purpose, and both are in `history()`: the tool results are
+        in the message's `tool_calls`/`tool_call_id` fields rather than flattened here, and a peer's
+        message is a `peer` event and *not* a chat message -- which is the rule that keeps a mailbox
+        from reaching a model, enforced by the file's shape rather than by a check.
+        """
+        return [e["message"] for e in self.history() if e.get("type") == "chat" and "message" in e]
+
+
+def read_session(path: str | os.PathLike) -> list[dict]:
+    """Read a session file into events. `Chat.history` is this, and it is public because a caller with
+    a path and no wish to build a `Chat` should not have to reimplement the reader."""
+    events: list[dict] = []
+    with open(path, encoding="utf-8") as handle:
+        for number, line in enumerate(handle, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise DamagedSession(
+                    f"{path}:{number} is not JSON: {exc}", str(path), number
+                ) from None
+            if not isinstance(event, dict) or "type" not in event:
+                raise DamagedSession(f"{path}:{number} has no type", str(path), number)
+            events.append(event)
+    return events
 
 
 class SchemaError(RuntimeError):

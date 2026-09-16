@@ -221,6 +221,46 @@ def main():
             # next call about it is not answered as if nothing had been written.
             recorded = "\n".join(p.read_text(encoding="utf-8") for p in session_files(scratch))
             check("and what the caller read is in the session file", "半句答案" in recorded)
+
+            # Streaming, as opposed to "the callback ran eventually". The stub writes its fragment
+            # immediately and then says nothing, and the run is only asked to stop after `timeout`, so
+            # a reader that collected every line and parsed it once the process had ended could not
+            # have called back a second early -- which is what makes this a measurement rather than a
+            # restatement. The margin is a whole second on a run this short.
+            fragments = []
+            began = time.monotonic()
+            streamed = ask(
+                "慢慢想",
+                provider="stall",
+                home=str(scratch),
+                cwd=str(HERE),
+                timeout=3.0,
+                on_delta=lambda text: fragments.append((time.monotonic() - began, text)),
+            )
+            ended = time.monotonic() - began
+            check("a fragment reached the callback", bool(fragments), repr(fragments))
+            check("while the run was still going, not after it ended",
+                  bool(fragments) and fragments[0][0] < ended - 1.0,
+                  f"first at {fragments[0][0]:.1f}s of {ended:.1f}s" if fragments else "never")
+            check("and the stopped turn still holds what was drawn",
+                  "半句答案" in streamed.answer, repr(streamed.answer))
+
+            # A callback that raises is the caller's bug, and it must not leave a flint running: the
+            # run is asked to stop like any other and the exception arrives once it has ended. Without
+            # that, this call would sit here for the 30 seconds it was given.
+            def refuse(event):
+                raise ValueError("callback said no")
+
+            raised = None
+            began = time.monotonic()
+            try:
+                ask("慢慢想", provider="stall", home=str(scratch), cwd=str(HERE),
+                    timeout=30.0, on_event=refuse)
+            except ValueError as exc:
+                raised = exc
+            check("a callback that raises raises, and does not leave a flint running",
+                  raised is not None and time.monotonic() - began < 15,
+                  f"{raised} after {time.monotonic() - began:.1f}s")
         finally:
             stall.terminate()
             try:
@@ -298,6 +338,52 @@ def main():
         check("a mistyped name is left as prose rather than inlined",
               not started.get("attachments"), repr(started.get("attachments")))
         check("and the run still works", typo.returncode == 0, str(typo.returncode))
+
+        print("\n12. one conversation over many calls, by path")
+        # `continue_last=True` re-derives "the newest conversation for this directory" on every call,
+        # which is a race the moment two callers share a directory -- and one file has one writer by
+        # design. `Chat` learns the path from the first call's `session.started` and passes it to
+        # `--resume` afterwards, so the conversation is decided once.
+        from flint_call import Chat  # noqa: E402  (kept beside its use, like the rest)
+
+        chat = Chat(cwd=str(scratch), home=str(scratch))
+        callback_events = []
+        callback_deltas = []
+        first_turn = chat.ask(
+            "第一个问题",
+            on_event=callback_events.append,
+            on_delta=callback_deltas.append,
+        )
+        check("the first call named the conversation", bool(chat.session), str(chat.session))
+        check("and it is the file flint said it opened",
+              chat.session == first_turn.session, f"{chat.session} vs {first_turn.session}")
+        check("every frame reached the callback, in order",
+              [e["type"] for e in callback_events] == [e["type"] for e in first_turn.events],
+              f"{len(callback_events)} vs {len(first_turn.events)}")
+        check("and the fragments were handed over as text, not as frames",
+              "".join(callback_deltas) == first_turn.answer, repr("".join(callback_deltas)))
+
+        files_before = len(session_files(scratch))
+        second_turn = chat.ask("第二个问题")
+        check("the second call continued that file",
+              second_turn.session == first_turn.session, str(second_turn.session))
+        check("so no second conversation was created",
+              len(session_files(scratch)) == files_before,
+              f"{files_before} -> {len(session_files(scratch))}")
+
+        history = chat.history()
+        check("the record reads back", bool(history) and history[0]["type"] == "meta",
+              str(history[:1])[:120])
+        check("both questions are in it",
+              sum(1 for e in history
+                  if e.get("type") == "chat" and e.get("message", {}).get("role") == "user") == 2,
+              str([e.get("type") for e in history]))
+        check("and the conversation is what the model saw, in order",
+              [m.get("role") for m in chat.messages()][:2] == ["user", "assistant"],
+              str([m.get("role") for m in chat.messages()]))
+        check("a second Chat on the same path reads the same record",
+              Chat(cwd=str(scratch), home=str(scratch), session=chat.session).messages()
+              == chat.messages())
     finally:
         stub.terminate()
         try:

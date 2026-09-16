@@ -44,7 +44,40 @@ directory would make the answer depend on where the caller happened to be runnin
 
 **Two calls must not share one conversation.** Concurrent calls against the same session interleave
 their appends; there is one writer per file by design. Parallel work belongs in threads with
-`cwd=`-separated sessions, separate `home=` values, or a fork (`extra=["--fork"]`).
+`cwd=`-separated sessions, separate `home=` values, or a fork (`extra=["--fork"]`). `Chat` below is
+how a worker names its own conversation instead of racing for the newest one.
+
+## One conversation, many calls
+
+`ask()` is one question, and `continue_last=True` is how a second question follows it. That works
+until two callers work in one directory, which is exactly when "the newest conversation here" stops
+naming the one you mean. `Chat` removes that from the caller's life:
+
+```python
+from flint_call import Chat
+
+chat = Chat(cwd="/path/to/project")
+chat.ask("read @rules.csv and tell me the columns", on_delta=lambda text: print(text, end=""))
+chat.ask("and the third row?")          # the same conversation
+print(chat.history()[-1])               # the record, as the file has it
+```
+
+**The session is decided once.** The first call creates it and flint reports the path on
+`session.started`; every later call passes that path to `--resume`, so nothing re-derives the target
+and two callers in one directory cannot land in each other's history. Nothing is cached either:
+`history()` reads the file, `messages()` is the conversation as the model saw it, and a `Chat` built
+with `session=<path>` continues a conversation another process was holding. If flint opens a file
+other than the one that was asked for, `Chat` raises `SessionMoved` rather than handing back an answer
+from a different conversation.
+
+**Streaming is the same frames, delivered as they arrive.** `on_event` gets every frame, `on_delta`
+gets each fragment's text, and both are called from the thread reading the stream while the run is
+going. That is measured rather than asserted: `test_call.py` checks that the first fragment of a
+stalled run reaches the callback about a second before the run is stopped, which a reader that
+collected every line and parsed it at the end could not do. The `Turn` that comes back holds the same
+frames, so a callback is a view and not a second channel. A callback that raises is the caller's bug,
+and it still must not leave a flint running: the run is asked to stop like any other, and the
+exception arrives once the process has ended.
 
 ## Asking a run to stop
 

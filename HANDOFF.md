@@ -95,7 +95,7 @@ be able to read, 4 the answer written where the caller asked, 3 the file inlined
 1 the stream checked on its bytes),
 7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 6 `who`, 8 `task`, 2 `say`), `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
-pass, and `python examples/python/test_call.py` is 61 checks, all passing (one of them waits
+pass, and `python examples/python/test_call.py` is 75 checks, all passing (one of them waits
 out the fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from),
 and `python examples/mcp/test_mcp.py` passes its own 23.
 

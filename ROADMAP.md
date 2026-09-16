@@ -1468,7 +1468,16 @@ What to build for it, in step 2:
    would leave the caller unable to say which is a promise and which is a hope; `map_calls(workers=)`
    with one session per worker (measured: 190 ms per call with an instant stub, so 100 calls are
    ~19 s in series and ~3 s on eight threads); and `require_read` for the case where a path named in
-   prose has to be *seen* to have been read.
+   prose has to be *seen* to have been read. — **`Chat`, the streaming callbacks and `history()` are
+   built** (`examples/python/flint_call.py`, `docs/python.md`): the first call learns the session path
+   from `session.started` and every later one passes it to `--resume`, so the target is decided once
+   and a mismatch raises `SessionMoved` instead of answering from another conversation; `on_event` and
+   `on_delta` are called from the reading thread as the frames arrive, and that is *measured* — the
+   first fragment of a stalled run reaches the callback a second before the run is stopped, which a
+   reader that parsed at the end could not do; `history()`/`messages()` read the file, and a line that
+   is not an event raises `DamagedSession` rather than being skipped. The rest of this step —
+   `paths=`/`attach=`/`inline=`, `require_read` and `map_calls(workers=)` with the balance breaker —
+   is not built.
 
 #### What other people's wrappers already learned
 

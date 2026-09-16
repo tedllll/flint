@@ -403,9 +403,12 @@ print(day["last_trading_day"])
 Two things about it are worth knowing before you build on it, and the second is the reason
 `ask_json` exists: **a call blocks** until the run is over, and **a failed run does not raise** —
 `ask()` returns a `Turn` whose `ok` is `False` and whose `answer` is `''`, so a caller that does not
-check carries on with nothing. `cwd=` is required and is what separates conversations.
-`docs/python.md` is the whole story, and `examples/python/timing_demo.py` shows both behaviours as
-measured output.
+check carries on with nothing. `cwd=` is required and is what separates conversations. `Chat` is the
+same calls for a conversation rather than a question: it pins the session path on the first call,
+passes it to `--resume` afterwards (so two callers in one directory cannot land in each other's
+history), takes `on_delta=` for rendering an answer as it is written, and reads the record back with
+`history()`. `docs/python.md` is the whole story, and `examples/python/timing_demo.py` shows both
+behaviours as measured output.
 
 ### Being used by another agent (MCP)
 
