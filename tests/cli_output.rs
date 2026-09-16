@@ -1624,6 +1624,99 @@ fn debug_prompt_input_prints_the_request_body_and_creates_no_session() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// The request is not the transcript, and a long conversation is where that stops being a detail.
+///
+/// Past `max_request_chars` the oldest turns are left out of the request, and the session file keeps
+/// every one of them. The unit tests in `agent.rs` hold the trim itself to its rules; this holds the
+/// *run* to them: the config key is read, the trim reaches the request the model would be sent, and
+/// nothing was taken out of the file on disk.
+#[test]
+fn a_long_conversation_is_trimmed_in_the_request_and_not_in_the_session_file() {
+    let home = std::env::temp_dir().join(format!("flint-trim-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    let sessions = home.join("sessions");
+    std::fs::create_dir_all(&sessions).expect("home directory");
+    // A budget of two turns and the note: every message below is ~227 characters, so this keeps the
+    // last two turns of six along with the question being asked.
+    std::fs::write(
+        home.join("config.toml"),
+        "default_provider = \"stub\"\n\
+         max_request_chars = 1200\n\n\
+         [[providers]]\n\
+         name = \"stub\"\n\
+         base_url = \"http://127.0.0.1:1/v1\"\n\
+         api_key = \"not-a-real-key\"\n\
+         model = \"stub-model\"\n",
+    )
+    .expect("config file");
+
+    let mut lines = vec![meta_line("trimmed-request")];
+    for i in 0..6 {
+        lines.push(format!(
+            r#"{{"type":"chat","message":{{"role":"user","content":"question {i} {}"}}}}"#,
+            "x".repeat(200)
+        ));
+        lines.push(format!(
+            r#"{{"type":"chat","message":{{"role":"assistant","content":"answer {i} {}"}}}}"#,
+            "y".repeat(200)
+        ));
+    }
+    let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+    let path = write_session(&sessions, "trimmed-request.jsonl", &refs, 0);
+
+    let out = binary()
+        .args(["--resume", "1", "debug", "prompt-input", "the next question"])
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .output()
+        .expect("failed to run flint");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "debug failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let body: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+        panic!(
+            "the output is not one JSON document ({e}): {:?}",
+            String::from_utf8_lossy(&out.stdout)
+        )
+    });
+    let sent = serde_json::to_string(&body["messages"]).expect("messages as text");
+
+    assert!(
+        !sent.contains("question 3"),
+        "a turn over the budget is still in the request: {sent}"
+    );
+    assert!(
+        !sent.contains("answer 3"),
+        "half a dropped turn is still in the request: {sent}"
+    );
+    assert!(
+        sent.contains("question 4") && sent.contains("answer 4"),
+        "the trim dropped a turn that fits: {sent}"
+    );
+    assert!(
+        sent.contains("question 5"),
+        "the newest turn is what the request is for: {sent}"
+    );
+    assert!(
+        sent.contains("the next question"),
+        "the message being asked is not in the request: {sent}"
+    );
+    assert!(
+        sent.contains("8 earlier messages were left out of this request"),
+        "the request does not say what was left out: {sent}"
+    );
+
+    let on_disk = std::fs::read_to_string(&path).expect("the session file is still there");
+    assert!(
+        on_disk.contains("question 0") && on_disk.contains("answer 5"),
+        "the session file lost a message the request dropped"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 /// The `debug` namespace says what it knows rather than failing silently.
 #[test]
 fn an_unknown_debug_subcommand_names_the_ones_that_exist() {
@@ -3420,11 +3513,11 @@ fn verbose_off_is_what_the_file_records() {
         "the file does not record the setting, so it does not outlive the run: {file}"
     );
     assert!(
-        text.contains("verbose          = off"),
+        text.contains("verbose           = off"),
         "the run that typed it does not report itself quiet: {text}"
     );
     assert!(
-        next_run.contains("verbose          = off"),
+        next_run.contains("verbose           = off"),
         "the next run does not start quiet: {next_run}"
     );
 }
@@ -3448,7 +3541,7 @@ fn the_old_bool_for_verbose_still_reads_as_it_did() {
         std::fs::write(&config, format!("verbose = {old}\n{written}")).expect("write the old form");
         let shown = repl(&home, &["/config"]);
         assert!(
-            shown.contains(&format!("verbose          = {word}")),
+            shown.contains(&format!("verbose           = {word}")),
             "`verbose = {old}` no longer reads as `{word}`: {shown}"
         );
     }
@@ -3493,7 +3586,7 @@ fn a_command_that_fails_does_not_end_the_session() {
         "the command's failure was not reported on the terminal: {text}"
     );
     assert!(
-        text.contains("verbose          = "),
+        text.contains("verbose           = "),
         "the session ended on a mistyped command instead of answering it: {text}"
     );
 }

@@ -3204,21 +3204,32 @@ async fn handle_command(
 
         "/config" => {
             printer.term().line(format_args!("{dim}config: {}{reset}", config::config_path().display()));
-            printer.term().line(format_args!("  default_provider = {bold}{}{reset}", cfg.default_provider));
+            printer.term().line(format_args!("  default_provider  = {bold}{}{reset}", cfg.default_provider));
             printer.term().line(format_args!(
-                "  shell            = {bold}{}{reset} {:?}",
+                "  shell             = {bold}{}{reset} {:?}",
                 cfg.shell, cfg.shell_args
             ));
-            printer.term().line(format_args!("  max_steps        = {}", cfg.max_steps));
+            printer.term().line(format_args!("  max_steps         = {}", cfg.max_steps));
+            // Printed because it is the one setting that can quietly leave something out of a
+            // request, and a person who is puzzling over a model that forgot the start of the
+            // conversation needs to see the number that did it.
             printer.term().line(format_args!(
-                "  proxy            = {}",
+                "  max_request_chars = {}",
+                if cfg.max_request_chars == 0 {
+                    "0 (off: every message is sent)".to_string()
+                } else {
+                    cfg.max_request_chars.to_string()
+                }
+            ));
+            printer.term().line(format_args!(
+                "  proxy             = {}",
                 cfg.proxy.as_deref().unwrap_or("(none)")
             ));
-            printer.term().line(format_args!("  verbose          = {}", cfg.verbose.word()));
-            printer.term().line(format_args!("  tool_detail      = {}", cfg.tool_detail));
+            printer.term().line(format_args!("  verbose           = {}", cfg.verbose.word()));
+            printer.term().line(format_args!("  tool_detail       = {}", cfg.tool_detail));
             let workspace = context::Workspace::discover(agent.cwd(), &cfg.skill_dirs);
             printer.term().line(format_args!(
-                "  instructions     = {}{}",
+                "  instructions      = {}{}",
                 cfg.instructions,
                 if workspace.instruction_files.is_empty() {
                     format!(
@@ -3239,7 +3250,7 @@ async fn handle_command(
             ));
             if !workspace.skills.is_empty() {
                 printer.term().line(format_args!(
-                    "  skills           = {} {dim}(.flint/skills or ~/.flint/skills){reset}",
+                    "  skills            = {} {dim}(.flint/skills or ~/.flint/skills){reset}",
                     workspace.skills.len()
                 ));
             }
@@ -3250,10 +3261,10 @@ async fn handle_command(
             // real session was left hunting the config for a setting that was not the
             // one in effect.
             if agent.readonly() == cfg.readonly {
-                printer.term().line(format_args!("  readonly         = {}", cfg.readonly));
+                printer.term().line(format_args!("  readonly          = {}", cfg.readonly));
             } else {
                 printer.term().line(format_args!(
-                    "  readonly         = {bold}{}{reset} {dim}(this run; the file says {}){reset}",
+                    "  readonly          = {bold}{}{reset} {dim}(this run; the file says {}){reset}",
                     agent.readonly(),
                     cfg.readonly
                 ));

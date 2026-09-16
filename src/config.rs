@@ -174,6 +174,12 @@ pub struct Config {
     #[serde(default = "default_max_tool_output")]
     pub max_tool_output: usize,
 
+    /// Ceiling on the characters of conversation sent in one request. Past it, the oldest turns are
+    /// left out of the *request* -- the session file keeps every one of them -- and a note says how
+    /// many went. The system prompt and the newest turn are never dropped. 0 turns the guard off.
+    #[serde(default = "default_max_request_chars")]
+    pub max_request_chars: usize,
+
     /// Safety valve against a runaway loop.
     #[serde(default = "default_max_steps")]
     pub max_steps: usize,
@@ -259,6 +265,24 @@ fn default_instructions() -> String {
 
 fn default_max_tool_output() -> usize {
     30_000
+}
+
+/// Characters of *conversation* a request may carry, in the same unit as `max_tool_output`.
+///
+/// A guard in the spirit of `max_steps`, and for the same reason one is needed: without it a long
+/// conversation grows the request until the provider refuses it, and that arrives as an error in the
+/// middle of a turn rather than as a decision anybody made. What is dropped when the budget is
+/// reached is the oldest *turns*, from the request only -- the session file keeps every message, and
+/// a note in their place says how many went and where they are. The system prompt and the newest
+/// turn are never dropped, so a request can be a little over this number.
+///
+/// A character count rather than a token count because flint has no tokenizer and will not grow one
+/// for this: 400,000 characters is a little over 100,000 tokens of English prose and code, which
+/// leaves room under a modern context window for the answer. A model with a small window wants this
+/// set lower; a model with a huge one, or a person who would rather see the provider's error than a
+/// dropped turn, sets it to 0, which turns the guard off.
+fn default_max_request_chars() -> usize {
+    400_000
 }
 
 /// Steps in one turn, counting model round-trips rather than tool runs, so a turn that
@@ -390,6 +414,7 @@ impl Default for Config {
             shell: default_shell(),
             shell_args: default_shell_args(),
             max_tool_output: default_max_tool_output(),
+            max_request_chars: default_max_request_chars(),
             max_steps: default_max_steps(),
             readonly: false,
             proxy: None,

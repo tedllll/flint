@@ -53,6 +53,9 @@ fn test_config(base_url: &str) -> Config {
             vec!["-c".to_string()]
         },
         max_tool_output: 10_000,
+        // Off in these tests: they are about one turn, and a budget that dropped a turn would be a
+        // second thing changing under the assertion.
+        max_request_chars: 0,
         max_steps: 10,
         readonly: false,
         proxy: None,

@@ -156,6 +156,11 @@ pub struct Agent {
     tools: ToolBox,
     history: Vec<Message>,
     max_steps: usize,
+    /// How much conversation one request may carry, in characters. See `trim_old_turns`.
+    ///
+    /// Captured from the config when the agent is built, like `max_steps`: `/reload` rebuilds the
+    /// agent, which is what makes a changed value take effect.
+    max_request_chars: usize,
     readonly: bool,
     cwd: PathBuf,
     writer: Option<SessionWriter>,
@@ -260,6 +265,7 @@ impl Agent {
             tools,
             history: vec![Message::system(base_prompt.clone())],
             max_steps: config.max_steps,
+            max_request_chars: config.max_request_chars,
             readonly,
             cwd,
             writer,
@@ -403,7 +409,12 @@ impl Agent {
         if let Some(text) = user_input {
             history.push(Message::user(text));
         }
-        let mut view = prune_tool_output(&history);
+        let view = prune_tool_output(&history);
+        // The two bounds in the order that keeps the request smallest: pruning shrinks the stale
+        // results *inside* the turns first, and only what is still over the budget after that costs
+        // whole turns -- which is the more expensive thing to lose, because a dropped turn takes its
+        // question with it.
+        let mut view = trim_old_turns(&view, self.max_request_chars);
         // The two things a real request carries that the session file does not: what a peer said, and
         // what flint has to report about jobs that ended. Both are *shown* here without being consumed
         // -- a preview that delivered them would change the next real request, and delivering a peer's
@@ -836,6 +847,9 @@ impl Agent {
         // them is how a working turn walks into the context ceiling. Dropping the old
         // ones from the *request* costs nothing and keeps the session file whole.
         let sent = prune_tool_output(&self.history);
+        // ...and, if that was not enough, the oldest turns. Same order as `request_preview`, because
+        // the preview's promise is that it is what this sends.
+        let sent = trim_old_turns(&sent, self.max_request_chars);
         // ...and anything a peer said that this run was asked to hear. Here rather than in the history
         // for the same reason: the file keeps the `peer` event, the request carries the words, and a
         // run resumed from that file starts without them.
@@ -1047,6 +1061,135 @@ fn prune_tool_output(history: &[Message]) -> Vec<Message> {
         .collect()
 }
 
+/// Keep a request inside its budget by dropping the oldest whole turns.
+///
+/// `max_request_chars` is a guard in the spirit of `max_steps`: without it a conversation grows the
+/// request without bound until the provider refuses it, and the refusal arrives in the middle of a
+/// turn rather than as a decision anybody made. Two things bound a request today and neither of them
+/// is this: the step guard bounds *one* turn, and `prune_tool_output` shrinks the stale results
+/// inside whatever history is being sent.
+///
+/// The unit is a **turn** -- a user message through to the next one, which is the smallest piece that
+/// can be dropped without leaving the request malformed. A tool result whose call has been dropped is
+/// a request the provider rejects, and a turn boundary cannot fall inside such a pair.
+///
+/// The newest turn is never dropped, whatever the budget says: a request with nothing to answer is
+/// not a smaller request, it is a broken one. The same reason keeps the system prompt, which is not
+/// counted against the budget at all -- the model has to be told what it is, and a budget that could
+/// take it away could empty the request from the wrong end.
+///
+/// This is a request-side view only. `self.history` and the session file keep every byte, for the
+/// reason `prune_tool_output` gives about tool output, and the note left in place of the dropped
+/// turns is what makes them recoverable: it says how many went.
+fn trim_old_turns(history: &[Message], budget: usize) -> Vec<Message> {
+    // 0 is off, the way an empty `proxy` is off: a person who does not want the guard says so in the
+    // file rather than by deleting the line and getting the default back on the next write.
+    if budget == 0 {
+        return history.to_vec();
+    }
+
+    // A turn starts at a user message. Everything before the first one is the prompt -- the system
+    // message, and on a loaded history possibly nothing else -- and a history with no user message at
+    // all is one unit, because there is no boundary to cut on.
+    let first_turn = history
+        .iter()
+        .position(|m| matches!(m, Message::User { .. }))
+        .unwrap_or(history.len());
+    let starts: Vec<usize> = (first_turn..history.len())
+        .filter(|&i| matches!(history[i], Message::User { .. }))
+        .collect();
+    if starts.is_empty() {
+        return history.to_vec();
+    }
+    let turn = |index: usize| -> &[Message] {
+        let end = starts.get(index + 1).copied().unwrap_or(history.len());
+        &history[starts[index]..end]
+    };
+    let turn_chars = |index: usize| -> usize { turn(index).iter().map(message_chars).sum() };
+
+    // Newest first, while they fit. The newest turn is taken whatever it costs: it is the one the
+    // request is for, and a request that asks nothing is not a smaller request.
+    let mut from = starts.len() - 1;
+    let mut used = turn_chars(from);
+    while from > 0 && used + turn_chars(from - 1) <= budget {
+        from -= 1;
+        used += turn_chars(from);
+    }
+    if from == 0 {
+        return history.to_vec();
+    }
+
+    // The note is part of the request, so it is charged to the budget like anything else is. Dropping
+    // one more turn is how it fits, and the newest turn is still never dropped for it.
+    loop {
+        let dropped = starts[from] - first_turn;
+        let note = message_chars(&dropped_turns_note(dropped, budget));
+        if used + note <= budget || from + 1 == starts.len() {
+            break;
+        }
+        from += 1;
+        used -= turn_chars(from - 1);
+    }
+
+    let mut view: Vec<Message> = history[..first_turn].to_vec();
+    view.push(dropped_turns_note(starts[from] - first_turn, budget));
+    for index in from..starts.len() {
+        view.extend_from_slice(turn(index));
+    }
+    view
+}
+
+/// What one message costs the request, in characters.
+///
+/// Characters rather than tokens, because characters are what flint can count without a tokenizer:
+/// the same unit `max_tool_output` uses, and the unit the config key is in. The number that matters
+/// is a ceiling -- the provider's context -- and being a fifth wrong about it is fine when the
+/// budget is chosen with room to spare.
+fn message_chars(message: &Message) -> usize {
+    /// What a message costs beyond its text: the role, the ids, and the JSON around it.
+    const OVERHEAD: usize = 16;
+    let text = match message {
+        Message::System { content } | Message::User { content } => content.chars().count(),
+        Message::Tool { content, .. } => content.chars().count(),
+        Message::Assistant {
+            content,
+            reasoning,
+            tool_calls,
+        } => {
+            content.as_deref().unwrap_or_default().chars().count()
+                + reasoning.as_deref().unwrap_or_default().chars().count()
+                + tool_calls
+                    .iter()
+                    .map(|call| {
+                        call.id.chars().count()
+                            + call.name.chars().count()
+                            + call.arguments.chars().count()
+                    })
+                    .sum::<usize>()
+        }
+    };
+    text + OVERHEAD
+}
+
+/// What the model is told where the dropped turns were.
+///
+/// A message rather than silence: shown a conversation that starts mid-way with no explanation, a
+/// model treats the first thing it sees as the whole of what happened and answers as if the earlier
+/// work never occurred. The count belongs here too, because "some context is missing" without a
+/// number is a fact the model cannot act on.
+fn dropped_turns_note(dropped: usize, budget: usize) -> Message {
+    Message::user(format!(
+        "[{dropped} earlier {} left out of this request: the conversation is longer than \
+         max_request_chars ({budget}). The session file keeps every one of them, so ask for \
+         anything older by name, or read the file.]",
+        if dropped == 1 {
+            "message was"
+        } else {
+            "messages were"
+        }
+    ))
+}
+
 /// Whether a tool result reports that it did not work.
 ///
 /// Matched loosely on purpose: the wording comes from a shell, a language runtime, or
@@ -1183,6 +1326,193 @@ mod tests {
 
     fn cfg_for_prompt() -> Config {
         Config::default()
+    }
+
+    /// A message the model said, which is what most of a conversation is after the first turn.
+    fn said(text: &str) -> Message {
+        Message::Assistant {
+            content: Some(text.to_string()),
+            reasoning: None,
+            tool_calls: Vec::new(),
+        }
+    }
+
+    /// A call the model made, which has to stay with the results that answer it.
+    fn called(id: &str) -> Message {
+        Message::Assistant {
+            content: None,
+            reasoning: None,
+            tool_calls: vec![crate::event::ToolCall {
+                id: id.to_string(),
+                name: "bash".to_string(),
+                arguments: "{}".to_string(),
+            }],
+        }
+    }
+
+    /// Every tool result in a view answers a call the same view still carries.
+    ///
+    /// The provider refuses a request where one does not, so this is the property the trim has to
+    /// keep rather than trust luck about; it is checked in the tests that drop turns near a pair.
+    fn every_result_answers_a_kept_call(view: &[Message]) -> bool {
+        let mut calls: Vec<&str> = Vec::new();
+        for message in view {
+            match message {
+                Message::Assistant { tool_calls, .. } => {
+                    calls.extend(tool_calls.iter().map(|c| c.id.as_str()));
+                }
+                Message::Tool { tool_call_id, .. } if !calls.contains(&tool_call_id.as_str()) => {
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        true
+    }
+
+    /// A conversation, unlike a single turn, had nothing bounding it: the step guard covers one turn
+    /// and pruning covers the stale results inside it, so a long conversation kept growing the
+    /// request until the provider refused it mid-turn.
+    #[test]
+    fn a_conversation_over_its_budget_loses_its_oldest_turns_and_is_told_so() {
+        let mut history = vec![Message::system("you are flint")];
+        for i in 0..20 {
+            history.push(Message::user(format!("question {i} {}", "x".repeat(100))));
+            history.push(said(&format!("answer {i} {}", "y".repeat(100))));
+        }
+
+        let sent = trim_old_turns(&history, 1000);
+
+        assert_eq!(
+            history.len(),
+            41,
+            "the trim must not touch the history it is given"
+        );
+        assert!(
+            matches!(sent.first(), Some(Message::System { .. })),
+            "the system prompt is not a turn and is never dropped: {sent:?}"
+        );
+        let Message::User { content: note } = &sent[1] else {
+            panic!("the dropped turns must be replaced by a note: {sent:?}");
+        };
+        assert!(
+            note.contains("left out of this request"),
+            "the note does not say what happened: {note}"
+        );
+        // Counted from what is actually in the view rather than from its length, so a note that
+        // names the wrong number cannot pass: a turn is two messages, and a kept answer means its
+        // question was kept too. The trailing space matters -- without it `answer 1` matches
+        // `answer 19`, which is how this check first counted four turns where three were kept.
+        let kept = (0..20)
+            .filter(|i| {
+                let answer = format!("answer {i} ");
+                sent.iter().any(|m| format!("{m:?}").contains(&answer))
+            })
+            .count();
+        assert!(kept < 20, "nothing was dropped at all: {sent:?}");
+        assert!(
+            note.contains(&format!("{} earlier messages", 2 * (20 - kept))),
+            "the note does not say how many went ({kept} turns of 20 are still here): {note}"
+        );
+        assert!(
+            !sent.iter().any(|m| format!("{m:?}").contains("question 0")),
+            "the oldest turn is still in the request"
+        );
+        assert!(
+            format!("{:?}", sent.last().unwrap()).contains("answer 19"),
+            "the newest turn is what the request is for"
+        );
+
+        let conversation: usize = sent[1..].iter().map(message_chars).sum();
+        assert!(
+            conversation <= 1000,
+            "the request is over its budget with the note in it: {conversation} characters"
+        );
+        assert!(every_result_answers_a_kept_call(&sent));
+    }
+
+    /// The pair is the unit: a result whose call has been dropped is a request the provider refuses.
+    #[test]
+    fn a_tool_call_is_never_dropped_without_its_results() {
+        let mut history = vec![Message::system("you are flint")];
+        history.push(Message::user("old question"));
+        history.push(called("call_old"));
+        history.push(tool_result("call_old", &big(400)));
+        history.push(said("that was the old answer"));
+        history.push(Message::user("new question"));
+        history.push(called("call_new"));
+        history.push(tool_result("call_new", "a few lines"));
+
+        // A budget too small for even the newest turn: the turn is still sent whole, because half of
+        // a call-and-result pair is a request the provider refuses.
+        let sent = trim_old_turns(&history, 50);
+
+        assert!(
+            !sent.iter().any(|m| format!("{m:?}").contains("call_old")),
+            "the old call and its result should both be gone: {sent:?}"
+        );
+        assert!(
+            sent.iter().any(|m| format!("{m:?}").contains("call_new")),
+            "the newest turn was dropped: {sent:?}"
+        );
+        assert!(
+            sent.iter().filter(|m| matches!(m, Message::Tool { .. })).count() == 1,
+            "a result survived its call, or a call survived without one: {sent:?}"
+        );
+        assert!(every_result_answers_a_kept_call(&sent));
+    }
+
+    /// Below the budget there is nothing to do, and a note would be a lie about a request that is
+    /// complete.
+    #[test]
+    fn a_conversation_that_fits_is_sent_unchanged() {
+        let mut history = vec![Message::system("you are flint")];
+        history.push(Message::user("one question"));
+        history.push(said("one answer"));
+
+        let sent = trim_old_turns(&history, 400_000);
+        assert_eq!(sent.len(), history.len(), "something was dropped: {sent:?}");
+        assert!(
+            !sent.iter().any(|m| format!("{m:?}").contains("left out of this request")),
+            "a note was added to a request nothing was dropped from: {sent:?}"
+        );
+    }
+
+    /// Whatever the budget says, the turn being asked is in the request: a request with nothing to
+    /// answer is not a smaller request, it is a broken one.
+    #[test]
+    fn the_newest_turn_is_never_dropped() {
+        let mut history = vec![Message::system("you are flint")];
+        history.push(Message::user("old ".repeat(500)));
+        history.push(said(&"old ".repeat(500)));
+        history.push(Message::user("the question being asked"));
+        history.push(said("part of the answer already drawn"));
+
+        for budget in [1, 50, 200] {
+            let sent = trim_old_turns(&history, budget);
+            assert!(
+                sent.iter().any(|m| format!("{m:?}").contains("the question being asked")),
+                "a budget of {budget} dropped the question: {sent:?}"
+            );
+            assert!(
+                sent.iter().any(|m| format!("{m:?}").contains("part of the answer")),
+                "a budget of {budget} dropped the turn in flight: {sent:?}"
+            );
+        }
+    }
+
+    /// The key's unit is characters, like `max_tool_output`, and 0 is how a person turns the guard
+    /// off without deleting the line.
+    #[test]
+    fn a_budget_of_zero_sends_the_whole_conversation() {
+        let mut history = vec![Message::system("you are flint")];
+        for i in 0..30 {
+            history.push(Message::user(format!("question {i} {}", "x".repeat(100))));
+            history.push(said(&format!("answer {i}")));
+        }
+
+        let sent = trim_old_turns(&history, 0);
+        assert_eq!(sent.len(), history.len(), "0 is off, not a request of nothing");
     }
 
     /// The prompt must carry the shell dialect for the platform it was built
