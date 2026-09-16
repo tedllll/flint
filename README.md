@@ -244,9 +244,12 @@ The vocabulary is closed and small: `session.started`, `turn.started`, `message.
   and exits **130**, so the half-answer you read is the one the next call is answered with in view.
   It does not exit 0: a caller branching on the code would take half an answer for a finished one,
   which is the fault the code is there to prevent. Killing
-  the process instead loses exactly that. A line that is not `/stop` is reported as a `warning`
-  rather than dropped in silence: a one-shot run has no next prompt to steer, and guessing whether a
-  line arrived is not something a caller should have to do.
+  the process instead loses exactly that. A line that is not `/stop` is counted and reported as a
+  `warning` — "ignored 2 lines on stdin" — and deliberately **not repeated**. A pipe into a run is not
+  a private channel: echoing what arrived would put a caller's diff, record or token on stdout, which
+  is what gets logged, and it would grow with whatever was piped in. The count stays because the other
+  failure is silence — a caller that wrote a line deserves to know it did nothing, without flint
+  repeating what it wrote.
 
 `--json` needs a prompt: an interactive session has no stream to write, and `flint exec`
 is plain by contract because its output is the child's own bytes. Ctrl-C during a `--json`

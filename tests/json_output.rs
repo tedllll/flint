@@ -502,6 +502,153 @@ async fn a_run_can_be_stopped_from_stdin() {
 
 /// What the answer committed by a stop is worth: the words the caller already read.
 ///
+/// A pipe into a run is not a private channel, and the line has to be read anyway.
+///
+/// `-p --json` reads stdin so a caller can stop a run with `/stop` without killing it, and the price
+/// of that is everything else that arrives. It used to be *repeated*: each line came back on stdout as
+/// `ignored "…"`, quoted, in full, unbounded -- so a caller that piped a diff, a customer record or a
+/// token into a run found it echoed into whatever reads stdout, and a parent agent that shares its
+/// stdin with a child found its own protocol lines in flint's output. The count stays, because the
+/// other failure is silence: a caller that wrote a line deserves to know it did nothing. What is
+/// asserted here is the absence, which is the part that protects a log.
+#[tokio::test]
+async fn what_arrives_on_stdin_is_counted_and_not_repeated() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a port");
+    let base = format!("http://{}", listener.local_addr().expect("the address"));
+    let _talker = std::thread::spawn(move || {
+        let Ok((mut socket, _)) = listener.accept() else {
+            return;
+        };
+        let mut request = Vec::new();
+        let mut byte = [0u8; 1];
+        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+            match socket.read(&mut byte) {
+                Ok(0) | Err(_) => return,
+                Ok(_) => request.push(byte[0]),
+            }
+        }
+        // The request's body has to be drained before the socket carries the answer. It arrives after
+        // the headers, and a socket closed with unread bytes still on it is *reset* -- which the client
+        // reports as "error decoding response body" on an answer that arrived complete. The stall
+        // fixture below never needed this, because its connection is never closed.
+        let headers = String::from_utf8_lossy(&request).to_ascii_lowercase();
+        let length: usize = headers
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(0);
+        if length > 0 {
+            let mut body = vec![0u8; length];
+            if socket.read_exact(&mut body).is_err() {
+                return;
+            }
+        }
+        let _ = socket.write_all(
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
+        );
+        let _ = socket.write_all(b"data: {\"choices\":[{\"delta\":{\"content\":\"an answer\"}}]}\n\n");
+        let _ = socket.flush();
+        // Long enough that the lines below are read while the turn is still going -- which is the
+        // only way they can be ignored at all, and the case a caller actually hits.
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let _ = socket.write_all(
+            b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+        );
+        let _ = socket.flush();
+    });
+
+    let cwd = cwd_for("stdin-counted");
+    let home = home_for("stdin-counted", &base, &cwd);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_flint"))
+        .args(["-p", "say hello", "--json"])
+        .arg("--cwd")
+        .arg(&cwd)
+        .env("FLINT_HOME", &home)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to start flint");
+    let mut stdout = child.stdout.take().expect("a pipe");
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stdout.read_to_string(&mut text);
+        text
+    });
+    // Read as well as the stream, for the failure message: when a run ends early its reason is on
+    // stderr, and a test that pipes stderr and never reads it reports only the symptom.
+    let mut stderr = child.stderr.take().expect("a pipe");
+    let complaints = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr.read_to_string(&mut text);
+        text
+    });
+    {
+        let mut stdin = child.stdin.take().expect("a pipe");
+        // Shaped like the things that must not come back: a secret, and a line of a parent's own
+        // protocol. Both are ordinary text, which is the point -- flint cannot know which is which.
+        stdin
+            .write_all(b"SECRET-TOKEN-9f3a\nparent-protocol: resume\n")
+            .expect("writing to flint");
+        stdin.flush().expect("flushing");
+    }
+
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("asking after flint") {
+            break status;
+        }
+        if started.elapsed() > std::time::Duration::from_secs(20) {
+            let _ = child.kill();
+            break child.wait().expect("reaping flint");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let text = reader.join().expect("the reader thread");
+    let said_when_it_failed = complaints.join().expect("the stderr thread");
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "the run did not finish normally, so the warning below was never reached.\n\
+         stream: {text}\nstderr: {said_when_it_failed}"
+    );
+    assert!(
+        !text.contains("SECRET-TOKEN"),
+        "what a caller piped in came back out on stdout: {text}"
+    );
+    assert!(
+        !text.contains("parent-protocol"),
+        "a line of the caller's own protocol was echoed: {text}"
+    );
+    // The stream is parsed here rather than searched as text, because "the content is absent" and "the
+    // stream is still one object per line" are two promises, and this test is about the first one.
+    let lines: Vec<Value> = text
+        .lines()
+        .map(|line| {
+            serde_json::from_str(line).unwrap_or_else(|e| {
+                panic!("a line of the stream is not one JSON object: {line:?} ({e})")
+            })
+        })
+        .collect();
+    let said = line_of(&lines, "warning")["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        said.contains('2') && said.contains("stdin"),
+        "a caller that wrote lines is not told they did nothing: {text}"
+    );
+    assert!(
+        said.contains("/stop"),
+        "the one line that does something is not named: {text}"
+    );
+}
+
 /// `/stop` drops the turn's future, so the agent loop never reaches the code that turns a step's text
 /// into a message. Without the commit, the half-answer exists on the caller's screen and nowhere
 /// else -- nothing fails, and the next question about what it just read is answered as if it had

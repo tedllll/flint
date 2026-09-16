@@ -3285,11 +3285,13 @@ async fn run_json_turn(
                 }
             }
         });
-        // A line that is not `/stop` is reported rather than dropped. Dropping it in silence is the
-        // worst of the three options: the caller would have to guess whether its line arrived, and
-        // this is a run it cannot type into again. A one-shot run has no *next* prompt to steer, so
-        // the honest answer is that the line did nothing.
-        let mut ignored: Vec<String> = Vec::new();
+        // A line that is not `/stop` is counted, not repeated. Two reasons, and the second is the one
+        // that matters: a pipe into a run is not a private channel. Anything that arrives -- a diff, a
+        // customer record, a token, a parent agent's own protocol -- would be echoed onto stdout in
+        // full, and stdout is what a caller logs; the buffer would also grow with whatever was piped.
+        // A count is still said out loud, because the other failure is silence: a caller that wrote a
+        // line deserves to know it did nothing, without flint repeating what it wrote.
+        let mut ignored = 0usize;
         let mut listening = true;
         let outcome = {
             let mut run = std::pin::pin!(agent.run(&asked, |event| {
@@ -3313,7 +3315,7 @@ async fn run_json_turn(
                     // caller that closed stdin (or that never had one) would spin this loop.
                     line = steering.recv(), if listening => match line {
                         Some(line) if line.trim() == "/stop" => break None,
-                        Some(line) => ignored.push(line.trim().to_string()),
+                        Some(_) => ignored += 1,
                         None => listening = false,
                     },
                 }
@@ -3327,10 +3329,12 @@ async fn run_json_turn(
         }
         beat.abort();
 
-        for line in ignored {
+        if ignored > 0 {
             emit(ndjson::warning(&format!(
-                "ignored {line:?}: a one-shot run has no next prompt to steer, and the only line it \
-                 acts on is /stop"
+                "ignored {ignored} line{} on stdin: a one-shot run has no next prompt to steer, and \
+                 the only line it acts on is /stop. What was written is not repeated here -- a caller's \
+                 pipe is not a private channel, and flint does not know what it was handed",
+                if ignored == 1 { "" } else { "s" }
             )));
         }
 
