@@ -1682,9 +1682,17 @@ measured and what was not.
   and the answer comes back with its exit code and its session path attached. The other half
   `docs/agents.md` argues for, two runs in one directory being able to see each other, is built
   too (`flint who`, `src/live.rs`) and does not contradict this bullet. **The mailbox is built as
-  well, in the only form this bullet allows**: `flint say` writes a line, a running flint shows it to
-  its person, and it never reaches a request — a peer's words cannot become a second author of this
-  conversation, so the "one conversation, one context window" claim is untouched. **Stage 4 is adopted
+  well, in the only form this bullet allows by default**: `flint say` writes a line, a running flint
+  shows it to its person, and it reaches no request — a peer's words cannot become a second author of
+  this conversation, so the "one conversation, one context window" claim is untouched. **The one
+  exception is asked for, per run, by the person**: `--hear-peers` (or `/hear-peers on`) passes what a
+  peer said to the model with the next request, as a user message labelled as another process's words.
+  That is a deliberate narrowing of what follows rather than a hole in it — it is off unless somebody
+  says otherwise, there is no config key to forget, the relay goes into the request and never into the
+  history the file is rebuilt from (so a resumed run inherits nothing), and the session records
+  `"heard":true` on the message that was passed on. What the bullet protects is *automatic* second
+  authorship, and there is none: without that flag, not one byte of a peer's message can reach a
+  request, and that is what `tests/say.rs` asserts against the bytes a provider received. **Stage 4 is adopted
   too, and the line is drawn inside it rather than around it**: a profile
   (`<project>/.flint/agents/<name>.md` — instructions, model, `readonly`) is a way to write down what
   "the explorer" means, and `tasks` runs several children **at the same time** when the model asks for

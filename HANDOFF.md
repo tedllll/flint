@@ -77,30 +77,68 @@ each other — prompted by three questions asked directly, and by the incident i
 in this checkout at once, one of them mid-write in `docs/sandbox.md`, and the other committing a
 half-written revision of it with `git add -A`). Its claim is that a subagent, a Python call, an MCP call
 and "a background process" are one thing — a run — seen through four doors, and that the MCP and Python
-doors are already built. **Stages 1, 2 and 4 are built, and so is the mailbox half of stage 3**
-(`flint who`, the `task` tool, `tasks`, profiles, `flint say`, and now `background: true` with `task_op`
-for a child nobody waited for), the "Subagents" entry in `ROADMAP.md`
+doors are already built. **Stages 1–4 are all built** (`flint who`, the `task` tool, `tasks`, profiles,
+`flint say`, `background: true` with `task_op` for a child nobody waited for, and the `--hear-peers` /
+`/hear-peers` opt-in that lets a peer's words reach a model when a person asks), the "Subagents" entry
+in `ROADMAP.md`
 was edited in the same commit as the code that adopts it, and **the five decisions at the end of that
 file were answered on 2026-09-16 at the recommended values** — the depth bound (`FLINT_DEPTH`, maximum
-2), the mailbox default (a peer's words are shown to the human and never fed to the model, which is why
-the opt-in is not built), what "another agent is here" may claim (no author, ever), and presence in
-`FLINT_HOME` only. What stage 3 still owes: the `.flint/` marker in the project and that opt-in. Stage
+2), the mailbox default (a peer's words are shown to the human and reach a model only when that run was
+asked to hear peers, which is what decision 3 said the opt-in had to be), what "another agent is here"
+may claim (no author, ever), and presence in
+`FLINT_HOME` only. What stage 3 still owes is one thing, and it is a deliberate "not yet": the
+`.flint/` marker in the project. Stage
 4 was written into `ROADMAP.md` and `docs/agents.md` in the same commit as the code, with the line
 drawn where it was built: profiles and an explicit, capped fan-out, and nothing above it — no shared
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 512 passing, 1 ignored (305 lib, 3 in
-the binary's own tests, 33 `agent_loop`, 61 `cli_output`, 35 `json_output` (7 structured
+As of the commit that carries this file, `cargo test` is 516 passing, 1 ignored (306 lib, 3 in
+the binary's own tests, 33 `agent_loop`, 63 `cli_output`, 35 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
 be able to read, 4 the answer written where the caller asked, 3 the file inlined into the prompt,
 1 the stream checked on its bytes, 1 how long a turn took),
-7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 7 `who`, 13 `task`, 2 `say`), `cargo clippy
+7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 7 `who`, 13 `task`, 3 `say`), `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
 pass, and `python examples/python/test_call.py` is 118 checks, all passing (one of them waits
 out the fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from),
 and `python examples/mcp/test_mcp.py` passes its own 23.
+
+**A run can now be asked to hear its peers, which is the opt-in decision 3 was holding open.**
+`--hear-peers` for a run, `/hear-peers [on|off]` while one is open, and the same switch on the page
+(drawn from the run's own `toggles` field, so the fourth switch cost the page nothing). A message that
+arrived between turns is then sent with the *next* request as one user-role message labelled as another
+process's words — not as the person's — and the transcript says `passed on to the model` instead of
+`not sent to the model`. Four things hold the safety argument rather than promising it: the relay goes
+into the request *view* (`Agent::with_peers`, beside `prune_tool_output`) and never into `history`, so
+the file keeps the `peer` event and a *resumed* run inherits nothing; there is no config key, because a
+standing property is one somebody forgets they set; the session event gained `heard`, which is the only
+place that answers "was the model told this" since a request body is kept nowhere; and the mailbox is
+still read between turns only, so nothing arrives mid-loop. `--hear-peers` with `-p` is **refused**
+rather than ignored — a one-shot run has no next turn to relay into, and a flag that silently did
+nothing would look like it worked, which is the dangerous direction for a switch whose point is that
+somebody chose it. Mutation-checked: forcing `heard` to false in `note_peer` fails the new `say` test
+on "relayed nothing", with the two prompts visible as two turns in the request body.
+
+**Two documents were lying, and both are corrected in the same round.** `ROADMAP.md`'s "Subagents"
+bullet still said a peer's words "never reach a request"; it now says what is true — never *by default*,
+and exactly once, on the person's word, when `--hear-peers` is on — with the reason this is a narrowing
+of the bullet rather than a hole in it. And `HANDOFF.md`'s own "the Windows half of the tooling plan is
+still unwritten" was stale by five steps: `docs/windows-tooling.md` §7 marks all five done, and the two
+tests that paragraph called unwritten exist and pass (`a_quoted_command_reaches_the_shell_verbatim`,
+`a_powershell_script_runs_from_the_file_it_was_written_to`, `a_killed_command_takes_its_children_with_it`).
+What is genuinely open there is the shorter list §7 ends with: a Unix process-group kill, and the
+line-ending sentence for `apply_patch`.
+
+**And the last "not measured" note in `docs/web-mode.md` §11 is now measured**: a report asked for
+*while a turn runs*. The gap was never the code — the wait is stashed (`Handover`) and answered once the
+model is done — it was that the suite had no turn slow enough to ask during. It has one (a stub provider
+that draws a delta and holds the socket open), and `a_report_asked_for_mid_turn_waits_for_the_turn`
+drives a real `--web` process through it: the report is accepted at `/report` mid-turn, the turn is then
+stopped for real (`outcome: stopped`), and both frames are read off one feed so the **order** is the
+assertion — `turn.completed`, then the `panel: true` answer. Mutation-checked by inverting the ordering
+assertion, which fails and prints the two frames.
 
 **A batch of concurrent runs found a real fault in the session file naming, and it is fixed.** The
 id was `<seconds>-<milliseconds>`, and six `map_calls` runs started at once proposed **the same id
@@ -1662,14 +1700,17 @@ place to read. Measured on both this build and the one before it (100.3% and 100
 predates the browser work. A fix means driving the loop from `event::poll(timeout)` and checking
 whether the terminal is still there, which is a change to the key thread rather than to a flag.
 
-**The Windows half of the tooling plan is still unwritten** — `pwsh` (step 3), the
-process-tree kill and the child output encoding (step 4), and the PowerShell facts in the
-system prompt (step 5). None of them can be written from reasoning alone: §4.2's
-execution-policy wrinkle, §6.6's reserved names and long paths, and `taskkill`'s behaviour
-all want a Windows session, and a guessed implementation would be worse than an absent one.
-[`docs/windows-tooling.md`](docs/windows-tooling.md) §7 marks each. The two Windows tests
-that would matter most — that an argument survives the round trip, and that a killed command
-takes its children with it — are also unwritten for the same reason.
+**The Windows half of the tooling plan is written, and this paragraph used to say it was not.** All five
+steps in [`docs/windows-tooling.md`](docs/windows-tooling.md) §7 are done on this machine — the shared
+runner, `exec` with an argument array, `pwsh` with the script handed over as a BOM'd file, the three
+small fixes (backslash normalisation, the `taskkill /T` process-tree kill, code-page decoding of child
+output), and the PowerShell facts in the system prompt — and the two tests that paragraph called
+unwritten exist and pass: `a_quoted_command_reaches_the_shell_verbatim` and
+`a_powershell_script_runs_from_the_file_it_was_written_to` (argument round trip, non-ASCII script text)
+in `tests/agent_loop.rs`, and `a_killed_command_takes_its_children_with_it` for the tree kill. What is
+genuinely still open is the shorter list §7 ends with: a Unix process-group kill for backgrounded work,
+and the line-ending sentence for `apply_patch` (§6.4). Both are recorded there with what is missing and
+why the fix is not free.
 
 **Windows terminal behaviour has now been measured, in a private console.** Read
 [`docs/windows.md`](docs/windows.md) first — it has the mechanisms, labelled by what was
