@@ -694,9 +694,13 @@ is cached: a listing kept from a moment ago would be a second copy of a fact the
 | A panel's answer fills the panel | Node, over the stub DOM | a `panel` frame fills the reading only when it answers what is on screen; a frame without the mark stays a transcript block. Mutation-checked: `ev.panel === true` → `false` fails the first, dropping the class filter fails the row check |
 | The row is a control and the others are not | Node, over the stub DOM | report rows are `button` (type `button`), a selector row is still a `div`, and each still says what to type and what it does |
 
-**Not measured**: a report asked for *while a turn runs*. The wait is stashed rather than treated as
-an interrupt (`Handover` in `main.rs`), and the assertion that it waits needs a stub turn slow enough
-to click during — which the suite does not have yet. And no browser, as ever.
+**Measured since**: a report asked for *while a turn runs*, which is what this note said the suite had no
+turn slow enough to check. It has one — a stub provider that draws a delta and then holds the socket
+open — and `a_report_asked_for_mid_turn_waits_for_the_turn` uses it against a real `--web` process: the
+report is accepted at `/report` mid-turn, the turn is then stopped (a real interrupt, `outcome: stopped`),
+and both frames are read off one feed so the *order* is the assertion — `turn.completed` first, the
+`panel: true` answer with the config path after it. That is the property the wait exists for: a read that
+raced the turn would be a second writer in the transcript. Still open after it: a browser, as ever.
 
 ### A read that takes an argument, and the values as the permission — measured, 2026-09-15
 

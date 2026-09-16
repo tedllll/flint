@@ -3135,6 +3135,84 @@ async fn a_stopped_turn_tells_the_page_it_is_over() {
     );
 }
 
+/// A report asked for while a turn is running waits for the turn instead of racing it.
+///
+/// This is the gap `docs/web-mode.md` §11 left open: the wait is stashed (`Handover`, not an
+/// interrupt), and asserting it needs a turn slow enough to ask during -- which this provider is,
+/// because it draws a delta and then holds the socket open.
+///
+/// The *order* is the claim, so it is read off one feed rather than inferred from a clock: the
+/// report's answer has to arrive after `turn.completed`, since a report is a read and a read that
+/// raced the turn would be a second writer in the transcript. Three facts, so that passing cannot
+/// mean the route quietly dropped it: the route accepted it, the turn ended (a real `/stop`, the
+/// ending a person can cause), and the answer came back after that ending.
+#[tokio::test]
+async fn a_report_asked_for_mid_turn_waits_for_the_turn() {
+    use std::io::Write;
+
+    let provider = HangingProvider::start("A HALF-WRITTEN ARTICLE\n");
+    let home = test_home("report-mid-turn", &provider.base_url);
+    let log = home.join("transcript.txt");
+    let mut child = binary()
+        .arg("--web")
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::fs::File::create(&log).expect("transcript file"))
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to run flint");
+
+    let (port, token) = port_and_token(&wait_for_url(&log));
+    let mut events = http_stream(port, "/events", &token);
+
+    let mut stdin = child.stdin.take().expect("no stdin handle");
+    stdin
+        .write_all(b"write me an article\n")
+        .expect("failed to write stdin");
+    // In flight once its first words have reached the page -- the same moment the other mid-turn
+    // tests use, and the only moment a report can be asked for *during* something.
+    let drawn = read_until(&mut events, "A HALF-WRITTEN ARTICLE", 20);
+    assert!(
+        drawn.contains("\"type\":\"message.delta\""),
+        "the turn never started, so there was nothing to wait for: {drawn:?}"
+    );
+
+    // The report, through the route the panel uses, while the model is still talking.
+    let asked = post_to(port, &token, "/report", "/config");
+    assert!(
+        asked.starts_with("HTTP/1.1 202"),
+        "the report route refused a read it should have taken: {asked:?}"
+    );
+
+    stdin.write_all(b"/stop\n").expect("failed to write stdin");
+    // Read past the turn's own frame to the answer: both have to be in this one slice for the order
+    // between them to mean anything.
+    let settled = read_until(&mut events, "\"input\":\"/config\"", 20);
+    drop(stdin);
+    let exited = wait_for_exit(&mut child, 20);
+    let transcript = std::fs::read_to_string(&log).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit: {transcript}");
+    let ended = settled
+        .find("\"type\":\"turn.completed\"")
+        .unwrap_or_else(|| panic!("the stopped turn was never said to be over: {settled:?}"));
+    let answered = settled
+        .find("\"input\":\"/config\"")
+        .expect("the report's answer is not in the slice that was read");
+    assert!(
+        ended < answered,
+        "the report was answered before the turn was over, so the read raced it: {settled:?}"
+    );
+    // And it came back with something to read, because a panel that answers with nothing is
+    // indistinguishable from a press that never arrived.
+    assert!(
+        settled.contains("\"panel\":true") && settled.contains("config.toml"),
+        "the report was answered with nothing to put in the panel: {settled:?}"
+    );
+}
+
 /// `/readonly` is the only switch this tool has, so it has to be a switch.
 ///
 /// Measured before it was fixed: `/readonly on` printed "no writes, no mutating commands", the
