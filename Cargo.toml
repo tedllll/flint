@@ -48,8 +48,8 @@ crossterm = "0.29"
 [dev-dependencies]
 wiremock = "0.6"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-# Only for tests/term_capture.rs, which moves a file onto stdout to capture the real
-# interactive byte stream.
+# Only for tests/tty_hangup.rs, which needs a pty: `openpty` to give a child a terminal, and
+# `poll` to watch it. Nothing in `std` can make either call.
 libc = "0.2"
 
 [profile.release]
