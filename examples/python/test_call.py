@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -134,7 +135,7 @@ def main():
     try:
         print(f"scratch FLINT_HOME: {scratch}")
         print("\n1. one turn, with a tool round in the middle")
-        turn = ask("跑个命令看看", home=str(scratch), cwd=str(HERE))
+        turn = ask("[[bash]] 跑个命令看看", home=str(scratch), cwd=str(HERE))
         kinds = [e["type"] for e in turn.events]
         print(f"   events: {kinds}")
         check("exit code 0", turn.returncode == 0, f"rc={turn.returncode} stderr={turn.stderr[:200]}")
@@ -575,6 +576,126 @@ def main():
         check("so the next call continues it rather than starting one",
               len(session_files(scratch)) == files_before,
               f"{files_before} -> {len(session_files(scratch))}")
+
+        print("\n16. a batch runs several calls at once, and each one has its own conversation")
+        # A batch is the whole reason this module has a `map_calls`: six calls with a stub that takes a
+        # second to answer take one second on six workers and six in a loop. The stub counts how many
+        # requests were waiting at once, because a stopwatch on a busy machine is a weaker witness than
+        # the endpoint saying "three of your calls were here together".
+        from flint_call import map_calls  # noqa: E402
+
+        slow_port = free_port()
+        slow = subprocess.Popen(
+            [sys.executable, str(HERE / "stub_provider.py"), str(slow_port), "delay=1.0"],
+            stdout=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+        )
+        slow.stdout.readline()
+        try:
+            with open(scratch / "config.toml", "a", encoding="utf-8") as f:
+                f.write(
+                    "\n[[providers]]\n"
+                    'name = "slow"\n'
+                    f'base_url = "http://127.0.0.1:{slow_port}/v1"\n'
+                    'model = "stub-model"\n'
+                    'api_key = "not-a-real-key"\n'
+                )
+            questions = [f"batch job {n}" for n in range(1, 7)]
+            began = time.monotonic()
+            turns = map_calls(questions, cwd=str(scratch), home=str(scratch), provider="slow",
+                              workers=6)
+            took = time.monotonic() - began
+            check("every call came back", len(turns) == len(questions), str(len(turns)))
+            check("in the order they were asked, not the order they finished",
+                  [t.answer for t in turns] == ["命令输出是 `flint-python-ok`。"] * len(questions),
+                  repr([t.answer for t in turns])[:120])
+            check("and each one is its own conversation",
+                  len({t.session for t in turns}) == len(questions),
+                  str(sorted(t.session for t in turns)))
+            check("no call was asked twice", all(t.ok for t in turns),
+                  str([t.error for t in turns if not t.ok]))
+            stats = json.loads(
+                urllib.request.urlopen(f"http://127.0.0.1:{slow_port}/stats", timeout=5).read()
+            )
+            check("the endpoint saw several calls at once, so this is really parallel",
+                  stats["max_in_flight"] >= 3, str(stats))
+            # Six calls of a second each: six in a loop, about one in parallel. The bound is loose on
+            # purpose -- what a timing check may prove here is the order of magnitude, and the count
+            # above is the precise part.
+            check("and the batch took about one call's time, not six",
+                  took < 4.0, f"{took:.1f}s for six 1s calls")
+
+            # A dict entry is one call's own arguments, so a batch can ask the same question about
+            # different files -- and the shared options still apply to the ones that say nothing.
+            marked = [{"prompt": "batch job 7", "require_read": [notes]}, "batch job 8"]
+            turns = map_calls(marked, cwd=str(scratch), home=str(scratch), provider="slow",
+                              workers=2)
+            check("a job that is a dict carries its own arguments", len(turns) == 2,
+                  str(len(turns)))
+            check("and its refusal is recorded on the turn rather than thrown at the caller",
+                  isinstance(turns[0].refused, NotRead), repr(turns[0].refused))
+            check("while the call beside it is unaffected", turns[1].refused is None,
+                  repr(turns[1].refused))
+
+            before = len(request_log(scratch))
+            try:
+                map_calls(questions, cwd=str(scratch), home=str(scratch), provider="slow",
+                          workers=0)
+                check("a worker count outside 1..8 is refused", False, "no exception")
+            except ValueError as exc:
+                check("a worker count outside 1..8 is refused", "workers=0" in str(exc), str(exc))
+            check("and it refused before anything was asked",
+                  len(request_log(scratch)) == before, "a request was sent anyway")
+
+            print("\n17. the first empty account stops the batch")
+            # The decision `ROADMAP.md` §10 B6 leaves to the caller, built: flint can say *what* went
+            # wrong, but only the caller knows that nineteen other calls are queued behind the one that
+            # failed -- and paying for nineteen more refusals teaches nobody anything.
+            from flint_call import OutOfBalance  # noqa: E402
+
+            many = [f"breaker job {n}" for n in range(1, 21)]
+            many[2] = "breaker job 3 [[balance]]"
+            before = len(request_log(scratch))
+            broke = None
+            try:
+                map_calls(many, cwd=str(scratch), home=str(scratch), workers=2)
+                check("the batch stops when the account is empty", False, "no exception")
+            except OutOfBalance as exc:
+                broke = exc
+                check("the batch stops when the account is empty",
+                      exc.turn.error_code == "insufficient_balance", repr(exc.turn.error_code))
+                check("and it says how much of the batch did not happen",
+                      exc.cancelled > 10 and exc.asked == len(many),
+                      f"asked={exc.asked} ran={len(exc.turns)} cancelled={exc.cancelled}")
+                check("the stopping call is one of the turns it hands back",
+                      any(t is exc.turn for t in exc.turns), str(len(exc.turns)))
+                check("the calls that had already run are kept, with their answers",
+                      all(t.ok for t in exc.turns if t is not exc.turn),
+                      str([t.error for t in exc.turns if not t.ok]))
+                check("and the message says why, in the provider's own words",
+                      "insufficient" in str(exc).lower(), str(exc))
+            check("the caller really did get the exception", broke is not None, "no exception")
+            asked = len(request_log(scratch)) - before
+            check("and the calls that were never made were never sent",
+                  asked < len(many), f"{asked} requests for {len(many)} jobs")
+
+            # The breaker is the caller's choice, not a law: a caller that wants every answer, refusals
+            # included, says so. Three jobs, one of them refused -- the other two still ran.
+            wanted = ["breaker job a", "breaker job b [[balance]]", "breaker job c"]
+            turns = map_calls(wanted, cwd=str(scratch), home=str(scratch), workers=2, stop_on=())
+            check("`stop_on=()` runs the whole batch anyway", len(turns) == 3, str(len(turns)))
+            check("with the refusal in the turn rather than an exception",
+                  any(t.error_code == "insufficient_balance" for t in turns),
+                  str([t.error_code for t in turns]))
+            check("and the calls after it still answered",
+                  sum(1 for t in turns if t.ok) == 2, str([t.ok for t in turns]))
+        finally:
+            slow.terminate()
+            try:
+                slow.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                slow.kill()
     finally:
         stub.terminate()
         try:

@@ -6,20 +6,20 @@ of it.
 
 ## Where things stand
 
-**The next round is §10 of `ROADMAP.md`: "flint as a function a program can call" — the agents work
-landed in front of it, and §10 is still the queue.** Steps 1 and 2 are done; the pieces below them are
-listed in order. The section is an audit in three buckets (what cannot be done at all, what cannot be
-told apart, what is a hole), the reference points it was measured against (Claude Code's
-`-p --output-format json`, `llm`, and the `sysexits.h` convention for exit codes), and the order to
-build it in. Step 1 landed the turn's `outcome` and the exit codes, and fixed the C1 bug (a `/stop`ped
-run exited 0 while carrying a truncated answer — now 130).
+**The round that was open is §10 of `ROADMAP.md`: "flint as a function a program can call" — the
+agents work landed in front of it, and §10 itself is now done, steps 1–7.** The section is an audit in
+three buckets (what cannot be done at all, what cannot be told apart, what is a hole), the reference
+points it was measured against (Claude Code's `-p --output-format json`, `llm`, and the `sysexits.h`
+convention for exit codes), and the order it was built in. Step 1 landed the turn's `outcome` and the
+exit codes, and fixed the C1 bug (a `/stop`ped run exited 0 while carrying a truncated answer — now
+130).
 
 **Step 2 is `error.code` produced where the cause is known. Its first job was money, and it is done**:
 §10 **B6** was added after the fact, from a report of hitting an empty balance repeatedly, and it was a
 bug fix as much as a classification. `provider::ProviderFailure` now carries `code` and `retryable`
 out of the code that read the response, `classify` reads the body as well as the status, the `error`
 frame names the cause, and the exit code follows the cause (`69` for money or credentials, `75` for a
-failure the retries could not outlast). **Still open in B6**: only the `map_calls` circuit breaker, which belongs to step 7.
+failure the retries could not outlast). **Still open in B6**: nothing — the `map_calls` circuit breaker belongs to step 7 and is built there.
 `flint balance` is built (a preflight that asks `/user/balance`, falls back to `/models`, and says
 "cannot tell" rather than "usable" when neither answers). **B7 is built too**, so a `--json` caller now
 hears about *every* failure on the stream, including a refusal resolved before the stream would have
@@ -52,7 +52,9 @@ two different places. The plain path got the same bound and its exit code now ca
 byte-level promise — one JSON object per line and nothing else on stdout, no `\r`, no escape code,
 UTF-8 strictly, a documented `type` — is asserted on the raw bytes of four shapes of run, with the
 vocabulary listed in the test as well as the README (which it turned out had drifted: `status` and
-`command` were missing). Next in the queue: step 7, the Python side.
+`command` were missing). **Step 7, the Python side, is built too** — `Chat`, the streaming callbacks,
+`history()`, the three promises about a file, `require_read=`, `map_calls(workers=)` and the balance
+breaker — so §10 is done and the queue moves on to what §11 and the other sections still hold.
 Read it before touching `src/main.rs`'s argument handling. In short: DeepSeek says it with
 **402**, OpenAI-shaped endpoints say it with **429 `insufficient_quota`** — the same status as a rate
 limit — and Anthropic with a 400 and a sentence. flint decides "transient" from the status **and** the
@@ -95,7 +97,7 @@ be able to read, 4 the answer written where the caller asked, 3 the file inlined
 1 the stream checked on its bytes),
 7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 22 `web_view`, 6 `who`, 10 `task`, 2 `say`), `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
-pass, and `python examples/python/test_call.py` is 95 checks, all passing (one of them waits
+pass, and `python examples/python/test_call.py` is 117 checks, all passing (one of them waits
 out the fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from),
 and `python examples/mcp/test_mcp.py` passes its own 23.
 
@@ -117,7 +119,7 @@ for one); the integration proof is the Python batch check, which failed with
 written into `AGENTS.md`: `cargo test --lib` does not rebuild `target/debug/flint.exe`, so a Python
 check run without `cargo build` first tests the previous binary and its bugs.
 
-**The Python caller's promises are built — the first half of `ROADMAP.md` §10 step 7's remainder.**
+**The Python caller is a batch runner as well as a caller — `ROADMAP.md` §10 step 7 is done.**
 `ask()`/`Chat.ask()`/`ask_json()` take `attach=`, `paths=`, `inline=` and `require_read=`, and the
 three ways of putting a file in a prompt are three arguments because they make three different
 promises: `attach=[path]` is a promise (it travels as a real `@` name, and `ask` raises `NotAttached`
@@ -137,7 +139,24 @@ only place `attach=`/`paths=`/`inline=` are distinguishable, and it answers a pr
 something rather than a hand-built event. Five sections of `test_call.py` (20 checks, 75 → 95), and
 each new promise was mutation-checked: making `verify_read` or `verify_attached` a no-op, dropping the
 names from `paths=`, and attaching the file's path instead of its `@` name each fail the check that
-owns them. Still to come in step 7: `map_calls(workers=)` and the balance breaker.
+owns them.
+
+**`map_calls` is the other half of step 7, and step 7 is done.** One run per item, results in the order
+asked for, jobs taken by whichever thread is free (`workers=`, default 4, 1–8, refused before anything
+is spent). The roadmap's sketch said "one session per worker" and the build rejected it: which calls
+shared a conversation would then depend on the thread schedule, so it is **one session per call** — and
+that decision is what found the real fault above, because six concurrent runs turned out to propose the
+same session id. Inside a batch a refused promise is `turn.refused` rather than an exception (one
+refused job out of twenty must not throw away the other nineteen answers), `on_turn=(index, turn)` is
+called from the worker thread as each settles, and a failed run is not an error. The breaker is on by
+default: the first turn whose `error_code` is in `stop_on=("insufficient_balance",)` cancels what has
+not started, **waits** for what is in flight rather than killing it, and raises `OutOfBalance` carrying
+the turns that did finish, `cancelled` (what was never spent) and the turn that found the empty account;
+`stop_on=()` turns it off. Two measurements back the parallelism rather than asserting it: six jobs
+against a one-second stub delay on six workers finish in about one call's time, with the stub's own
+`max_in_flight` above three, and twenty jobs on two workers with one empty account cancel more than ten.
+The stub grew the two markers that make those measurable (`[[balance]]` → a real `402`, `delay=<secs>`)
+and a `/stats` route. `python examples/python/test_call.py` is now **117 checks, all passing**.
 
 **The `task` bug report of 2026-09-16 is fixed, and it was the missing background handle seen from the
 other side.** A person started a child, the parent's status row went on saying `task` and nothing else

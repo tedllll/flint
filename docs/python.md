@@ -110,6 +110,69 @@ While a run is going, flint also says so every five seconds — `{"elapsed_secs"
 false,"text":"running bash","type":"status"}` — which is what makes a long run distinguishable from
 a hung one if you are reading the stream yourself rather than waiting for `ask()`.
 
+## Many calls at once
+
+`map_calls` is the batch, and it exists because the naive version is wrong in three ways that are
+easy to miss. It takes a list of prompts (or of job dicts) and returns one `Turn` per item, in the
+order asked for:
+
+```python
+from flint_call import map_calls, OutOfBalance
+
+turns = map_calls(
+    ["summarise @a.md", "summarise @b.md", "summarise @c.md"],
+    cwd="/path/to/project", workers=3, attach=["a.md", "b.md", "c.md"],
+)
+for turn in turns:
+    print(turn.ok, turn.answer)
+```
+
+**Every call is its own conversation.** Not one per worker: with `workers=3` and six jobs the
+threads take jobs as they finish, so which calls shared a worker would depend on the schedule, and
+two conversations in one file is the thing `docs/session-format.md` says must not happen. Each job
+gets its own run, its own session and its own bill, and `turn.session` names it — so a result can be
+traced back to the conversation that produced it. (This is the check that found the real fault
+underneath: six concurrent runs proposed the same session id, because they started in the same
+millisecond, and five conversations went into one file. `new_id` now ends in the process id and
+taking the name is a claim; see `HANDOFF.md`.)
+
+**A promise made to one job is checked for that job.** `attach=`, `paths=`, `inline=` and
+`require_read=` are arguments of `map_calls` and are applied to every job that does not override
+them with its own dict:
+
+```python
+turns = map_calls(
+    [{"prompt": "read @rules.csv and count the rows", "require_read": ["rules.csv"]},
+     {"prompt": "just say hello"}],
+    cwd="/path/to/project", attach=["rules.csv"],
+)
+```
+
+A job whose promise was not kept on the stream does **not** raise: it comes back as a `Turn` whose
+`refused` holds the reason, because one refused job out of twenty should not throw away the other
+nineteen answers. `turn.refused` being set means the call ran but the file was not attached, or was
+not read — the same two refusals `ask()` raises, with `.missing` and `.turn` still there.
+
+**The first `insufficient_balance` stops the batch.** Twenty calls that each discover the account is
+empty are twenty calls paid for; the breaker watches for `stop_on=("insufficient_balance",)` on the
+turns that have already come back, cancels the jobs that have not started, waits for the ones in
+flight (it never kills a run mid-answer) and then raises:
+
+```python
+try:
+    turns = map_calls(questions, cwd="/path/to/project", workers=4)
+except OutOfBalance as e:
+    print(e)                     # the sentence flint gave, and how many were cancelled
+    print(e.asked, e.turns)      # how many were asked, and the ones that did finish
+```
+
+`OutOfBalance.cancelled` is what was never spent, `OutOfBalance.turns` is what was, and
+`OutOfBalance.turn` is the call that found the empty account. Pass `stop_on=()` to run the batch
+anyway — for a provider that uses `402` for something other than money. A failed run is not an
+error: a job whose flint exited non-zero, or whose promise was refused, is a `Turn` like any other,
+and only the breaker and a bug in the caller raise. `on_turn=` gets `(index, turn)` from the worker
+thread as each one settles, which is how a caller draws progress without waiting for the batch.
+
 ## What a `Turn` holds
 
 | Field | What it is |
@@ -219,9 +282,10 @@ if turn.error_retryable:
 ```
 
 `error_retryable` is the field to loop on, and the exit code says the same thing to a shell (`69`
-a person must act, `75` try later, `1` unclassified). In a batch, a balance failure should stop the
-whole batch rather than the one call: `map_calls` cannot know that twenty other calls are queued
-behind this one, and flint cannot know either — so the caller is where that decision belongs.
+a person must act, `75` try later, `1` unclassified). In a batch, a balance failure stops the whole
+batch rather than the one call, which is what `map_calls`'s `stop_on=` does — see
+[Many calls at once](#many-calls-at-once). The decision belongs to the caller because only the caller
+knows that nineteen other calls are queued behind this one.
 
 **Better than discovering it on the first call is not discovering it at all.** `balance()` is the
 preflight — `flint balance --json`, one request, no completion, no tokens:
@@ -247,7 +311,7 @@ explicit yes.
 
 ```console
 $ cargo build
-$ python examples/python/test_call.py       # 95 checks against a local stub, no key, no cost
+$ python examples/python/test_call.py       # 117 checks against a local stub, no key, no cost
 $ python examples/python/timing_demo.py     # what blocking and failure actually look like
 $ python examples/python/ask_schema.py      # needs DEEPSEEK_API_KEY; spends real tokens
 ```
@@ -262,7 +326,12 @@ The stub is told to log every request body it is sent (`FLINT_STUB_LOG`), becaus
 flint did and the request says what the **model** was given — the only place `attach=`, `paths=` and
 `inline=` are distinguishable from each other. A prompt containing `[[read: <path>]]` is answered with
 a real `read` tool call and then answered for real, so `require_read=`'s positive case is a run that
-read something rather than a hand-built event.
+read something rather than a hand-built event. `[[balance]]` makes the stub answer `402
+insufficient_balance`, which is how the breaker is tested without an empty account; `delay=<secs>` makes
+each request take that long, and `/stats` reports how many requests it has seen and how many were in
+flight at once. The last two are what turn "it runs several at once" into a measurement rather than a
+hope: six jobs with a one-second stub delay on six workers finish in about one call's time, and the
+stub's own count says at least three of them overlapped.
 
 On Windows, set `PYTHONIOENCODING=utf-8`: this machine's ANSI code page is CP936, and the default
 would mangle the answer.

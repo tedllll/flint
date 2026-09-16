@@ -424,7 +424,10 @@ Putting a file in the prompt is three arguments, because they make three differe
 read them), and `inline=[text]` is a promise by construction (the text *is* the prompt).
 `require_read=[path]` checks the other direction — what the run *did*, from the `read` tool's frames —
 and raises `NotRead` otherwise. Both refusals carry the `Turn`, and `Chat` keeps the conversation, so a
-refused promise is not a lost answer. `docs/python.md` is the whole story, and
+refused promise is not a lost answer. `map_calls(prompts, workers=…)` is the batch: one run per item,
+each in its own conversation, results in the order asked for, and the first `insufficient_balance`
+cancels what has not started and raises `OutOfBalance` rather than paying for nineteen more discoveries
+that the account is empty. `docs/python.md` is the whole story, and
 `examples/python/timing_demo.py` shows both blocking behaviours as measured output.
 
 ### Being used by another agent (MCP)

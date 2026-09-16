@@ -1156,7 +1156,7 @@ line no longer crosses the composer; **the page's own log, written by default** 
 the hand's code made the boot's first paint throw, taking the sidebar, the sessions and the feed
 with it; and `/stop`, the interrupt as a short word, reachable from the composer today.
 
-### 10. flint as a function a program can call — **in progress: steps 1–6 landed (B7 included), 7 queued**
+### 10. flint as a function a program can call — **done: steps 1–7 landed (B7 included)**
 
 flint answers; it cannot yet be *trusted as a function*. A caller that acts on the result — writes a
 config, queues a job, retries a batch, feeds it data it did not author — has to know four things
@@ -1367,8 +1367,13 @@ What to build for it, in step 2:
 - **the batch-level circuit breaker is the caller's**, and that is a feature of step 7 rather than of
   flint: the first `insufficient_balance` should cancel the rest of the batch and raise, because flint
   cannot know that twenty other calls are queued behind this one. flint's whole job is to make the
-  cause sayable; the Python side is what turns it into "stop everything". **Half built**: the cause is
-  sayable now (`Turn.error_code`, `Turn.error_retryable`), the `map_calls` that acts on it is step 7.
+  cause sayable; the Python side is what turns it into "stop everything". **Built**, as
+  `map_calls(..., stop_on=("insufficient_balance",))` in `examples/python/flint_call.py`: the first turn
+  whose `error_code` is in `stop_on` sets an event, the jobs that have not started are skipped, the ones
+  in flight are waited for rather than killed, and the batch raises `OutOfBalance` carrying the turns
+  that did finish, how many were never spent, and the turn that found the empty account. `stop_on=()`
+  turns it off for a provider that uses `402` for something else, and the sentence above is why the
+  decision stayed in the caller rather than in flint.
 - **flint never switches provider by itself.** DeepSeek's own advice for a 429 is to use another
   provider for a while; for a system whose answers become recorded values, a silent change of model is
   a provenance fault, not a resilience feature.
@@ -1481,8 +1486,22 @@ What to build for it, in step 2:
    prompt as prose and promises nothing, `inline=` is the prompt, and `require_read=` is checked
    against the `read` tool's `tool.args` frames (raising `NotRead`) — all three differences are visible
    in the checks because the stub logs the request bodies, which is the only place they are
-   distinguishable; both refusals carry the `Turn` and `Chat` keeps the conversation. `map_calls(workers=)`
-   with the balance breaker is the rest of this step, and it is not built.
+   distinguishable; both refusals carry the `Turn` and `Chat` keeps the conversation. **`map_calls(workers=)`
+   and the balance breaker are built too, and the step is done.** The sketch above said "one session per
+   worker" and the build rejected that: with jobs taken as threads free up, which calls shared a
+   conversation would depend on the thread schedule, so it is **one session per call** — every job is its
+   own run, its own session and its own bill, and `turn.session` names it. That is not a preference: the
+   parallel checks found that six concurrent runs proposed *the same* session id (they started in the same
+   millisecond) and the older writer appended to an existing file, so five conversations went into one
+   file — `new_id` now ends in the process id and taking the name is a `create_new` claim, which is a bug
+   fix in `src/session.rs` rather than a change here. The breaker is `stop_on=("insufficient_balance",)`,
+   on by default: the first such turn cancels what has not started, waits for what is in flight (it never
+   kills a run mid-answer) and raises `OutOfBalance` with the turns that did finish, how many were never
+   spent, and the turn that found the empty account; `stop_on=()` turns it off. A refused promise inside a
+   batch is a `Turn.refused`, not an exception, because one refused job out of twenty should not throw
+   away the other nineteen answers. Measured rather than asserted: six jobs against a one-second stub
+   delay on six workers finish in about one call's time with the stub's own `max_in_flight` above three,
+   and twenty jobs with one empty account cancel more than ten of them.
 
 #### What other people's wrappers already learned
 

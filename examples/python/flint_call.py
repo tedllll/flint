@@ -27,6 +27,14 @@ back the events.
     })
     print(day["trading_day"])
 
+    # Or ask many questions at once, four flint processes at a time, stopping the batch when the
+    # account is empty rather than paying for the rest of the refusals:
+    from flint_call import map_calls, OutOfBalance
+    try:
+        turns = map_calls([f"summarise row {n}" for n in range(1, 101)], cwd="/path/to/project")
+    except OutOfBalance as broke:
+        print(f"stopped after {len(broke.turns)}; {broke.cancelled} never asked")
+
 `--cwd` is what names that context, and it is recorded in the session file: conversations live
 in `<FLINT_HOME>/sessions/<dir>/`, one directory per working directory, so two projects in one
 home cannot be handed each other's history. `continue_last=True` continues the most recent
@@ -93,6 +101,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -187,6 +196,11 @@ class Turn:
     # asked for again: this is where the count comes from when there is no `result` line to read it
     # from, which is exactly the case a caller most wants to know about.
     turns: int = 0
+    # The exception `map_calls` caught for this turn, or `None`. A batch records a refused promise
+    # here instead of raising it, because one job's refusal must not discard ninety-nine answers --
+    # and it is a field rather than a warning on purpose: `warnings` is what the *stream* said, and a
+    # caller deciding whether to trust this answer should not have to read the two together.
+    refused: BaseException | None = None
 
     @property
     def answer(self) -> str:
@@ -1013,3 +1027,138 @@ def ask_json(
             turn.error or f"the run produced no checked answer (exit {turn.returncode})", turn
         )
     return turn.result
+
+
+# One flint process per job, so this is also the number of simultaneous bills. Eight is where flint's
+# own `tasks` tool stops for the same reason, and the two should not disagree about what "a lot at once"
+# means: a caller that wants more than eight can run two batches, which is a decision made on purpose.
+MAX_WORKERS = 8
+# The default, and four rather than eight: a batch is often the first thing a caller does with a new
+# account, and being wrong about the price should cost a quarter of what being wrong about it costs at
+# the cap. Raising it is one argument.
+DEFAULT_WORKERS = 4
+
+
+class OutOfBalance(RuntimeError):
+    """A batch was stopped because the account is empty.
+
+    The batch-level half of `ROADMAP.md` §10 B6, and it is the one failure a caller cannot handle one
+    call at a time: flint can say *what* went wrong (`Turn.error_code`) but it cannot know that twenty
+    other calls are queued behind the one that failed, and a caller that keeps going pays for nineteen
+    more refusals. So the first `insufficient_balance` cancels the rest of the batch and raises this,
+    which is a decision about the *batch* and therefore belongs here.
+
+    `.turns` is what was asked and answered, in the order asked for, the stopping call included: its
+    answer is empty and its `error_code` is the reason. `.asked` is how many the batch had and
+    `.cancelled` is the difference -- the calls never made, so a caller can say precisely how much of
+    the work did not happen. `.turn` is the call that ended it.
+    """
+
+    def __init__(self, message: str, turns: list["Turn"], asked: int, turn: "Turn"):
+        super().__init__(message)
+        self.turns = turns
+        self.asked = asked
+        self.turn = turn
+        self.cancelled = asked - len(turns)
+
+
+def map_calls(
+    prompts: list,
+    *,
+    cwd: str | os.PathLike,
+    workers: int = DEFAULT_WORKERS,
+    stop_on: str | tuple | list | None = ("insufficient_balance",),
+    on_turn: Callable[[int, "Turn"], None] | None = None,
+    **options,
+) -> list["Turn"]:
+    """Ask several questions at once, one flint process each, and return the turns in order.
+
+    `prompts` is a list where each entry is a prompt string or a dict of `ask`'s arguments (so one
+    batch can attach a different file to each question). `options` are `ask`'s, applied to every call;
+    a dict entry overrides them for its own call. The result is one `Turn` per prompt, in the order
+    asked for, so `[t.answer for t in map_calls(...)]` lines up with the input.
+
+    **Every call gets its own conversation.** A worker does not hand its session to the next job, and
+    that is a decision rather than an omission: the alternative -- one session per *worker*, which is
+    what the roadmap first sketched -- would make which calls share a conversation depend on the thread
+    schedule, so the same batch with `workers=2` and with `workers=8` would produce different answers
+    from different contexts. A batch is a set of independent questions or it is not a batch; a caller
+    that wants a conversation across a worker's jobs wants `Chat`, one per thread, which is four lines
+    and no guessing.
+
+    `on_turn(index, turn)` is called as each call ends, from the worker thread that made it (like
+    `ask`'s own callbacks), so a hundred-call batch can report progress instead of looking hung.
+
+    Two things are deliberately *not* raised:
+
+    - a refused promise (`NotAttached`, `NotRead`) is recorded on that turn as `.refused` and the batch
+      carries on, because one job's refusal must not throw away ninety-nine answers. `ask` raises it;
+      `map_calls` records it, and `.refused` is how a caller finds it.
+    - a failed *run* is not an error at all: `turn.ok` is `False` and `turn.error` says why, exactly as
+      for one call. A batch of ten questions about a broken endpoint returns ten of those.
+
+    An exception from `ask` that is neither of the above (a missing `cwd`, a command line over the
+    limit, no flint binary) is re-raised when the batch ends: it is the caller's own argument, every job
+    would fail the same way, and it happens before anything is spent.
+
+    `stop_on` names the `error_code` values that stop the whole batch -- by default
+    `insufficient_balance`, because paying for nineteen more refusals teaches nobody anything. A call
+    already in flight is *not* killed; it is paid for and its answer is real, and killing it would
+    throw that away to save nothing. `stop_on=()` disables the breaker for a caller that wants all of
+    it, and raising `OutOfBalance` is how the caller finds out that the rest did not happen.
+    """
+    if not 1 <= workers <= MAX_WORKERS:
+        raise ValueError(f"workers={workers} is outside 1..{MAX_WORKERS}")
+    if isinstance(stop_on, str):
+        stop_on = (stop_on,)
+    codes = set(stop_on or ())
+    jobs = list(prompts)
+    if not jobs:
+        return []
+    stopped = threading.Event()
+    stopping: list[Turn] = []
+    stopping_lock = threading.Lock()
+    skipped = object()
+
+    def one(index: int, job) -> "Turn | object":
+        # The breaker is checked here rather than by cancelling futures: a call that has not started is
+        # the only thing "cancel the rest" can honestly mean, and asking before each job says exactly
+        # that. Futures that are already running are left to finish.
+        if stopped.is_set():
+            return skipped
+        fields = {"prompt": job} if isinstance(job, str) else dict(job)
+        prompt = fields.pop("prompt")
+        try:
+            turn = ask(prompt, cwd=cwd, **{**options, **fields})
+        except (NotAttached, NotRead) as refused:
+            turn = refused.turn
+            turn.refused = refused
+        if turn.error_code in codes:
+            # The first one wins: later calls can only repeat it, and the batch's reason should be the
+            # call that was actually first, not whichever thread happened to finish soonest.
+            with stopping_lock:
+                if not stopping:
+                    stopping.append(turn)
+            stopped.set()
+        if on_turn is not None:
+            on_turn(index, turn)
+        return turn
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(one, index, job) for index, job in enumerate(jobs)]
+        # `.result()` re-raises whatever a job raised, after the block has waited for every worker --
+        # so a broken argument never leaves a flint process behind.
+        done = [future.result() for future in futures]
+
+    turns = [turn for turn in done if turn is not skipped]
+    if stopping:
+        turn = stopping[0]
+        raise OutOfBalance(
+            f"the batch stopped after {len(turns)} of {len(jobs)} calls: "
+            f"{turn.error or 'the account is empty'}"
+            f" (exit {turn.returncode}); {len(jobs) - len(turns)} calls were never made",
+            turns,
+            len(jobs),
+            turn,
+        )
+    return turns
