@@ -46,13 +46,23 @@ function browserPath() {
     "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
     "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
     "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+    "C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
     "/usr/bin/google-chrome",
     "/usr/bin/chromium",
     "/usr/bin/chromium-browser",
+    "/usr/bin/brave-browser",
   ];
   return candidates.find((candidate) => fs.existsSync(candidate)) || null;
+}
+
+/// The binary this harness drives: the debug build in this checkout, which is what the other checks
+/// run and what `cargo build` puts there. The name differs on Windows, and that is the only platform
+/// difference in this file -- everything else is the protocol's.
+function flintBinary() {
+  return path.join(root, "target", "debug", process.platform === "win32" ? "flint.exe" : "flint");
 }
 
 /// A flint to drive: a scratch home, a provider that is never called (nothing here needs a model),
@@ -87,7 +97,7 @@ function scratch() {
 /// `--web` from opening a tab in the browser of whoever is sitting at this machine.
 async function startFlint(where) {
   const out = fs.openSync(where.log, "a");
-  const child = spawn(path.join(root, "target", "debug", "flint.exe"), ["--web"], {
+  const child = spawn(flintBinary(), ["--web"], {
     cwd: where.cwd,
     env: { ...process.env, FLINT_HOME: where.home, NO_COLOR: "1" },
     stdio: ["pipe", out, out],
@@ -269,8 +279,8 @@ async function main() {
     console.log("no browser found -- name one with --browser <path>");
     process.exit(2);
   }
-  if (!fs.existsSync(path.join(root, "target", "debug", "flint.exe"))) {
-    console.log("build first: cargo build");
+  if (!fs.existsSync(flintBinary())) {
+    console.log(`build first: cargo build (${flintBinary()} is not there)`);
     process.exit(2);
   }
   const where = scratch();
@@ -380,11 +390,17 @@ async function main() {
       .find((b) => b.textContent.trim() === "/reload");
       if (!b) return null; b.id = "harness-action"; return b.textContent.trim(); })()`);
     await page.click("#harness-action");
-    await sleep(800);
+    // Waited for rather than slept on, like the composer below it: how long a run takes to print a
+    // line is the run's business, and a sleep would be a guess about this machine.
+    let reloaded = "";
+    for (let i = 0; i < 25 && !reloaded; i += 1) {
+      await sleep(200);
+      reloaded = flint.text().slice(beforeAction);
+    }
     check(
       "an action button runs the command",
-      flint.text().slice(beforeAction).includes("reloaded"),
-      `terminal gained: ${JSON.stringify(flint.text().slice(beforeAction).slice(0, 200))}`
+      reloaded.includes("reloaded"),
+      `terminal gained: ${JSON.stringify(reloaded.slice(0, 200))}`
     );
 
     // ---- the masked credential field --------------------------------------
@@ -399,12 +415,16 @@ async function main() {
     await page.js(`document.getElementById("harness-input").focus(); true`);
     await page.send("Input.insertText", { text: secret });
     await page.click("#harness-submit");
-    await sleep(800);
+    let saved = "";
+    for (let i = 0; i < 25 && !saved.includes("key saved"); i += 1) {
+      await sleep(200);
+      saved = flint.text().slice(beforeKey);
+    }
     const emptied = await page.js(`document.getElementById("harness-input").value`);
     check(
       "a key typed into the field reaches the run",
-      flint.text().slice(beforeKey).includes("key saved"),
-      `terminal gained: ${JSON.stringify(flint.text().slice(beforeKey).slice(0, 200))}`
+      saved.includes("key saved"),
+      `terminal gained: ${JSON.stringify(saved.slice(0, 200))}`
     );
     check(
       "and the field is cleared, so it does not sit on screen",
