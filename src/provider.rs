@@ -820,16 +820,7 @@ impl StreamParser {
 
         // A usage-only frame is the final frame on OpenAI and DeepSeek.
         if let Some(usage) = chunk.get("usage").filter(|u| !u.is_null()) {
-            events.push(Event::Usage(Usage {
-                prompt_tokens: usage
-                    .get("prompt_tokens")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-                completion_tokens: usage
-                    .get("completion_tokens")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-            }));
+            events.push(Event::Usage(usage_from(usage)));
         }
 
         let Some(choices) = chunk.get("choices").and_then(Value::as_array) else {
@@ -941,6 +932,36 @@ impl StreamParser {
 /// stable one when absent so tool results can be correlated.
 pub fn id_for(index: u64) -> String {
     format!("call_{index}")
+}
+
+/// A `usage` object read into flint's own accounting, cache split included.
+///
+/// The counts fall back to `0` because a usage frame without them is a frame that reported nothing
+/// usable, and a turn showing no tokens is what the line already meant. The cache split is the one
+/// field that must *not* fall back: DeepSeek reports `prompt_cache_hit_tokens`, OpenAI reports
+/// `prompt_tokens_details.cached_tokens`, and an endpoint that reports neither is saying nothing
+/// about caching -- `None` keeps that distinct from a reported miss, which is the difference between
+/// "flint did not ask for this" and "the prefix flint builds keeps changing".
+fn usage_from(usage: &Value) -> Usage {
+    Usage {
+        prompt_tokens: usage
+            .get("prompt_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        completion_tokens: usage
+            .get("completion_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        cache_hit_tokens: usage
+            .get("prompt_cache_hit_tokens")
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                usage
+                    .get("prompt_tokens_details")
+                    .and_then(|details| details.get("cached_tokens"))
+                    .and_then(Value::as_u64)
+            }),
+    }
 }
 
 #[cfg(test)]
@@ -1244,6 +1265,45 @@ mod tests {
             }
             ref other => panic!("expected Usage, got {other:?}"),
         }
+    }
+
+    /// Both cache shapes the endpoints in the wild use, into one field, and neither invents a zero.
+    ///
+    /// DeepSeek reports `prompt_cache_hit_tokens`; OpenAI reports `prompt_tokens_details.cached_tokens`.
+    /// Reading only one would make the rate silently absent on the other endpoint -- which is the
+    /// exact failure the number exists to expose, so it is the one thing this parse must not do. The
+    /// last case is the important one: a usage that mentions caching nowhere leaves the field `None`,
+    /// because a provider that reports no split and a provider that reports a miss are different.
+    #[test]
+    fn reads_both_shapes_of_the_cache_split() {
+        let usage_of = |line: &str| {
+            let mut p = StreamParser::default();
+            p.feed_line(line)
+                .into_iter()
+                .find_map(|e| match e {
+                    Event::Usage(u) => Some(u),
+                    _ => None,
+                })
+                .expect("the frame carries usage")
+        };
+
+        let deepseek = usage_of(
+            r#"data: {"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":7,"prompt_cache_hit_tokens":871,"prompt_cache_miss_tokens":129}}"#,
+        );
+        assert_eq!(deepseek.cache_hit_tokens, Some(871));
+        assert_eq!(deepseek.cache_rate(), Some(87));
+
+        let openai = usage_of(
+            r#"data: {"choices":[],"usage":{"prompt_tokens":512,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":512}}}"#,
+        );
+        assert_eq!(openai.cache_hit_tokens, Some(512));
+
+        // A details object without the field is still "nothing said", not a zero.
+        let silent = usage_of(
+            r#"data: {"choices":[],"usage":{"prompt_tokens":512,"completion_tokens":3,"prompt_tokens_details":{"audio_tokens":0}}}"#,
+        );
+        assert_eq!(silent.cache_hit_tokens, None);
+        assert_eq!(silent.cache_rate(), None);
     }
 
     #[test]

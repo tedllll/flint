@@ -6,6 +6,82 @@ of it.
 
 ## Where things stand
 
+**The fourth of the twelve items taken from the reading of Pi is built and pushed: the cache hit rate,
+beside the token counts it is a share of.** The number is what tells a person whether the prompt flint
+builds is stable from turn to turn -- a cached prefix is money and latency that a prompt reassembled in
+a different order every turn quietly spends -- and the item was taken for that reason rather than
+because Pi prints one too.
+
+**Two endpoints, two field names, one number.** DeepSeek reports `prompt_cache_hit_tokens`; OpenAI
+reports `prompt_tokens_details.cached_tokens`; both mean "a subset of the prompt the provider had
+already seen", so `provider::usage_from` collapses them and nothing downstream knows which endpoint
+answered. `Usage` gained `cache_hit_tokens: Option<u64>`, and the `Option` is the whole design in one
+type: **not reported** and **reported zero** are different facts, only one of them is about the prompt
+flint builds, and an endpoint that says nothing about caching printing `0% cached` would accuse the
+prompt of being unstable. So the rule the tests hold is not only "the rate is shown" but "an endpoint
+with no split produces no cache text at all" -- nothing on `/usage`, nothing in the footer, no
+`cache_hit_tokens` key on either `--json` frame.
+
+**Where it is printed, and why there rather than on a screen of its own.** `/usage` puts it on the same
+line as the prompt it is a share of (`cache 87% (871 of 1000 prompt tokens)`, because 871 is good news
+on a 1000-token prompt and bad news on a 200,000-token one), and the footer under every answer appends
+`, 87% cached` -- the footer because the point of the number is to notice it *move*, and a number nobody
+sees while working is a number nobody notices. The rate itself is computed at the point of printing and
+never stored: it is arithmetic on two numbers that are both in the file, and a stored percentage is a
+number that can disagree with its own inputs after a hand-edit. It refuses a prompt of no tokens (the
+division would panic, and a request that sent nothing has no rate) and bounds itself at 100 (a provider
+reporting more hits than tokens is wrong, and `130%` would spread the mistake).
+
+**Building it found a small piece of damage, and fixing that is part of the round.** `session::load`
+has always parsed the last `usage` line of a file into `Loaded::last_usage` -- and nothing anywhere
+consumed it, so `/usage` on a conversation somebody came back to answered *"no usage reported yet by
+this provider"* while the line it wanted sat in the file it had just opened. Every mid-run rebuild had
+the same hole for the same reason: `/model`, `/provider`, `/reload` and `/readonly` all build a
+replacement agent around a conversation that stays, and all of them hand over the messages and nothing
+else. `Agent::set_last_usage` is now called in all four places, so the counts survive a resume and a
+switch; the field went from written-and-never-read to the number `/usage` prints. It was found by
+writing the test, which is the reason that test drives a *resumed* session rather than a live turn: a
+resumed session is race-free (nothing is typed while a turn is running -- an earlier version of the
+test typed `hello` and `/usage` in one write and the second line interrupted the first turn, which is
+what an interrupt looks like from inside the harness), and it holds the format as well, since the number
+comes back out of the file.
+
+**Red first, in five places, and two mutations.** `reads_both_shapes_of_the_cache_split`
+(`src/provider.rs`) failed on `left: None, right: Some(871)` -- the DeepSeek shape was being ignored --
+and holds the OpenAI shape and the silent-case control beside it. `a_cache_rate_needs_both_numbers_and_stays_a_percentage`
+and `a_usage_without_a_cache_split_says_nothing_about_caching` (`src/event.rs`) hold the arithmetic and
+the absent field. `the_turn_footer_carries_the_cache_rate` was watched failing with the old footer
+`[ctx 1000 prompt + 7 completion = 1007 tokens]` and no rate. `usage_prints_the_cache_split_it_read_back_from_the_session`
+was red as "no usage reported yet" (the dead field above) and then, deliberately, red again with the
+cache fragment removed from the `/usage` line. `the_cache_split_reaches_a_program_and_never_as_a_zero`
+(`tests/json_output.rs`) was red on `Null` vs `871`, and the absence half was made red on purpose by
+mutating the frame to always insert the field: it failed with
+`{"cache_hit_tokens":0,…}` where the key had to be missing. Both mutations were reverted.
+
+**What was read and not taken: the cost.** `ROADMAP.md` B5 stands -- flint does not know what a token
+costs on the endpoint it was pointed at, and Pi knows because it generates a model registry from
+`models.dev` and OpenRouter, which is a dependency and a derived table this project will not take. The
+flint-shaped version (a price in the provider's own config table) is a config key plus arithmetic that
+would need its own argument, and the rate is the half that answers the question the item was taken for.
+
+**Not measured, and said so in the docs: a real endpoint's number.** No key is in this machine's
+environment, and spending one that is not would not be flint's call, so every claim here is about the
+plumbing -- both field shapes read into one number, the arithmetic right for the values in the tests,
+and silence from an endpoint that reports no split. The honest way to get a real figure is two short
+turns against a provider with a key; `/usage` then prints what that endpoint said. Reading flint's own
+construction first does say something about what to expect: the system prompt is built once per agent
+out of facts that are properties of the *run* -- shell, working directory, where flint keeps its config
+and sessions, the `AGENTS.md` note, the skill names -- with **no clock, no date and no per-turn state**,
+so within one conversation the only thing that moves is the conversation appended after it. The prefix
+is stable by construction rather than by tuning, and the two ways to break it are deliberate: a mid-run
+`/reload`, `/model` or `/provider` rebuilds the prompt and rewrites the first message (and a model
+switch invalidates the cache wherever it lives anyway).
+
+**Test counts this round: 583 → 589 passing, 1 ignored** (341 lib, 5 in the binary's own tests, 33
+`agent_loop`, 83 `cli_output`, 36 `json_output`, 7 `balance`, 4 `search_tool`, 20 `term_capture` plus
+the ignored cost measurement, 27 `web_view`, 10 `who`, 17 `task`, 6 `say`), clippy silent, both Node
+checks passing.
+
 **A conversation you switch to inside a run is drawn, and not only loaded — reported against the
 terminal, and the page had already been doing it.** Starting with `--continue`, `--resume` or
 `--fork` has printed the tail of the conversation since sessions became reachable, but `/resume
@@ -217,12 +293,12 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 583 passing, 1 ignored on this machine
-(338 lib, 5 in the binary's own tests, 33 `agent_loop`, 81 `cli_output`, 35 `json_output` (7 structured
+As of the commit that carries this file, `cargo test` is 589 passing, 1 ignored on this machine
+(341 lib, 5 in the binary's own tests, 33 `agent_loop`, 83 `cli_output`, 36 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
 be able to read, 4 the answer written where the caller asked, 3 the file inlined into the prompt,
-1 the stream checked on its bytes, 1 how long a turn took),
+1 the stream checked on its bytes, 1 how long a turn took, 1 the cache split and its absence),
 7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 27 `web_view`,
 10 `who`, 17 `task`, 6 `say`),
 and one more on Unix, `tty_hangup`, which is `#![cfg(unix)]` and needs a real pty — as is the Unix
@@ -768,7 +844,7 @@ still building when the second landed.
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
 cargo build                                       # the Python and browser checks run this binary
-cargo test                                        # 583 passing, 1 ignored
+cargo test                                        # 589 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed
@@ -1918,6 +1994,39 @@ three` and `/nope` shows the four answers in the order the design wants, and the
 what changed."}}` — the expansion, not the line. See the note under *Traps* about `$home` in
 PowerShell: running that check cost two minutes of cleanup because `$home` is read-only and the scratch
 `FLINT_HOME` silently became the real one.
+
+### The cache split, and the counts that were written and never read
+
+**The number is an `Option` because three facts wear two faces.** An endpoint may report a cache split
+in DeepSeek's shape (`prompt_cache_hit_tokens`), OpenAI's (`prompt_tokens_details.cached_tokens`), or
+not at all — and "not at all" is not `0`: it says nothing about whether the prompt flint builds is
+stable. So `provider::usage_from` collapses the two shapes into `Usage::cache_hit_tokens`, and every
+printer (`/usage`, the footer, the two `--json` frames) skips the cache entirely when it is `None`.
+`Usage::cache_rate` is the one place the arithmetic lives: rounded half-up, bounded at 100, and `None`
+for a prompt of no tokens rather than a division that panics. It is computed at the point of printing
+because the two numbers it needs are both in the file, and a stored percentage could disagree with them
+after a hand-edit.
+
+**The damage that building it exposed.** `Loaded::last_usage` was parsed out of every session file and
+read by nobody, so a resumed conversation's `/usage` said "no usage reported yet by this provider" while
+its own file held the line; four mid-run rebuilds (`/model`, `/provider`, `/reload`, `/readonly`) lost
+the same numbers by handing over the messages and nothing else. `Agent::set_last_usage` is called at all
+four sites plus startup now, which is why `usage_prints_the_cache_split_it_read_back_from_the_session`
+drives a *resumed* session: it holds the format (a `usage` line written by one run, with the split on
+it, still means the same thing to the next), and it is race-free, because nothing is typed while a turn
+is running.
+
+**A harness detail worth keeping, because it cost a red herring.** The first version of that test typed
+`hello\n/usage\n` in one write, and the capture showed the first turn dropped with *"no usage reported
+yet"* and no request made at all: a line that arrives while a turn is in flight is an **interrupt**, not
+a queued command, so the second line killed the turn whose footer the test wanted. One line per REPL
+test is the safe shape; where two lines are needed, the second must wait for the turn (or, better, be
+avoided — as here, by resuming a session instead of asking twice).
+
+**Also worth knowing when a test asserts a word is *absent*:** the scratch `FLINT_HOME`'s path is
+printed on the run's first line, so a fixture tag containing that word (`flint-cache-footer-quiet-1234`)
+puts it on screen and fails the control for the wrong reason. The tags in these tests deliberately name
+no cache.
 
 ### Still owed on the page
 

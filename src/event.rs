@@ -124,11 +124,37 @@ impl<'de> Deserialize<'de> for ToolCall {
 pub struct Usage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    /// How much of the prompt the provider served out of its own cache, when it says.
+    ///
+    /// `Option` rather than a plain number, because "this provider does not report caching" and
+    /// "this provider reported no hits" are different answers and only the second is a fact about
+    /// the prompt flint builds. A `0` printed for the first would be a lie that reads exactly like
+    /// the defect the number exists to expose.
+    ///
+    /// Two shapes are read into this one field (see `provider::usage_from`): DeepSeek's
+    /// `prompt_cache_hit_tokens` and OpenAI's `prompt_tokens_details.cached_tokens`. Both count a
+    /// subset of `prompt_tokens`, which is what makes the rate below one rule on either endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_hit_tokens: Option<u64>,
 }
 
 impl Usage {
     pub fn total(&self) -> u64 {
         self.prompt_tokens + self.completion_tokens
+    }
+
+    /// The share of the prompt that came out of the provider's cache, as a whole percent.
+    ///
+    /// `None` when the provider said nothing about caching, and `None` for a prompt of no tokens --
+    /// there is no rate to give for a request that sent nothing, and the division would panic. The
+    /// result is bounded at 100 because a provider reporting more hits than prompt tokens is simply
+    /// wrong: repeating that as 130% would spread the mistake to anything reading it.
+    pub fn cache_rate(&self) -> Option<u64> {
+        let hit = self.cache_hit_tokens?;
+        if self.prompt_tokens == 0 {
+            return None;
+        }
+        Some((hit.min(self.prompt_tokens) * 100 + self.prompt_tokens / 2) / self.prompt_tokens)
     }
 }
 
@@ -182,4 +208,49 @@ pub enum Event {
     },
     /// A non-fatal problem worth surfacing to the user.
     Warning(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn usage(prompt_tokens: u64, cache_hit_tokens: Option<u64>) -> Usage {
+        Usage {
+            prompt_tokens,
+            completion_tokens: 0,
+            cache_hit_tokens,
+        }
+    }
+
+    /// The rate is a reading of two numbers and has to refuse to give one when either is missing.
+    ///
+    /// Three ways to be wrong, all of them plausible implementations: treating "not reported" as
+    /// zero (which accuses the prompt of being unstable on a provider that never said), dividing by
+    /// a prompt of no tokens (which panics on the first request of a run pointed at an endpoint that
+    /// counts differently), and passing a provider's bad arithmetic through as 130%.
+    #[test]
+    fn a_cache_rate_needs_both_numbers_and_stays_a_percentage() {
+        assert_eq!(usage(1000, None).cache_rate(), None);
+        assert_eq!(usage(0, Some(0)).cache_rate(), None);
+        assert_eq!(usage(1000, Some(0)).cache_rate(), Some(0));
+        assert_eq!(usage(1000, Some(871)).cache_rate(), Some(87));
+        assert_eq!(usage(1000, Some(875)).cache_rate(), Some(88));
+        assert_eq!(usage(1000, Some(1000)).cache_rate(), Some(100));
+        assert_eq!(usage(10, Some(999)).cache_rate(), Some(100));
+    }
+
+    /// A usage the provider never mentioned must not serialise the field at all.
+    ///
+    /// The session file is the record, and an absent field is what lets a reader tell an endpoint
+    /// that reports caching from one that does not -- `docs/session-format.md` says so in those
+    /// words, and a `0` written here would make both files identical.
+    #[test]
+    fn a_usage_without_a_cache_split_says_nothing_about_caching() {
+        let line = serde_json::to_string(&usage(1000, None)).expect("serialise");
+        assert!(!line.contains("cache"), "{line}");
+        let back: Usage = serde_json::from_str(r#"{"prompt_tokens":5,"completion_tokens":1}"#)
+            .expect("an old line still reads");
+        assert_eq!(back.cache_hit_tokens, None);
+        assert_eq!(back.total(), 6);
+    }
 }

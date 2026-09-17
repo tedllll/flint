@@ -206,7 +206,7 @@ Inside the REPL:
 | `/provider key <key>` | set the API key for the active provider |
 | `/model` | show the model in force |
 | `/model <name>` | switch to one of that provider's models |
-| `/usage` | context size and token accounting |
+| `/usage` | context size and token accounting, including the provider's cache hit rate when it reports one |
 | `/verbose [on\|off\|full]` | how much of the agent's activity to narrate |
 | `/detail [on\|off]` | print tool output (default off: one line per result) |
 | `/readonly [on\|off]` | toggle the write guard |
@@ -276,6 +276,9 @@ are worth knowing:
   JSON-escaped, never printed raw, so splitting the stream on `\n` cannot cut an object in
   half. `message.completed` carries the whole answer, for a reader that would rather not
   reassemble the fragments.
+- **`cache_hit_tokens` is on `usage` and `turn.completed` when the endpoint reported one**, and
+  absent when it did not: a `0` there would be flint inventing a fact about the prompt. It is the
+  raw count, so a caller can compute a rate over its own window rather than over one request.
 - **The stream is a view, not the record.** The session file is written exactly as in any
   other run, and `session.started` names it, so a `--json` run can be resumed, listed and
   read afterwards like anything else.
@@ -1029,6 +1032,16 @@ one transcript line per percent would bury the conversation under its own transp
 There is no automatic context management. `/usage` shows the size of your last
 prompt (that *is* your context) and the token accounting. If it grows too large,
 `/new` starts fresh.
+
+The footer under each answer carries the same counts for that turn, and when the endpoint
+reports a cache split it adds the hit rate — `[ctx 12004 prompt + 88 completion = 12092
+tokens, 87% cached]` — which is the one number that says whether the prompt flint builds is
+stable from turn to turn. Endpoints differ in what they report: DeepSeek's
+`prompt_cache_hit_tokens` and OpenAI's `prompt_tokens_details.cached_tokens` are both read,
+and an endpoint that reports neither gets no cache text at all rather than a misleading
+`0%`. The line in the session file is `{"type":"usage","usage":{…,"cache_hit_tokens":1050}}`
+when there is one, and a resumed conversation starts with the last of those lines already in
+force, so `/usage` answers with the size the conversation really had.
 
 What flint does add to the prompt is what the project has written down, and nothing
 else.

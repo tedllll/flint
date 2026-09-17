@@ -898,6 +898,16 @@ async fn real_main(args: Args) -> Result<i32> {
     if !history.is_empty() {
         agent.splice_loaded_history(&cfg, &cwd, history);
     }
+    // The counts the resumed conversation already reported, read back out of the file's last
+    // `usage` line. Without this the number is in the session file and nowhere else -- `session::load`
+    // has always parsed it into `Loaded::last_usage`, and nothing consumed it -- so `/usage` on a
+    // conversation somebody came back to answered "no usage reported yet by this provider" while the
+    // line it wanted sat in the file it had just opened. The cache split is the field that made this
+    // visible: a rate is exactly what a person asks for on a long conversation, which is the one they
+    // resume.
+    if let Some(loaded) = &resumed_history {
+        agent.set_last_usage(loaded.last_usage);
+    }
 
     // ---- what shape this run's answers must take ----
     //
@@ -2253,6 +2263,9 @@ fn continue_conversation(
     }
     let mut next = agent::Agent::new(cfg, provider, old.readonly(), cwd.clone(), writer);
     next.set_no_session(no_session);
+    // A switch keeps the conversation, so it keeps how big its last prompt was: `/usage` after
+    // `/model` used to answer "no usage reported yet" about a turn that had just reported one.
+    next.set_last_usage(old.last_usage());
     next.splice_loaded_history(cfg, &cwd, old.history().to_vec());
     Ok(next)
 }
@@ -3384,16 +3397,35 @@ async fn handle_command(
 
         "/usage" => match agent.last_usage() {
             Some(u) => {
+                // The cache split, on the same line as the prompt it is a share of: 871 cached
+                // tokens is good news on a prompt of 1000 and bad news on one of 200,000, so the
+                // number means nothing without the count beside it. Absent when the endpoint did not
+                // report it, because a `0%` there would read as an unstable prompt rather than as an
+                // endpoint that says nothing.
+                let cache = match (u.cache_hit_tokens, u.cache_rate()) {
+                    (Some(hit), Some(rate)) => format!(
+                        "  cache {bold}{rate}%{reset} ({hit} of {} prompt tokens)",
+                        u.prompt_tokens
+                    ),
+                    _ => String::new(),
+                };
                 printer.term().line(format_args!(
-                    "last request:  prompt {bold}{}{reset}  completion {bold}{}{reset}  total {bold}{}{reset} tokens",
+                    "last request:  prompt {bold}{}{reset}  completion {bold}{}{reset}  total {bold}{}{reset} tokens{cache}",
                     u.prompt_tokens,
                     u.completion_tokens,
-                    u.total()
+                    u.total(),
                 ));
                 printer.term().line(format_args!(
                     "{dim}prompt tokens = your current context size. Nothing is trimmed automatically; \
                      use /new if it grows too large.{reset}"
                 ));
+                if u.cache_rate().is_some() {
+                    printer.term().line(format_args!(
+                        "{dim}cache = the share of that prompt the provider had already seen. It is \
+                         withheld by the provider for a prefix that changed, so a low rate on a long \
+                         conversation is the prompt moving rather than your money going missing.{reset}"
+                    ));
+                }
             }
             None => printer.term().line(format_args!("{dim}no usage reported yet by this provider{reset}")),
         },
@@ -3505,6 +3537,8 @@ async fn handle_command(
             let provider = provider::Provider::new(provider_cfg.clone())?;
             let mut next = agent::Agent::new(cfg, provider, turn_on, cwd.clone(), writer);
             next.splice_loaded_history(cfg, &cwd, agent.history().to_vec());
+            // A permission change is not a new conversation, so the counts stay where they were.
+            next.set_last_usage(agent.last_usage());
             printer.term().line(format_args!(
                 "{dim}note: the tool set is rebuilt, so its read history starts over; {} now says \
                  readonly = {}{reset}",
@@ -4013,6 +4047,7 @@ async fn handle_command(
             // drawn it (`Viewer::follow` makes a browser re-read the file the run moved to); this
             // is the terminal catching up with its own startup path.
             print_transcript(&loaded.messages, printer);
+            new_agent.set_last_usage(loaded.last_usage);
             new_agent.splice_loaded_history(cfg, &cwd, loaded.messages);
             return Ok(Flow::NewAgent(new_agent, provider_cfg.clone()));
         }
@@ -5394,12 +5429,20 @@ async fn run_turn(
     };
 
     if let Some(u) = agent.last_usage() {
+        // The cache rate rides in the footer rather than only in `/usage`, because this is the line a
+        // person reads after every answer: the whole reason to have the number is to notice it move
+        // between turns, and a rate nobody sees is a rate nobody notices. Nothing is appended when the
+        // endpoint reported no split -- see `Usage::cache_rate`.
+        let cached = match u.cache_rate() {
+            Some(rate) => format!(", {rate}% cached"),
+            None => String::new(),
+        };
         printer.term().line(format_args!(
             "{}",
             printer.style(
                 DIM,
                 &format!(
-                    "[ctx {} prompt + {} completion = {} tokens]",
+                    "[ctx {} prompt + {} completion = {} tokens{cached}]",
                     u.prompt_tokens,
                     u.completion_tokens,
                     u.total()

@@ -1847,8 +1847,24 @@ argument, the cost and what flint has today are in the document, §3.
 - **Compaction written into the session file** — an appended entry carrying the summary and the first
   entry it keeps (`firstKeptEntryId`), never cutting at a tool result. This one is the largest, and it
   is the one where Pi's design is ahead of flint's own request-side pruning.
-- **The cache hit rate next to the token counts** — the one number that says whether the prompt flint
-  builds is stable.
+- **The cache hit rate next to the token counts — built, 2026-09-17.** The one number that says
+  whether the prompt flint builds is stable, and it is built as the *rate* rather than as a second set
+  of counts: `cache 87% (871 of 1000 prompt tokens)` on `/usage`'s own line, `, 87% cached` appended to
+  the footer under every answer, and the raw count (`cache_hit_tokens`) on the session file's `usage`
+  line and on the two `--json` frames so a program can compute its own window. DeepSeek's
+  `prompt_cache_hit_tokens` and OpenAI's `prompt_tokens_details.cached_tokens` are read into that one
+  field, and the field is an `Option`, which is the whole design in one type: an endpoint that reports
+  no cache split produces **no cache text at all**, because a `0%` would accuse the prompt of being
+  unstable when the truth is that the endpoint does not say. The rate refuses to divide by a prompt of
+  no tokens and is bounded at 100. Building it turned up a small piece of damage worth recording: the
+  counts a resumed conversation reported had been parsed out of the file into `Loaded::last_usage` and
+  never read, so `/usage` answered "no usage reported yet" about a conversation whose size was written
+  down in the file it had just opened — and every mid-run rebuild (`/model`, `/provider`, `/reload`,
+  `/readonly`) lost them the same way. `Agent::set_last_usage` carries them across both kinds of
+  replacement. The **cost** half stays declined: `ROADMAP.md` B5 stands, and a price needs a model
+  registry flint will not take. **Not measured: a real endpoint's rate** — the plumbing is held by
+  tests on both field shapes, and the honest way to get the number is two short turns against a
+  provider with a key.
 - **The session and provider in a command's environment — built, 2026-09-17.** Every command a run
   starts (the model's `bash`, `pwsh` and `exec`, and a person's own `!cmd`) is handed `FLINT_SESSION`
   (the conversation's file), `FLINT_PROVIDER` and `FLINT_MODEL`; a run with none of its own takes the

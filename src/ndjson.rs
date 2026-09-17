@@ -101,14 +101,20 @@ impl Sink {
                     json!({ "id": id, "name": name, "ok": ok, "output": output }),
                 )
             }
-            Event::Usage(usage) => frame(
-                "usage",
-                json!({
+            Event::Usage(usage) => {
+                // `cache_hit_tokens` is inserted rather than always present: a caller computing a hit
+                // rate can only do so from a number the endpoint actually reported, and a `0` here
+                // would turn "this endpoint does not report caching" into "nothing was cached".
+                let mut body = json!({
                     "prompt_tokens": usage.prompt_tokens,
                     "completion_tokens": usage.completion_tokens,
                     "total_tokens": usage.total(),
-                }),
-            ),
+                });
+                if let (Some(hit), Some(object)) = (usage.cache_hit_tokens, body.as_object_mut()) {
+                    object.insert("cache_hit_tokens".to_string(), json!(hit));
+                }
+                frame("usage", body)
+            }
             Event::Warning(message) => frame("warning", json!({ "message": message })),
             Event::Status { text, restarted } => status(text, *restarted),
             // The answer is taken, not cloned: a second `Done` in one turn would otherwise
@@ -256,6 +262,11 @@ pub fn turn_completed(
         "outcome": outcome.as_str(),
         "duration_ms": duration_ms,
     });
+    // Like the `usage` frame's own field, and for the same reason: present only when the endpoint
+    // reported a split, so a reader never sees a zero it would have to disbelieve.
+    if let (Some(hit), Some(object)) = (usage.and_then(|u| u.cache_hit_tokens), body.as_object_mut()) {
+        object.insert("cache_hit_tokens".to_string(), json!(hit));
+    }
     if outcome == Outcome::Incomplete {
         if let (Some(limit), Some(object)) = (limit, body.as_object_mut()) {
             object.insert("reason".to_string(), json!(limit.as_str()));
@@ -445,6 +456,7 @@ mod tests {
             Event::Usage(Usage {
                 prompt_tokens: 10,
                 completion_tokens: 4,
+                cache_hit_tokens: None,
             }),
             Event::Warning("careful".to_string()),
             Event::Done,
@@ -528,6 +540,7 @@ mod tests {
             Some(Usage {
                 prompt_tokens: 7,
                 completion_tokens: 3,
+                cache_hit_tokens: None,
             }),
             Outcome::Complete,
             None,

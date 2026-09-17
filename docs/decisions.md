@@ -209,6 +209,37 @@ landing on the bottom row scrolled the transcript off the recorded screen and ma
 run look broken. `FLINT_TERM_CAPTURE_FILE=<path>` is the recording, and no test moves a
 descriptor.
 
+**The cache split is `Option`, and the rate is derived rather than stored.** Two endpoints, two
+field names, one number: DeepSeek reports `prompt_cache_hit_tokens`, OpenAI reports
+`prompt_tokens_details.cached_tokens`, and both mean "a subset of the prompt the provider had
+already seen", so `provider::usage_from` collapses them and nothing downstream knows which
+endpoint answered. The field is `Option<u64>` because *not reported* and *reported zero* are
+different facts and only one of them is about the prompt flint builds — an endpoint that says
+nothing about caching printing `0% cached` would accuse the prompt of being unstable, which is
+exactly the reading the number exists to make trustworthy. The percentage is computed at the
+point of printing (`Usage::cache_rate`) rather than stored in the file: it is arithmetic on two
+numbers that are both there, and a stored rate is a number that can disagree with its own
+inputs after one of them is hand-edited. It refuses to divide by a prompt of no tokens and
+bounds itself at 100 — a provider reporting more hits than tokens is wrong, and repeating that
+as `130%` would spread the mistake.
+
+**The rate is printed where the counts are, not on a screen of its own.** `/usage` puts it on
+the same line as the prompt it is a share of, and the footer under every answer appends
+`, 87% cached` — because the reason to have this number is to notice it *move* between turns,
+and a number nobody sees while working is a number nobody notices. The file's `usage` line and
+the `--json` frames carry the raw `cache_hit_tokens` and never the rate, so a program can
+compute a rate over its own window instead of over one request.
+
+**A number that is in the file is read back out of the file.** The counts a resumed
+conversation reported were parsed into `Loaded::last_usage` and then dropped on the floor: the
+field had no reader, so `/usage` on a conversation somebody came back to answered "no usage
+reported yet by this provider" while the line it wanted sat in the file it had just opened, and
+`/model`, `/provider`, `/reload` and `/readonly` — every path that rebuilds the agent around a
+conversation that stays — lost the numbers the same way. `Agent::set_last_usage` is the one
+line that carries them across both kinds of replacement, and it exists because the alternative
+(a field that is written and never read) is the kind of quiet wrongness this project counts as
+damage even when nothing crashes.
+
 ## Tests
 
 **No test ever uses a real API key.** The stub is `wiremock` replaying hand-written SSE

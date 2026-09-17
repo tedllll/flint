@@ -428,6 +428,17 @@ impl Agent {
         self.last_usage
     }
 
+    /// Carry the last reported counts into a *replacement* agent.
+    ///
+    /// Two paths replace the agent while keeping the conversation -- a resume that loaded the file,
+    /// and every mid-run rebuild (`/model`, `/provider`, `/reload`, the page's own switch rows) -- and
+    /// both hand over the messages and nothing else, so the counts of the last turn used to be lost
+    /// by the act of switching. `None` is written rather than skipped: the caller is saying what the
+    /// conversation's last usage was, and a replacement that was handed nothing has nothing.
+    pub fn set_last_usage(&mut self, usage: Option<Usage>) {
+        self.last_usage = usage;
+    }
+
     /// Whether the last turn ended at the step limit, which makes its answer an unfinished one.
     pub fn ran_out_of_steps(&self) -> bool {
         self.ran_out_of_steps

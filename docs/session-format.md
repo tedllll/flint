@@ -49,7 +49,7 @@ Every line is a JSON object with a `type`. This build understands six:
 |---|---|---|
 | `meta` | once, as the first line | `v`, `id`, `created`, `cwd`, `provider`, `model`, `parent` (only when another run started this one) |
 | `chat` | a message is added to the conversation | `message` |
-| `usage` | the provider reports token counts | `usage` |
+| `usage` | the provider reports token counts | `usage` (`prompt_tokens`, `completion_tokens`, and `cache_hit_tokens` when the endpoint reported a cache split) |
 | `title` | the conversation is named | `name` |
 | `switch` | the provider or model in force changes | `provider`, `model` |
 | `schema` | the answer shape in force changes | `schema` (absent or `null` when cleared) |
@@ -148,6 +148,7 @@ form of the conversation:
 
 ```json
 {"type":"usage","usage":{"prompt_tokens":1204,"completion_tokens":88}}
+{"type":"usage","usage":{"prompt_tokens":1204,"completion_tokens":88,"cache_hit_tokens":1050}}
 {"type":"title","name":"dsh start failure"}
 {"type":"switch","provider":"deepseek","model":"deepseek-reasoner"}
 {"type":"schema","schema":{"type":"object","properties":{"day":{"type":"string"}},"required":["day"]}}
@@ -156,6 +157,21 @@ form of the conversation:
 
 `usage` is whatever the provider last reported, written as it arrives; it is an event rather
 than a field on `meta` because the file is append-only and the numbers change every turn.
+
+`cache_hit_tokens` is on the line **only when the endpoint reported a cache split**, and it is
+flint's own field name rather than either of the two the endpoints use: DeepSeek's
+`prompt_cache_hit_tokens` and OpenAI's `prompt_tokens_details.cached_tokens` are read into this
+one number, because they mean the same thing (a subset of `prompt_tokens` the provider had
+already seen) and a reader of this file should not have to know which endpoint wrote it. An
+absent field is a fact and not a gap: it means this endpoint said nothing about caching, which
+is different from `0`, and the rate flint prints (`/usage`, and the footer under each answer)
+is derived from the two numbers here rather than stored. Hand-editing one of these lines is
+safe in either direction — the field may be added, changed or dropped, and the next run reads
+what is on the line.
+
+The counts are also **read back**: a resumed conversation starts with the last `usage` line in
+the file already in force, so `/usage` answers with the size the conversation really had rather
+than with "no usage reported yet" until the next turn runs.
 
 `title` is a human name for the conversation, and it is an event for the same reason:
 renaming appends one line. **The last `title` in the file is the one in force**, which is

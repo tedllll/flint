@@ -49,6 +49,18 @@ fn answers_in_two_fragments() -> String {
     ])
 }
 
+/// The same answer, from an endpoint that reports the cache split DeepSeek reports.
+fn answers_with_a_cache_split(hit: u64) -> String {
+    sse(&[
+        r#"data: {"choices":[{"delta":{"content":"hello world"}}]}"#,
+        r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+        &format!(
+            r#"data: {{"choices":[],"usage":{{"prompt_tokens":1000,"completion_tokens":7,"prompt_cache_hit_tokens":{hit}}}}}"#
+        ),
+        "data: [DONE]",
+    ])
+}
+
 /// A model asking for one `read`, which is the round after which it answers.
 ///
 /// Built with `serde_json` rather than by hand: the arguments are a JSON string *inside* a
@@ -252,6 +264,66 @@ async fn an_answer_arrives_as_a_stream_of_objects() {
     assert!(
         Path::new(&session).is_file(),
         "the session file named by the stream does not exist: {session}"
+    );
+}
+
+/// The cache split reaches a program reading the stream, and only when the endpoint reported one.
+///
+/// Both halves matter and the second is the one that is easy to get wrong: a caller that wants to
+/// know whether flint's prompt is stable can compute the rate from `cache_hit_tokens`, but a `0`
+/// emitted for an endpoint that reports no split would turn "not reported" into "nothing was
+/// cached", which is the same defect the terminal line refuses to print.
+#[tokio::test]
+async fn the_cache_split_reaches_a_program_and_never_as_a_zero() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(SseFixture {
+            body: answers_with_a_cache_split(871),
+        })
+        .mount(&server)
+        .await;
+
+    let cwd = cwd_for("cache-json");
+    let home = home_for("cache-json", &server.uri(), &cwd);
+    let (code, lines, stderr) = run_json(&home, &cwd, &["-p", "say hello", "--json"]);
+
+    assert_eq!(code, 0, "the run failed: {stderr}");
+    assert_eq!(line_of(&lines, "usage")["cache_hit_tokens"], 871);
+    assert_eq!(line_of(&lines, "turn.completed")["cache_hit_tokens"], 871);
+
+    let plain = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(SseFixture {
+            body: sse(&[
+                r#"data: {"choices":[{"delta":{"content":"hello world"}}]}"#,
+                r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+                r#"data: {"choices":[],"usage":{"prompt_tokens":42,"completion_tokens":11}}"#,
+                "data: [DONE]",
+            ]),
+        })
+        .mount(&plain)
+        .await;
+
+    let cwd = cwd_for("cache-json-quiet");
+    let home = home_for("cache-json-quiet", &plain.uri(), &cwd);
+    let (code, lines, stderr) = run_json(&home, &cwd, &["-p", "say hello", "--json"]);
+
+    assert_eq!(code, 0, "the run failed: {stderr}");
+    assert_eq!(
+        line_of(&lines, "usage")["prompt_tokens"], 42,
+        "the plain run is the control: it is the same stream with no cache field in it"
+    );
+    assert!(
+        line_of(&lines, "usage").get("cache_hit_tokens").is_none(),
+        "a usage frame with no cache split must not carry the field at all: {}",
+        line_of(&lines, "usage")
+    );
+    assert!(
+        line_of(&lines, "turn.completed")
+            .get("cache_hit_tokens")
+            .is_none(),
+        "the same for the end of the turn: {}",
+        line_of(&lines, "turn.completed")
     );
 }
 

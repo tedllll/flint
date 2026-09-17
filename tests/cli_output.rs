@@ -2873,7 +2873,9 @@ async fn typed_at_a_repl(
     let body = requests
         .first()
         .map(|r| serde_json::from_slice(&r.body).expect("the request body is JSON"))
-        .expect("no request was made, so nothing typed at the prompt reached the model");
+        .unwrap_or_else(|| {
+            panic!("no request was made, so nothing typed at the prompt reached the model. The run said: {stdout:?}")
+        });
     let _ = std::fs::remove_dir_all(&home);
     (stdout, body)
 }
@@ -3002,6 +3004,134 @@ async fn prompt_files_are_listed_with_their_descriptions() {
     assert!(
         text.contains("prompts"),
         "the listing does not say where it looked: {text:?}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// The turn footer carries the cache rate, and an endpoint that reports none gets no cache text.
+///
+/// The footer is where counts are read turn by turn -- it is printed under every answer -- so a rate
+/// that only existed in `/usage` would be a number nobody looks at. The control half is the one that
+/// matters: an endpoint with no cache split must produce no `cache` text at all, because `0%` would
+/// read as "the prompt flint builds keeps changing" when the truth is "this endpoint does not say".
+#[tokio::test]
+async fn the_turn_footer_carries_the_cache_rate() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(&[
+                    r#"data: {"choices":[{"delta":{"content":"STUB ANSWER"}}]}"#,
+                    r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+                    r#"data: {"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":7,"prompt_cache_hit_tokens":871}}"#,
+                    "data: [DONE]",
+                ])),
+        )
+        .mount(&server)
+        .await;
+    // The tags name no cache, deliberately: the scratch home's path is printed on the run's first
+    // line, so a tag containing the word would be the thing the control below found on screen.
+    let (stdout, _) = typed_at_a_repl(&server, "hit-footer", &[], "hello\n").await;
+    assert!(
+        stdout.contains("1000 prompt + 7 completion") && stdout.contains("87% cached"),
+        "the footer must carry the cache rate beside the counts it is a share of: {stdout:?}"
+    );
+
+    // The control reports counts and no split at all, which is the shape most endpoints have: the
+    // footer must still be there, and the word `cache` must not be on it.
+    let quiet = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(&[
+                    r#"data: {"choices":[{"delta":{"content":"STUB ANSWER"}}]}"#,
+                    r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+                    r#"data: {"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":7}}"#,
+                    "data: [DONE]",
+                ])),
+        )
+        .mount(&quiet)
+        .await;
+    let (stdout, _) = typed_at_a_repl(&quiet, "hit-footer-quiet", &[], "hello\n").await;
+    assert!(
+        stdout.contains("1000 prompt + 7 completion") && !stdout.contains("cache"),
+        "a provider that reports no cache split must not have the word on screen, and must still \
+         have its counts: {stdout:?}"
+    );
+}
+
+/// `/usage` prints the split beside the prompt count, and only when the session's provider said so.
+///
+/// Driven from a *resumed* session rather than a live turn, and that is the stronger test of the two:
+/// the number a person asks for with `/usage` is read back out of the session file, so this also holds
+/// the format -- a usage line written by one run, with the cache split on it, still means the same
+/// thing to the next one. It is also race-free: nothing is typed during a turn.
+#[tokio::test]
+async fn usage_prints_the_cache_split_it_read_back_from_the_session() {
+    let server = MockServer::start().await;
+    // Again no cache in the tag: the scratch home is the run's working directory and its path is on
+    // the first line of the capture.
+    let home = test_home("hit-usage", &server.uri());
+    let dir = home.join("sessions");
+    std::fs::create_dir_all(&dir).expect("sessions directory");
+    let with_cache = write_session(
+        &dir,
+        "111-1.jsonl",
+        &[
+            &meta_line("111"),
+            r#"{"type":"chat","message":{"role":"user","content":"what is the socket question"}}"#,
+            r#"{"type":"usage","usage":{"prompt_tokens":1000,"completion_tokens":7,"cache_hit_tokens":871}}"#,
+        ],
+        5,
+    );
+    let without = write_session(
+        &dir,
+        "222-1.jsonl",
+        &[
+            &meta_line("222"),
+            r#"{"type":"chat","message":{"role":"user","content":"what is the socket question"}}"#,
+            r#"{"type":"usage","usage":{"prompt_tokens":1000,"completion_tokens":7}}"#,
+        ],
+        5,
+    );
+
+    let said = |session: &std::path::Path| {
+        let mut child = binary()
+            .current_dir(&home)
+            .env("FLINT_HOME", &home)
+            .env("FLINT_TERM_CAPTURE", "1")
+            .env("FLINT_TERM_SIZE", "100x24")
+            .env_remove("NO_COLOR")
+            .args(["--resume", &session.to_string_lossy()])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("failed to run flint");
+        {
+            use std::io::Write;
+            child
+                .stdin
+                .as_mut()
+                .expect("no stdin handle")
+                .write_all(b"/usage\n/exit\n")
+                .expect("failed to write stdin");
+        }
+        let out = child.wait_with_output().expect("flint did not finish");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+
+    let shown = said(&with_cache);
+    assert!(
+        shown.contains("871 of 1000 prompt tokens") && shown.contains("87%"),
+        "the cached count and the rate it makes belong on the same line as the prompt: {shown:?}"
+    );
+    let silent = said(&without);
+    assert!(
+        silent.contains("1000") && !silent.contains("cache"),
+        "a session whose provider reported no split must say nothing about caching: {silent:?}"
     );
     let _ = std::fs::remove_dir_all(&home);
 }

@@ -302,27 +302,62 @@ in the code.
 
 ### 3.8 Cache and cost, on screen
 
-Pi's footer shows input and output tokens, cache reads, cache writes, the latest cache hit rate,
-cost, and context usage. Flint's `/usage` prints prompt, completion and total for the last request,
-and the turn footer prints the same three.
+**The cache half is built, 2026-09-17; the cost half is still declined.** Pi's footer shows input and
+output tokens, cache reads, cache writes, the latest cache hit rate, cost, and context usage. Flint's
+`/usage` prints prompt, completion and total for the last request, and the turn footer prints the same
+three -- and now appends the hit rate.
 
-The reason flint has no cost is recorded and is not a gap in the code: `ROADMAP.md` B5 says the money
-half has no home because flint does not know what a token costs on the endpoint it was pointed at.
-Pi knows because it generates a model registry from `models.dev` and OpenRouter, which is a dependency
-and a derived table flint would not take. The flint-shaped version is a price in the provider's own
-config table -- the person's own number, not flint's guess -- plus the cache split if and only if the
-provider reports it. The author of Pi is candid about the same difficulty from the other side: some
-providers report usage only when the stream ends, which makes exact cost impossible for a request
-that was aborted, so this has to be labelled as what the provider said.
+**What was taken: the rate, beside the counts it is a share of.** `Usage` gained
+`cache_hit_tokens: Option<u64>`, read from either shape an endpoint uses for it (DeepSeek's
+`prompt_cache_hit_tokens`, OpenAI's `prompt_tokens_details.cached_tokens`) because they mean the same
+thing and a reader should not have to know which endpoint answered. The rate itself is computed where
+it is printed -- `cache 87% (871 of 1000 prompt tokens)` on `/usage`'s own line, `, 87% cached` in the
+footer under every answer -- and never stored, for the reason the repository gives for everything else:
+a stored percentage is a number that can disagree with the two numbers it came from, and the file is
+hand-editable. The `Option` is the whole design in one type: an endpoint that reports tokens and says
+nothing about caching must produce **no cache text at all**, because `0% cached` would accuse the prompt
+of being unstable when the truth is that this endpoint does not say. Two smaller decisions came out of
+building it: the rate is bounded at 100 and refuses a prompt of no tokens (a provider reporting more
+hits than tokens is wrong, and repeating `130%` would spread the mistake), and a resumed conversation
+now starts with the last `usage` line in its file already in force -- that field had been parsed out of
+the file and never read, so `/usage` used to answer "no usage reported yet" about a conversation whose
+size was written down in the file it had just opened.
 
-The part that is worth having with or without money is the **cache hit rate**, because it is the one
-number that says whether the prompt flint builds is stable. Flint already has `debug prompt-input` to
-explain why it moved. Pi's design is shaped around that number in a way worth noticing: mid-conversation
-system messages are delivered in place "so the cached prefix stays intact", a tool that is added or
-removed mid-session is announced as a patch rather than by rebuilding the prompt, and a tool that is
-removed stays declared -- all so that the prefix the provider has already cached does not change. A
-prompt assembled in a different order every turn costs money quietly, and the hit rate is how you find
-out.
+**What was read and not taken: the money.** `ROADMAP.md` B5 still stands -- flint does not know what a
+token costs on the endpoint it was pointed at. Pi knows because it generates a model registry from
+`models.dev` and OpenRouter, which is a dependency and a derived table flint would not take. The
+flint-shaped version remains a price in the provider's own config table -- the person's own number, not
+flint's guess -- and it is deliberately not built now: the rate is the half that answers "is the prompt
+I build stable", and a price with no registry behind it is a new config key plus arithmetic that would
+need its own argument. The author of Pi is candid about the same difficulty from the other side: some
+providers report usage only when the stream ends, which makes exact cost impossible for a request that
+was aborted, so it would have to be labelled as what the provider said.
+
+**Why the rate is the interesting number, and what flint already does about it.** It is the one number
+that says whether the prompt flint builds is stable, and `debug prompt-input` is the other half of the
+same question. Pi's design is shaped around that number in a way worth noticing: mid-conversation system
+messages are delivered in place "so the cached prefix stays intact", a tool that is added or removed
+mid-session is announced as a patch rather than by rebuilding the prompt, and a tool that is removed
+stays declared -- all so that the prefix the provider has already cached does not change. Read against
+flint's own construction, flint is on the right side of this by accident of its design rather than by
+tuning: the system prompt is built once per agent out of facts that are properties of the *run* (the
+shell, the working directory, where flint keeps its config and sessions, the AGENTS.md note, the skill
+names) and holds **no clock, no date and no per-turn state**, so within one conversation the only thing
+that moves is the conversation appended after it. The ways to break that prefix are the ones worth
+knowing about and they are all deliberate: a mid-run `/reload`, `/model` or `/provider` rebuilds the
+prompt and rewrites the first message, and a model switch invalidates the cache wherever it lives
+anyway. **Not measured here**: a real endpoint's number. Every figure in this document is from a page
+that was loaded or a measurement on this machine, and the cache rate for a real DeepSeek or OpenAI
+conversation is owed -- the honest way to get it is two short turns against a provider with a key, and
+`/usage` prints what it says. What is measured is the plumbing: both field shapes parse into one number,
+the rate is right for the values in the tests, and an endpoint that reports no split produces no cache
+text anywhere.
+
+One more accounting fact from Pi's tool contract is worth checking against flint rather than copying:
+a tool result carries a `usage` field "for nested LLM work performed by the tool", and it counts toward
+the session's totals. A `task` child spends real tokens on somebody's account; flint's handle carries
+the child's usage, and whether the parent's own total includes it is a question this document leaves
+open because it was not the one being read for.
 
 One more accounting fact from Pi's tool contract is worth checking against flint rather than copying:
 a tool result carries a `usage` field "for nested LLM work performed by the tool", and it counts toward
