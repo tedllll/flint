@@ -1777,6 +1777,26 @@ and C6 is the note that the documentation has to say so).
   the other hole in this test and is closed too: `web/view.html` is scanned, measured with a middle dot
   replaced by its artifact.
 
+## Candidates from a reading of Pi, not agreed
+
+[`docs/pi-agent-harness.md`](docs/pi-agent-harness.md) is a reading of Pi — the minimal TypeScript
+agent harness at pi.dev, the same kind of program built on the opposite bet — with every claim
+sourced from a page that was loaded. It is not a plan and nothing in it is scheduled; it is here so
+that a future reader knows the reading exists before adding to the queue. The candidates it raises,
+in its own order: a fork from a *chosen point* (`--fork` copies the whole conversation and its tail
+comes with it) plus the lineage the new file would carry; a follow-up message that does not interrupt
+the turn (a plain line typed mid-turn does, by design); a run-level tool allowlist as something
+narrower than `readonly`; `--no-session`; `/import <file>`; a static export of a finished
+conversation; an entry id the page can resume from after a restart; prompt templates, and a way for a
+*person* to invoke a skill (today only the model can); compaction written into the session file as an
+appended entry carrying the summary and the first entry it keeps; the cache hit rate next to the
+token counts; the session and provider in a command's environment; a thinking level, with the
+per-provider shape of that field read first; and running several tool calls of one assistant message
+at once. Two of flint's own decisions are argued *against* Pi in the same document, and both are
+already in the tree: jobs and a panel instead of tmux, and a `task` child whose conversation is a
+file instead of no sub-agent tool at all. Pi's numbers in that document are also the strongest
+argument for the MCP deferral recorded under "Not doing, and why".
+
 ## Known unfinished
 
 No known defect is open. The five that were on this list are closed, and they are kept here
