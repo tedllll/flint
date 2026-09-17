@@ -294,10 +294,16 @@ Four decisions in that list are worth keeping:
   calling both of them one thing.
 
 Two limits are honest and worth stating where a reader will meet them. A command dies with the run on
-Windows (the guard fires as the runtime drops the task); on Unix it does not, which is the same
-single-process gap `docs/windows-tooling.md` §6.1 already documents for foreground commands. And a
-background command is **not** a run: it has no session file, no presence record, and no depth, so
-`flint who` will not name it and `job_op` answers for it only from the process that started it.
+both platforms now — the guard fires as the runtime drops the task, and on Unix, since that half of
+`docs/windows-tooling.md` §6.1 was closed, it signals the child's whole **process group** rather than
+the one process `kill_on_drop` reached, which is what `taskkill /T` does on Windows for the same reason
+(`sh -c 'make & wait'` leaves a `make` that outlives its shell). The limit that is left is the one no
+guard can cover: a run killed outright — SIGKILL, a crash, the machine going down — leaves its children
+behind, because the guard is flint's own code and it does not run. Putting the child in a group of its
+own is also what stops it inheriting a signal aimed at flint's group, which is the price of the group
+being a thing flint can signal by itself. And a background command is **not** a run: it has no session
+file, no presence record, and no depth, so `flint who` will not name it and `job_op` answers for it only
+from the process that started it.
 
 ## Stages
 

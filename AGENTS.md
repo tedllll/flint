@@ -56,7 +56,7 @@ whoever is changing the code — a person or a model driving it.
 | `examples/python/` | the Python caller: `flint_call.py` (ask/ask_json, no dependencies), its stub and its checks |
 | `examples/mcp/` | flint as an MCP tool for Codex, Claude Code and Cursor: `flint_server.py` (stdlib only, one tool) and `test_mcp.py`, which speaks the protocol at it |
 | `docs/windows.md` | field notes on Windows terminal behaviour; read before touching layout |
-| `docs/windows-tooling.md` | the plan for command-line escaping on Windows and the measured record of building it — all five steps are in the tree and the parts that needed a real machine were settled on one, so what is left open is one item and it is not a Windows one (a Unix process-group kill, §6.1); read before touching `probe_shell` or adding a tool |
+| `docs/windows-tooling.md` | the plan for command-line escaping on Windows and the measured record of building it — all five steps are in the tree, the parts that needed a real machine were settled on one, and the Unix process-group kill that was the last open item (§6.1) is built and held by a test the ubuntu job watched fail first; read before touching `probe_shell` or adding a tool |
 | `docs/session-format.md` | the session file format, for readers and for hand-editing |
 | `docs/web-mode.md` | the browser view over a running flint: all three levels are built (read-only view, live feed, composer with a sidebar) and §11 records what was measured in a browser |
 | `docs/deepseek-search.md` | web search: what was measured about DeepSeek's search, and what it costs |

@@ -1130,31 +1130,31 @@ impl Job {
     /// to commit, so this is a kill -- and it has to be the whole tree. `kill_on_drop` ends only the
     /// process that was spawned, and on Windows the shell stays as the parent of whatever it ran:
     /// the measurement in `KillTree`'s comment is about exactly this (a killed `cmd.exe` left
-    /// `cargo`/`rustc` holding `target/`). On Unix this is the one process, which is the documented
-    /// gap rather than a decision: `sh -c` usually *becomes* the command it was given, and a script
-    /// that backgrounds work is not covered -- `docs/windows-tooling.md` §6.1.
+    /// `cargo`/`rustc` holding `target/`). On Unix the shell normally *becomes* the command, but a
+    /// script that backgrounds work does not, which is why that side gets a process group
+    /// ([`KillTree::detach`]) and this signals the group rather than one process.
     ///
     /// Blocking, and on purpose: the caller is a tool call that has already decided to end this, and
-    /// `taskkill` measures in the hundreds of milliseconds.
+    /// `taskkill` measures in the hundreds of milliseconds. On Unix there is nothing to wait for at
+    /// all -- it is one `killpg`, which is also the reason it is a syscall here rather than the
+    /// `kill` command: no shell spells "the group" the same way twice, and the tool that started
+    /// this is not going to hand a group id to a parser it does not control.
     fn kill(&self) {
-        let pid = self.pid.to_string();
         #[cfg(windows)]
-        let mut command = {
+        {
+            let pid = self.pid.to_string();
             let mut command = std::process::Command::new("taskkill");
             command.args(["/PID", &pid, "/T", "/F"]);
-            command
-        };
-        #[cfg(not(windows))]
-        let mut command = {
-            let mut command = std::process::Command::new("kill");
-            command.arg(&pid);
-            command
-        };
-        let _ = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+            let _ = command
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        #[cfg(unix)]
+        unsafe {
+            libc::killpg(self.pid as libc::pid_t, libc::SIGKILL);
+        }
     }
 
     /// What a background command has printed since the last time somebody asked.
@@ -1665,6 +1665,9 @@ pub async fn run_program_streaming(
     // actually reaps the process; this is the backstop for every *other* way the future
     // can end -- an interrupt drops the turn, and a dropped turn must not leave a build
     // running behind it.
+    // Before the spawn, and on the command itself: what the guard below signals has to be
+    // decided at that moment, not after.
+    KillTree::detach(cmd.as_std_mut());
     cmd.kill_on_drop(true);
     let mut child = cmd
         .spawn()
@@ -1881,21 +1884,45 @@ pub async fn run_program_streaming(
 /// only on the paths that kill it -- a timeout, an idle kill, or an interrupted turn dropping
 /// the future this lives in.
 ///
-/// On Unix this is nothing at all, and deliberately: `sh -c` usually *becomes* a lone command,
-/// so the process killed is the command. A script that backgrounds work is the case where that
-/// is not true, and it is not measured here -- see `docs/windows-tooling.md` §6.1.
+/// On Unix `sh -c` usually *becomes* a lone command, so the process killed is the command -- but a
+/// script that backgrounds work (`sh -c 'make & wait'`) leaves it running, because there is no
+/// process group in play for anything to signal. That is the same gap as the Windows one and it is
+/// closed the same way, mechanically: [`KillTree::detach`] puts the child in a group of its own
+/// before it is spawned, and the guard signals the group rather than the process.
 struct KillTree {
-    #[cfg(windows)]
+    #[cfg(any(unix, windows))]
     pid: Option<u32>,
 }
 
 impl KillTree {
+    /// Put the child in a process group of its own, so the guard below can reach what it starts.
+    ///
+    /// This is the Unix half of `taskkill /T`: there is no tree to walk here, so the group is what
+    /// makes the whole of it addressable with one signal. Called before `spawn`, which is the only
+    /// moment `std` will accept it.
+    ///
+    /// A group of its own is not a lifetime of its own -- nothing about the child's exit changes,
+    /// and a child that outlives its budget is still killed by the same guard as before. What
+    /// changes is only *what the signal reaches*.
+    #[cfg(unix)]
+    fn detach(cmd: &mut std::process::Command) {
+        use std::os::unix::process::CommandExt;
+        // `0` asks for a new group whose id is this child's pid, so the id the guard already has
+        // from `Child::id()` is also the group to signal -- no second handle to keep in step.
+        cmd.process_group(0);
+    }
+
+    /// Windows needs nothing here: `taskkill /T` walks the tree from the live parent instead,
+    /// which is why that path has the "not found" limitation its own comment records.
+    #[cfg(not(unix))]
+    fn detach(_cmd: &mut std::process::Command) {}
+
     fn arm(pid: Option<u32>) -> Self {
-        #[cfg(windows)]
+        #[cfg(any(unix, windows))]
         {
             KillTree { pid }
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = pid;
             KillTree {}
@@ -1904,7 +1931,7 @@ impl KillTree {
 
     /// The command ended by itself; leave whatever it started alone.
     fn defuse(&mut self) {
-        #[cfg(windows)]
+        #[cfg(any(unix, windows))]
         {
             self.pid = None;
         }
@@ -1925,6 +1952,16 @@ impl Drop for KillTree {
                 .stderr(Stdio::null())
                 .status();
         }
+        #[cfg(unix)]
+        if let Some(pid) = self.pid {
+            // The *group*, which is what `detach` made the pid stand for; a bare `kill` here
+            // would be the bug this guard exists to close. `SIGKILL` and not a polite signal,
+            // because this runs on the abnormal paths only -- a timeout, an idle kill, a turn
+            // dropped by an interrupt -- where the question is whether the work stops, not
+            // whether it stops tidily. Nothing to wait for: `SIGKILL` cannot be caught, and the
+            // child is reaped by whoever was already waiting on it.
+            unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) };
+        }
     }
 }
 
@@ -1944,9 +1981,9 @@ impl Drop for KillTree {
 /// * **It does not die with the call, but it should not outlive the run either.** `kill_on_drop` is
 ///   deliberately *not* set here, because the whole point is that this outlives the tool call that
 ///   started it. What ends it is its budget, a `stop`, or the run itself: dropping this task on the
-///   way out of the process fires the guard below, which ends the tree on Windows. On Unix the guard
-///   is the same no-op it already is for foreground commands -- a background command outliving flint
-///   is part of the gap `docs/windows-tooling.md` §6.1 documents, not a second one.
+///   way out of the process fires the guard below, which ends the tree -- `taskkill /T` on Windows
+///   and the process group on Unix, in both cases including what the shell started rather than only
+///   the shell.
 async fn start_background_command(
     config: &Config,
     run: &Invocation,
@@ -1987,6 +2024,7 @@ async fn start_background_command(
         cmd.env("all_proxy", proxy);
     }
 
+    KillTree::detach(cmd.as_std_mut());
     let mut child = cmd
         .spawn()
         .with_context(|| format!("cannot spawn program '{}'", run.program))?;

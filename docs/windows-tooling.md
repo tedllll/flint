@@ -328,15 +328,23 @@ escapes it. **Built as recommended**: `KillTree::arm` in `src/tools.rs`.
   children it would have walked survive. So the kill is a backstop for the *interrupt and
   timeout* cases, which is where it is used, and not a guarantee about anything a command
   deliberately detached.
-- On **Unix** the gap is the same shape and is *not* fixed: `sh -c 'sleep 300 & wait'`
-  leaves a child that `kill_on_drop` does not reach, because there is no process group in
-  play and no `setsid` to put one there. Closing it means `libc` and either `killpg` after
-  `setsid` or a scan of `/proc`; the dependency is no longer part of the cost — `libc` became
-  a Unix dependency when a hung-up terminal had to be watched for (`watch_for_hangup` in
-  `src/main.rs`) — so what is left is the code and the test, neither of which this machine can
-  run. Unmeasured here — this machine is Windows — and left undone deliberately rather than
-  half-done: the Windows path is where the damage was observed, and the Unix case needs a
-  test before it needs code.
+- On **Unix** the gap had the same shape and is now **closed the same way, by the same guard**.
+  `KillTree::detach` puts the child in a process group of its own before it is spawned
+  (`CommandExt::process_group(0)` — a `std` method, so no `setsid` binary and no unsafe
+  `pre_exec`), and `KillTree::drop` signals that group with `libc::killpg` rather than the one
+  process `kill_on_drop` reaches. `Job::kill` -- the `job_op stop` path for a background command
+  -- does the same, which also retires the `kill <pid>` subprocess it used to spawn: no shell
+  spells "the group" the same way twice (`kill -- -<pgid>` is a GNU spelling), and `killpg` is a
+  syscall.
+  The test is `a_killed_command_takes_its_children_with_it_on_unix` in `tests/agent_loop.rs`: the
+  same test the Windows half already had, one platform over -- a subshell backgrounds a marker
+  write and `wait`s, a control run proves the script works, and a one-second budget must end the
+  subshell with the shell. **Measured on the one machine that can**: the test was pushed alone and
+  the ubuntu job failed with `the command's child outlived the kill and wrote
+  /tmp/flint-tree-kill-unix-3199/child-survived.txt -- the shell was killed, not the process
+  group`; the fix is the next commit and made it pass. The Windows job was green for both,
+  because `taskkill /T` was already there -- which is the whole reason this half was left for a
+  session that could watch it.
 
 ### 6.2 GBK output becomes U+FFFD — `MEASURED`, fixed differently than planned
 
@@ -582,8 +590,9 @@ top of this file:
    `-ExecutionPolicy Bypass`. Windows only. (§4.2) — **done**; the BOM and the execution
    policy were both measured first, and both were needed.
 4. **The three small fixes:** `\` normalisation in `glob`/`grep` (§6.3) — **done**; the
-   process-tree kill (§6.1) — **done**, with the `taskkill /T` and Unix limits recorded
-   there; child output encoding (§6.2) — **done**, as code-page decoding rather than `chcp`.
+   process-tree kill (§6.1) — **done on both platforms**, `taskkill /T` where it was measured
+   and a process group on Unix; child output encoding (§6.2) — **done**, as code-page decoding
+   rather than `chcp`.
 5. **The facts in the system prompt:** PowerShell version and
    `$PSNativeCommandArgumentPassing`. (§6.9) — **done**.
 
@@ -596,10 +605,12 @@ it would be a large amount of code that is wrong in the cases that matter), `-En
 (opaque state, against the repository's rules), and a permission layer for `exec` beyond the
 existing `readonly` switch.
 
-Still open, and left open on purpose rather than by oversight: a Unix process-group kill for
-backgrounded work (§6.1). It is recorded where it belongs, with what is missing and why the
-fix is not free. The other item on this list — the line-ending sentence for `apply_patch`
-(§6.4) — is built, and building it is what proved a patch cannot express a CRLF line at all.
+**Nothing on that list is open now.** The Unix process-group kill for backgrounded work (§6.1),
+which stood here as the one deliberately unfinished item for two sessions, is built — with the
+test that watched it fail on the ubuntu job before the code existed, which is the only way this
+machine could see it. The other item this paragraph used to carry — the line-ending sentence for
+`apply_patch` (§6.4) — is built too, and building it proved a patch cannot express a CRLF line at
+all.
 
 As always: write the failing test first, watch it fail for the right reason, then fix the
 code. The process-tree kill and the `\` normalisation are both cheap to test; the quoting

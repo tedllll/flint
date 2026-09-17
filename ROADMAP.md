@@ -127,10 +127,11 @@ could only be settled on a Windows machine were settled on one (Windows 10.0.262
 - the browser line was broken for the same reason as everything else in the document: std
   quotes an argument only when it has a space in it, and a URL does not.
 
-**Left open, deliberately, and recorded in the document**: a Unix process-group kill for
-work a command backgrounds (§6.1). It is not a Windows item, and it needs a test before it
-needs code. The other item this paragraph used to carry — the line-ending sentence for
-`apply_patch` (§6.4) — **is built**, and `docs/windows-tooling.md` is where that is written
+**Closed since**: the Unix process-group kill for work a command backgrounds (§6.1) — the one
+item this paragraph carried as deliberately open — **is built**, with the code and the test that
+was watched failing on the ubuntu job before the code existed. The other item it used to carry —
+the line-ending sentence for
+`apply_patch` (§6.4) — **is built too**, and `docs/windows-tooling.md` is where both are written
 down. This file claimed otherwise for a session, and the correction is spelled out rather than
 dropped in silence, because "what is left" is the sentence the next reader trusts.
 

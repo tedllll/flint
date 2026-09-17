@@ -188,10 +188,16 @@ of the bullet rather than a hole in it. And `HANDOFF.md`'s own "the Windows half
 still unwritten" was stale by five steps: `docs/windows-tooling.md` §7 marks all five done, and the two
 tests that paragraph called unwritten exist and pass (`a_quoted_command_reaches_the_shell_verbatim`,
 `a_powershell_script_runs_from_the_file_it_was_written_to`, `a_killed_command_takes_its_children_with_it`).
-What is genuinely open there is the shorter list §7 ends with: a Unix process-group kill. The other item
-on it, the line-ending sentence for `apply_patch`, is built — and building it measured that a patch
-cannot express a CRLF line at all (`str::lines` drops the `\r` before each `\n`, and the file's lines
-keep theirs), so the sentence names the reason and the tool that works, `edit`.
+That shorter list §7 ends with — a Unix process-group kill — **is now closed too**, so nothing on it is
+open: `KillTree::detach` puts a command in a process group of its own (`CommandExt::process_group(0)`,
+a `std` method rather than `setsid` or an unsafe `pre_exec`) and both kill paths signal the group with
+`libc::killpg` — the guard's `Drop` and `Job::kill`, whose `kill <pid>` subprocess is retired with it.
+The red was watched where it could be: the test (`a_killed_command_takes_its_children_with_it_on_unix`
+in `tests/agent_loop.rs`) was pushed **alone**, the ubuntu job failed with `the command's child outlived
+the kill and wrote /tmp/flint-tree-kill-unix-3199/child-survived.txt`, and the commit with the code made
+it pass. The other item on it, the line-ending sentence for `apply_patch`, is built — and building it
+measured that a patch cannot express a CRLF line at all (`str::lines` drops the `\r` before each `\n`,
+and the file's lines keep theirs), so the sentence names the reason and the tool that works, `edit`.
 
 **And the last "not measured" note in `docs/web-mode.md` §11 is now measured**: a report asked for
 *while a turn runs*. The gap was never the code — the wait is stashed (`Handover`) and answered once the
@@ -1464,10 +1470,11 @@ before being written, and the BOM and the policy switch both turned out to be re
 than prudent. The system prompt now states which PowerShell is on the machine and what it does
 with native arguments, which is the fact that stops a model writing `??` on 5.1.
 
-**Recorded rather than fixed**, because it needs a test before it needs code: a Unix
-process-group kill for work a command backgrounds (there is no process group and no `setsid`,
-and closing it means `libc`). The second item this paragraph used to carry — the same
-line-ending sentence for `apply_patch` — is built; see the paragraph above.
+**Recorded rather than fixed** was the shape of this paragraph. A Unix process-group kill for work a
+command backgrounds is now **built** — `process_group(0)` at spawn and `killpg` at both kill paths, with
+the test watched red on the ubuntu job before the code existed (the paragraph above has the mechanism
+and the failure it printed). The second item this paragraph used to carry — the same line-ending
+sentence for `apply_patch` — is built; see the paragraph above.
 
 **The terminal side was measured too** (`docs/windows.md` §1–§3, all four items of the
 checklist at its end). Two things came out of it that the next session should not re-derive:
@@ -1841,8 +1848,9 @@ how an EOF on a pipe already ends a run. The key thread is untouched on purpose:
 reports a vanished console itself, and nothing on this machine can drive the Windows key path (the
 capture hook reads lines from a pipe, and there is no pty without a console), so the one path that
 cannot be exercised here is left exactly as it was. `libc` moved from the dev-dependencies to a
-Unix-only dependency for it, which adds no crate -- it was already in the tree -- and it also removes
-half the cost of the Unix process-group kill `docs/windows-tooling.md` §6.1 leaves open.
+Unix-only dependency for it, which adds no crate -- it was already in the tree -- and it also removed
+half the cost of the Unix process-group kill that `docs/windows-tooling.md` §6.1 has since closed with
+it.
 
 The test is Unix-only because the bug is: `tests/tty_hangup.rs` gives a child a real pty as its
 standard input, output and error (so `isatty` is true and the interactive path -- the one with the key
@@ -1872,11 +1880,12 @@ small fixes (backslash normalisation, the `taskkill /T` process-tree kill, code-
 output), and the PowerShell facts in the system prompt — and the two tests that paragraph called
 unwritten exist and pass: `a_quoted_command_reaches_the_shell_verbatim` and
 `a_powershell_script_runs_from_the_file_it_was_written_to` (argument round trip, non-ASCII script text)
-in `tests/agent_loop.rs`, and `a_killed_command_takes_its_children_with_it` for the tree kill. What is
-genuinely still open is the shorter list §7 ends with: a Unix process-group kill for backgrounded work,
-recorded there with what is missing and why the fix is not free. The line-ending sentence for
-`apply_patch` (§6.4) was the other item on that list and is now built, with the fact it measured: a
-patch line cannot carry a `\r`, so the sentence names `edit` instead.
+in `tests/agent_loop.rs`, and `a_killed_command_takes_its_children_with_it` for the tree kill. What was
+genuinely open on that list — a Unix process-group kill for backgrounded work — is **built now**: a
+process group of its own at spawn and `killpg` at both kill paths, with its own test watched red on the
+ubuntu job and green after the fix, `taskkill /T` being what Windows already had. The line-ending
+sentence for `apply_patch` (§6.4) was the other item on that list and is now built, with the fact it
+measured: a patch line cannot carry a `\r`, so the sentence names `edit` instead.
 
 **Windows terminal behaviour has now been measured, in a private console, and is kept here as
 history rather than as an open item — nothing in it turned out to be broken.** Read
