@@ -121,7 +121,15 @@ function loadViewer() {
         route: String(url),
         body: init && init.body ? String(init.body) : "",
       });
-      return { ok: true, status: 200, text: async () => "", json: async () => ({}) };
+      // `headers` because the file route answers with the cut and the size of what it served, and
+      // the page reads them: a stub without one would fail a check for a reason of its own making.
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        text: async () => "",
+        json: async () => ({}),
+      };
     },
     document: {
       getElementById(id) {
@@ -1270,6 +1278,106 @@ check("the feed trace says what the page cannot work out for itself", () => {
   eq(line.includes("3 blocks"), true, "how many became blocks");
   eq(line.includes("status seq 12"), true, "which frame was last");
   eq(viewer.debugFeed, false, "off unless the address asks for it");
+});
+
+console.log("the paths in a transcript");
+
+check("a path is cut out of the line around it, and a word that only looks like one is not", () => {
+  // The rule in full, on the shapes a tool block actually contains. Every entry here is a case
+  // that was argued about rather than an example that happened to pass: `e.g.` and `and/or` are
+  // why the rule has an extension length and a segment count at all.
+  const parts = viewer.pathParts(
+    "wrote C:\\work\\src\\main.rs and tests/say.rs:412:3, see and/or e.g. 4/2 https://x.dev/a/b.rs"
+  );
+  eq(
+    parts.filter((p) => p.path !== undefined),
+    [
+      { path: "C:\\work\\src\\main.rs", line: 0 },
+      { path: "tests/say.rs", line: 412 },
+    ],
+    "the two real paths, with the line a grep hit was on"
+  );
+  // Joined back together, nothing is lost or doubled, with one deliberate exception: the column of
+  // a `:line:column` hit is dropped -- the route opens a file at a line, and a character offset
+  // inside it was not asked for. This assertion is what makes the splitter a splitter rather than a
+  // renderer that eats the text between two paths.
+  eq(
+    parts.map((p) => (p.path === undefined ? p.text : p.path + (p.line ? ":" + p.line : ""))).join(""),
+    "wrote C:\\work\\src\\main.rs and tests/say.rs:412, see and/or e.g. 4/2 https://x.dev/a/b.rs",
+    "the pieces put back together are the line that came in, minus the column"
+  );
+
+  // Absolute and relative, and the two shapes with no separator at all that are still files.
+  eq(viewer.asPath("/tmp/flint/spill/1.txt"), { path: "/tmp/flint/spill/1.txt", line: 0 }, "an absolute path");
+  eq(viewer.asPath("./src/bin"), { path: "./src/bin", line: 0 }, "an explicitly relative path");
+  eq(viewer.asPath("src/bin"), null, "one separator and no extension is left as text");
+  eq(viewer.asPath("and/or"), null, "which is what keeps `and/or` out of it");
+  eq(viewer.asPath("a/b/c"), { path: "a/b/c", line: 0 }, "three segments are a path");
+  eq(viewer.asPath("Cargo.toml"), { path: "Cargo.toml", line: 0 }, "a name with an extension");
+  eq(viewer.asPath("e.g."), null, "a prose abbreviation is not a file");
+  eq(viewer.asPath("4/2"), null, "a ratio is not a directory");
+  eq(viewer.asPath("2024/09/17"), null, "a date is not a directory");
+  eq(viewer.asPath("https://api.github.com/repos/x/y.rs"), null, "a URL is not a path");
+});
+
+check("a rendered tool block makes its paths buttons, and pressing one opens the panel", () => {
+  // The one check that runs the *view* half: the block is built, walked for the buttons the
+  // splitter's rule produced, and pressed. What the press must do is ask the route for the path it
+  // named -- encoded, because `?path=` with a raw backslash or space is a different request.
+  eq(viewer.fileRoute("src/main.rs"), "/file?path=src%2Fmain.rs", "the path, percent-encoded");
+  eq(
+    viewer.fileRoute("C:\\work\\a b.txt"),
+    "/file?path=C%3A%5Cwork%5Ca%20b.txt",
+    "a backslash, a colon and a space all travel escaped"
+  );
+
+  const block = viewer.renderBlock({
+    kind: "tool", id: "call_1", name: "write", args: '{"path":"src/main.rs"}',
+    output: "wrote src/main.rs", done: true, ok: true,
+  });
+  const buttons = [];
+  const walk = (node) => {
+    if (!node) return;
+    if (node.tag === "button" && node.className === "path") buttons.push(node);
+    for (const child of node.children || []) walk(child);
+  };
+  walk(block);
+  // Three: the arguments appear twice in one block by design -- clipped in the summary, whole in
+  // the `pre` under it -- and the path in the output is the third.
+  eq(buttons.length, 3, "the arguments twice and the output once");
+  eq(buttons[1].textContent, "src/main.rs", "the button is the path, not a label for it");
+
+  buttons[1].handlers.click[0]({ preventDefault() {}, stopPropagation() {} });
+  // The harness has no run behind it (`canSend` is false, as it is for a dropped session file), so
+  // what is asserted here is the panel and the honest sentence. The fetch is the browser harness's
+  // to check, against a real listener.
+  eq(viewer.__node("preview").hidden, false, "the panel is on screen");
+  eq(
+    viewer.__node("preview-path").children.map((n) => n.textContent).join(""),
+    "src/main.rs",
+    "the header shows the path that was pressed"
+  );
+  eq(
+    /no flint behind it/.test(viewer.__node("preview-text").textContent),
+    true,
+    "and says why it cannot read it: " + viewer.__node("preview-text").textContent
+  );
+});
+
+check("the preview says which line, and how much of a cut file is here", () => {
+  // The two headers the route adds rather than the transport. Without them the panel would show
+  // the first 512 KB of a 40 MB log and say nothing about the other 39.5 MB.
+  const headers = (map) => ({ get: (name) => (name in map ? map[name] : null) });
+  eq(viewer.previewNote({ headers: headers({}) }, "one\ntwo\n", 0), "8 bytes", "a small file is its size");
+  eq(viewer.previewNote({ headers: headers({}) }, "one\ntwo\n", 12), "line 12", "the line it opened at");
+  eq(
+    viewer.previewNote({ headers: headers({ "X-Flint-Cut": "524288", "X-Flint-Size": "41943040" }) }, "x", 7),
+    "line 7 · the first 512 KB of 40 MB",
+    "both facts, in the order a reader wants them"
+  );
+  eq(viewer.bytesLabel(0), "0 bytes", "bytes");
+  eq(viewer.bytesLabel(1536), "2 KB", "kilobytes, rounded");
+  eq(viewer.bytesLabel(12 * 1024 * 1024), "12 MB", "megabytes");
 });
 
 if (failures) {

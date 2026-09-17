@@ -21,6 +21,7 @@
 
 const { spawn } = require("child_process");
 const fs = require("fs");
+const http = require("http");
 const os = require("os");
 const path = require("path");
 
@@ -67,7 +68,7 @@ function flintBinary() {
 
 /// A flint to drive: a scratch home, a provider that is never called (nothing here needs a model),
 /// and two conversations on disk so the sidebar has rows and a destructive row has candidates.
-function scratch() {
+function scratch(baseUrl) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "flint-browser-"));
   const cwd = path.join(home, "work");
   fs.mkdirSync(path.join(home, "sessions"), { recursive: true });
@@ -75,7 +76,7 @@ function scratch() {
   fs.writeFileSync(
     path.join(home, "config.toml"),
     'default_provider = "stub"\n\n[[providers]]\nname = "stub"\n' +
-      'base_url = "http://127.0.0.1:9/v1"\nmodel = "stub-model"\n' +
+      `base_url = "${baseUrl}"\nmodel = "stub-model"\n` +
       'models = ["stub-model-2", "stub-model-3"]\napi_key = "not-a-real-key"\n'
   );
   for (const [id, prompt] of [["111-1", "the older question"], ["222-1", "the newer question"]]) {
@@ -90,6 +91,50 @@ function scratch() {
   }
   return { home, cwd, log: path.join(home, "stdout.txt") };
 }
+
+/// A model the harness can script, so a browser claim can be made about a *turn*.
+///
+/// The shape is the Rust stub provider's (`tests/task.rs`): one `data:` line per delta, then a
+/// `finish_reason`, then `[DONE]`. Answers by request number with the last one repeating, because
+/// a turn with a tool call in it is two requests at least -- the call, then the prose that ends it.
+/// Nothing is asserted here about the model: this exists so the transcript has a tool block in it,
+/// with real paths, that the page can be asked to open.
+function stubModel(bodies) {
+  let step = 0;
+  const server = http.createServer((request, response) => {
+    request.on("data", () => {});
+    request.on("end", () => {
+      const body = bodies[Math.min(step, bodies.length - 1)] || "";
+      step += 1;
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end(body);
+    });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, "127.0.0.1", () =>
+      resolve({ server, port: server.address().port })
+    );
+  });
+}
+
+/// One SSE body, as the wire carries it: every line followed by a blank line.
+const sse = (...lines) => lines.map((line) => `${line}\n\n`).join("");
+
+const prose = (text) =>
+  sse(
+    `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}`,
+    `data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+    "data: [DONE]"
+  );
+
+const toolCall = (name, args) =>
+  sse(
+    `data: ${JSON.stringify({
+      choices: [{ delta: { tool_calls: [{ index: 0, id: "call_1", function: { name, arguments: JSON.stringify(args) } }] } }],
+    })}`,
+    `data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+    "data: [DONE]"
+  );
 
 /// Start flint with `--web` and hand back the URL it printed.
 ///
@@ -339,9 +384,18 @@ async function main() {
     console.log(`build first: cargo build (${flintBinary()} is not there)`);
     process.exit(2);
   }
-  const where = scratch();
+  // The scripted model: a file is written, read back, and missed, and a grep prints a line number
+  // -- the four shapes a path appears in a transcript. Then prose, which ends the turn.
+  const model = await stubModel([
+    toolCall("write", { path: "notes.txt", content: "one\ntwo\nthree\n" }),
+    toolCall("read", { path: "notes.txt" }),
+    toolCall("read", { path: "gone.txt" }),
+    toolCall("grep", { pattern: "two", path: "." }),
+    prose("all done"),
+  ]);
+  const where = scratch(`http://127.0.0.1:${model.port}/v1`);
   const flint = await startFlint(where);
-  console.log(`flint: ${flint.url}\n  home: ${where.home}\n  browser: ${binary}\n`);
+  console.log(`flint: ${flint.url}\n  home: ${where.home}\n  browser: ${binary}\n  model: port ${model.port}\n`);
 
   const chrome = await startBrowser(binary, flint.url, where.home);
   const page = await attach(chrome.page);
@@ -794,10 +848,193 @@ async function main() {
       `run printed: ${JSON.stringify(gained.slice(0, 200))} | transcript: ` +
         JSON.stringify(await page.js(`(document.getElementById("doc") || {}).textContent || ""`))
     );
+    // ---- a path in the transcript ------------------------------------------
+    // The turn here is scripted: a write, a read, a read of a file that is not there, and a grep
+    // that prints a line number. Four tool blocks, therefore four shapes a path takes, and every
+    // claim below is about pressing one. What the panel must show is the *file* -- read by the run
+    // over `GET /file`, from the directory the run is working in -- and not something the page
+    // worked out for itself.
+    const beforeTurn = before();
+    await page.js(`document.getElementById("message").focus(); true`);
+    await page.send("Input.insertText", { text: "leave me a note" });
+    await page.click("#send");
+    const drew = await page
+      .waitFor(
+        `document.querySelectorAll("details.tool button.path").length >= 4`,
+        "the paths in the tool blocks",
+        60
+      )
+      .catch(() => null);
+    const labels = await page.js(
+      `Array.from(document.querySelectorAll("details.tool button.path"))
+         .map((b) => ({ text: b.textContent, title: b.title }))`
+    );
+    check(
+      "a tool block's paths are buttons, and a grep hit carries its line",
+      drew !== null &&
+        Array.isArray(labels) &&
+        labels.some((b) => b.text === "notes.txt") &&
+        labels.some((b) => b.text === "gone.txt") &&
+        labels.some((b) => /^notes\.txt:\d+$/.test(b.title)),
+      `terminal: ${JSON.stringify(flint.text().slice(beforeTurn).slice(0, 120))}, ` +
+        `paths: ${JSON.stringify(labels)}`
+    );
+
+    // The block a path sits in is a `summary`, and pressing a path must not also fold the block
+    // open: the file would appear and the line that named it would slide away under it.
+    const folded = (text, nth = 0) =>
+      page.js(
+        `(() => { const all = Array.from(document.querySelectorAll("details.tool button.path"))
+            .filter((b) => b.textContent === ${JSON.stringify(text)});
+          const b = all[${nth}]; return b ? b.closest("details").open : null; })()`
+      );
+    // Aimed by a predicate rather than by position, because the same path appears in more than one
+    // block -- its own arguments twice, the line a grep printed once -- and the claim is about a
+    // *particular* one of them.
+    const aim = async (find, id) => {
+      const tagged = await page.js(
+        `(() => { const b = Array.from(document.querySelectorAll("details.tool button.path"))
+            .find((b) => ${find});
+          if (!b) return null; b.id = ${JSON.stringify(id)}; return true; })()`
+      );
+      if (tagged) await page.click(`#${id}`);
+      return tagged === true;
+    };
+    const called = (text) => `b.textContent === ${JSON.stringify(text)}`;
+    const theHit = `/^notes\\.txt:\\d+$/.test(b.title)`;
+
+    const wasFolded = await folded("notes.txt");
+    const pressed = await aim(called("notes.txt"), "harness-path");
+    const readIt = await page
+      .waitFor(
+        `document.getElementById("preview-text").textContent.includes("three")
+           ? { hidden: document.getElementById("preview").hidden,
+               path: document.getElementById("preview-path").textContent,
+               note: document.getElementById("preview-note").textContent,
+               body: document.getElementById("preview-text").textContent,
+               url: location.pathname + (location.search.includes("token=") ? "?token=…" : "") }
+           : null`,
+        "the file's own bytes in the panel",
+        30
+      )
+      .catch(() => null);
+    check(
+      "pressing a path shows the file the run just wrote",
+      pressed && !!readIt && readIt.body === "one\ntwo\nthree\n" && readIt.path === "notes.txt",
+      `panel: ${JSON.stringify(readIt)}`
+    );
+    check(
+      "and the page stayed where it was: the file did not navigate it away",
+      !!readIt && readIt.url === "/?token=…",
+      `address: ${JSON.stringify(readIt && readIt.url)}`
+    );
+    check(
+      "the panel says how big the file is, and where a grep hit was",
+      !!readIt && readIt.note === "14 bytes",
+      `note: ${JSON.stringify(readIt && readIt.note)}`
+    );
+    check(
+      "pressing a path inside a tool block does not fold the block",
+      wasFolded === false && (await folded("notes.txt")) === false,
+      `open before: ${wasFolded}, after: ${await folded("notes.txt")}`
+    );
+    // Kept outside the scratch home, which a green run deletes: what the panel looks like beside
+    // the conversation is a judgement no claim here makes, and a picture is how it gets made.
+    const shotOfPanel = await page.send("Page.captureScreenshot", { format: "png" });
+    if (shotOfPanel.result && shotOfPanel.result.data) {
+      const file = path.join(os.tmpdir(), "flint-preview.png");
+      fs.writeFileSync(file, Buffer.from(shotOfPanel.result.data, "base64"));
+      console.log(`        screenshot: ${file}`);
+    }
+
+    // A file that changed under the reader: the reload button is the one control that re-reads it,
+    // and what it must show is the new bytes rather than the ones the page already had.
+    fs.writeFileSync(path.join(where.cwd, "notes.txt"), "four\nfive\n");
+    await page.click("#preview-reload");
+    const reread = await page
+      .waitFor(
+        `document.getElementById("preview-text").textContent.includes("five")
+           ? { body: document.getElementById("preview-text").textContent,
+               note: document.getElementById("preview-note").textContent }
+           : null`,
+        "the file read again",
+        30
+      )
+      .catch(() => null);
+    check(
+      "reload reads the file again rather than redrawing what it had",
+      !!reread && reread.body === "four\nfive\n" && reread.note === "10 bytes",
+      `panel: ${JSON.stringify(reread)}`
+    );
+
+    // The line a grep printed: the same file, opened where the hit was. It sits in the block's
+    // *output*, and an output inside a closed block is not on screen at all -- so the block is
+    // opened first, which is what a reader does and also what proves a hidden button is not
+    // quietly pressable.
+    const grepClosed = await page.js(
+      `(() => { const block = Array.from(document.querySelectorAll("details.tool"))
+          .find((d) => (d.querySelector("summary") || {}).textContent.includes("grep"));
+        if (!block) return null; block.querySelector("summary").id = "harness-grep";
+        return block.open; })()`
+    );
+    await page.click("#harness-grep");
+    const grepOpen = await page.js(`document.getElementById("harness-grep").closest("details").open`);
+    check(
+      "a hit inside a block's output is there to press once the block is open",
+      grepClosed === false && grepOpen === true,
+      `open: ${grepClosed} -> ${grepOpen}`
+    );
+    await aim(theHit, "harness-line");
+    const atLine = await page
+      .waitFor(
+        `document.getElementById("preview-note").textContent.startsWith("line")
+           ? { note: document.getElementById("preview-note").textContent,
+               body: document.getElementById("preview-text").textContent }
+           : null`,
+        "the line the hit was on",
+        30
+      )
+      .catch(() => null);
+    check(
+      "a hit's line travels with the path, and the panel opens there",
+      !!atLine && /^line \d+/.test(atLine.note) && atLine.body === "four\nfive\n",
+      `panel: ${JSON.stringify(atLine)}`
+    );
+
+    // A file that is not there: the route's sentence, in the panel, where the file would have been.
+    await aim(called("gone.txt"), "harness-gone");
+    const refused = await page
+      .waitFor(
+        `document.getElementById("preview-note").textContent.startsWith("HTTP 4")
+           ? { note: document.getElementById("preview-note").textContent,
+               body: document.getElementById("preview-text").textContent }
+           : null`,
+        "the refusal",
+        30
+      )
+      .catch(() => null);
+    check(
+      "a path that is not there is refused in the route's own words, not with an empty panel",
+      !!refused && /nothing at/.test(refused.body) && refused.body.includes("gone.txt"),
+      `panel: ${JSON.stringify(refused)}`
+    );
+
+    // Escape, from wherever the reader is: the panel closes and the transcript is where it was.
+    await page.key("Escape", 27);
+    const closed = await page.js(
+      `({ hidden: document.getElementById("preview").hidden,
+          transcript: (document.getElementById("doc") || {}).textContent.length })`
+    );
+    check(
+      "Escape closes the panel and leaves the reading alone",
+      !!closed && closed.hidden === true && closed.transcript > 0,
+      `after Escape: ${JSON.stringify(closed)}`
+    );
   } finally {
     page.close();
     chrome.child.kill();
     flint.child.stdin.end();
+    model.server.close();
     await sleep(400);
     flint.child.kill();
   }

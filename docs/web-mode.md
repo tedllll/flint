@@ -218,7 +218,7 @@ would disagree with.
 
 ## 6. The HTTP surface, small on purpose
 
-Four routes. No cookies, no HTTP/2, no TLS, no keep-alive, no streaming request bodies.
+Seven routes. No cookies, no HTTP/2, no TLS, no keep-alive, no streaming request bodies.
 
 | Route | Returns |
 |---|---|
@@ -228,11 +228,12 @@ Four routes. No cookies, no HTTP/2, no TLS, no keep-alive, no streaming request 
 | `POST /message` | one message from the browser, into the steering channel |
 | `POST /report` | one command *read* from the browser: same channel, and its answer is captured with the terminal quiet (§11) |
 | `GET /sessions` | the conversations `/resume` can reach, numbered the way `/resume` numbers them |
+| `GET /file` | a file the transcript named, for the preview drawer (§12). `?path=` takes what the transcript says, including a trailing `:line` or `:line:column`; a relative path is resolved against the run's own working directory. `text/plain` with `X-Flint-Line` when a line was named, and `X-Flint-Cut`/`X-Flint-Size` when the file was longer than the preview cap |
 | *`event: sessions`* | not a route but its counterpart: the list has changed, re-read it |
 | *`event: state`* | the run's own configuration: provider, model, what each provider offers, the toggles, and the command list with §8's class for each row — a row also carries `values` when the page may send that command with an argument the frame names (a *read* on a `panel` row, a line the page types for you on a `selector`), `fields` when the page may collect its answers (one entry per word the line wants, each with the input's kind, the argument's name, and whether the command works without it), and `from` when it destroys something and the argument is one of a list (§11) |
 | `type: command` | what a command answered, on the same stream as the turn's events: `input` and `text` — which is also what a header button's answer arrives on. Carries `panel: true` when the page asked to read it rather than typing it, and `input` is the command's own `send` rather than the line in the one case the line carries a credential (§11) |
 
-**All six are implemented.** `/session` and `/events` read the session path and the event feed
+**All seven are implemented.** `/session` and `/events` read the session path and the event feed
 through a shared handle, which is what lets `/new` and `/resume` move an open window to the
 conversation the terminal moved to. `/sessions` is the sidebar's source and goes through
 `session::list` — the same function `resolve_session` uses — so the numbers in the page *are*
@@ -970,4 +971,90 @@ from the keyboard, which is the path a person takes through it, and what it send
 run. Long answers and reconnection, which are §11's own performance section and were measured on macOS
 over a different harness, are the other half — and the composer at the *keyboard* was measured in the
 earlier pass, with the button driven here.
+
+---
+
+## 12. A file the transcript names, opened beside it
+
+Asked for directly, and the complaint was precise: *"the file paths in the conversation are plain text
+and cannot be clicked, which is a nuisance."* Everything a run does leaves paths in the transcript — the
+arguments of a `read`, the `notes.txt:2:` lines a `grep` prints, the name at the end of a `write` — and
+the only way to see any of them was to leave the browser, find the file by hand and open it in an editor.
+DSH's page answers the same complaint its own way (`dsh-client-ui-reference`: an `@` mention, pressed,
+opens the file in the right sidebar as a document preview). What follows is that idea, with none of the
+machinery: no tab system, no renderer registry, no file tree — one route, one panel.
+
+**A path is a button, and the panel is a column of the layout.** Three decisions carried it:
+
+- **`GET /file?path=`, not a route path.** The route table stays literal and tiny, which is §6's whole
+  argument; a path parameter is a *parameter*, not a new shape of route, and the route still takes no
+  path from the URL's structure — so §6's "nothing is served from disk" line stays true in the form that
+  matters (nothing is served that a *tool result already in the transcript* did not name).
+- **Relative paths resolve against the run's working directory**, which is the only reading that can be
+  right: the transcript's `notes.txt` is the `notes.txt` of the process that wrote the line. It arrives
+  in `Viewer::asked` from `agent.cwd()` — a `--cwd` moves the meaning of every relative path in a
+  conversation, and this follows it rather than guessing from the page's own URL.
+- **The panel is a grid column, and a browser is what settled that.** The first version was
+  `position: fixed` over the right edge, on the argument that a column would reflow the reading. The
+  harness rejected it in one press: with the panel open, `elementFromPoint` at the *next* path's centre
+  answered `pre#preview-text` — the panel covered the block it had just been opened from, so the second
+  path in a turn could not be pressed at all without closing the first. A column narrows the transcript
+  instead, which is also what DSH's sidebar does. The check that found it is in the harness (the same
+  coverage check every press goes through), and it is the reason this feature has a claim about pressing
+  *two* paths and not just one.
+
+**What a cut file says, and where it says it.** The preview cap is 512 KB of a file that may be any
+size, so the response carries `X-Flint-Cut` (what was sent) and `X-Flint-Size` (what the file is), and
+the *page* draws the note — "the first 512 KB of 40 MB" — beside the path. The alternative, a sentence
+inside the body, would be text the file does not contain in a `<pre>` that promises the file's own
+bytes, which is the same fault as a Markdown renderer that invents markup. Nothing is refused for
+being long: half of a 40 MB log, honestly labelled, is what a reader wants. What *is* refused is a file
+this page cannot show as text: not valid UTF-8, a directory, or over 64 MB (the one case where reading
+it is the wrong thing to do even to show a little).
+
+**The capability question, answered rather than dodged.** A token holder can already `POST /message` and
+run the agent, so serving any file the user can read adds no capability whatsoever — §4's boundary is
+unchanged. What was refused on purpose is a cwd jail: it would be a boundary that *looks* like one, and
+the honest statement is the one §4 already makes. The page's own rule is unchanged too — every piece of
+a path still goes in through `textContent`, because a file called `<script>` is a filename here like any
+other, and there is a policy test (`a_path_opens_in_this_page_or_not_at_all`) that forbids the two ways
+a path could escape the page: navigating to it, and `window.open`.
+
+**Where the line between a path and prose is drawn, and why it is a rule and not a guess.** A candidate
+is a run of characters with no whitespace, quote, bracket, comma or backtick in it; it is a path if it is
+absolute, or its last segment has an extension of two to eight characters, or it has three or more
+segments. The two edges that decided it: `e.g.` and `i.e.` are why a one-character "extension" is not
+one (`foo.c` is the price), and `and/or`, `read/write` and `24/7` are why one separator with no extension
+is not one (`src/bin` is the price). A `//` means a URL. A trailing `:line` or `:line:column` is the line
+a `grep` hit was on and comes back as a line, not as part of the name. **Only tool blocks are split this
+way** — prose is where those abbreviations live, and a linkifier that guesses turns a sentence into a
+wrong file. Every one of those edges is a check in `scripts/web-view-test.js`, and one of them was a real
+bug caught there: `segments.slice(1).every(…)` is `true` for a name with no separator, which swallowed
+every bare filename until `Cargo.toml` was in the test.
+
+**What was measured, in a real browser (2026-09-17).** Ten claims in
+`scripts/browser-controls-test.js`, against a run whose turns are scripted by a stub model the harness
+starts itself (the same SSE shape `tests/task.rs` serves, so a browser claim can be about a *turn* —
+a tool call, its result, and the prose that ends it — rather than about an empty transcript). The
+transcript held a `write`, a `read` of that file, a `read` of a file that is not there, and a `grep`,
+which is four shapes of path:
+
+| Claim | How | Result |
+|---|---|---|
+| A tool block's paths are buttons, and a grep hit carries its line | the blocks' `.path` buttons, after a scripted turn | four buttons; `notes.txt`, `gone.txt`, and one whose `title` is `notes.txt:2` — the line, in the tooltip rather than in the label |
+| Pressing a path shows the file the run just wrote | a real click, then the panel | `one\ntwo\nthree\n` — the *file's* bytes, read over `GET /file` from the run's cwd, not something the page worked out |
+| The page stays where it was | `location` after the press | `/?token=…`, unchanged: the file did not navigate the page |
+| The note says the size | the panel's header | `14 bytes` |
+| Pressing a path inside a block does not fold the block | the `details`' `open`, before and after | `false` both times: the press is `preventDefault`ed, so the block does not slide away under the file it just opened |
+| Reload reads the file again | the file rewritten on disk, then the button | `four\nfive\n` and `10 bytes` — the new bytes, not the ones the page already had |
+| A hit inside a block's output is there to press once the block is open | the grep block's `summary`, then the hit | closed → open, and only then was the hit's centre actually on screen — the check that found the fixed-panel defect |
+| A hit's line travels with the path | pressing `notes.txt:2` | the note reads `line 2`, and the file's bytes are beside it |
+| A path that is not there is refused in the route's own words | pressing `gone.txt` | the panel holds `nothing at gone.txt: …` with `HTTP 404` beside it, rather than an empty panel |
+| Escape closes the panel and leaves the reading alone | a real `Escape` | hidden, with the transcript still there |
+
+**Two residues, both deliberate.** A file that is not valid UTF-8 is refused rather than shown as
+replacement characters: a lossy conversion would print something no editor would show, and "this is not
+text this page can show" is a better answer than a screen of U+FFFD. And there is no highlight on the line a
+hit came from — the panel scrolls to it and says which line it is, and a highlight would be a second
+render path over the file's own text.
 

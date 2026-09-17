@@ -1235,6 +1235,22 @@ line no longer crosses the composer; **the page's own log, written by default** 
 the hand's code made the boot's first paint throw, taking the sidebar, the sessions and the feed
 with it; and `/stop`, the interrupt as a short word, reachable from the composer today.
 
+**And the complaint that opened the next round: a file path in the conversation could not be
+clicked — fixed, 2026-09-17.** *"他对话里显示的文件真实地址，没做超链接，不能直接点开文件"*. Every path a
+run leaves in the transcript is now a button: `GET /file?path=` reads the file the line names —
+relative to the **run's** working directory, with a trailing `:line` opening at that line — and the
+page shows it in a panel beside the conversation, with the size, the file's own bytes and a
+`reload`. The panel is a column of the grid and not a fixed overlay, which a browser settled: the
+overlay covered the very block the first path was pressed in, so the second path in a turn could not
+be pressed at all. `docs/web-mode.md` §12 has the rule for what in a line counts as a path, the two
+capability arguments (why serving any readable file adds nothing, and why a cwd jail was refused),
+and the ten browser claims that hold it — including one `every()` on an empty array that swallowed
+every bare filename until `Cargo.toml` was in the test.
+
+**Still open in this section, and it is what §9 was written about:** the page cannot see the run's
+*background work* — the `task` children and the background commands §4 of `docs/agents.md` built —
+which is the next round.
+
 ### 10. flint as a function a program can call — **done: steps 1–7 landed (B7 included, and the duration half of B5)**
 
 flint answers; it cannot yet be *trusted as a function*. A caller that acts on the result — writes a

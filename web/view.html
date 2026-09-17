@@ -173,12 +173,16 @@
        width is a variable so that hand can move it, and `min(var(--side), 60vw)` is what stops
        a widened sidebar from eating the transcript on a narrow window -- a clamp in CSS rather
        than a listener on every resize. The 5px column is the grab area: a hairline seam is a
-       pixel hunt, and the sidebar's own border is still the line you see. */
-    grid-template-columns: min(var(--side, 250px), 60vw) 5px minmax(0, 1fr);
+       pixel hunt, and the sidebar's own border is still the line you see.
+       The fourth column is the file preview, and it is a column rather than a panel floating over
+       the reading: measured in a browser, a fixed panel covered the very block the path was pressed
+       in, so the second path in a turn could not be pressed at all without closing the first. A
+       column narrows the transcript instead, which is what DSH's own preview does. */
+    grid-template-columns: min(var(--side, 250px), 60vw) 5px minmax(0, 1fr) auto;
     grid-template-rows: minmax(0, 1fr) auto;
     height: 100vh;
   }
-  .app.plain { grid-template-columns: minmax(0, 1fr); }
+  .app.plain { grid-template-columns: minmax(0, 1fr) auto; }
   /* The grip has no visible width of its own, only a highlight on hover so that it is
      discoverable at all, and the resize cursor. Every cursor on the page becomes that one
      while a drag is running: the pointer is captured, so the moves keep arriving here while
@@ -369,6 +373,49 @@
   .notice { color: var(--warn); font-size: 13.5px; margin: 8px 0; }
   .notice.error { color: var(--bad); }
   .notice.damage { color: var(--bad); border-left: 2px solid var(--bad); padding-left: 8px; }
+  /* A path in a tool block: a button that opens the file, drawn as text so the block still reads
+     like the terminal's line rather than like a page full of chrome. The dotted underline is the
+     only sign it is pressable -- discovered by hovering, which is what a reader does with a path
+     they want to look at. */
+  button.path {
+    font: inherit; color: inherit; background: none; border: 0; padding: 0; margin: 0;
+    cursor: pointer; text-align: inherit;
+    border-bottom: 1px dotted var(--dim);
+  }
+  button.path:hover, button.path:focus { color: var(--user); border-bottom-color: var(--user); }
+  /* The file, opened beside the conversation. A column of the layout, not a panel over it -- see
+     the grid above for the measurement that settled it -- and deliberately not resizable: it has one
+     width, and the reader closes it rather than negotiating with it. DSH's page opens a file
+     reference in a document preview beside the conversation; this is that idea with none of the
+     machinery: no tabs, no renderer registry, one route and this panel. */
+  #preview {
+    grid-column: 4; grid-row: 1;
+    width: min(720px, 45vw);
+    display: flex; flex-direction: column; min-height: 0;
+    background: var(--panel); border-left: 1px solid var(--line);
+  }
+  .app.plain #preview { grid-column: 2; }
+  #preview[hidden] { display: none; }
+  .preview-head {
+    display: flex; gap: 10px; align-items: baseline;
+    padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: 12.5px;
+  }
+  /* The directories dim and the file's own name in full ink, which is the half a reader is
+     looking for. The directories are the part that gives way when the path is wider than the row;
+     `title` on the row carries the whole thing. */
+  #preview-path { display: flex; min-width: 0; flex: 1 1 auto; }
+  #preview-path .dirs { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #preview-path .name { color: var(--fg); white-space: nowrap; }
+  #preview-note { color: var(--dim); white-space: nowrap; flex: 0 0 auto; }
+  .preview-head button {
+    font: inherit; font-size: 12.5px; color: var(--dim); background: none; border: 0; padding: 0;
+    cursor: pointer; flex: 0 0 auto;
+  }
+  .preview-head button:hover { color: var(--user); }
+  #preview-text {
+    flex: 1 1 auto; margin: 0; padding: 10px 12px; overflow: auto;
+    white-space: pre-wrap; word-wrap: break-word; font-size: 13px;
+  }
   #status {
     grid-column: 1 / -1;
     background: var(--panel); border-top: 1px solid var(--line);
@@ -462,6 +509,20 @@
   <!-- The second grid row: the terminal's status strip, in the same place the terminal puts it,
        and out of the composer's way. -->
   <div id="status" hidden></div>
+
+  <!-- A file a tool block named, opened beside the conversation. Its own column of the grid rather
+       than a panel over the reading, and drawn here -- inside the app -- so that is true by
+       construction. Hidden until a path is pressed; the column it would occupy is gone while it is
+       hidden, because a `display: none` grid item takes no cell. -->
+  <aside id="preview" hidden>
+    <div class="preview-head">
+      <span id="preview-path"></span>
+      <span id="preview-note"></span>
+      <button id="preview-reload" type="button" title="read it again">reload</button>
+      <button id="preview-close" type="button" title="close (Esc)">close</button>
+    </div>
+    <pre id="preview-text"></pre>
+  </aside>
 </div>
 
 <script>
@@ -855,6 +916,77 @@ function applyText(doc, whole) {
 
 function clip(s, n) {
   return s.length > n ? s.slice(0, n) + "…" : s;
+}
+
+/// The pieces of a string that look like a path, and the plain text between them.
+///
+/// A pure splitter, so the one rule this page has about paths can be tested under Node without a
+/// DOM. It is deliberately dumb, and the whole of it is written down here rather than left to a
+/// regex nobody reads again:
+///
+///   * a candidate is a run of characters with no whitespace, quote, bracket, brace, angle
+///     bracket, comma, semicolon or backtick in it -- so JSON arguments and English sentences
+///     both come apart in the right places;
+///   * it is a path if it is **absolute** (`/…`, `./…`, `../…`, `~…`, `C:\…`), or its last
+///     segment has an extension of two to eight characters, or it has three or more segments. One
+///     separator and no extension is left as text on purpose: `and/or`, `read/write`,
+///     `pass/fail` and `24/7` all look like `src/bin` from here, and this page cannot tell them
+///     apart without asking the disk;
+///   * a one-character "extension" is prose, not a file: `e.g.` and `i.e.` are the reason, and
+///     `foo.c` is the price -- it stays text;
+///   * a `//` in it means it is a URL, not a path;
+///   * trailing `.` and `:` are punctuation rather than part of a name, and a trailing `:N` or
+///     `:N:C` is the line a `grep` hit was found on: it comes back as `line` rather than as part
+///     of the path, so the preview can open where the hit was.
+///
+/// Only tool blocks are split this way. Prose is left as prose, because prose is where `e.g.` and
+/// `and/or` live.
+function pathParts(text) {
+  const parts = [];
+  let last = 0;
+  const candidates = String(text).matchAll(/[^\s"'`()\[\]{}<>,;]+/g);
+  for (const match of candidates) {
+    const found = asPath(match[0]);
+    if (!found) continue;
+    if (match.index > last) parts.push({ text: text.slice(last, match.index) });
+    parts.push(found);
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) parts.push({ text: text.slice(last) });
+  return parts;
+}
+
+/// One candidate token as a path, or `null` when it is a word that merely looks like one.
+function asPath(token) {
+  let path = token.replace(/[.:]+$/, "");
+  let line = 0;
+  const numbered = /^(.*?):(\d+)(?::\d+)?$/.exec(path);
+  if (numbered) {
+    path = numbered[1];
+    line = Number(numbered[2]);
+  }
+  if (path.length < 3 || path.indexOf("//") !== -1) return null;
+  const segments = path.split(/[\\/]+/);
+  const name = segments[segments.length - 1];
+  const absolute = /^([\\/]|~[\\/]|[A-Za-z]:[\\/])/.test(path);
+  // `4/2`, `2024/09` and `1/2/3` are ratios and dates as often as they are directories, and a
+  // numeric segment in every position after the first is the shape they share. The check is only
+  // made when there *is* a position after the first: `Cargo.toml` is one segment, and `every` on
+  // an empty list is true -- which is how this rule first swallowed every bare filename.
+  const tail = segments.slice(1);
+  if (tail.length && tail.every((s) => /^\d+$/.test(s))) return null;
+  if (!absolute && !/\.([A-Za-z0-9]{2,8})$/.test(name) && segments.length < 3) return null;
+  return { path: path, line: line };
+}
+
+/// A byte count in the words the route uses for the same number, so the panel's note and the
+/// route's own sentence do not disagree about how to say it.
+function bytesLabel(n) {
+  const units = [["GB", 1024 * 1024 * 1024], ["MB", 1024 * 1024], ["KB", 1024]];
+  for (const [unit, size] of units) {
+    if (n >= size) return Math.round(n / size) + " " + unit;
+  }
+  return n + " bytes";
 }
 
 /// The token, out of the URL that `--web` printed.
@@ -1375,8 +1507,46 @@ function el(tag, className, textContent) {
 function toolSummary(block) {
   const parts = [];
   parts.push(el("span", "name", block.name || "(tool)"));
-  if (block.args) parts.push(document.createTextNode(" " + clip(block.args.replace(/\s+/g, " "), 160)));
+  if (block.args) {
+    const one = clip(block.args.replace(/\s+/g, " "), 160);
+    for (const node of linkNodes(one)) parts.push(node);
+  }
   return parts;
+}
+
+/// Text with the paths in it as buttons that open the preview, and everything else as text.
+///
+/// Buttons rather than links: a link would navigate away from a conversation that is still
+/// running, and this opens a panel *over* it. It stays inside the page's one rule -- the splitter
+/// decides where the text is cut, and every piece still goes in through `textContent`, so a file
+/// whose name is `<script>` is a filename here like any other.
+function linkNodes(text) {
+  const nodes = [];
+  for (const part of pathParts(text)) {
+    if (part.path === undefined) {
+      nodes.push(document.createTextNode(part.text));
+      continue;
+    }
+    const button = el("button", "path", part.path);
+    button.type = "button";
+    button.title = part.line ? part.path + ":" + part.line : part.path;
+    button.addEventListener("click", (e) => {
+      // Both, because this sits inside a `summary`: without them the press would also toggle the
+      // block open or shut, and the file that was just opened would slide down the page.
+      e.preventDefault();
+      e.stopPropagation();
+      openPreview(part.path, part.line);
+    });
+    nodes.push(button);
+  }
+  return nodes;
+}
+
+/// A `<pre>` whose text has its paths turned into buttons.
+function linkifiedPre(text) {
+  const node = el("pre");
+  for (const child of linkNodes(text)) node.appendChild(child);
+  return node;
 }
 
 function toolBlock(block) {
@@ -1385,8 +1555,8 @@ function toolBlock(block) {
   summary.appendChild(el("span", block.ok ? "ok" : "bad", block.done ? (block.ok ? "✓ " : "✗ ") : "… "));
   for (const part of toolSummary(block)) summary.appendChild(part);
   box.appendChild(summary);
-  if (block.args) box.appendChild(el("pre", "", block.args));
-  if (block.output) box.appendChild(el("pre", "", block.output));
+  if (block.args) box.appendChild(linkifiedPre(block.args));
+  if (block.output) box.appendChild(linkifiedPre(block.output));
   return box;
 }
 
@@ -1802,6 +1972,115 @@ async function readSessions() {
 }
 
 // ---------------------------------------------------------------------------
+// the preview: a file a tool block named, opened over the reading
+// ---------------------------------------------------------------------------
+
+/// The file on screen, in the transcript's own words: `{ path, line }`, or `null` when closed.
+///
+/// The path is kept as the transcript wrote it rather than as the route resolved it, because the
+/// header shows the reader what they pressed -- and the route is the one place that resolves a
+/// relative path against the run's working directory.
+let preview = null;
+
+/// Open a path, or move the panel to another one. `line` of zero means the transcript named no
+/// line, which is the usual case.
+async function openPreview(path, line) {
+  preview = { path: path, line: line || 0 };
+  const panel = document.getElementById("preview");
+  if (panel) panel.hidden = false;
+  paintPreviewHead();
+  await readPreview();
+}
+
+/// Close it. The transcript, the scroll position and the reader's place are untouched: this panel
+/// never owned any of them.
+function closePreview() {
+  preview = null;
+  const panel = document.getElementById("preview");
+  if (panel) panel.hidden = true;
+}
+
+/// The path, split so the file's own name stays in full ink while the directories give way.
+function paintPreviewHead() {
+  const node = document.getElementById("preview-path");
+  if (!node) return;
+  node.textContent = "";
+  if (!preview) return;
+  node.title = preview.line ? preview.path + ":" + preview.line : preview.path;
+  const cut = Math.max(preview.path.lastIndexOf("/"), preview.path.lastIndexOf("\\"));
+  if (cut > 0) node.appendChild(el("span", "dirs", preview.path.slice(0, cut + 1)));
+  node.appendChild(el("span", "name", cut > 0 ? preview.path.slice(cut + 1) : preview.path));
+}
+
+/// The route one path is read through, encoded.
+///
+/// A function of its own so the encoding is testable on its own: `encodeURIComponent` is what the
+/// route's decoder expects, and a path with a backslash, a space or a `+` in it is a file like any
+/// other -- the alternative, assembling the URL at the call site, is the one place a `+` would
+/// quietly become a space.
+function fileRoute(path) {
+  return "/file?path=" + encodeURIComponent(path);
+}
+
+/// Read it. A refusal is the route's own sentence, shown where the file would have been: a click
+/// that did nothing at all is the one answer a reader cannot act on.
+async function readPreview() {
+  const text = document.getElementById("preview-text");
+  const note = document.getElementById("preview-note");
+  if (!text || !preview) return;
+  if (!canSend) {
+    text.textContent = "";
+    note.textContent = "";
+    text.textContent = "this page has no flint behind it: a file is read through the run that served it";
+    return;
+  }
+  text.textContent = "reading…";
+  note.textContent = "";
+  let response;
+  try {
+    response = await fetch(fileRoute(preview.path), { headers: authHeader() });
+  } catch (e) {
+    text.textContent = "cannot read it: " + describe(e);
+    return;
+  }
+  const body = await response.text();
+  if (!response.ok) {
+    // The route says *why* -- nothing there, a directory, not text -- and that sentence is the
+    // whole answer, so it is shown as it is rather than turned into a status code.
+    text.textContent = body.trim();
+    note.textContent = "HTTP " + response.status;
+    return;
+  }
+  text.textContent = body;
+  note.textContent = previewNote(response, body, preview.line);
+  scrollToLine(text, preview.line);
+}
+
+/// What the header says beside the path: where the line is, and how much of the file is here.
+function previewNote(response, body, line) {
+  const said = [];
+  if (line) said.push("line " + line);
+  // Two numbers, because a cut with no total is not something a reader can judge: "the first
+  // 512 KB" of what?
+  const cut = Number(response.headers.get("X-Flint-Cut"));
+  const size = Number(response.headers.get("X-Flint-Size"));
+  if (cut > 0 && size > 0) said.push("the first " + bytesLabel(cut) + " of " + bytesLabel(size));
+  if (!said.length) said.push(bytesLabel(body.length));
+  return said.join(" · ");
+}
+
+/// Put the line a `grep` hit was on at the top of the panel.
+///
+/// No highlight and no second render pass: the line number came from the transcript, and all this
+/// owes the reader is not having to find it by eye.
+function scrollToLine(text, line) {
+  if (!line || typeof getComputedStyle !== "function") return;
+  const height = parseFloat(getComputedStyle(text).lineHeight);
+  const step = isNaN(height) ? 20 : height;
+  text.scrollTop = Math.max(0, (line - 1) * step);
+}
+
+// ---------------------------------------------------------------------------
 // typing
 // ---------------------------------------------------------------------------
 
@@ -2121,6 +2400,17 @@ if (typeof document !== "undefined" && document.getElementById) {
   document.addEventListener("dragover", (e) => e.preventDefault());
   document.addEventListener("drop", (e) => e.preventDefault());
 
+  // The preview's own three controls. Escape closes it, and it is bound here rather than on the
+  // panel because the reader's focus is wherever they were reading, not in the panel: a path was
+  // clicked, and the panel appeared beside the text they were looking at. A page with no run
+  // behind it still draws the panel -- the paths in a dropped session are still paths -- and it
+  // says there what it cannot do.
+  document.getElementById("preview-close").addEventListener("click", closePreview);
+  document.getElementById("preview-reload").addEventListener("click", () => readPreview());
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && preview) closePreview();
+  });
+
   if (servedByFlint()) {
     // Served by a running flint: there is nothing to drop, and the conversation is the
     // process's. A failure is rendered rather than thrown, because a blank page and a
@@ -2319,6 +2609,7 @@ if (typeof module !== "undefined" && module.exports) {
     sessionsFrom, messageBody, resumeLine, streamingAnswer, carryStreaming, setStreamingAnswer,
     paint, feedTrouble, tokenRefused, feedTrace, debugFeed, applyState, showState, fillSelect,
     showToggles, showCommands, showActions, sessionRow, formLine,
+    pathParts, asPath, bytesLabel, previewNote, linkNodes, renderBlock, fileRoute,
   };
 }
 </script>

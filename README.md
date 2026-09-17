@@ -673,6 +673,15 @@ the live event stream — the same events `--json` writes, produced by the same 
 call, a streamed answer, a reasoning delta and the status line all appear, and `/new`,
 `/resume` and `/reload` move the page to the conversation the terminal moved to.
 
+**The file paths in the transcript are buttons.** Every path a run leaves behind — a `read`'s
+argument, the `notes.txt:2:` lines a `grep` prints, the name at the end of a `write` — can be pressed,
+and the file opens in a panel beside the conversation: the file's own bytes, its size, and a `reload`
+for one that changed while you were reading it. A `:line` in the path opens at that line. A relative
+path is the path of the process that wrote it, so `src/web.rs` means the run's `src/web.rs`, and
+`--cwd` is what decides that. It is `GET /file`, which reads a file the transcript already names and
+nothing else; §12 of `docs/web-mode.md` has the rule for what in a line counts as a path and the
+measured record from a real browser.
+
 **What that costs, stated plainly:** a caller who has the port and the token can run the agent,
 because that is what an input box is. What keeps it acceptable is §4 of `docs/web-mode.md` —
 loopback only, the `Host` and `Origin` checks, and a token another origin's page cannot set. Any

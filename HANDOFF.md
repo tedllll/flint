@@ -97,20 +97,22 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 549 passing, 1 ignored on this machine
-(323 lib, 5 in the binary's own tests, 33 `agent_loop`, 68 `cli_output`, 35 `json_output` (7 structured
+As of the commit that carries this file, `cargo test` is 556 passing, 1 ignored on this machine
+(328 lib, 5 in the binary's own tests, 33 `agent_loop`, 68 `cli_output`, 35 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
 be able to read, 4 the answer written where the caller asked, 3 the file inlined into the prompt,
 1 the stream checked on its bytes, 1 how long a turn took),
-7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 23 `web_view`,
+7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 25 `web_view`,
 10 `who`, 15 `task`, 6 `say`),
 and one more on Unix, `tty_hangup`, which is `#![cfg(unix)]` and needs a real pty — as is the Unix
 half of the process-group kill, `a_killed_command_takes_its_children_with_it_on_unix`. `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
-pass, and `node scripts/browser-controls-test.js` is **34 of 34** — the browser harness, run by hand
+pass, and `node scripts/browser-controls-test.js` is **44 of 44** — the browser harness, run by hand
 because CI has no browser, and the only place the two defects in the page's later controls were ever
-visible. `python examples/python/test_call.py` is 118 checks, all passing (one of them waits out the
+visible (the last two were found by the file-preview claims: a fixed panel that covered the block the
+path was pressed in, and a covered path that could not be pressed at all until the block was opened).
+`python examples/python/test_call.py` is 118 checks, all passing (one of them waits out the
 fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from), and
 `python examples/mcp/test_mcp.py` passes its own 23.
 
@@ -632,11 +634,11 @@ open, so the copy needs every flint window closed first — measured twice.
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
 cargo build                                       # the Python and browser checks run this binary
-cargo test                                        # 544 passing, 1 ignored
+cargo test                                        # 556 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed
-node scripts/browser-controls-test.js             # 34/34 -- needs a browser, so it is not in CI
+node scripts/browser-controls-test.js             # 44/44 -- needs a browser, so it is not in CI
 cargo test --test term_capture -- --ignored --nocapture measured_cost_of_streaming   # the cost number
 ```
 
@@ -1479,6 +1481,18 @@ thing to ask a browser to do — and it is checked against the directory listing
 witness one level out. What the page adds is the two presses, and what stops a single
 press is that there is nothing to press that sends.
 
+### A path in the transcript opens the file, and the panel is a column
+
+Asked for in two sentences: *"现在看不到子代理和后台任务的情况，在web页面上面"* and *"他对话里显示的文件真实地址，没做超链接，不能直接点开文件，有点麻烦"*. The first half (background work on the page) is the next round; this one is the second, and it is one commit: `feat: a path in the transcript opens in the page`.
+
+**The route.** `GET /file?path=…` (`serve_file` in `src/web.rs`), added beside `/sessions` in the same literal table. It takes the string the transcript wrote — `?path=` is a *parameter*, so the route table keeps its shape and §6's "nothing is served from disk" stays true in the form that matters: nothing is served that a tool result already in the transcript did not name. Three decisions inside it: a relative path resolves against **the run's working directory** (`Viewer::asked` gained `cwd`, fed from `agent.cwd()`, because `--cwd` moves what every relative path in a conversation means); a trailing `:line` or `:line:column` is stripped and answered in an `X-Flint-Line` header rather than being treated as part of the name (`split_line` — and the *first* thing tried is the literal path, so a file genuinely called `a:1` still opens); and a file longer than 512 KB is **cut, not refused** — its own bytes, with `X-Flint-Cut` and `X-Flint-Size`, because half a 40 MB log honestly labelled is what a reader wants. What *is* refused, each with its own sentence: not valid UTF-8 (no lossy conversion — a page of replacement characters is worse than "not text this page can show"), a directory, and over 64 MB.
+
+**The page.** The path splitter (`pathParts`/`asPath`) is a pure function in the model half, and the rule is written down rather than hidden in a regex: a candidate has no whitespace, quote, bracket or comma in it; it is a path if it is absolute, or its last segment has an extension of two to eight characters, or it has three or more segments. `e.g.`/`i.e.` are why a one-character extension is not one (`foo.c` is the price); `and/or`, `read/write` and `24/7` are why one separator and no extension is not one (`src/bin` is the price); `//` means a URL; `4/2` and `2024/09/17` are ratios and dates. **Only tool blocks are split** — prose is where those abbreviations live. The panel shows the file's bytes in a `<pre>`, the directories dim and the filename in full ink, the size, a `line N` when the transcript named one, `reload` and `close`, and Escape from anywhere.
+
+**Two things the browser settled, and both were changes to the design rather than to the code.** The panel was `position: fixed` over the right edge; with it open, `elementFromPoint` at the next path's centre answered `pre#preview-text`, so the second path in a turn could not be pressed at all. It is now a fourth grid column (`#preview` inside `#app`, `grid-column: 4`, `.app.plain #preview { grid-column: 2 }`), which narrows the transcript instead of covering it — the same shape as DSH's sidebar preview, which is where the feature came from. And the Node checks caught `segments.slice(1).every(…)` being `true` for a name with no separator at all, which swallowed every bare filename (`Cargo.toml`) until it was in the test.
+
+**Measured.** `cargo test` (the new `web::tests` cases: the file the transcript names, a `:line`, a missing file, a directory, a binary, a cut file counted on a character boundary, and the token still required), the page's policy tests in `tests/web_view.rs` (`a_path_opens_in_this_page_or_not_at_all` forbids `window.open` and `target="_blank"`, and pins the percent-encoding of the route), three checks in `scripts/web-view-test.js`, and ten claims in the browser harness — 44/44, against a run whose turns are scripted by a stub model the harness now starts itself. Mutation-checked on the route: with `cwd.join(path)` replaced by `path.to_path_buf()` and `split_line` forced to `None`, exactly four tests fail.
+
 ### Still owed on the page
 
 **§8 is built, so this list is now the residues rather than a class.** The command list, its panel, the
@@ -1522,7 +1536,8 @@ each with the reason it is left:
    `The later controls, in a real browser` is the table and the method; what is still unmeasured is a
    short and named list — a native `<select>`'s open dropdown, the sidebar's own menu, and the drag
    grips. **The last two of those three are now driven too, and the pickers are driven from the
-   keyboard**: the harness is 34 claims (was 20) and covers the sidebar's `⋯` menu on both kinds of
+   keyboard**: the harness is 44 claims (was 34, and 20 before that) and covers the sidebar's `⋯` menu
+   on both kinds of
    row — the open conversation's, whose rename field reaches the run and whose first press sends
    nothing, and a fixture conversation's, whose second press carries *that row's* number and removes
    that file, which the directory listing witnesses — both hands by a real pointer drag with the
@@ -1533,6 +1548,18 @@ each with the reason it is left:
    What is left uncovered is one widget and one section: a native `<select>`'s open *popup*, which
    belongs to the operating system and no protocol can reach into, and §11's own long answers and
    reconnection, measured on macOS over a different harness.
+
+   **The ten claims the file preview added are the newest, and building them changed the harness
+   itself**: it now starts a *scripted model* (`stubModel`, the SSE shape `tests/task.rs` serves) so a
+   browser claim can be about a real turn — a `write`, a `read` of that file, a `read` of a file that
+   is not there, and a `grep` whose output carries a line number — rather than about a transcript that
+   is empty because nothing was ever asked. That is what makes "the panel shows the file the run just
+   wrote" an end-to-end claim: the bytes in the panel travelled from the model's tool call, through
+   `write`, through `GET /file`, into the page. §12 of `docs/web-mode.md` is the table. Two of these
+   claims found defects rather than confirming the design: the fixed panel covered the block the path
+   was pressed in (the panel is a grid column now, and the harness's own coverage check is what
+   caught it), and `every()` on an empty array — a JavaScript trap in the path splitter — swallowed
+   every bare filename until `Cargo.toml` was in the Node checks.
 4. **Renaming from the sidebar** — ~~a `/name` field exists in the panel and works, and the sidebar
    has no affordance for it~~ **built 2026-09-17**, exactly as this line predicted: a `/name <text>`
    line through `/message` like every other row action, with no route of its own. The row's menu

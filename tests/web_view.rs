@@ -101,6 +101,60 @@ fn the_view_requests_nothing_external() {
     forbidden("XMLHttpRequest", "the view has no reason to use XHR");
 }
 
+/// A path in a tool block is a thing to press, and it opens **in this page**.
+///
+/// The rule this pins is not cosmetic. A link would navigate away from a conversation that is
+/// still running -- the token, the stream and the reader's place all live in this document -- and
+/// a `window.open` would be a second copy of the page with none of them. What the page may do
+/// instead is ask the run for the file, over the one route that reads a path (`GET /file`).
+#[test]
+fn a_path_opens_in_this_page_or_not_at_all() {
+    let html = view();
+    assert!(
+        html.contains("function fileRoute(path)"),
+        "the route a path is read through must be one function, so the encoding is one decision"
+    );
+    assert!(
+        html.contains("\"/file?path=\" + encodeURIComponent(path)"),
+        "the path travels percent-encoded: a raw backslash or space is a different request"
+    );
+    assert!(
+        html.contains("fetch(fileRoute(preview.path)"),
+        "the panel reads the file through the route and not by any other means"
+    );
+    assert!(
+        html.contains("el(\"button\", \"path\", part.path)"),
+        "a path is a button, which cannot navigate the page"
+    );
+    forbidden("window.open(", "a file opens in this page, where the run that served it is");
+    forbidden("target=\"_blank\"", "a second tab would be a page with no token and no stream");
+    // The one place a path could reach the wire unencoded, or as markup, is the panel's header:
+    // it is built from `textContent` like everything else.
+    let head = from("function paintPreviewHead()", 14);
+    assert!(
+        !head.contains("innerHTML") && head.contains("textContent"),
+        "the panel's header is text like every other piece of the page:\n{head}"
+    );
+}
+
+/// A file the page cannot show says why, in the route's own words.
+///
+/// The alternative -- an empty panel, or a spinner that stops -- is the failure this project keeps
+/// designing against: three different reasons look exactly the same. `serve_file` writes a
+/// sentence for each one (nothing there, a directory, not text, too big), and the page shows it.
+#[test]
+fn the_preview_shows_the_routes_own_refusal_rather_than_an_empty_panel() {
+    let body = from("async function readPreview()", 30);
+    assert!(
+        body.contains("text.textContent = body.trim()"),
+        "the refusal is shown as it was written:\n{body}"
+    );
+    assert!(
+        body.contains("HTTP \" + response.status"),
+        "and the status beside it, for the reader who wants the code:\n{body}"
+    );
+}
+
 /// The two rules the session format asks of *any* reader, stated where a page author will
 /// see them: the page is a reader of the same files.
 #[test]

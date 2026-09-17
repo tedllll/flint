@@ -1008,6 +1008,9 @@ async fn real_main(args: Args) -> Result<i32> {
             args.port.unwrap_or(0),
             agent.session_path(),
             browser_input(&reader, args.prompt.is_none()),
+            // The directory the run works in, so `/file` resolves a relative path in a tool result
+            // the way the tool that printed it did.
+            agent.cwd().clone(),
         ))
     } else {
         None
@@ -2966,8 +2969,8 @@ async fn handle_command(
                 },
             };
             let browser = browser_input(reader, true);
-            let asked = viewer
-                .get_or_insert_with(|| web::Viewer::asked(0, agent.session_path(), browser));
+            let cwd = agent.cwd().clone();
+            let asked = viewer.get_or_insert_with(|| web::Viewer::asked(0, agent.session_path(), browser, cwd));
             match asked.open(port).await {
                 Ok(url) => announce_view(printer, &url),
                 // Not fatal, unlike `--web`: there the view was the whole point of the run,

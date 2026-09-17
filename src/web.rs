@@ -84,7 +84,31 @@ pub struct State {
     /// `None` for a run with no prompt to type into -- a one-shot `-p` run -- and for those
     /// `POST /message` says so rather than accepting a message nobody will ever read.
     input: Option<tokio::sync::mpsc::UnboundedSender<FromPage>>,
+    /// The directory this run is working in, which is what a **relative** path in a tool result
+    /// means.
+    ///
+    /// A copy of the value rather than a lock, unlike `session`: the working directory is decided
+    /// once, before the listener is bound, and nothing in flint changes it afterwards (`--cwd`
+    /// chooses it; it does not `chdir`). A run's tools read and write relative to this, so a path
+    /// served from some other directory would be a different file with the same name.
+    cwd: std::path::PathBuf,
 }
+
+/// How much of a file the page will show.
+///
+/// The page is a preview, and this is the whole of what makes it one: a session file, a log or a
+/// source file is what a person clicks on, and a request that served a 4 GB log would take the run
+/// down rather than show the file. Beyond this the answer is cut, in the same bytes, with the cut
+/// and the real size in headers -- see `serve_file`.
+const FILE_PREVIEW_MAX: usize = 512 * 1024;
+
+/// The size above which a file is not read at all.
+///
+/// Distinct from the preview cap on purpose: cutting is for a file whose *beginning* is the answer,
+/// and this is for one that is not a text file anybody is reading in a browser -- a disk image, a
+/// database, a tarball. Reading it to cut it is the part that costs, so it is refused before the
+/// first byte is read.
+const FILE_REFUSE_ABOVE: u64 = 64 * 1024 * 1024;
 
 /// A line the page sent, and what the page expects to happen to it.
 ///
@@ -759,6 +783,10 @@ pub fn respond(request: &Request, body: &str, state: &State) -> Answer {
         // go through `session::list` -- a second listing that sorted differently would make
         // every number in the page point at the wrong conversation.
         ("GET", "/sessions") => serve_sessions(state),
+        // A file the transcript named, opened where the reader is looking instead of in another
+        // program. The one route that reads a path from the wire: see `serve_file`, and §12 of
+        // `docs/web-mode.md` for what it will and will not serve.
+        ("GET", "/file") => serve_file(request, state),
         // Everything since, and then everything as it happens.
         ("GET", "/events") => return Answer::Events {
             last: last_event_id(request),
@@ -1028,10 +1056,244 @@ fn serve_session(state: &State) -> Response {
     }
 }
 
+/// The line a `:N` or `:N:C` suffix named, as the header that carries it.
+const X_FLINT_LINE: &str = "X-Flint-Line";
+
+/// How many bytes of the file were served, and how many there are, when it was cut.
+const X_FLINT_CUT: &str = "X-Flint-Cut";
+const X_FLINT_SIZE: &str = "X-Flint-Size";
+
+/// One file, opened where the reader is already looking: `GET /file?path=…`.
+///
+/// Why this route exists: flint's own tools report paths -- `read`, `write`, `edit`, `grep` and
+/// `glob` all name files -- and until this route there was no way to look at one without leaving
+/// the page for another program. DSH's page solves the same problem by opening a file reference in
+/// a document preview beside the conversation; this copies the idea and none of the machinery: no
+/// file tree, no renderer registry, no Markdown or image or PDF support, one route and one panel.
+///
+/// **What it may serve, and why that is not a hole.** The token is the only credential, exactly as
+/// for every route, and whoever holds it can already `POST /message` -- that is, type a line into a
+/// run with no permission layer and no approval prompts, which can read or write any file this
+/// process can. So this route hands the holder of the token nothing they did not have. Pretending
+/// otherwise, by serving only paths under the working directory, would be security theatre in a
+/// program whose whole documented position is that it can damage the machine; what this route
+/// *does* refuse is what has no honest answer -- a directory, a file that is not text, a file too
+/// large to be a preview.
+///
+/// A path is a **parameter**: `/file?path=…`, never `/file/…`, so the route table stays literal and
+/// there is no traversal in a route (§6). A relative path is resolved against the run's working
+/// directory, because that is what a relative path in a tool result means; an absolute one is used
+/// as it is. A path with a `:line` or `:line:column` on the end -- which is how `grep` prints a hit
+/// -- falls back to the file before the numbers, and the line comes back in a header so the page
+/// can open where the hit was found. The literal path is tried **first**, so a Windows drive letter
+/// or a name that really has a colon in it is never mistaken for a line number.
+fn serve_file(request: &Request, state: &State) -> Response {
+    let Some(raw) = request.query("path") else {
+        return Response::text(
+            400,
+            "Bad Request",
+            "which file? this route takes ?path=<path> (and ?path=<path>:<line> opens at a line)\n",
+        );
+    };
+    let Some(asked) = percent_decode(raw) else {
+        return Response::text(400, "Bad Request", "that path is not percent-encoded properly\n");
+    };
+    if asked.trim().is_empty() {
+        return Response::text(400, "Bad Request", "which file? ?path= was empty\n");
+    }
+
+    // The literal path first, then the same path without a trailing `:N`/`:N:C`. Both go through
+    // the same read, so there is one set of refusals rather than two that can disagree -- and a
+    // Windows drive letter, or a name that really has a colon in it, is never mistaken for a line
+    // number, because the literal path gets its chance first.
+    let literal = resolve(&asked, &state.cwd);
+    if let Ok(preview) = read_preview(&literal) {
+        return preview.into_response();
+    }
+    if let Some((path, line)) = split_line(&literal) {
+        if let Ok(mut preview) = read_preview(&path) {
+            preview.headers.push((X_FLINT_LINE.to_string(), line.to_string()));
+            return preview.into_response();
+        }
+    }
+    refusal(&asked, &literal)
+}
+
+/// What a file read produced: its text, and the headers that describe the read.
+struct Preview {
+    text: String,
+    headers: Vec<(String, String)>,
+}
+
+impl Preview {
+    fn into_response(self) -> Response {
+        Response {
+            status: 200,
+            reason: "OK",
+            content_type: "text/plain; charset=utf-8",
+            body: self.text,
+            extra: self.headers,
+        }
+    }
+}
+
+/// Read at most [`FILE_PREVIEW_MAX`] of a file, cutting on a character boundary and saying so.
+///
+/// One `Err(())` for every way this can fail to be a file worth showing. The caller turns it into
+/// the sentence that names what the path actually is, because that is a question about the path
+/// rather than about the read.
+fn read_preview(path: &std::path::Path) -> Result<Preview, ()> {
+    let metadata = std::fs::metadata(path).map_err(|_| ())?;
+    if metadata.is_dir() || metadata.len() > FILE_REFUSE_ABOVE {
+        return Err(());
+    }
+    let mut file = std::fs::File::open(path).map_err(|_| ())?;
+    // Bounded by the cap rather than by the file: the extra byte beyond the cap is what tells this
+    // read that there is more, and reading the rest of a 40 MB log to find out is the cost the cap
+    // exists to avoid.
+    let mut bytes = Vec::new();
+    use std::io::Read as _;
+    std::io::Read::take(&mut file, FILE_PREVIEW_MAX as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ())?;
+    let cut = bytes.len() > FILE_PREVIEW_MAX;
+    let mut headers = Vec::new();
+    let mut text = as_text(bytes).ok_or(())?;
+    if cut {
+        // On a boundary, so the page never renders half a character: `as_text` gives the whole
+        // prefix when it *is* whole, and the two disagree only when the cut fell inside one.
+        let end = text
+            .char_indices()
+            .take_while(|(at, _)| *at < FILE_PREVIEW_MAX)
+            .last()
+            .map(|(at, c)| at + c.len_utf8())
+            .unwrap_or(0);
+        text.truncate(end);
+        headers.push((X_FLINT_CUT.to_string(), text.len().to_string()));
+        headers.push((X_FLINT_SIZE.to_string(), metadata.len().to_string()));
+    }
+    Ok(Preview { text, headers })
+}
+
+/// Bytes as text, shrinking a truncated character at the end and refusing anything else.
+///
+/// `String::from_utf8_lossy` is deliberately not used: it would turn a binary file into a field of
+/// replacement characters and call that a preview. The difference between "this is not text" and
+/// "the cap landed inside a character" is `error_len`, which is `None` only for the second.
+fn as_text(mut bytes: Vec<u8>) -> Option<String> {
+    loop {
+        match String::from_utf8(bytes) {
+            Ok(text) => return Some(text),
+            Err(e) => {
+                let error = e.utf8_error();
+                let whole = error.valid_up_to();
+                if error.error_len().is_some() || whole == 0 {
+                    return None;
+                }
+                let mut raw = e.into_bytes();
+                raw.truncate(whole);
+                bytes = raw;
+            }
+        }
+    }
+}
+
+/// The `path:line` in a path that is not there, when there is one.
+fn split_line(path: &std::path::Path) -> Option<(std::path::PathBuf, u32)> {
+    let text = path.to_string_lossy().to_string();
+    let (rest, tail) = text.rsplit_once(':')?;
+    let last: u32 = tail.parse().ok()?;
+    // `notes.txt:3:1`, which is how a grep with column numbers prints a hit: the line comes first
+    // and the column last, so the number *before* the final one is the line. The column itself is
+    // dropped, because a preview opens at a line and a character offset inside it was not asked
+    // for. A Windows path survives this: the segment before the last colon is `C` or a directory,
+    // and neither parses as a number.
+    if let Some((head, before)) = rest.rsplit_once(':') {
+        if !head.is_empty() {
+            if let Ok(line) = before.parse::<u32>() {
+                return Some((std::path::PathBuf::from(head), line));
+            }
+        }
+    }
+    if rest.is_empty() {
+        return None;
+    }
+    Some((std::path::PathBuf::from(rest), last))
+}
+
+/// The refusal for a path that could not be read, said in words that name what it actually is.
+fn refusal(asked: &str, path: &std::path::Path) -> Response {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => Response::text(
+            400,
+            "Bad Request",
+            format!("{asked} is a directory, not a file\n"),
+        ),
+        Ok(metadata) if metadata.len() > FILE_REFUSE_ABOVE => Response::text(
+            400,
+            "Bad Request",
+            format!(
+                "{asked} is {} -- too big to preview; open it where it lives\n",
+                bytes_label(metadata.len())
+            ),
+        ),
+        Ok(_) => Response::text(
+            400,
+            "Bad Request",
+            format!("{asked} is not text this page can show (it is not valid UTF-8)\n"),
+        ),
+        Err(e) => Response::text(404, "Not Found", format!("nothing at {asked}: {e}\n")),
+    }
+}
+
+/// A relative path against the directory the run is working in; an absolute one as it is.
+fn resolve(asked: &str, cwd: &std::path::Path) -> std::path::PathBuf {
+    let path = std::path::Path::new(asked);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    }
+}
+
+/// A size in the words a person reads, for the one sentence that needs it.
+fn bytes_label(bytes: u64) -> String {
+    const UNITS: [(&str, u64); 3] = [("GB", 1024 * 1024 * 1024), ("MB", 1024 * 1024), ("KB", 1024)];
+    for (unit, size) in UNITS {
+        if bytes >= size {
+            return format!("{} {unit}", bytes / size);
+        }
+    }
+    format!("{bytes} bytes")
+}
+
+/// `%XX` back into bytes.
+///
+/// The page encodes a path with `encodeURIComponent`, so a space, a backslash, a colon or a
+/// non-ASCII character arrives escaped and has to be unescaped before it means anything. `+` is
+/// **not** a space: this is a path in a query string, not a form, and a file whose name has a plus
+/// in it is a file like any other.
+fn percent_decode(raw: &str) -> Option<String> {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%' {
+            let hex = bytes.get(at + 1..at + 3)?;
+            let text = std::str::from_utf8(hex).ok()?;
+            out.push(u8::from_str_radix(text, 16).ok()?);
+            at += 3;
+        } else {
+            out.push(bytes[at]);
+            at += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 // ---------------------------------------------------------------------------
 // the socket
 // ---------------------------------------------------------------------------
-
 /// A running window: the port it is on and the token that opens it.
 ///
 /// Held by the CLI for the life of the process, which is the whole of its lifetime -- the
@@ -1059,19 +1321,25 @@ impl Window {
         session: Option<std::path::PathBuf>,
         live: Option<Arc<Live>>,
     ) -> Result<Window> {
-        Window::open_following(port, Arc::new(Mutex::new(session)), live, None).await
+        // A window with no run behind it -- `debug`, a test -- has no working directory of its own,
+        // and the process's is the only answer that means anything for a relative path.
+        let cwd = std::env::current_dir().unwrap_or_default();
+        Window::open_following(port, Arc::new(Mutex::new(session)), live, None, cwd).await
     }
 
     /// The same, for a caller whose session can change under it.
     ///
     /// The REPL is that caller: `/new` and `/resume` move the run to a different file with
     /// the window still open, so the two of them share the path rather than the window
-    /// taking a copy at bind time.
+    /// taking a copy at bind time. It is also the caller that knows the working directory, which
+    /// is a *different* fact from where the session file lives -- a conversation is filed under a
+    /// key derived from the directory it was held in.
     pub async fn open_following(
         port: u16,
         session: Arc<Mutex<Option<std::path::PathBuf>>>,
         live: Option<Arc<Live>>,
         input: Option<tokio::sync::mpsc::UnboundedSender<FromPage>>,
+        cwd: std::path::PathBuf,
     ) -> Result<Window> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
             .await
@@ -1087,6 +1355,7 @@ impl Window {
             session,
             live,
             input,
+            cwd,
         });
         tokio::spawn(accept_loop(listener, state));
         Ok(Window { port, token })
@@ -1130,6 +1399,10 @@ pub struct Viewer {
     /// `POST /message` answer `409` rather than swallowing a message nobody will read. See
     /// `State::input` for why this carries a [`FromPage`] rather than the REPL's own input event.
     input: Option<tokio::sync::mpsc::UnboundedSender<FromPage>>,
+    /// The directory the run is working in, which is what `/file` resolves a relative path
+    /// against. Held here rather than read from the listener's process, because the two are only
+    /// the same by accident: the run's directory is `--cwd`'s answer. See `State::cwd`.
+    cwd: std::path::PathBuf,
 }
 
 impl Viewer {
@@ -1138,6 +1411,7 @@ impl Viewer {
         port: u16,
         session: Option<std::path::PathBuf>,
         input: Option<tokio::sync::mpsc::UnboundedSender<FromPage>>,
+        cwd: std::path::PathBuf,
     ) -> Viewer {
         Viewer {
             live: Live::new(),
@@ -1145,6 +1419,7 @@ impl Viewer {
             session: Arc::new(Mutex::new(session)),
             port,
             input,
+            cwd,
         }
     }
 
@@ -1168,6 +1443,7 @@ impl Viewer {
             Arc::clone(&self.session),
             Some(Arc::clone(&self.live)),
             self.input.clone(),
+            self.cwd.clone(),
         )
         .await?;
         let url = window.url();
@@ -1489,6 +1765,9 @@ mod tests {
             session: Arc::new(Mutex::new(None)),
             live: None,
             input: None,
+            // A window with no run behind it: the process's own directory is the only answer, and
+            // the `/file` tests that care build their own state over a scratch directory.
+            cwd: std::env::temp_dir(),
         }
     }
 
@@ -1508,6 +1787,15 @@ mod tests {
 
     fn body(response: &Response) -> String {
         response.body.clone()
+    }
+
+    /// One of the headers a *route* adds, as opposed to the ones the transport always sends.
+    fn header<'a>(response: &'a Response, name: &str) -> Option<&'a str> {
+        response
+            .extra
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
     }
 
     #[test]
@@ -1970,7 +2258,185 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // -----------------------------------------------------------------------
+    // `/file`: the one route that reads the disk, and only what a person pointed at
+    // -----------------------------------------------------------------------
+
+    /// A scratch directory under the platform's temp directory, the way every suite here makes one.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("flint-web-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch directory");
+        dir
+    }
+
+    /// A state whose working directory is `dir`: what a relative path in a tool result means.
+    fn working_in(dir: &std::path::Path) -> State {
+        State {
+            cwd: dir.to_path_buf(),
+            ..state()
+        }
+    }
+
+    fn written(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("scratch directory");
+        }
+        std::fs::write(&path, body).expect("scratch file");
+        path
+    }
+
+    /// `encodeURIComponent`, near enough: what the page does to a path before it goes in the
+    /// query string, so the route's decoding is tested against the encoding it will really see.
+    fn encoded(text: &str) -> String {
+        let mut out = String::new();
+        for byte in text.bytes() {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~' | b'/') {
+                out.push(byte as char);
+            } else {
+                out.push_str(&format!("%{byte:02X}"));
+            }
+        }
+        out
+    }
+
+    /// One file the transcript named, opened. This is the route §12 exists for.
+    #[test]
+    fn a_file_the_transcript_names_can_be_opened() {
+        let dir = scratch("file-open");
+        let path = written(&dir, "src/main.rs", "fn main() {}\n");
+
+        let relative = ask(&ours(&format!("/file?path={}", encoded("src/main.rs"))), &working_in(&dir));
+        assert_eq!(relative.status, 200, "{}", relative.body);
+        assert_eq!(relative.body, "fn main() {}\n", "the file's own bytes, not a rendering");
+        assert_eq!(relative.content_type, "text/plain; charset=utf-8");
+        assert_eq!(header(&relative, "X-Flint-Cut"), None, "nothing was left out");
+
+        // The absolute path the terminal prints works the same way: that is what the transcript
+        // most often contains, because it is what flint's own tools report.
+        let absolute = ask(
+            &ours(&format!("/file?path={}", encoded(&path.display().to_string()))),
+            &working_in(&dir),
+        );
+        assert_eq!(absolute.status, 200, "{}", absolute.body);
+        assert_eq!(absolute.body, "fn main() {}\n");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `grep` prints a hit as `path:12:3: text`, and that whole token is what a person clicks. The
+    /// line is a fact about where in the file, so it is reported rather than thrown away.
+    #[test]
+    fn a_path_carrying_a_line_number_opens_the_file_and_names_the_line() {
+        let dir = scratch("file-line");
+        written(&dir, "notes.txt", "one\ntwo\nthree\n");
+
+        let with_line = ask(&ours(&format!("/file?path={}", encoded("notes.txt:2"))), &working_in(&dir));
+        assert_eq!(with_line.status, 200, "{}", with_line.body);
+        assert_eq!(with_line.body, "one\ntwo\nthree\n");
+        assert_eq!(header(&with_line, "X-Flint-Line"), Some("2"));
+
+        let with_column = ask(&ours(&format!("/file?path={}", encoded("notes.txt:3:1"))), &working_in(&dir));
+        assert_eq!(with_column.status, 200, "{}", with_column.body);
+        assert_eq!(header(&with_column, "X-Flint-Line"), Some("3"));
+
+        // A file that really is called `notes.txt:2` is not a thing on Windows, but a *path* that
+        // has a colon in it is (`C:\...`), so the fallback only ever runs after the literal path
+        // has failed -- and when neither is there, the answer is still that there is nothing.
+        let nowhere = ask(&ours(&format!("/file?path={}", encoded("notes.txt:999"))), &working_in(&dir));
+        assert_eq!(nowhere.status, 200, "the line number is not part of the filename: {}", nowhere.body);
+        assert_eq!(header(&nowhere, "X-Flint-Line"), Some("999"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every way this can fail has a sentence, because a click that does nothing is the thing a
+    /// person cannot act on.
+    #[test]
+    fn a_missing_file_a_directory_and_a_binary_each_say_what_they_are() {
+        let dir = scratch("file-refusals");
+        std::fs::create_dir_all(dir.join("sub")).expect("scratch dir");
+
+        let missing = ask(&ours(&format!("/file?path={}", encoded("nope.txt"))), &working_in(&dir));
+        assert_eq!(missing.status, 404);
+        assert!(missing.body.contains("nope.txt"), "{}", missing.body);
+
+        let directory = ask(&ours(&format!("/file?path={}", encoded("sub"))), &working_in(&dir));
+        assert_eq!(directory.status, 400, "{}", directory.body);
+        assert!(directory.body.contains("directory"), "{}", directory.body);
+
+        std::fs::write(dir.join("blob.bin"), [0x00, 0xFF, 0xFE, 0x41]).expect("scratch binary");
+        let binary = ask(&ours(&format!("/file?path={}", encoded("blob.bin"))), &working_in(&dir));
+        assert_eq!(binary.status, 400, "{}", binary.body);
+        assert!(binary.body.contains("text"), "{}", binary.body);
+
+        // Asked with no path at all: a question answered, not a missing route.
+        let unsaid = ask(&ours("/file"), &working_in(&dir));
+        assert_eq!(unsaid.status, 400, "{}", unsaid.body);
+        assert!(unsaid.body.contains("path"), "{}", unsaid.body);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A file too big to show is **cut and says so**. A preview that quietly showed the first
+    /// 512 KB of a 40 MB log would be this page lying about a file, which is the one thing it is
+    /// built not to do.
+    #[test]
+    fn a_file_too_big_to_preview_is_cut_on_a_character_boundary_and_counted() {
+        let dir = scratch("file-big");
+        // One multi-byte character straddling the cap, so the cut has to move back to a boundary
+        // rather than serve half a character -- which the page would render as a replacement glyph.
+        let body = format!("{}\u{4e16}\u{754c}", "x".repeat(FILE_PREVIEW_MAX - 1));
+        written(&dir, "big.log", &body);
+
+        let response = ask(&ours(&format!("/file?path={}", encoded("big.log"))), &working_in(&dir));
+        assert_eq!(response.status, 200, "{}", response.body);
+        assert!(
+            response.body.len() < FILE_PREVIEW_MAX,
+            "the cut is on a boundary, so it lands below the cap: {}",
+            response.body.len()
+        );
+        assert!(response.body.starts_with("xxx"), "the body is the file's own text");
+        assert_eq!(header(&response, "X-Flint-Cut"), Some(response.body.len().to_string().as_str()));
+        assert_eq!(header(&response, "X-Flint-Size"), Some(body.len().to_string().as_str()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// §4.2 again, for the one route that reads whatever it is pointed at: no token, no file.
+    #[test]
+    fn the_file_route_needs_the_token_like_every_other() {
+        let dir = scratch("file-token");
+        written(&dir, "secret.txt", "not for a page without the token\n");
+        let state = working_in(&dir);
+
+        let none = ask(
+            &format!("GET /file?path={} HTTP/1.1\r\nHost: 127.0.0.1:7777\r\n\r\n", encoded("secret.txt")),
+            &state,
+        );
+        assert_eq!(none.status, 403);
+        assert!(!none.body.contains("not for a page"), "{}", none.body);
+
+        // And the token in the *query string* is still accepted on `/` alone.
+        let in_query = ask(
+            &format!(
+                "GET /file?path={}&token={} HTTP/1.1\r\nHost: 127.0.0.1:7777\r\n\r\n",
+                encoded("secret.txt"),
+                state.token
+            ),
+            &state,
+        );
+        assert_eq!(in_query.status, 403);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A path is never looked up on disk, so there is no traversal to get wrong (§6).
+    ///
+    /// `/file` is the route that *does* read a path, and it is not an exception to this: it takes
+    /// its path as a **parameter**, never as a route, so a request for `/../../etc/passwd` is still
+    /// an unknown route. What the parameter may name is §12's subject.
     #[test]
     fn an_unknown_route_is_a_404_and_the_method_is_checked() {
         let state = state();
@@ -2079,6 +2545,7 @@ mod socket_tests {
             Arc::new(Mutex::new(None)),
             None,
             Some(tx),
+            std::env::temp_dir(),
         )
         .await
         .expect("bind");
@@ -2127,7 +2594,7 @@ mod socket_tests {
     #[tokio::test]
     async fn a_message_that_stops_arriving_is_refused() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<FromPage>();
-        let window = Window::open_following(0, Arc::new(Mutex::new(None)), None, Some(tx))
+        let window = Window::open_following(0, Arc::new(Mutex::new(None)), None, Some(tx), std::env::temp_dir())
             .await
             .expect("bind");
 
@@ -2150,7 +2617,7 @@ mod socket_tests {
     #[tokio::test]
     async fn a_message_over_the_ceiling_is_refused() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<FromPage>();
-        let window = Window::open_following(0, Arc::new(Mutex::new(None)), None, Some(tx))
+        let window = Window::open_following(0, Arc::new(Mutex::new(None)), None, Some(tx), std::env::temp_dir())
             .await
             .expect("bind");
 
@@ -2232,7 +2699,7 @@ mod socket_tests {
         std::fs::write(&first, "{\"type\":\"meta\",\"id\":\"first\"}\n").expect("write");
         std::fs::write(&second, "{\"type\":\"meta\",\"id\":\"second\"}\n").expect("write");
 
-        let mut viewer = Viewer::asked(0, Some(first.clone()), None);
+        let mut viewer = Viewer::asked(0, Some(first.clone()), None, std::env::temp_dir());
         let url = viewer.open(0).await.expect("bind");
         let port: u16 = url
             .trim_start_matches("http://127.0.0.1:")
@@ -2387,7 +2854,7 @@ mod live_tests {
     /// disagree about which run they are watching.
     #[tokio::test]
     async fn asking_for_the_view_twice_opens_one_listener() {
-        let mut viewer = Viewer::asked(0, None, None);
+        let mut viewer = Viewer::asked(0, None, None, std::env::temp_dir());
         let first = viewer.open(0).await.expect("bind");
         let second = viewer.open(0).await.expect("bind again");
         assert_eq!(first, second, "the second ask must report where it already is");
@@ -2396,7 +2863,7 @@ mod live_tests {
     /// And a viewer that was only *asked* for is not broken -- it is unbound.
     #[test]
     fn a_viewer_that_has_not_been_opened_has_no_window() {
-        let viewer = Viewer::asked(0, None, None);
+        let viewer = Viewer::asked(0, None, None, std::env::temp_dir());
         assert!(viewer.window.is_none());
         // The feed exists anyway, which is the point of the split: a turn that starts while
         // the socket is still being bound does not lose its frames.
