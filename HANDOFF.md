@@ -427,9 +427,10 @@ exists and follows `/new` and `/resume` because the page is told at the same pla
 reason, and `flint who` prints the id on the human line and the path in `--json`. A record written by an
 older build or by hand still reads (`#[serde(default)]`), and reports "session": null rather than an
 empty name; the reader keeps the older "newest session file written here" line as well, because it covers
-a record that has said nothing yet. Not built: the background handle (`background: true`,
-`task_status`, `task_wait`, `task_stop`), so the record is a readable handle from a person's side and not
-yet a collectable one from a model's side.
+a record that has said nothing yet. **Built since: the background handle** — `background: true` on
+`task`, `bash`, `exec` and `pwsh`, with `job_op`'s `status`/`output`/`wait`/`stop` (the three verbs
+this paragraph sketched as `task_status`/`task_wait`/`task_stop` became one tool with an `action`) —
+so the record is collectable from a model's side as well as readable from a person's.
 
 **Two runs in one directory can talk — the mailbox half of stage 3 of `docs/agents.md`.** `flint say
 "…" [--to <pid>] [--cwd <dir>] [--json]` appends one JSON line to
@@ -442,8 +443,12 @@ That last part is the safety property this half was allowed to ship on, and it i
 promised: `session::load` reads a `peer` event **without** putting it in `messages`, so the history a
 request is built from cannot contain one; `tests/say.rs` makes a peer speak *during* a turn through the
 real command and then asserts the person saw it, the session file kept it, and **every request body the
-provider received is free of it**. Deliberately not built: the opt-in that would feed a peer's words to
-a model, the `.flint/` presence marker in the project, and a `/say` inside the prompt. One bug worth
+provider received is free of it**. **Built since**: the opt-in that feeds a peer's words to a model
+(`--hear-peers`, or `/hear-peers on` while a run is open) and the `.flint/` presence marker in the
+project, both bound the way `docs/agents.md` decisions 3 and 5 say — the relay lands in the request
+view and never in `history`, and the marker is only ever looked for, never created. Still not built,
+and deliberately: a `/say` inside the prompt, so leaving a peer a message takes a second terminal.
+One bug worth
 remembering: `flint say` takes everything after it as prose, so `--cwd` and `--json` have to be pulled
 out before the rest is joined — the first version put `--cwd` *inside* the message and sent it to the
 wrong directory's mailbox, which the end-to-end test caught.
@@ -1490,9 +1495,13 @@ each with the reason it is left:
    `renaming_a_conversation_tells_the_page_to_read_the_list_again` (`tests/cli_output.rs`, a real
    `--web` process, red without the frame).
 
-- The small queued-line hole above still wants its two structural lines before a test can hold it.
-  The report path now leans on the same machinery and does *not* have the hole: a report arriving
-  mid-turn is stashed rather than consumed as an interrupt.
+- ~~The small queued-line hole above still wants its two structural lines before a test can hold it.~~
+  **Fixed, and this bullet was left standing over it** (it was written 2026-09-14 and survived the fix):
+  the hole is the one "A line already waiting no longer erases the question it interrupts" below records,
+  and the two structural lines it wanted are the `poll_fn` that polls the turn once before the input loop
+  starts reading — held since by `a_line_that_was_already_waiting_does_not_erase_the_question` in
+  `src/main.rs`'s own tests. The report path leans on the same machinery and never had the hole:
+  a report arriving mid-turn is stashed rather than consumed as an interrupt.
 
 **The Windows plan is finished, and the measurements are the useful part.**
 `docs/windows-tooling.md` had been "settled and unimplemented" for several sessions: a
@@ -2064,8 +2073,12 @@ section into it, so the two do not drift. The shape of it now:
 1. **The Windows command line** — settled in full in
    [`docs/windows-tooling.md`](docs/windows-tooling.md) and **built**: all five steps are in the
    tree, and the parts that needed a real machine were settled on one (Windows 10.0.26200,
-   rustc 1.98.1, PowerShell 5.1 as the only PowerShell on `PATH`). What is left is one item, and
-   it is not a Windows one: a Unix process-group kill for work a command backgrounds (§6.1).
+   rustc 1.98.1, PowerShell 5.1 as the only PowerShell on `PATH`). The one item this entry used to
+   carry as open — a Unix process-group kill for work a command backgrounds (§6.1) — is **built**
+   (`KillTree::detach` puts the child in its own process group, the guard signals the group, and the
+   ubuntu job watched the test fail before the code existed). Nothing in the plan is left open; what
+   remains here is the honest limit `docs/agents.md` states — a run killed outright leaves its
+   children behind, because the guard is flint's own code and does not run.
 2. **The transcript as cells** — steps 1 and 2 are done. The measurement found one 40-line
    answer streamed in 256 deltas painting **10×** the characters it contains (about 78
    characters of waste per delta) for a screen identical to the one a single delta produces;
@@ -2086,8 +2099,11 @@ section into it, so the two do not drift. The shape of it now:
    only the strip had, the strip is emptied, and the next fragment starts a fresh segment at the
    new width (`a_resize_closes_the_answer_that_was_still_arriving`; re-wrapping instead would
    commit rows against a `committed` count measured in the old wrapping and duplicate text in the
-   scrollback). What step 3 still owes is the **consolidation**, and `ROADMAP.md` §6 now records
-   what it has to keep, because two of the four pieces cannot be deleted: `segment_text` (what
+   scrollback). What step 3 owed was the **consolidation**, and it landed a few paragraphs below in
+   this same entry — this sentence and the "What step 3 still owes" line in `ROADMAP.md` §6 were both
+   written before it and were left standing over it until 2026-09-17, when they were rewritten to
+   point at the record. `ROADMAP.md` §6 keeps what the merge had to
+   preserve, because two of the four pieces cannot be deleted: `segment_text` (what
    actually arrived) is not the concatenation of the handed prefix and the drawn text — the strip
    drops the leading blank space and may not fire at all — and `committed` has to stay while
    answers commit *into* the transcript as they stream, which is the feature that makes a long

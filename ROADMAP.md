@@ -250,10 +250,13 @@ What step 3 still owes, and the shape of it:
   because the handler only recomputed the layout and repainted the input row.
   What it deliberately does not do is re-wrap the rows already in the transcript: those are
   scrollback, drawn at the width they were drawn at, and the answer keeps the seam.
-- The interim state is still there. Deleting it is what makes the strip a cell grid rather than
-  a text offset, and it is the larger half of step 3. The character/row mismatch behind the
-  paragraph above is one of the things that goes with it: `committed` counts *rows*, which is
-  why a width change has to end the segment rather than continue it.
+- ~~The interim state is still there. Deleting it is what makes the strip a cell grid rather than
+  a text offset, and it is the larger half of step 3.~~ **The merge landed, 2026-09-14, and this
+  bullet was left standing over it** — "The merge landed" below is the record: the eight fields
+  behind five locks are two models under two locks, and nothing was deleted, because measuring each
+  one showed it carries something that cannot be reconstructed. `committed` counts *rows*, which is
+  why a width change has to end the segment rather than continue it — a property of the count, not
+  a piece of interim state waiting to be removed.
 
 **What that rewrite has to keep**, worked out 2026-09-14 by trying to derive each piece instead
 of storing it. Two of the four cannot go, and it is worth knowing why before starting:
@@ -856,10 +859,15 @@ the forms and now the destructive ones — and what is left is not a class but t
 written down where it belongs: `/config edit` as a page form (it would need a command the terminal
 does not have, above), the mid-turn wait for a report — **asserted since 2026-09-16** by
 `a_report_asked_for_mid_turn_waits_for_the_turn`, which drives a real `--web` process against a stub
-slow enough to ask during, so this residue is closed — and a browser, **half measured**: §11's `L3 in a
+slow enough to ask during, so this residue is closed — and a browser, **measured**: §11's `L3 in a
 real browser` table was driven over the DevTools protocol against the real page (sidebar listing, row
-click, `+ new`, Enter, the layout at two sizes, three defects found), while the later controls are
-still bytes and not clicks, which §11's `Not yet measured in a browser` lines name one by one. The
+click, `+ new`, Enter, the layout at two sizes, three defects found), and the *later* controls have
+since had the same treatment from a committed harness rather than a one-off —
+`scripts/browser-controls-test.js` drives the switches, the command panel, an action button, the masked
+credential field and a destructive row's menu, checks every press against the run's own stdout, and
+found two more defects, both fixed (a fresh run's page drew no controls at all; the open panel covered
+the composer's send button). §11's `The later controls, in a real browser` is that table and the method,
+and what no browser has touched is the short named list at the end of the same section. The
 fourth residue, the sidebar's rename, is built as well and is recorded below. The queue is what comes
 next.
 
