@@ -6,6 +6,69 @@ of it.
 
 ## Where things stand
 
+**The eighth of the twelve items taken from the reading of Pi is built: a finished conversation as one
+HTML file.** `flint export <n|id|path> [--out <file>]` writes what the page has always drawn — the
+question, the answers, every tool call and its result, the reasoning, the fold-out rows — into a single
+file that is opened from `file://` with no flint, no listener and no network. It was the item the reading
+itself called the bigger half, and the reason it turned out small is the thing worth recording: the page
+**is** the renderer for a finished conversation already (`applyText` parses `meta`, `chat`, `usage`,
+`title`, and dropping a session file on the page draws it), so the export is that same page with the
+conversation welded into it as a JSON island, `<script id="session" type="application/json">`, placed
+just before the page's own script. The page's boot already had the branch for it — `servedByFlint()` is
+false for `file:`, and that branch fetched nothing — so the whole change to the renderer is one function
+that reads the island and one call to the `applyText` that was there. The alternative, rendering a
+conversation to HTML in Rust, was refused for the rule this repository keeps everywhere: it would be a
+second place where "what a tool call looks like" is decided, and the second place is the one that drifts.
+
+**What the export may not carry is the design, and one of the three only turned up in a real browser.**
+The `cwd` is taken out of the `meta` line — the one field in a session file that names the machine rather
+than the conversation, in the one artifact whose purpose is to leave that machine — while the provider and
+the model stay, because they are facts about the conversation. `<`, `>` and `&` are escaped inside the
+island (`\u003c` and friends), because a `<script>` element ends at the first `</script` in its text and
+that text is a conversation: a tool result quoting a file, or a model asked about this very page. Without
+that, one conversation line closes the island early and the rest of the conversation is parsed as HTML,
+where `<script>` is a script. And a **byte-order mark** is stripped before parsing: `notepad` writes one,
+so does PowerShell's `Set-Content -Encoding utf8`, and JSON stops at it — which made the `meta` line read
+as damage *with its `cwd` still in it*, exactly the thing the first rule exists to remove. That one was
+found by exporting a hand-written session in a scratch home and looking at the bytes, and it is red-first
+in the tree now (`an_export_of_a_marked_session_still_leaves_the_directory_out` failed before the strip
+was added).
+
+**Where the page goes, and what it refuses.** With `--out` the page is written there and stdout carries
+one line naming it; without `--out` stdout **is** the page and nothing else, so `flint export 3 >
+page.html` is the whole invocation. That is `--json`'s rule — a mode either owns stdout or owns none of
+it — because a caller who has to strip a banner out of an artifact is a caller who will strip the wrong
+line one day. Like `/import` and `--archive` it needs no key and no reachable endpoint (it reads one file
+and writes another), and like `/import` it refuses a conversation with no messages in it: a page that
+looks like a conversation and holds nothing cannot be told from a page that failed to load. Placed beside
+`--archive`/`--delete` in `real_main`, before the provider is resolved, for the reason the comment there
+gives — this is the artifact somebody wants on exactly the machine where the provider is what is in
+doubt.
+
+**Red first, six times, and then measured in a real browser.** The six tests in `tests/cli_output.rs` were
+written before the flag existed and failed with `unknown flag 'export'`; after it existed, the two that
+failed were the ones that had a real defect behind them (the island carried parsed objects rather than the
+file's lines, so `applyText` would have received `[object Object]`; and the BOM case above). The drawing
+half needed no new test, because it is `applyText` on the island's lines — but it was checked end to end
+anyway, in headless Chrome over `file://`: the question, the answer, a tool call with its result and the
+model's reasoning all appear in the dumped DOM, the directory the session was held in appears nowhere, the
+tab carries the conversation's name, and a session whose message is
+`</script><script>document.body.setAttribute("data-pwned","1")</script>` produces exactly two `</script>`
+closers, keeps the text as text, and sets no attribute. `scripts/web-view-test.js` holds the island's
+reader (`islandLines`) including the escaped case, so the parse is covered in CI on both legs.
+
+**Gate and counts: `cargo test` 605 → 611 passing, 1 ignored** (95 → **101** in `cli_output`; 344 lib and
+6 binary tests unchanged). `cargo clippy --all-targets -- -D warnings` is silent, `node
+scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass. The release binary and the flint on
+`PATH` were rebuilt from this commit. The docs moved with it: `ROADMAP.md`'s export line, `README.md`'s
+command list and a paragraph on what an export is, `docs/web-mode.md` **§14** (the full record, including
+the browser measurement), `docs/decisions.md` ("An export is the page, not a second reading of a
+conversation"), `docs/pi-agent-harness.md` §3.5 where the sketch was answered, and `AGENTS.md`'s rows for
+`src/main.rs`, `src/web.rs` and `tests/`. **Not built, and named in both places:** `/export` from inside a
+running conversation, which needs its own answer to where a page goes while the terminal owns stdout.
+Three small asides rode along in the same commits: `--help` gained the verb and lost a stray misindented
+`who` line, and the ubuntu view-test failure above was made readable.
+
 **The seventh of the twelve items taken from the reading of Pi is built: a follow-up that does not
 interrupt the turn.** A plain line typed mid-turn *is* the interrupt — that is the design, and the help
 says so — which left no way to say the other thing people say at a running agent: "also, when you are

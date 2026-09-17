@@ -1872,7 +1872,30 @@ argument, the cost and what flint has today are in the document, §3.
   indistinguishable from a real one), importing the file this run is currently writing is refused (it
   would copy a growing conversation into itself, and `--fork` is that act), and a run started with
   `--no-session` refuses it like every other door that would create a conversation.
-- **A static export of a finished conversation** — one HTML file, no process behind it.
+- **A static export of a finished conversation** — one HTML file, no process behind it. **Built,
+  2026-09-17.** `flint export <n|id|path> [--out <file>]`, with stdout as the default destination so
+  that `flint export 3 > page.html` is the whole invocation, and nothing else on stdout in that case
+  — `--json`'s rule that a mode either owns stdout or owns none of it. What it writes is
+  `web/view.html` with the session's own lines welded into it as a JSON island, so there is **one
+  renderer**: the page already draws a finished conversation (`applyText` parses `meta`, `chat`,
+  `usage`, `title`), and a second reading of a conversation written in Rust would be a second place
+  where "what a tool call looks like" is decided. Three things are what make it an artifact rather
+  than a copy: the `cwd` is taken out of the `meta` line (the only field in a session file that names
+  the machine rather than the conversation, and an export exists to leave that machine); `<`, `>` and
+  `&` are escaped inside the island, because a `<script>` element ends at the first `</script` in its
+  text and that text is a conversation (a tool result quoting a file, or a model asked about this page)
+  — without the escapes the rest of the conversation is parsed as HTML, where `<script>` is a script;
+  and a byte-order mark is stripped before parsing, since `notepad` writes one and a JSON parser stops
+  at it, which would carry the `meta` line as damage *with its `cwd` still in it*. It needs no key and
+  no endpoint, like `/import` and `--archive`: it reads one file and writes another, and this is the
+  artifact somebody wants on the machine where the provider is what is in doubt. A conversation with
+  no messages is refused, for `/import`'s reason — a page that looks like a conversation and holds
+  nothing is one nobody can tell from a page that failed to load. Verified in a real browser, offline
+  from `file://`: the question, the answer, a tool call and its result are drawn, and a conversation
+  containing `</script><script>document.body.setAttribute("data-pwned","1")</script>` does not run.
+  Not built with it, and worth naming because it is the obvious next door: `/export` from inside a
+  running conversation, which needs its own answer to where the page goes while the terminal owns
+  stdout.
 - **An entry id the page can resume from after a restart** — the reconnection cursor today is a
   per-process ring, so a reload after a restart re-reads from nothing.
 - **Prompt templates, and a way for a *person* to invoke a skill — built, 2026-09-17.** A prompt file is

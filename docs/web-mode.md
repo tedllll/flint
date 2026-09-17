@@ -1280,3 +1280,66 @@ means *this run ended it*, and it is true on both platforms for the same reason.
   with the job's own budget named as what ends it either way. Nothing waits forever, and nothing claims
   a job is gone because a signal was sent.
 
+## 14. The same page with nothing behind it: `flint export`
+
+Every level in §3 needs something: a run to serve the page, a file to drop on it, a terminal. The
+export is the page as an **artifact** — `flint export <n|id|path> [--out <file>]` writes one HTML file
+holding a finished conversation, and that file is opened from `file://` with no flint, no listener and
+no network. It is the shape Pi's own export has (§3.5 of `docs/pi-agent-harness.md`), and the interesting
+part is that flint already had both halves of it and had never put them together: the page draws a
+session file dropped on it, and the session file is the record.
+
+**One renderer, driven from a static frame.** The export is `web/view.html` with the conversation welded
+into it as a JSON island — `<script id="session" type="application/json">{"lines":[…]}</script>` —
+placed immediately before the page's own script. The lines are the session file's *own* lines, because
+`applyText` already parses them (`meta`, `chat`, `usage`, `title`, the tool-call shapes); the alternative,
+rendering the conversation to HTML in Rust, was refused for the reason this repository gives everywhere:
+it would be a second place where "what a tool call looks like" is decided, and the page is the one
+somebody looks at. The page's boot reads the island in the branch it already had for `file:`
+(`servedByFlint()` is false there, so not one live route is touched), and an island that cannot be read
+is drawn as damage with a hint saying so — a broken export and an empty conversation must not look alike
+when one of them is a file to send back.
+
+**What an export may not carry is the whole design**, and each of the three is a decision rather than a
+detail:
+
+- **The directory the conversation was held in.** `cwd` is removed from the `meta` line, and it is the
+  only field in a session file that names the machine rather than the conversation. An export exists to
+  leave that machine, which no other file in this project does. Everything else is kept, including the
+  provider and the model, which are facts about the conversation.
+- **A byte-order mark.** `notepad` writes one, and so does PowerShell's `Set-Content -Encoding utf8`; a
+  JSON parser stops at it, so the `meta` line would be carried as damage — *with its `cwd` still in it*,
+  which is the one thing this function exists to take out. The mark is the encoding's business rather
+  than the content's, which is the same sentence `attach.rs` already has for `@file`, and the export
+  writes a fresh utf-8 document with its own `<meta charset>`.
+- **The ability to become script.** The island sits inside a `<script>` element, and such an element ends
+  at the first `</script` in its text — and that text is a conversation: a tool result quoting a file, or
+  a model asked about this very page. So `<`, `>` and `&` are escaped (`\u003c` and friends), which
+  `JSON.parse` reads back as the same characters and the HTML parser does not see at all. Without it, one
+  conversation line closes the island early and the rest of the conversation is parsed as HTML, where
+  `<script>` is a script — in a file whose whole purpose is to be opened by somebody else.
+
+**Where it goes, and what it refuses.** With `--out` the page goes to that path and stdout keeps one line
+naming it; without one, stdout *is* the page and nothing else, so `flint export 3 > page.html` is the
+whole invocation. That is `--json`'s rule — a mode either owns stdout or owns none of it — because a
+caller who has to strip a banner out of an artifact is a caller who will strip the wrong line one day. It
+needs no key and no reachable endpoint, like `/import` and `--archive`: it reads one file and writes
+another, and the machine where the provider is in doubt is exactly where somebody wants to hand a
+conversation to a colleague. A conversation with no messages is refused, for `/import`'s reason: a page
+that looks like a conversation and holds nothing cannot be told from a page that failed to load.
+
+**Measured, in a real browser rather than in bytes.** Chrome, `--headless=new --dump-dom`, over
+`file://` on an exported page: the question, the answer, a tool call and its result, and the model's
+reasoning are all in the dumped DOM; the directory the session was held in is nowhere in it; the browser
+tab carries the conversation's name; and a session whose message is
+`</script><script>document.body.setAttribute("data-pwned","1")</script>` produces exactly two
+`</script>` closers (the page's and the island's), keeps the text as text, and sets no attribute. The
+bytes are held by six tests in `tests/cli_output.rs` and the island's reader by
+`scripts/web-view-test.js`; the drawing needs no new test, because it is `applyText`, which the page's own
+suite already covers line by line.
+
+**Not built here, and named on purpose:** `/export` from inside a running conversation. It needs its own
+answer to where the page goes while the terminal owns stdout, and the run's file is the wrong file to
+guess at half way through a turn. The door that exists is the one somebody with a finished conversation
+and a colleague needs.
+

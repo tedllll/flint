@@ -43,6 +43,325 @@ fn escape_count(bytes: &[u8]) -> usize {
     bytes.iter().filter(|b| **b == 0x1b).count()
 }
 
+/// One file, nothing behind it: the export a person can hand to somebody else.
+///
+/// The page is already a renderer for a finished conversation -- `--web` serves it, and dropping a
+/// `.jsonl` on it draws one -- but neither is an artifact. The first needs a process and the second
+/// needs two files and a drag. The export is those welded into one file, and the interesting half of
+/// it is what it must *not* carry: the author's directory, a request to anywhere, and a conversation
+/// that can reach out of the JSON island it is written into.
+#[test]
+fn an_exported_conversation_is_one_file_with_nothing_behind_it() {
+    let home = test_home("export", "http://127.0.0.1:1/v1");
+    let sessions = home.join("sessions");
+    let worked_in = home.join("somewhere-on-my-machine");
+    write_session(
+        &sessions,
+        "111-1.jsonl",
+        &[
+            &meta_line_in("111-1", &worked_in),
+            r#"{"type":"chat","message":{"role":"user","content":"what changed in the queue"}}"#,
+            r#"{"type":"chat","message":{"role":"assistant","content":"A follow-up waits."}}"#,
+            r#"{"type":"title","name":"the queue"}"#,
+        ],
+        10,
+    );
+    let page = home.join("page.html");
+
+    let out = binary()
+        .current_dir(&home)
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .arg("export")
+        .arg("111-1")
+        .arg("--out")
+        .arg(&page)
+        .output()
+        .expect("failed to run flint");
+
+    assert!(
+        out.status.success(),
+        "export failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        said.contains("page.html"),
+        "the page went to a file, so stdout has one line naming it: {said:?}"
+    );
+    assert_eq!(escape_count(&out.stdout), 0, "the export leaked escape codes");
+
+    let html = std::fs::read_to_string(&page).expect("the exported page");
+    assert!(
+        html.contains("what changed in the queue") && html.contains("A follow-up waits."),
+        "the conversation is not in the exported page"
+    );
+    assert!(
+        html.contains("<!doctype html") || html.contains("<!DOCTYPE html"),
+        "the exported page is not a page: {}",
+        &html[..html.len().min(200)]
+    );
+    // What an artifact may not carry. The directory the conversation was held in is the author's
+    // machine rather than the conversation, and a page that fetches something is not one file.
+    assert!(
+        !html.contains(&worked_in.display().to_string()),
+        "the export names the directory the conversation was held in"
+    );
+    assert!(
+        !html.contains("http://") && !html.contains("https://"),
+        "the export reaches off the machine for something"
+    );
+    // The conversation is the file's own lines, in the island the page reads, and the page's headline
+    // is the conversation's name rather than every export carrying the same browser tab.
+    let island = island_of(&html);
+    let parsed: serde_json::Value = serde_json::from_str(&island).expect("the island is JSON");
+    let lines: Vec<String> = parsed["lines"]
+        .as_array()
+        .expect("the island carries lines")
+        .iter()
+        .map(|line| line.as_str().expect("a line is a string").to_string())
+        .collect();
+    assert!(
+        lines.iter().any(|line| line.contains("what changed in the queue"))
+            && lines.iter().any(|line| line.contains(r#""type":"meta""#)),
+        "the island is not the session's own lines: {lines:?}"
+    );
+    assert!(
+        !island.contains("somewhere-on-my-machine"),
+        "the island still names the directory: {island}"
+    );
+    assert!(
+        html.contains("<title>flint \u{2014} the queue</title>") || html.contains("the queue</title>"),
+        "the exported page's title is not the conversation's name: {}",
+        &html[..html.len().min(400)]
+    );
+}
+
+/// A conversation cannot become script in the file it is exported to.
+///
+/// The conversation is written into the page as a JSON island inside a `<script>` element, and a
+/// `<script>` element ends at the first `</script` in its text -- whoever wrote it. Tool output is
+/// somebody else's text: a file that contains that sequence, or a model that was asked about it,
+/// would otherwise truncate the island and leave the rest of the conversation to be parsed as HTML,
+/// where `<script>alert(1)</script>` is a script. The island escapes `<`, `>` and `&`, so the bytes
+/// that end an element never appear in it, and what the page reads back is the conversation exactly.
+#[test]
+fn a_conversation_line_cannot_become_script_in_an_export() {
+    let home = test_home("export-script", "http://127.0.0.1:1/v1");
+    let sessions = home.join("sessions");
+    let nasty = r#"</script><script>alert(1)</script>"#;
+    write_session(
+        &sessions,
+        "111-1.jsonl",
+        &[
+            &meta_line("111-1"),
+            &format!(
+                r#"{{"type":"chat","message":{{"role":"user","content":"{nasty}"}}}}"#
+            ),
+        ],
+        10,
+    );
+    let page = home.join("page.html");
+    let out = binary()
+        .current_dir(&home)
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .arg("export")
+        .arg("111-1")
+        .arg("--out")
+        .arg(&page)
+        .output()
+        .expect("failed to run flint");
+    assert!(
+        out.status.success(),
+        "export failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let html = std::fs::read_to_string(&page).expect("the exported page");
+    // Two real closers: the page's own script and the island's. The conversation's is escaped, so it
+    // is not one of them -- which is the whole claim.
+    assert_eq!(
+        html.matches("</script>").count(),
+        2,
+        "a conversation line closed the script element early: {html}"
+    );
+    assert!(
+        !html.contains("<script>alert(1)"),
+        "the conversation was parsed as markup: {html}"
+    );
+    // And it comes back exactly, which is what makes this escaping rather than mangling.
+    let island = island_of(&html);
+    let parsed: serde_json::Value = serde_json::from_str(&island).expect("the island is JSON");
+    assert!(
+        parsed["lines"]
+            .as_array()
+            .expect("lines")
+            .iter()
+            .any(|line| line.as_str().unwrap_or_default().contains(nasty)),
+        "the conversation did not survive the island"
+    );
+}
+
+/// With no `--out`, the page is the whole of stdout and nothing else is: a caller redirects it.
+#[test]
+fn an_export_with_no_out_is_the_page_on_stdout() {
+    let home = test_home("export-stdout", "http://127.0.0.1:1/v1");
+    let sessions = home.join("sessions");
+    write_session(
+        &sessions,
+        "111-1.jsonl",
+        &[
+            &meta_line("111-1"),
+            r#"{"type":"chat","message":{"role":"user","content":"the question on stdout"}}"#,
+        ],
+        10,
+    );
+
+    let out = binary()
+        .current_dir(&home)
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .args(["export", "111-1"])
+        .output()
+        .expect("failed to run flint");
+
+    assert!(
+        out.status.success(),
+        "export failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let html = String::from_utf8(out.stdout).expect("the page is text");
+    assert!(
+        html.trim_start().starts_with("<!doctype html"),
+        "stdout is not the page from its first byte: {}",
+        &html[..html.len().min(200)]
+    );
+    assert!(
+        html.contains("the question on stdout"),
+        "the conversation is not on stdout"
+    );
+    assert_eq!(escape_count(html.as_bytes()), 0, "the export leaked escape codes");
+}
+
+/// A byte-order mark is the encoding's business, and an export may not keep the directory in one.
+///
+/// This is the case a Windows user actually has: `notepad` writes utf-8 *with* a mark, and so does
+/// `Set-Content -Encoding utf8`. A JSON parser stops at the mark, so the `meta` line reads as damage
+/// -- and a `meta` line carried as damage is a line whose `cwd` was never taken out. The export
+/// writes a fresh utf-8 document with its own `<meta charset>`, so the mark is not content to carry,
+/// and the island it writes must be readable without one.
+#[test]
+fn an_export_of_a_marked_session_still_leaves_the_directory_out() {
+    let home = test_home("export-bom", "http://127.0.0.1:1/v1");
+    let sessions = home.join("sessions");
+    let worked_in = home.join("somewhere-on-my-machine");
+    let path = sessions.join("111-1.jsonl");
+    std::fs::write(
+        &path,
+        format!(
+            "\u{feff}{}\n{}\n",
+            meta_line_in("111-1", &worked_in),
+            r#"{"type":"chat","message":{"role":"user","content":"a question"}}"#
+        ),
+    )
+    .expect("write session");
+
+    let out = binary()
+        .current_dir(&home)
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .args(["export", "111-1"])
+        .output()
+        .expect("failed to run flint");
+    assert!(
+        out.status.success(),
+        "export failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let html = String::from_utf8(out.stdout).expect("the page is text");
+    assert!(
+        !html.contains(&worked_in.display().to_string()),
+        "the mark hid the meta line from the parser, and its directory was carried with it"
+    );
+    let island = island_of(&html);
+    let parsed: serde_json::Value = serde_json::from_str(&island).expect("the island is JSON");
+    let first = parsed["lines"][0].as_str().expect("the meta line is a string");
+    assert!(
+        first.starts_with('{') && first.contains(r#""type":"meta""#),
+        "the island's first line is not the readable meta line: {first:?}"
+    );
+}
+
+/// The refusals: a session that is not there, and a `--out` with nothing to write.
+#[test]
+fn an_export_refuses_what_it_cannot_do() {
+    let home = test_home("export-refusals", "http://127.0.0.1:1/v1");
+
+    let missing = binary()
+        .current_dir(&home)
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .args(["export", "no-such-session"])
+        .output()
+        .expect("failed to run flint");
+    assert!(!missing.status.success(), "a missing session was exported");
+    let stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(
+        stderr.contains("no-such-session"),
+        "the refusal does not name what was asked for: {stderr}"
+    );
+
+    let stray = binary()
+        .current_dir(&home)
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .args(["--out", "somewhere.html", "-p", "hi"])
+        .output()
+        .expect("failed to run flint");
+    assert!(!stray.status.success(), "--out was accepted with nothing to export");
+    let stderr = String::from_utf8_lossy(&stray.stderr);
+    assert!(
+        stderr.contains("--out"),
+        "the refusal does not name the flag: {stderr}"
+    );
+}
+
+/// The JSON island out of an exported page, as text.
+fn island_of(html: &str) -> String {
+    let start = html
+        .find(r#"<script id="session" type="application/json">"#)
+        .expect("the exported page carries an island");
+    let after = &html[start..];
+    let open = after.find('>').expect("the island's opening tag") + 1;
+    let end = after.find("</script>").expect("the island's closing tag");
+    after[open..end].to_string()
+}
+
+/// A conversation with no messages in it is not worth a page, and saying so beats writing one.
+#[test]
+fn an_export_of_an_empty_session_is_refused() {
+    let home = test_home("export-empty", "http://127.0.0.1:1/v1");
+    let sessions = home.join("sessions");
+    write_session(&sessions, "111-1.jsonl", &[&meta_line("111-1")], 10);
+
+    let out = binary()
+        .current_dir(&home)
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .args(["export", "111-1"])
+        .output()
+        .expect("failed to run flint");
+
+    assert!(!out.status.success(), "an empty conversation was exported");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("111-1"),
+        "the refusal does not name the session: {stderr}"
+    );
+}
+
 #[test]
 fn redirected_help_has_no_escape_codes() {
     let (code, out) = run(&["--help"]);

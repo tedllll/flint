@@ -279,10 +279,24 @@ different things are missing and they are worth separating, and **one of them is
   (`{"type":"import","from":…,"from_id":…,"messages":…}`), and that line is read back by the two doors
   that name a conversation -- the same rule as everywhere else in this repository: a record nothing
   reads is not a record.
-- **An HTML export**: the same reading the page already draws, written to one file with no process
-  behind it. This is the bigger half, and it is only worth doing if the page's renderer can be driven
-  from a static frame -- which, since the page's model half is pure and runs under Node in
-  `scripts/web-view-test.js`, is a question with a cheap answer. Still owed.
+- **An HTML export** — **built, 2026-09-17**: `flint export <n|id|path> [--out <file>]` writes the same
+  reading the page already draws to one file with no process behind it. The sketch's own condition
+  ("only worth doing if the page's renderer can be driven from a static frame") turned out to be the
+  right question, and the cheap answer was cheaper than expected: the page's boot already has a branch
+  for a page opened from `file:` (`servedByFlint()` is false there, and it fetches nothing), so the
+  static frame is the session file's own lines in `<script id="session"
+  type="application/json">` and the whole change to the renderer is one function that reads the island
+  plus one call to the `applyText` that was already there. Three things the sketch did not mention and
+  that turned out to *be* the design: the export must not carry the directory the conversation was held
+  in (the one field in a session file that names the machine rather than the conversation, and an export
+  is the one file here meant to leave it), it must escape `<`, `>` and `&` in the island (a `<script>`
+  element ends at the first `</script` in its text, and its text is a conversation — without the escape
+  the rest of the conversation is parsed as HTML, verified by exporting a session that contains
+  `</script><script>…` and opening it in Chrome), and it must strip a byte-order mark before parsing
+  (`notepad` writes one, and a JSON parser stops at it — which would carry the `meta` line as damage
+  *with its `cwd` still in it*). The rendering half is not a second implementation and has no test of
+  its own: it is the page's `applyText` on the island's lines, which `scripts/web-view-test.js` already
+  covers line by line. §14 of `docs/web-mode.md` is the full record.
 
 There is a third thing in the same area, and it is the smallest of the three: Pi records every entry
 with a stable id, which makes an id a **durable cursor** -- a client asks for everything after the

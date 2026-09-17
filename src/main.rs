@@ -50,6 +50,15 @@ struct Args {
     archive: Option<String>,
     /// Delete a session and exit.
     delete: Option<String>,
+    /// Write one conversation out as a single HTML page and exit. A list number, an id prefix, or a
+    /// path -- the same three ways `--archive` and `--delete` name a session.
+    ///
+    /// The artifact rather than the view: the page `--web` serves needs a process, and dropping a
+    /// session file on `web/view.html` needs two files and a drag. This is one file to send somebody,
+    /// with no flint and no network behind it.
+    export: Option<String>,
+    /// Where `export` writes the page. Absent means stdout, which is the whole point of an artifact.
+    out: Option<PathBuf>,
     provider: Option<String>,
     model: Option<String>,
     readonly: bool,
@@ -777,6 +786,16 @@ async fn real_main(args: Args) -> Result<i32> {
             return Ok(0);
         }
         (None, None) => {}
+    }
+
+    // ---- write one conversation out as a page, then stop ----
+    //
+    // Here with the archive and the mailbox rather than after the provider: an export reads one file
+    // and writes another. The conversation somebody wants to hand to a colleague is very often on the
+    // machine where the provider is what is in doubt, and needing a key to write a file would make the
+    // artifact useless exactly when it is wanted.
+    if let Some(target) = args.export.clone() {
+        return export_and_stop(&target, args.out.clone());
     }
 
     // ---- who else is working here, then stop ----
@@ -6302,6 +6321,23 @@ fn parse_args(argv: Vec<String>, stream_seen: &mut bool) -> Result<Args> {
                 args.say_to = said.to;
                 args.say = Some(said.text.join(" "));
             }
+            "export" => {
+                // A word rather than a flag, like `who` and `say`, and taken before the bare-word
+                // fallback below so that `flint export 3` is not a prompt asking the model to guess.
+                // It needs no key for the same reason they do not: it reads one file and writes
+                // another, and the conversation somebody wants to send away is often on a machine
+                // whose provider is exactly what is in doubt.
+                let target = iter.next().ok_or_else(|| {
+                    anyhow!("export requires a session: `flint export <n|id|path> [--out <file>]`")
+                })?;
+                args.export = Some(target);
+            }
+            "--out" => {
+                args.out = Some(PathBuf::from(
+                    iter.next()
+                        .ok_or_else(|| anyhow!("--out requires a path"))?,
+                ))
+            }
             "debug" => {
                 let rest: Vec<String> = iter.by_ref().collect();
                 if rest.is_empty() {
@@ -6331,6 +6367,22 @@ fn parse_args(argv: Vec<String>, stream_seen: &mut bool) -> Result<Args> {
     if args.port.is_some() && !args.web {
         return Err(anyhow!(
             "--port needs --web: it chooses the port the browser view listens on"
+        ));
+    }
+    // `--out` writes the page somewhere, so it belongs to `export` alone. Ignoring it would leave
+    // somebody with a run that looks like it worked and no file where they asked for one.
+    if args.out.is_some() && args.export.is_none() {
+        return Err(anyhow!(
+            "--out needs export: `flint export <n|id|path> --out <file>` writes the page there"
+        ));
+    }
+    // And the other direction: `export` is a verb that reads a file and stops, so a prompt beside it
+    // is two runs asked for at once. Saying which one is not happening beats doing one of them.
+    if args.export.is_some() && args.prompt.is_some() {
+        return Err(anyhow!(
+            "export takes no prompt: it writes the conversation out and stops. \
+             Bare words after the session name would be a prompt, so they are refused rather than \
+             guessed at."
         ));
     }
     // `--json` writes one turn to stdout and exits, so a window opened beside it would close
@@ -6365,10 +6417,12 @@ fn print_help(color: bool, term: &Term) {
   flint --fork [<n|id>]            copy a session and continue the copy, leaving the original alone
   flint exec <command>             run a command directly (no model, no network)
   flint balance [--json]           ask the provider whether it can be used, and what is left
-flint who [--all] [--json]       who else is working in this directory (flint only), and what changed
+  flint who [--all] [--json]       who else is working in this directory (flint only), and what changed
   flint say <text> [--to <pid>]    leave a message for whoever is working here: shown to the person,
                                    and sent to the model only if that run asked to hear peers
                                    ({b}/hear-peers{r} turns that on for a running session)
+  flint export <n|id|path>         write a session out as one HTML page, and stop
+                                   (--out <file> writes it there; absent, the page is stdout)
   flint debug prompt-input [msg]   print the request that would be sent, and send nothing
   flint --list-sessions            list saved sessions, numbered for --resume
                                    (--json: one object, with each session's path)
@@ -6545,6 +6599,75 @@ fn split_say(words: &[String]) -> SayWords {
         }
     }
     out
+}
+
+/// Write one conversation out as a single HTML page and say where it went.
+///
+/// The file is the session's own lines welded into `web/view.html`, which is the renderer the page
+/// has always been -- see `web::export_html` for what is carried, what is left out and why. What is
+/// decided *here* is the two ways of asking: with `--out` the page goes to that path and stdout keeps
+/// one line naming it, and without one stdout is the page and nothing else, so that
+/// `flint export 3 > page.html` is the whole invocation. That division is `--json`'s: a mode either
+/// owns stdout or owns none of it, because a caller that has to strip a banner out of an artifact is
+/// a caller who will strip the wrong line one day.
+///
+/// A conversation with no messages in it is refused, like `/import` refusing an empty file and for
+/// the same reason: the artifact would be a page that looks like a conversation and holds nothing,
+/// and the person who sent it would have no way to tell that from a page that failed to load.
+fn export_and_stop(target: &str, out: Option<PathBuf>) -> Result<i32> {
+    let path = resolve_session(target)?;
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let lines: Vec<String> = text.lines().map(|line| line.to_string()).collect();
+
+    // "Has a conversation" is counted the way the page counts one: a `chat` line is a message in the
+    // transcript. A `title` or a `usage` line alone is a file something started and never spoke in.
+    let messages = lines
+        .iter()
+        .filter(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .ok()
+                .and_then(|value| value.get("type").and_then(|t| t.as_str()).map(str::to_string))
+                .is_some_and(|kind| kind == "chat")
+        })
+        .count();
+    if messages == 0 {
+        return Err(anyhow!(
+            "{} has no conversation in it: there is nothing to export",
+            path.display()
+        ));
+    }
+
+    // The tab names the conversation. The last `title` line is the one in force, the same rule the
+    // page applies, and a conversation that was never named is named by its id -- which is the only
+    // other thing about it that is stable and short enough for a tab.
+    let title = lines
+        .iter()
+        .rev()
+        .find_map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line).ok()?;
+            if value.get("type")?.as_str()? == "title" {
+                Some(value.get("name")?.as_str()?.to_string())
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            path.file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+        })
+        .unwrap_or_else(|| path.display().to_string());
+
+    let html = web::export_html(&lines, &title);
+    match out {
+        Some(path) => {
+            std::fs::write(&path, html.as_bytes())
+                .with_context(|| format!("writing {}", path.display()))?;
+            println!("wrote {} ({} bytes)", path.display(), html.len());
+        }
+        None => print!("{html}"),
+    }
+    Ok(0)
 }
 
 /// Leave a message in this directory's mailbox, and say where it went.

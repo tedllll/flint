@@ -19,6 +19,91 @@
 /// that document, and puts every piece of text in through `textContent`.
 pub const VIEW_HTML: &str = include_str!("../web/view.html");
 
+/// The conversation's lines, welded into that page, as one file with no process behind it.
+///
+/// The whole design is in *what* is welded and *how*, because the page is already the renderer for a
+/// finished conversation: dropping a session file on it draws one. An export is that same page with
+/// the conversation inside it, so there is exactly one renderer and the export cannot drift from the
+/// view -- the alternative, a second reading of a conversation written in Rust, would be a second
+/// place where "what a tool call looks like" is decided, and the first place would win every time
+/// somebody changed the page.
+///
+/// Three things are deliberately not what they look like:
+///
+///   * **The island carries the session's own lines**, not a summary of them: the page's `applyText`
+///     already parses `meta`, `chat`, `usage`, `title` and the rest, so an export is the same
+///     vocabulary the page has always read. A derived shape here would be derived state in a file
+///     that is meant to be opened by somebody else's browser for years.
+///   * **`cwd` is removed from the `meta` line.** It is the only field in a session file that names
+///     the machine it was written on rather than the conversation, and an export is the one artifact
+///     whose whole purpose is to leave that machine. Everything else is kept, including the model and
+///     the provider, which are facts about the conversation.
+///   * **`<`, `>` and `&` are escaped in the JSON.** The island lives inside a `<script>` element,
+///     which ends at the first `</script` in its text -- and the text is a conversation: a tool
+///     result quoting a file, or a model asked about this very page. Without the escapes, one of
+///     those closes the island early and the rest of the conversation is parsed as HTML, where
+///     `<script>` is a script. `\u003c` is the same character to `JSON.parse` and no character at
+///     all to the HTML parser, which is the whole trick.
+pub fn export_html(lines: &[String], title: &str) -> String {
+    let carried: Vec<String> = lines.iter().map(|line| without_cwd(line)).collect();
+    let island = serde_json::json!({ "lines": carried }).to_string();
+    let island = island
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026");
+
+    // The tab names the conversation rather than every export being "a session".
+    let page = VIEW_HTML.replace(
+        "<title>flint — a session</title>",
+        &format!("<title>flint — {}</title>", escaped(title)),
+    );
+    // The island goes immediately before the page's own script: it has to be in the body for the page
+    // to find it by id, and it has to be *before* the script runs, because the boot reads it.
+    let script = page
+        .find("<script>")
+        .expect("the view has one script tag to hang a conversation on");
+    format!(
+        "{}<script id=\"session\" type=\"application/json\">{island}</script>\n{}",
+        &page[..script],
+        &page[script..]
+    )
+}
+
+/// One session line with the directory it was held in taken out of it.
+///
+/// The lines are carried as the file's own text -- the island is an array of strings, and `applyText`
+/// reads them exactly as it reads a dropped file -- so a line is returned untouched unless it is the
+/// one line that has a `cwd`. That is not an optimisation: re-serialising every line would rewrite a
+/// conversation that has nothing wrong with it, and the export would stop being the file's own words.
+/// A line that cannot be parsed is left alone too: the page skips what it does not understand, and
+/// rewriting damage would be inventing a record rather than carrying one.
+fn without_cwd(line: &str) -> String {
+    // A byte-order mark is the encoding's business, not the content's -- the same sentence `attach.rs`
+    // has for `@file`, and it matters more here than it looks. `notepad` on Windows writes utf-8 *with*
+    // a mark, and so does PowerShell's `Set-Content -Encoding utf8`; JSON stops at the mark, so the
+    // `meta` line would be carried as damage, and a `meta` line carried as damage is a line whose
+    // `cwd` was never taken out. The export writes a fresh utf-8 document with its own `<meta
+    // charset>`, so the mark is not content to carry.
+    let line = line.strip_prefix('\u{feff}').unwrap_or(line);
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(line) else {
+        return line.to_string();
+    };
+    if value.get("cwd").is_none() {
+        return line.to_string();
+    }
+    if let Some(object) = value.as_object_mut() {
+        object.remove("cwd");
+    }
+    serde_json::to_string(&value).unwrap_or_else(|_| line.to_string())
+}
+
+/// Text for an HTML element: the three characters that mean something to the parser.
+fn escaped(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 use std::collections::VecDeque;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicU64, Ordering};

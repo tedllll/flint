@@ -128,6 +128,8 @@ flint --list-sessions --json     # the same list as data, each row with its sess
 flint --name "codex config"      # name the conversation you are in
 flint --archive 3                # file it away, out of the list
 flint --delete 4                 # remove the session file
+flint export 3 > page.html       # one HTML file with the conversation in it, and nothing behind it
+flint export 3 --out page.html   # the same, written where you say (stdout says where it went)
 ```
 
 A session can be named, archived and deleted, and none of the three needs a model or a
@@ -137,6 +139,18 @@ moment the network is what is broken. Archiving moves the file into
 the same operation backwards. The file itself — every event, the rules a reader keeps, and
 what can safely be edited by hand — is documented in
 [`docs/session-format.md`](docs/session-format.md).
+
+**`flint export` writes a conversation out as one file you can send somebody.** It is the same page
+`--web` serves, with the conversation welded into it: open it in any browser, from disk, with no flint
+running and no network — the question, the answers, every tool call and its result, the reasoning, the
+same colours and the same fold-out rows. It is not a screenshot and not a second renderer: the page has
+always been able to draw a session file dropped on it, and an export is that page with the file already
+in it, so what you send is what you were looking at. Two things it deliberately does not carry: the
+directory the conversation was held in (the one field in a session file that names your machine rather
+than the conversation) and any request to anywhere — an export is one file, and it works on a machine
+that has never heard of flint. A conversation with nothing in it is refused rather than written, since
+a page that looks like a conversation and holds nothing is indistinguishable from one that failed to
+load.
 
 **The list is your conversations, not every conversation on the machine.** A run that
 another run started — a `task`/`tasks` child, or the same thing through Python or MCP — writes

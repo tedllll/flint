@@ -102,6 +102,45 @@ columns — where what wrapped was the count a reader is looking for. It is one 
 copy and both doors, so no two of them can drift into saying different things about the same file, and
 the startup line on stderr says the same sentence for the same reason even though nothing wraps there.
 
+## An export is the page, not a second reading of a conversation
+
+**The renderer is the page's, and the export is that page with the conversation inside it.**
+`flint export` writes `web/view.html` with the session file's own lines in a JSON island. The
+alternative — rendering the conversation to HTML in Rust — was refused for the rule this repository
+keeps everywhere: it would be a second place where "what a tool call looks like" is decided, and the
+second place is the one that drifts, because the page is what somebody is actually looking at. The
+lines are the file's own bytes rather than a derived shape for the same reason: `applyText` already
+parses `meta`, `chat`, `usage` and `title`, so an export is the same vocabulary the page has always
+read, and a shape invented for the export would be derived state inside a file meant to be opened by
+somebody else's browser for years. It also means the drawing needs no test of its own: it is the
+page's own model half, which `scripts/web-view-test.js` runs line by line.
+
+**An export does not carry the directory the conversation was held in.** `cwd` is removed from the
+`meta` line. It is the one field in a session file that names the machine rather than the
+conversation, and the export is the one file here whose entire purpose is to leave that machine —
+which is what makes this worth doing deliberately rather than inheriting. The provider and the model
+stay: they are facts about the conversation. A related accident is why the removal happens after a
+byte-order mark is stripped: `notepad` writes utf-8 with a mark, JSON stops at it, and a `meta` line
+that reads as damage is a line whose `cwd` was never taken out — so a file that is already damaged on
+this machine would have exported the very thing the export exists to leave out.
+
+**A conversation cannot become script in the file it is exported to.** The island lives inside a
+`<script>` element, which ends at the first `</script` in its text, and its text is a conversation: a
+tool result quoting a file, or a model asked about this page. `<`, `>` and `&` are therefore escaped
+as `\u003c` and friends, which `JSON.parse` reads back as the same characters and the HTML parser does
+not see at all. This is not a precaution against a hostile model; it is the ordinary case of a
+conversation containing HTML, and the failure mode is that the rest of the conversation is parsed as
+markup in a file somebody was sent.
+
+**The page's documents are the API, and a caller redirects an artifact.** With `--out` the page is
+written there and stdout carries one line naming it; without `--out` stdout is the page and nothing
+else. That is `--json`'s rule — a mode either owns stdout or owns none of it — because a caller who has
+to strip a banner out of an artifact is a caller who will strip the wrong line one day. It joins
+`--archive`, `--delete` and `/import` in needing no key and no reachable endpoint: it reads one file and
+writes another, and the machine where the provider is in doubt is exactly where a conversation is worth
+handing to somebody. No messages means no page, refused the way `/import` refuses an empty file: one
+that looks like a conversation and holds nothing cannot be told from one that failed to load.
+
 ## Turns, and the lines typed into them
 
 **A queued follow-up is the run's memory, not the file's.** `/queue <text>` holds a line until the turn

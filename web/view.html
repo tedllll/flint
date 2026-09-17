@@ -1595,6 +1595,27 @@ function servedByFlint(loc) {
   return here.protocol !== "file:" && tokenFromSearch(here.search) !== "";
 }
 
+/// The conversation an *exported* page carries: the session's own lines, in a JSON island beside the
+/// page, and nothing else.
+///
+/// An export is one file -- this page with the conversation welded into it -- and it is opened from
+/// `file:`, which `servedByFlint` is already false for. So this is the other half of that branch: the
+/// same lines `applyText` reads for a dropped session file, which is why an export draws exactly like
+/// a session somebody dropped on the page. There is no second renderer and no second vocabulary.
+///
+/// An island that cannot be read returns nothing rather than throwing: the boot says so where a
+/// person can see it, because a page that looks like an empty conversation is worse than one that
+/// says it is damaged.
+function islandLines(island) {
+  if (!island || !island.textContent) return "";
+  try {
+    const carried = JSON.parse(island.textContent);
+    return Array.isArray(carried.lines) ? carried.lines.join("\n") : "";
+  } catch (e) {
+    return "";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // The view: a document in, elements out. Every text goes in through textContent.
 // ---------------------------------------------------------------------------
@@ -2862,6 +2883,20 @@ if (typeof document !== "undefined" && document.getElementById) {
       paint(doc);
     });
   } else {
+    // A file opened from disk: a session somebody dropped on the page, or an export, which is this
+    // same page with the conversation welded into it. Nothing is fetched either way -- `file:` is what
+    // `servedByFlint` is false for -- and the drop zone stays visible, because a reader of an exported
+    // conversation dropping their own session on it is a reasonable thing to do next.
+    const island = document.getElementById("session");
+    const carried = islandLines(island);
+    if (carried) {
+      applyText(doc, carried);
+    } else if (island) {
+      // Present and unreadable is a broken export rather than an empty conversation, and the
+      // difference matters: one is a file to send back, the other is a page with nothing in it.
+      doc.blocks = [{ kind: "damage", text: "this export's conversation cannot be read" }];
+      setHint("this export is damaged: its conversation is not readable");
+    }
     paint(doc);
   }
 }
@@ -2870,6 +2905,7 @@ if (typeof document !== "undefined" && document.getElementById) {
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     newDoc, applyLine, applyText, applyEvent, tokenFromSearch, servedByFlint, sseFrames,
+    islandLines,
     sessionsFrom, messageBody, resumeLine, streamingAnswer, carryStreaming, setStreamingAnswer,
     paint, feedTrouble, tokenRefused, feedTrace, debugFeed, applyState, showState, fillSelect,
     showToggles, showCommands, showActions, sessionRow, formLine,

@@ -1445,6 +1445,31 @@ check("a job's line says whether it is still going, and how long for", () => {
   eq(viewer.jobIsLive({ status: "completed" }), false, "and nothing else is");
 });
 
+// An exported page carries its conversation in a JSON island, and this is the one function that reads
+// it. The island is a list of the session file's own lines, so what comes out of it goes straight into
+// `applyText` -- which is why an export draws like a session somebody dropped on the page, and why
+// there is nothing here to test about drawing. What is worth pinning is the two ways it can say
+// nothing: no island at all (the page as it has always been, empty and waiting for a drop), and an
+// island that cannot be read (a broken export, which the boot says out loud rather than drawing as an
+// empty conversation).
+check("the island an exported page carries", () => {
+  const lines = [`{"type":"meta","id":"1"}`, `{"type":"chat","message":{"role":"user","content":"hi"}}`];
+  eq(
+    viewer.islandLines({ textContent: JSON.stringify({ lines }) }),
+    lines.join("\n"),
+    "the conversation comes back as the lines applyText reads"
+  );
+  eq(viewer.islandLines(null), "", "a page with no island carries no conversation");
+  eq(viewer.islandLines({ textContent: "" }), "", "and neither does an empty one");
+  eq(viewer.islandLines({ textContent: "not json at all" }), "", "damage is not thrown, it is refused");
+  eq(viewer.islandLines({ textContent: `{"lines":"a string"}` }), "", "lines that are not a list are refused");
+  // The escape the export writes: a conversation cannot close the element it is written into, and the
+  // text that comes back is the conversation, not the escape.
+  const nasty = `</script><script>alert(1)</script>`;
+  const escaped = JSON.stringify({ lines: [nasty] }).replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
+  eq(viewer.islandLines({ textContent: escaped }), nasty, "an escaped island still reads exactly");
+});
+
 if (failures) {
   console.log(`\n${failures} failed`);
   process.exit(1);
