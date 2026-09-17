@@ -441,6 +441,96 @@ impl Agent {
         self.provider.thinking_field()
     }
 
+    /// Where a compaction would cut this conversation: the newest question, when there is something
+    /// above it to fold.
+    ///
+    /// A **question** rather than a message count, which is the rule the request-side trimming already
+    /// follows and the one Pi's compaction states outright: a cut inside a tool exchange would leave
+    /// the model holding half a step -- a question's answer with the question gone, or a tool result
+    /// whose call was summarized away. `None` when the newest question is the first thing in the
+    /// conversation, because a summary of nothing is not worth a request.
+    pub fn compaction_cut(&self) -> Option<usize> {
+        let cut = self
+            .history
+            .iter()
+            .rposition(|m| matches!(m, Message::User { .. }))?;
+        (cut >= 2).then_some(cut)
+    }
+
+    /// What a fold would cost and where it would land, or `None` when there is nothing to fold.
+    ///
+    /// Both halves at once on purpose: the index the messages are cut at and the byte offset in the
+    /// file those messages start at are two readings of one decision, and a caller that computed them
+    /// apart could write a pointer that folds a different question than the one it summarized.
+    pub fn compaction_plan(&self) -> Result<Option<(usize, u64)>> {
+        let Some(cut) = self.compaction_cut() else {
+            return Ok(None);
+        };
+        let Some(path) = self.session_path().filter(|p| p.exists()) else {
+            return Ok(None);
+        };
+        Ok(crate::session::last_question_offset(&path)?.map(|from| (cut, from)))
+    }
+
+    /// Ask the model to summarize everything before `cut`.
+    ///
+    /// A request of its own rather than a turn: it carries **no tools**, so nothing the model says
+    /// here can act, and the answer is a paragraph rather than a step in a loop. This is the only
+    /// thing a slash command asks a model for on the conversation's own behalf, which is why
+    /// `/compact` says out loud that it is spending a request.
+    ///
+    /// The messages asked about are the ones that are about to be folded -- not the whole
+    /// conversation, which would make the request as large as the thing it is trying to shrink.
+    pub async fn summarize(&self, cut: usize) -> Result<String> {
+        let mut asked: Vec<Message> = self.history[..cut.min(self.history.len())].to_vec();
+        asked.push(Message::user(COMPACT_INSTRUCTION));
+        let mut text = String::new();
+        {
+            let sink = |event: Event| {
+                if let Event::Text(t) = event {
+                    text.push_str(&t);
+                }
+            };
+            self.provider.stream_chat(&asked, &[], sink).await?;
+        }
+        let summary = text.trim().to_string();
+        if summary.is_empty() {
+            anyhow::bail!("the model returned no summary, so nothing was folded");
+        }
+        Ok(summary)
+    }
+
+    /// Write the fold into the conversation's file.
+    ///
+    /// Writer-or-ok, like [`Agent::record_thinking`]: a run that keeps no file still compacts what it
+    /// is holding, and refusing here would fail the command for a reason the person did not ask about.
+    /// What such a run cannot do is come back compacted, which is the honest limit.
+    pub fn record_compaction(&mut self, summary: &str, from: u64) -> Result<()> {
+        match &mut self.writer {
+            Some(writer) => writer.compacted(summary, from),
+            None => Ok(()),
+        }
+    }
+
+    /// Fold everything before `cut` into `summary`, in the conversation this run is holding.
+    ///
+    /// The file was written first; this is the same fold applied to the messages in memory, so the
+    /// *next* request is the smaller one without a reload. The head of the history -- the system
+    /// prompt -- stays where it is: a compaction folds what was *said*, not what the run was told it is.
+    pub fn apply_compaction(&mut self, summary: &str, cut: usize) {
+        if cut == 0 || cut > self.history.len() {
+            return;
+        }
+        let mut next = Vec::with_capacity(self.history.len() - cut + 2);
+        next.extend(self.history[..1].iter().cloned());
+        next.push(crate::session::compacted_message(summary));
+        next.extend(self.history[cut..].iter().cloned());
+        self.history = next;
+        // The counts of the last turn were about a prompt that no longer exists -- the same reason
+        // `set_last_usage` exists for a replacement agent.
+        self.last_usage = None;
+    }
+
     /// The answer shape this conversation is being held to, as it would be written to a session.
     ///
     /// The raw schema, not the parsed one: what the file records has to be what the caller wrote, so
@@ -1091,6 +1181,20 @@ const KEEP_TOOL_RESULTS: usize = 4;
 
 /// Anything this short is worth more than the note that replaces it.
 const MIN_PRUNABLE: usize = 160;
+
+/// What the model is asked for when a person compacts the conversation.
+///
+/// Four things are asked for and every one of them is there because leaving it out is how a summary
+/// loses the thing the next question needs: what was decided (not just what was discussed), the names
+/// and paths that were settled on, what went wrong, and what is still open. "Do not answer it" is the
+/// last line because the request *is* a user message like any other: a model that treats it as the
+/// next question replies with the work instead of the summary, and the fold then stores an answer.
+const COMPACT_INSTRUCTION: &str = "\
+Summarize the conversation above, for a later turn that will read your summary instead of it. \
+Keep every fact the work depends on: what was decided and why, the exact names, paths, commands and \
+numbers that were settled on, what was tried and failed, and what is still open. Drop the small talk \
+and the intermediate steps that led nowhere. Write it as prose in the third person, in the language \
+the conversation was held in, and do not answer anything in it -- reply with the summary and nothing else.";
 
 /// What a relayed peer message reads as, or `None` when there is nothing to relay.
 ///

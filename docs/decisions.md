@@ -217,6 +217,51 @@ another provider asks in that provider's field with the level the person chose. 
 not have are **not** hidden: flint cannot know which rungs an endpoint supports without asking it, and a
 menu that quietly drops one is a menu that lies. Four words, offered as they are.
 
+## A fold is a position in the file, never a count
+
+Pi records a compaction as an appended entry carrying the summary and `firstKeptEntryId` — the id of
+the first entry the fold keeps. flint has no entry ids, and minting some would be a change to the
+format in service of one feature: an id is derived state that has to be kept unique by something and
+repaired by hand when somebody inserts a line. What a session file already has, always, for free, is
+**byte offsets**. So a fold is `{"type":"compact","summary":…,"from":<byte offset>}` and `load` drops
+every `chat` line that starts before it. That is the same idea as the page's reconnection cursor (§15
+of `docs/web-mode.md`): a position in a file is the only identifier this project needs, and the second
+feature that needs one is the argument for the first.
+
+A **count** was the other candidate, and it is worse in a way that only shows up later: "the last N
+messages" is not the same set twice once anything is appended, so a resumed conversation would fold a
+different window than the one that was summarized. A position does not move. It also degrades honestly
+— a person who edits `from` by hand gets exactly the fold they asked for, including a pointer past the
+end (fold everything) and a deleted line (fold nothing) — which is the standard every other part of
+this format is held to.
+
+Two smaller decisions came with it. The cut is always the newest **question**, never a message index
+and never a tool result: a request whose tool result was summarized away, or whose call was, is a
+request the provider rejects, and a boundary inside a tool exchange is exactly the boundary this
+format cannot see. And the summary is inserted as one framed `user` message rather than as a second
+system message, because a system message in the middle of a conversation is accepted by some endpoints
+and refused by others; the framing (`[the conversation before this point, summarized by flint at the
+person's request]`) exists so a model does not answer the summary as though the person had just said
+it.
+
+**`/compact` spends a request, and nothing spends one for you.** The summary is written by the model,
+because a fold written by dropping the oldest third of a conversation loses the decisions and keeps
+the pleasantries; that costs one request, so the command says so before it makes it. The request
+carries **no tools**: a summarizer with tools is a turn, and the one thing a request the person did not
+compose must not be able to do is act. Automatic compaction — Pi triggers it on a token budget — is
+refused for the reason the job report is: starting a model turn nobody asked for is a bill nobody
+agreed to, and the number a budget would be checked against is a guess about an endpoint flint cannot
+see. `max_request_chars` remains what it always was, a last-resort guard that drops whole turns from
+the *request* when a conversation has grown past it; the fold is the deliberate version of the same
+thing, and the difference is who decided.
+
+What a fold never does is shrink the **record**. Every folded message stays in the file, in order,
+above the line that folds it, and deleting that line undoes the whole thing. The asymmetry is the
+feature: the request is the thing with a price and a limit, and the session file is the thing a person
+has to be able to read, quote and repair. A fold that deleted messages would make `/compact` the only
+flint command that destroys work, and it would make the summary the only surviving account of a
+conversation — which is the kind of derived state this repository refuses to keep.
+
 ## Turns, and the lines typed into them
 
 **A queued follow-up is the run's memory, not the file's.** `/queue <text>` holds a line until the turn

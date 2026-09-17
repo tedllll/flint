@@ -2881,6 +2881,13 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp::row("/model", "/model", "show the model in force", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/model <name>", "/model", "switch to one", HelpSection::Commands, OnPage::Selector),
     CommandHelp::row("/usage", "/usage", "context and token accounting", HelpSection::Commands, OnPage::Panel),
+    CommandHelp::row(
+        "/compact",
+        "/compact",
+        "fold the earlier part of this conversation into a summary (one request; the file keeps every message)",
+        HelpSection::Commands,
+        OnPage::Panel,
+    ),
     CommandHelp::row("/verbose [on|off|full]", "/verbose", "how much of the agent's activity to narrate", HelpSection::Commands, OnPage::Toggles),
     CommandHelp::row("/detail [on|off]", "/detail", "print tool output (off: one line per result)", HelpSection::Commands, OnPage::Toggles),
     CommandHelp::row("/readonly [on|off]", "/readonly", "toggle the write guard", HelpSection::Commands, OnPage::Toggles),
@@ -3668,6 +3675,48 @@ async fn handle_command(
             }
         }
 
+        // Fold the earlier part of this conversation into a summary the model writes.
+        //
+        // Two refusals and one honest sentence about cost. The refusals are different facts and are
+        // said differently: a run that keeps no conversation has nowhere to record the fold (and a
+        // fold nobody wrote down is one the next run does not have), and a conversation with one
+        // question in it has nothing above the cut. The cost is mentioned because this is the one
+        // command that spends a request on the conversation itself -- and every folded message is
+        // still in the file, so a person who disagrees can delete the line afterwards.
+        "/compact" => {
+            if agent.session_path().is_none() {
+                printer.term().line(format_args!(
+                    "{dim}this run keeps no conversation (--no-session), so there is nowhere to record a \
+                     fold -- and a fold nobody wrote down is one the next run does not have{reset}"
+                ));
+            } else if let Some((cut, from)) = agent.compaction_plan()? {
+                let folded = cut.saturating_sub(1);
+                printer.term().line(format_args!(
+                    "{dim}asking {bold}{}{reset}{dim} to summarize the {folded} message(s) before the newest \
+                     question...{reset}",
+                    provider_cfg.model
+                ));
+                let summary = agent.summarize(cut).await?;
+                agent.record_compaction(&summary, from)?;
+                agent.apply_compaction(&summary, cut);
+                printer.term().line(format_args!(
+                    "{} folded {bold}{folded}{reset} message(s) into a {bold}{}{reset}-character summary",
+                    printer.style(GREEN, "ok"),
+                    summary.chars().count()
+                ));
+                printer.term().line(format_args!(
+                    "{dim}every message is still in the session file; what changed is what the next request \
+                     sends. A resumed run reads the same fold, and deleting the `compact` line in the file \
+                     puts the conversation back whole.{reset}"
+                ));
+            } else {
+                printer.term().line(format_args!(
+                    "{dim}nothing to compact yet: this conversation has one question in it, and a summary of \
+                     nothing is not worth a request{reset}"
+                ));
+            }
+        }
+
         "/usage" => match agent.last_usage() {
             Some(u) => {
                 // The cache split, on the same line as the prompt it is a share of: 871 cached
@@ -3690,7 +3739,7 @@ async fn handle_command(
                 ));
                 printer.term().line(format_args!(
                     "{dim}prompt tokens = your current context size. Nothing is trimmed automatically; \
-                     use /new if it grows too large.{reset}"
+                     /compact folds the older part into a summary the model writes, and /new starts over.{reset}"
                 ));
                 if u.cache_rate().is_some() {
                     printer.term().line(format_args!(

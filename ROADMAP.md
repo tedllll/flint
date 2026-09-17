@@ -1925,9 +1925,27 @@ argument, the cost and what flint has today are in the document, §3.
   prompt or the tool schemas — a directory of long templates costs a run exactly nothing — and the
   transcript keeps the line the person typed while the request carries the file's words, named once
   under the echo with the file it came from.
-- **Compaction written into the session file** — an appended entry carrying the summary and the first
-  entry it keeps (`firstKeptEntryId`), never cutting at a tool result. This one is the largest, and it
-  is the one where Pi's design is ahead of flint's own request-side pruning.
+- **Compaction written into the session file — built, 2026-09-17.** Pi's entry carries the summary and
+  the id of the first entry it keeps (`firstKeptEntryId`); flint's carries the summary and the **byte
+  offset** of the first `chat` line it keeps (`{"type":"compact","summary":…,"from":…}`), because this
+  format has no entry ids and a position in the file is the same idea as the page's reconnection cursor
+  (§15 of `docs/web-mode.md`) — and the one idea that survives a hand-edit, since a person can count
+  bytes and cannot count an id that does not exist. `load` drops everything that starts before `from`
+  and puts the summary in its place as one framed `user` message, so a resumed run is folded without
+  being told; the folded lines stay in the file, which is what makes the line deletable and the fold
+  reversible. `/compact` is the door: one request with **no tools** (nothing a summarizer says may act)
+  asking the model to summarize everything before the newest question, then one appended line, then the
+  same fold applied in memory so the next request is the smaller one. Cutting at a **question** and not
+  at a message count is Pi's rule and the request-side trimming's: a cut inside a tool exchange leaves
+  the model holding half a step. **Automatic** compaction is refused: starting a model turn nobody asked
+  for is a bill nobody agreed to, which is the same refusal `job_op`'s report makes. Two honest limits:
+  a `--no-session` run is refused (a fold nobody wrote down is one the next run does not have), and
+  `/fork`/`/import` copy messages rather than events, so a fold does not travel into a copy.
+- **Compaction, the automatic half** — *not built, on purpose.* `trim_old_turns` still bounds a request
+  by dropping whole turns past `max_request_chars` when nothing else has, which is a guard rather than a
+  policy: the person decides when the conversation is folded, and the request-side trim stays the
+  last-resort bound it always was. Pi decides by token budget on its own; flint's answer is that the
+  number a budget would be checked against is a guess about an endpoint it cannot see.
 - **The cache hit rate next to the token counts — built, 2026-09-17.** The one number that says
   whether the prompt flint builds is stable, and it is built as the *rate* rather than as a second set
   of counts: `cache 87% (871 of 1000 prompt tokens)` on `/usage`'s own line, `, 87% cached` appended to

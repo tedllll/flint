@@ -232,6 +232,7 @@ Inside the REPL:
 | `/model` | show the model in force |
 | `/model <name>` | switch to one of that provider's models |
 | `/usage` | context size and token accounting, including the provider's cache hit rate when it reports one |
+| `/compact` | fold the earlier part of this conversation into a summary the model writes (one request; the session file keeps every message) |
 | `/verbose [on\|off\|full]` | how much of the agent's activity to narrate |
 | `/detail [on\|off]` | print tool output (default off: one line per result) |
 | `/readonly [on\|off]` | toggle the write guard |
@@ -997,6 +998,18 @@ message, so a turn that has scrolled out of the request can still be read, or as
 recovered by resuming the session. The newest turn and the system prompt are never dropped,
 however small the budget, and a tool result is never separated from the call it answers.
 `/config` shows the number in force.
+
+That bound is a guard, not a policy: it fires when a conversation has grown too large, in the
+middle of a turn, and what it drops is chosen by size rather than by meaning. `/compact` is the
+deliberate version. It asks the model to summarize everything before your newest question — one
+request, with no tools, so the summary cannot act — appends that summary to the session file along
+with the byte offset of the first message that is still sent, and folds the same way in memory, so
+the next request carries the summary and the tail instead of the whole conversation. The messages
+it folded are **still in the file**: what changed is what gets sent. A run resumed tomorrow reads
+the same fold and sends the same thing, and deleting that one `compact` line puts the conversation
+back exactly as it was. Two things it will not do: decide on its own that a conversation is too
+long (that is your call, and a model turn nobody asked for is a bill nobody agreed to), and compact
+a run started with `--no-session`, which has nowhere to write the fold down.
 
 `write` and `edit` refuse to touch a file this run has not read, and refuse again if the
 file was read and then changed on disk by something else — a build, a formatter, a

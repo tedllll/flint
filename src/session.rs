@@ -181,14 +181,34 @@ pub enum SessionEvent {
     /// travels with the file is how much reasoning the person asked for, which is the part that is
     /// theirs.
     Thinking { level: String },
+    /// The earlier part of this conversation folded into a summary, and where the fold cuts.
+    ///
+    /// `/compact` is the door, and this is the only event that changes what a *reader* gets out of a
+    /// file: `load` drops every `chat` line that starts before `from` and puts `summary` in their
+    /// place. Everything folded is still in the file, which is the point -- the request gets smaller
+    /// and the record does not -- and a person who disagrees with the summary deletes this one line
+    /// and the conversation is whole again.
+    ///
+    /// `from` is a **byte offset**, not a count and not an id. This format has no entry ids, and a
+    /// count would fold the wrong messages the moment anything was appended after it: the tail keeps
+    /// growing, and "the last N messages" is not the same set twice. A position in the file is the
+    /// same idea as the page's reconnection cursor (§15 of `docs/web-mode.md`), and it is what makes
+    /// the fold survive a restart, a resume and a hand-edit.
+    ///
+    /// The cut is always a `chat` line that is a *user* message -- the newest question -- so a fold
+    /// never leaves the model holding half a tool exchange. `SessionWriter::compacted` is where it is
+    /// written and `last_question_offset` is where it is read from; `docs/session-format.md` says what
+    /// it means for a reader.
+    Compact { summary: String, from: u64 },
 }
 
 /// The event names this build understands.
 ///
 /// Used for one decision only: a line that failed to parse but names a type in here is
 /// damage, and a line that names anything else is somebody else's event.
-const KNOWN_TYPES: [&str; 10] = [
+const KNOWN_TYPES: [&str; 11] = [
     "meta", "chat", "import", "fork", "usage", "title", "switch", "schema", "peer", "thinking",
+    "compact",
 ];
 
 /// Whether a line names an event type this build knows.
@@ -556,6 +576,19 @@ impl SessionWriter {
         })
     }
 
+    /// Record that the earlier part of this conversation was folded into a summary.
+    ///
+    /// Append-only like everything else: the folded messages stay in the file, and this line says where
+    /// a reader should stop sending them. `from` is the byte offset of the first message that is still
+    /// sent -- `SessionEvent::Compact` is where that choice is argued -- and the caller gets it from
+    /// `last_question_offset`, so the pointer is read off the file rather than counted in memory.
+    pub fn compacted(&mut self, summary: &str, from: u64) -> Result<()> {
+        self.append(&SessionEvent::Compact {
+            summary: summary.to_string(),
+            from,
+        })
+    }
+
     /// Record that the run moved to another provider or model.
     ///
     /// An event rather than a new file, and the argument is the one `Usage` already makes for its own
@@ -601,6 +634,75 @@ pub struct LoadedSession {
     /// look identical on screen, and a reader who has just resumed the branch has no other way to tell
     /// it from the conversation it was cut from. `None` for every conversation that began here.
     pub origin: Option<Origin>,
+    /// The fold in force, from the last `compact` line in the file.
+    ///
+    /// Already *applied* to `messages` by the time a caller sees them: `load` drops what the pointer
+    /// folds and puts the summary in its place, so a resumed run is compacted without anybody having
+    /// to remember that it was. Kept beside the messages so a reader can say what happened, and so
+    /// `/compact` on top of a fold can fold again.
+    pub compaction: Option<Compaction>,
+}
+
+/// A folding of a conversation's earlier part into a summary the model wrote.
+#[derive(Debug, Clone)]
+pub struct Compaction {
+    /// The summary, in the model's own words.
+    pub summary: String,
+    /// The byte offset in the file of the first `chat` line that is still part of the conversation.
+    pub from: u64,
+}
+
+/// What a folded prefix becomes in the conversation: one message, in the summary's own words.
+///
+/// A `user` message rather than a `system` one, because a system message in the middle of a
+/// conversation is accepted by some endpoints and refused by others and this has to read the same
+/// everywhere. The framing says what it is: a summary that reads like something the person said is a
+/// summary the model will try to answer.
+pub fn compacted_message(summary: &str) -> Message {
+    Message::user(format!(
+        "[the conversation before this point, summarized by flint at the person's request]\n\n{summary}"
+    ))
+}
+
+/// Each line of a file with the byte offset it starts at.
+///
+/// Split on the raw text rather than by `lines()`, which strips a CRLF's `\r` as well: a hand-edited
+/// file would then point one byte short of itself per line, and a fold would drop one more message
+/// than the person asked for without saying anything.
+fn lines_with_offsets(text: &str) -> impl Iterator<Item = (u64, &str)> {
+    let mut at = 0u64;
+    text.split_inclusive('\n').map(move |line| {
+        let start = at;
+        at += line.len() as u64;
+        (start, line.trim_end_matches(['\n', '\r']))
+    })
+}
+
+/// The byte offset of the newest question in a session file: where a compaction cuts.
+///
+/// `None` when the newest question is the file's first message, because then there is nothing above
+/// the cut and a summary of nothing is not worth a request. Read from the file rather than counted
+/// from the messages in memory because this is the value that gets *written down*: the pointer and the
+/// in-memory cut are two readings of one rule, and the file's reading is the one that has to be right.
+pub fn last_question_offset(path: &Path) -> Result<Option<u64>> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("cannot read session {}", path.display()))?;
+    let mut seen = 0usize;
+    let mut cut = None;
+    for (at, line) in lines_with_offsets(&text) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(SessionEvent::Chat { message }) = serde_json::from_str::<SessionEvent>(line) {
+            // Read in order, so the last question wins: compacting twice folds up to the newest one
+            // both times.
+            if seen > 0 && matches!(message, Message::User { .. }) {
+                cut = Some(at);
+            }
+            seen += 1;
+        }
+    }
+    Ok(cut)
 }
 
 /// Where a conversation came from, as the file that holds it records it.
@@ -654,10 +756,15 @@ pub fn load(path: &Path) -> Result<LoadedSession> {
         output_schema: None,
         thinking: None,
         origin: None,
+        compaction: None,
     };
 
     let mut damaged = 0usize;
-    for line in text.lines() {
+    // Where each `chat` line started, kept beside the messages because the `compact` line that folds
+    // them is written *after* them: which messages it folds is only knowable once the file has been
+    // read to the end.
+    let mut chat_offsets: Vec<u64> = Vec::new();
+    for (at, line) in lines_with_offsets(&text) {
         if line.trim().is_empty() {
             continue;
         }
@@ -676,7 +783,10 @@ pub fn load(path: &Path) -> Result<LoadedSession> {
                 loaded.provider = provider;
                 loaded.model = model;
             }
-            Ok(SessionEvent::Chat { message }) => loaded.messages.push(message),
+            Ok(SessionEvent::Chat { message }) => {
+                loaded.messages.push(message);
+                chat_offsets.push(at);
+            }
             // Read, and *not* put in `messages`: this line is provenance, and the conversation it
             // describes is the `chat` lines that follow it. The last one wins, as the last `title`
             // does -- importing a copy records the file it was copied *from*, so a chain of copies
@@ -728,11 +838,31 @@ pub fn load(path: &Path) -> Result<LoadedSession> {
             // reading the conversation, not to the history a model is sent. That is the whole safety
             // rule of the mailbox, and this line is where it is enforced on the way back in.
             Ok(SessionEvent::Peer { .. }) => {}
+            // Read here, applied below: the fold is written *after* the messages it folds, so it
+            // cannot be acted on while the file is still being read. Last one wins, like everything
+            // else that can change mid-conversation.
+            Ok(SessionEvent::Compact { summary, from }) => {
+                loaded.compaction = Some(Compaction { summary, from })
+            }
             // Skipped in silence when the file claims a newer revision -- a type this
             // build knows may have changed shape in it, and that is not damage either.
             Err(_) if loaded.version > FORMAT_VERSION || !names_a_known_event(line) => {}
             Err(_) => damaged += 1,
         }
+    }
+
+    // The fold, now that the pointer and the messages are both in hand: everything that starts before
+    // `from` leaves the conversation and the summary takes its place. The file keeps every line -- this
+    // is what is *sent* that changes -- and a `from` a person typed by hand is honoured as it is, which
+    // is what makes the line editable: a pointer past the end folds everything, and deleting the line
+    // puts the whole conversation back.
+    if let Some(fold) = &loaded.compaction {
+        let keeps = chat_offsets
+            .iter()
+            .position(|at| *at >= fold.from)
+            .unwrap_or(chat_offsets.len());
+        loaded.messages.drain(..keeps);
+        loaded.messages.insert(0, compacted_message(&fold.summary));
     }
 
     if damaged > 0 {

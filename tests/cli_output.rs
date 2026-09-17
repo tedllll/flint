@@ -5307,6 +5307,178 @@ fn the_switch_kept_the_conversation(
     }
 }
 
+/// `/compact` is one request, one line in the file, and a smaller request after it.
+///
+/// The three claims are one feature. The summary has to reach the request that follows, or the fold
+/// only exists on screen; the messages it folded must *not*, or nothing got smaller; and the file has
+/// to say where the fold cut, or tomorrow's run asks all of it again at full price with nothing on
+/// screen to explain why. The stub answers every request with the same sentence, which is what makes
+/// the second claim checkable: the summary is that sentence, framed, and the folded messages are the
+/// thing that has to be gone.
+#[tokio::test]
+async fn compacting_folds_the_earlier_messages_into_one_line_and_a_smaller_request() {
+    let server = MockServer::start().await;
+    answer_once(&server).await;
+    let config = stub_config(&server.uri());
+
+    let (text, files, bodies, _) =
+        through_a_switch(&server, "compact-fold", &config, "/compact").await;
+
+    assert!(
+        text.contains("folded"),
+        "`/compact` did not fold anything, so this proves nothing: {text:?}"
+    );
+    assert_eq!(
+        bodies.len(),
+        3,
+        "expected one request per turn plus one for the summary: {bodies:?}"
+    );
+
+    // The request the summary was asked for: the messages about to be folded, and **no tools** --
+    // nothing a summarizer says may act. The tool schemas are a screenful each, so their absence is
+    // also what makes this request the cheap one.
+    let asked = sent_messages(&bodies[1]);
+    for needle in ["the earlier question", "the earlier answer"] {
+        assert!(
+            asked.contains(needle),
+            "the summary was not asked about {needle:?}: {asked}"
+        );
+    }
+    assert!(
+        asked.contains("Summarize the conversation above"),
+        "the summary was asked for without saying what kind of answer is wanted: {asked}"
+    );
+    assert!(
+        !bodies[1].contains("\"tools\""),
+        "the summary was asked for with tools, which makes it a turn and not a summary: {}",
+        bodies[1]
+    );
+
+    // The request after it: the summary stands where the folded messages were.
+    let after = sent_messages(&bodies[2]);
+    assert!(
+        after.contains("summarized by flint at the person's request"),
+        "the next request did not carry the summary, so the fold was only on screen: {after}"
+    );
+    for gone in ["the earlier question", "the earlier answer"] {
+        assert!(
+            !after.contains(gone),
+            "`/compact` left {gone:?} in the request it was supposed to shrink: {after}"
+        );
+    }
+    for kept in ["the question in this run", "and now?"] {
+        assert!(
+            after.contains(kept),
+            "`/compact` folded too much -- {kept:?} is gone from the request: {after}"
+        );
+    }
+
+    // The file: the fold is a line, and everything it folds is still in there. The record got no
+    // smaller, which is the promise that makes the request shrinking acceptable.
+    let written = &files
+        .iter()
+        .find(|(name, _)| name == "111-1.jsonl")
+        .expect("the resumed session")
+        .1;
+    assert!(
+        written.contains("\"type\":\"compact\""),
+        "the fold was not written down, so a resume would send the whole conversation again: {written}"
+    );
+    for needle in ["the earlier question", "the earlier answer"] {
+        assert!(
+            written.contains(needle),
+            "compacting removed {needle:?} from the conversation's own file: {written}"
+        );
+    }
+}
+
+/// A fold written into a file is what a *resumed* run acts on.
+///
+/// This is the half that makes it a file feature: the run that compacted is gone by tomorrow, and a
+/// resume that ignored the line would send the folded messages again -- the one failure a person
+/// could not see coming, because the transcript on screen shows them either way. The pointer here is
+/// written by hand and computed the way a person would compute it, by finding the line the fold keeps
+/// and counting the bytes before it. That is the promise `docs/session-format.md` makes about editing
+/// this line yourself.
+#[tokio::test]
+async fn a_fold_in_the_file_is_what_a_resumed_run_sends() {
+    use std::io::Write;
+
+    let server = MockServer::start().await;
+    answer_once(&server).await;
+    let home = test_home("compact-resume", &server.uri());
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("working directory");
+    let sessions = home.join("sessions");
+
+    let kept = r#"{"type":"chat","message":{"role":"user","content":"the kept question"}}"#;
+    let mut body = String::new();
+    body.push_str(&meta_line("222-2"));
+    body.push('\n');
+    body.push_str(r#"{"type":"chat","message":{"role":"user","content":"the folded question"}}"#);
+    body.push('\n');
+    body.push_str(r#"{"type":"chat","message":{"role":"assistant","content":"the folded answer"}}"#);
+    body.push('\n');
+    body.push_str(kept);
+    body.push('\n');
+    let from = body.find(kept).expect("the line the fold keeps");
+    body.push_str(&format!(
+        r#"{{"type":"compact","summary":"FOLDED SUMMARY","from":{from}}}"#
+    ));
+    write_session(&sessions, "222-2.jsonl", &[&body], 10);
+
+    let mut child = binary()
+        .current_dir(&work)
+        .env("FLINT_HOME", &home)
+        .env("FLINT_TERM_CAPTURE", "1")
+        .env("FLINT_TERM_SIZE", "100x24")
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to run flint");
+    child
+        .stdin
+        .as_mut()
+        .expect("no stdin handle")
+        .write_all(b"/resume 222-2\nand now?\n")
+        .expect("failed to write stdin");
+    wait_for_requests(&server, 1).await;
+    let _ = child.wait_with_output().expect("flint did not finish");
+    let bodies: Vec<String> = server
+        .received_requests()
+        .await
+        .expect("requests")
+        .iter()
+        .map(|request| String::from_utf8_lossy(&request.body).to_string())
+        .collect();
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert_eq!(
+        bodies.len(),
+        1,
+        "one question should be one request: {bodies:?}"
+    );
+    let sent = sent_messages(&bodies[0]);
+    assert!(
+        sent.contains("FOLDED SUMMARY"),
+        "a resumed run sent the conversation whole, ignoring the fold in its file: {sent}"
+    );
+    for gone in ["the folded question", "the folded answer"] {
+        assert!(
+            !sent.contains(gone),
+            "the fold in the file was not applied, so {gone:?} was paid for again: {sent}"
+        );
+    }
+    for kept in ["the kept question", "and now?"] {
+        assert!(
+            sent.contains(kept),
+            "the fold took {kept:?} with it, which is the request being broken rather than smaller: {sent}"
+        );
+    }
+}
+
 /// The messages out of a request body, so a failure reads as a conversation.
 ///
 /// The body also carries every tool schema, which is a screenful per tool and says nothing about

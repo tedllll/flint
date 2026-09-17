@@ -374,10 +374,17 @@ reminder of what was in it.
 
 The flint-shaped version is a `/compact` that asks the model for a summary and writes it **into the
 session file** as a line of its own -- visible, hand-editable, resumable, and never a silent rewrite
-of history. The format already tolerates such a line (a test uses
-`{"type":"compaction","summary":"earlier stuff"}` as an example of an unknown type that is skipped in
-silence), and the request-side note is already read from the transcript rather than from anywhere
-else, so the hook exists and nothing writes to it.
+of history. **Built, 2026-09-17**, and the shape is this section's own: `/compact` makes one request
+with no tools, appends `{"type":"compact","summary":…,"from":…}`, and applies the same fold in memory
+so the next request is the smaller one. The pointer is a **byte offset** rather than Pi's
+`firstKeptEntryId` -- this format has no entry ids, and a position in the file is the same idea as the
+page's reconnection cursor, which is the second feature to want one (`docs/decisions.md`, "A fold is a
+position in the file, never a count"). "Never cut at a tool result" is adopted exactly as stated: the
+cut is the newest **question**, which is the boundary flint's own `trim_old_turns` already uses. The
+other two rules are **not** copied and the reason is the same for both -- flint folds a whole turn and
+never splits one, so a "turn prefix" summary has nothing to merge into, and the request handed to the
+summarizer is the conversation itself rather than a second rendering of it, because the messages are
+already the format flint sends and a private rendering would be a second thing to keep in step.
 
 Pi does exactly this, and its shape is worth copying rather than inventing. The summary is an appended
 JSONL entry carrying the summary text **and `firstKeptEntryId`**, the first entry that survives the

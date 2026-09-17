@@ -43,7 +43,7 @@ conversation such a run could otherwise create by itself.
 
 ## One event per line
 
-Every line is a JSON object with a `type`. This build understands ten:
+Every line is a JSON object with a `type`. This build understands eleven:
 
 | `type` | Written when | Fields |
 |---|---|---|
@@ -57,18 +57,35 @@ Every line is a JSON object with a `type`. This build understands ten:
 | `switch` | the provider or model in force changes | `provider`, `model` |
 | `schema` | the answer shape in force changes | `schema` (absent or `null` when cleared) |
 | `thinking` | the reasoning level in force changes (`--thinking`, `/thinking <level>`) | `level` (`off`, `low`, `medium` or `high`) |
+| `compact` | the earlier part of the conversation is folded into a summary (`/compact`) | `summary`, `from` (the byte offset of the first `chat` line still sent) |
 
-Three of the ten are not conversation and never become history: `peer` (a peer's words are shown to
+Three of the eleven are not conversation and never become history: `peer` (a peer's words are shown to
 the person and kept out of `messages` on purpose — see its section), `import` and `fork` (both
 provenance, read into `LoadedSession::origin` and read by the lines that name a conversation). An
 **unknown** `type` is skipped in silence, which is what lets a hand-edited file, or one written by a
-newer flint, still load; a line that names one of these ten and cannot be parsed is reported as
+newer flint, still load; a line that names one of these eleven and cannot be parsed is reported as
 damage instead. `thinking` is the one event that changes what a *request* carries without changing
 the conversation: the last line wins, and the field name the level is sent in is deliberately **not**
 in the file — that is the provider's, so a conversation resumed against another endpoint asks in that
 endpoint's own field. A bare `/thinking` reports the level and writes nothing; a `/thinking <level>`
 is a decision about this conversation, so it is written down (and creates the file if the
 conversation has not said anything yet, like `--schema`).
+
+`compact` is the one event that changes what a reader gets **out of** the file, and it is the one line
+worth understanding before editing a session by hand. `from` is a **byte offset into this file**: the
+start of the first `chat` line that is still part of the conversation. When a file is loaded, every
+`chat` line starting before that offset leaves the conversation and `summary` takes its place as a
+single `user` message framed `[the conversation before this point, summarized by flint at the person's
+request]`. Nothing is deleted — the folded lines are still in the file, in order, above the `compact`
+line — so the fold is what is *sent* rather than what is *kept*, and it is undone by deleting the one
+line (or by editing `from`). Offsets are counted in bytes on the raw file, so a CRLF file points where
+a person counting with an editor would land, and the pointer is the start of a line rather than a count
+of messages precisely so that appending to the file later cannot move it. A whole `/compact` run writes
+`from` as the offset of the newest **question** (a `chat` line whose `message.role` is `user`), because
+a fold that cut in the middle of a tool exchange would leave a request with a tool result whose call
+was summarized away. More than one `compact` line is allowed and the last one wins, as `title`,
+`schema` and `thinking` do: compacting again folds everything before the newest question, summary and
+all.
 
 A whole conversation, then — a real one is longer, this is the shape:
 

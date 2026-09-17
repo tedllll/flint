@@ -6,6 +6,51 @@ of it.
 
 ## Where things stand
 
+**The eleventh of the twelve items taken from the reading of Pi is built: compaction written into the
+session file.** Before this, nothing in flint could make a conversation *smaller*: `trim_old_turns`
+dropped whole turns from the request when a conversation passed `max_request_chars`, a guard that fires
+in the middle of a turn and chooses by size rather than by meaning, and `prune_tool_output` only ever
+shrank stale tool results. The record kept everything, which was right, and the request had no
+deliberate way to forget.
+
+**The line is `{"type":"compact","summary":…,"from":…}` and `from` is a byte offset.** Pi carries
+`firstKeptEntryId`; flint has no entry ids, and minting some would be derived state in service of one
+feature. A **position in the file** is what this format has for free, and it is the same idea as the
+page's reconnection cursor — the second feature to need an identifier is the argument for the first
+(`docs/decisions.md`, "A fold is a position in the file, never a count"). A count was refused because
+"the last N messages" stops being the same set the moment anything is appended. `load` applies the fold:
+every `chat` line starting before `from` leaves `messages`, the summary takes its place as one framed
+`user` message, and the folded lines stay in the file in order, above the line that folds them — so the
+line is editable, deletable, and the fold is reversible. A run resumed tomorrow sends what the run that
+compacted sent, which is the half that makes this a *file* feature rather than a session trick.
+
+**`/compact` is the door and it is one request.** It asks the model for a summary of everything before
+the newest question — **with no tools**, because a summarizer with tools is a turn and a request the
+person did not compose must not be able to act — then appends the line and applies the same fold in
+memory so the next request is the smaller one. The cut is always a **question**, never a message index
+and never a tool result: Pi's rule, and the same boundary `trim_old_turns` already uses, because a
+request whose tool result was summarized away is a request the provider rejects. The command says it is
+spending a request before it spends it, and it refuses with different sentences for two different facts:
+a `--no-session` run has nowhere to write the fold down, and a conversation with one question in it has
+nothing above the cut. **Automatic** compaction is refused — a model turn nobody asked for is a bill
+nobody agreed to, the same refusal `job_op`'s report makes — and `max_request_chars` stays the
+last-resort guard it always was.
+
+**Both halves were watched red**, by neutering the feature and running its own test: with the fold not
+applied at load, `a_fold_in_the_file_is_what_a_resumed_run_sends` failed with "a resumed run sent the
+conversation whole, ignoring the fold in its file"; with `apply_compaction` neutered,
+`compacting_folds_the_earlier_messages_into_one_line_and_a_smaller_request` failed with "the next request
+did not carry the summary, so the fold was only on screen". The second test also holds the two claims
+that make the first one safe: the summary request carries **no tools**, and the folded messages are still
+in the conversation's own file. `KNOWN_TYPES` 10 → 11; `docs/session-format.md` carries the row and a
+paragraph on what the pointer means for a hand-edit.
+
+**Named as limits rather than left to be discovered:** a `--no-session` run cannot be compacted (a fold
+nobody wrote down is one the next run does not have), `/fork` and `/import` copy messages rather than
+events so a fold does not travel into a copy, and the parts of Pi's design flint refused — a token budget
+as the trigger, splitting a turn that does not fit into a "turn prefix" summary, and a private rendering
+of the conversation for the summarizer.
+
 **The tenth of the twelve items taken from the reading of Pi is built: flint asks for reasoning, and the
 field it asks in is the endpoint's.** Before this the request body was model, messages, `stream`,
 `stream_options`, tools and `response_format`, and nothing else — flint read reasoning when a provider
