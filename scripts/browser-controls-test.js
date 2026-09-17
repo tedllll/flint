@@ -539,6 +539,13 @@ async function main() {
   if (failed.length) {
     console.log("failed:");
     for (const one of failed) console.log(`  - ${one.claim}`);
+    // Left behind on purpose, and only then: the home holds the run's own output, the config a form
+    // wrote and the screenshot, which is what a failing claim has to be diagnosed from -- and it is
+    // the same rule the Rust tests follow. A green run leaves nothing, because a harness that keeps
+    // its scratch every time fills somebody's temp directory.
+    console.log(`kept for inspection: ${where.home}`);
+  } else {
+    fs.rmSync(where.home, { recursive: true, force: true });
   }
   process.exit(failed.length ? 1 : 0);
 }
