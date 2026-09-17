@@ -499,6 +499,61 @@ async fn a_killed_command_takes_its_children_with_it() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The same fact as the test above, on the other platform -- and it is the half that was a
+/// documented gap for a while, because Windows is where the damage was measured: `taskkill /T` was
+/// built for it and Unix was left with "`sh -c` usually *becomes* the command, so killing it is
+/// usually enough".
+///
+/// Usually is the whole problem, and this is the case where it is not true. The shell here starts a
+/// second process and waits for it, which is what a real command that backgrounds work looks like;
+/// killing the shell alone leaves that process to write the marker at its leisure. On Unix there
+/// was no process group in play for anything to signal, so there was nothing to kill *but* the
+/// shell. `KillTree::detach` is the fix and this is what says so: the group dies with the command,
+/// and the marker never appears.
+///
+/// The control run is here for the same reason it is in the test above: a quoting mistake in this
+/// script would look exactly like a successful kill.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_killed_command_takes_its_children_with_it_on_unix() {
+    let config = test_config("http://unused");
+    let dir = std::env::temp_dir().join(format!("flint-tree-kill-unix-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let marker = dir.join("child-survived.txt");
+    let _ = std::fs::remove_file(&marker);
+
+    // A subshell in the background, deliberately: `sleep 2; echo …` in a *list* is a process the
+    // shell has to fork, and `wait` is what keeps the shell itself alive -- so the process that
+    // writes the marker outlives its parent unless the whole group is signalled. A single simple
+    // command would be exec'd into and would prove nothing about children.
+    let command = format!("(sleep 2; echo alive > '{}') & wait", marker.display());
+
+    // The control: uninterrupted, this command leaves the marker, so the assertion below is about
+    // the kill and not about the command never having run.
+    let out = flint::tools::run_command_raw(&config, &command, &dir, 30)
+        .await
+        .expect("the control run should finish");
+    assert!(
+        marker.exists(),
+        "the control did not produce the marker, so this test proves nothing: {out:?}"
+    );
+
+    // Now under a budget that runs out while the subshell is still sleeping.
+    let _ = std::fs::remove_file(&marker);
+    let result = flint::tools::run_command_raw(&config, &command, &dir, 1).await;
+    assert!(result.is_err(), "a command over its budget must report an error");
+
+    // Well past when the subshell would have written the marker on its own.
+    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+    assert!(
+        !marker.exists(),
+        "the command's child outlived the kill and wrote {} -- the shell was killed, not the \
+         process group",
+        marker.display()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A command that outlives its budget must be **killed**, not merely abandoned.
 ///
 /// The old code wrapped `wait_with_output` in a timeout and returned an error, which
