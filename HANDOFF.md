@@ -108,7 +108,7 @@ be able to read, 4 the answer written where the caller asked, 3 the file inlined
 and one more on Unix, `tty_hangup`, which is `#![cfg(unix)]` and needs a real pty — as is the Unix
 half of the process-group kill, `a_killed_command_takes_its_children_with_it_on_unix`. `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
-pass, and `node scripts/browser-controls-test.js` is **20 of 20** — the browser harness, run by hand
+pass, and `node scripts/browser-controls-test.js` is **34 of 34** — the browser harness, run by hand
 because CI has no browser, and the only place the two defects in the page's later controls were ever
 visible. `python examples/python/test_call.py` is 118 checks, all passing (one of them waits out the
 fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from), and
@@ -164,10 +164,18 @@ watched fail first** — the five the person asked for, in the order they were a
    for what it found. See "A browser" under "Still owed on the page" below; the short form is that a
    fresh `--web` run's page drew no controls at all, and that the `commands` panel could cover the
    `send` button.
+6. **Everything §11 still listed as reasoned rather than seen, read in a real browser** — the
+   sidebar's own `⋯` menu on both kinds of row, both drag grips (a real pointer drag, the arrow keys
+   and the double-click reset), and a picker driven from the keyboard. All of it passed the first
+   time, which is a result about the page and not about the harness: the mutation that neuters the
+   page's `pointermove` handler fails the two drag claims, so they are load-bearing. The harness went
+   from 20 claims to 34. What a browser has still not touched is now one widget and one section: a
+   native `<select>`'s open popup, which is the operating system's, and §11's own long answers and
+   reconnection, which were measured on macOS over a different harness.
 
-So §8 is not only built but *driven*, and what a browser has still not touched is a named list at the
-end of `docs/web-mode.md` §11 rather than a section: a native `<select>`'s open dropdown, the sidebar's
-own `⋯` menu, and the drag grips.
+So §8 is not only built but *driven*, and the list at the end of `docs/web-mode.md` §11 is down to the
+operating system's own popup and the page's performance section — no control of the page's is left
+asserted-but-undriven.
 
 
 **A `task` child is started in the background by default now, and a job that ends says so — the default
@@ -628,7 +636,7 @@ cargo test                                        # 544 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed
-node scripts/browser-controls-test.js             # 20/20 -- needs a browser, so it is not in CI
+node scripts/browser-controls-test.js             # 34/34 -- needs a browser, so it is not in CI
 cargo test --test term_capture -- --ignored --nocapture measured_cost_of_streaming   # the cost number
 ```
 
@@ -1008,17 +1016,19 @@ from `/help` fails it on "the page is offered `/provider rm <name>` and `/help` 
 panel are the read half; buttons, selectors, forms and the destructive confirmation are next, and the
 decisions already taken for them are below.
 
-**Not measured yet: the controls, or the panel, in a browser.** They are pinned as behaviour
+**Measured since, in a browser** — this paragraph used to say the opposite, and the correction is worth
+keeping as a record of what "pinned" does not cover. They are pinned as behaviour
 (`applyState`, `fillSelect`, `showToggles`, `showCommands` and `showActions` over the stub DOM in
 `scripts/web-view-test.js`) and as bytes (`the_pickers_offer_the_runs_own_commands`,
 `the_toggles_are_switches_that_show_their_value`, `the_command_panel_is_drawn_from_the_frame`,
 `the_action_buttons_send_the_frames_own_line`), and
 the frame end to end (`the_page_is_told_the_state_its_controls_would_show`, which reads `/events` on
 connect, sends `/model stub-other` and `/verbose full` to `POST /message`, and then opens a *second*
-stream, which can only have been handed the snapshot). Nobody has looked at the header with a real
-font, or used a picker or a switch from the keyboard, or watched a command's answer land in the
-transcript, or opened the command panel and read it with `/help` beside it; `docs/web-mode.md` §11
-says so in the same words.
+stream, which can only have been handed the snapshot). And since 2026-09-17 the header has been looked
+at with a real font and driven with real events: a switch moves the control and the run together, a
+picker moves from the keyboard and the run is told which model, a command's answer lands in the panel
+and not in the terminal, the panel is opened and read with a real click, and the send button is
+reachable under it — `docs/web-mode.md` §11 is the table.
 
 ### The actions are buttons — §8's first class, and the smallest one to get right
 
@@ -1054,8 +1064,11 @@ it. Two things are pinned, and the second is the one worth keeping:
 - The two Node checks draw the buttons from a real frame and take them away when a frame has only
   reports in it — which is also the assertion that a panel is not a button.
 
-**Not measured in a browser either**: nobody has pressed one. The click path is pinned as bytes and
-the answer path end to end, and that is all it is.
+**Measured in a browser since 2026-09-17**: a real click on `/reload`, one of the run's two action
+buttons — the run printed `reloaded` in the terminal, which is the witness that the press reached it —
+with the buttons themselves read out of the header first. `/new` was not pressed: it would start a fresh
+conversation mid-pass and the rest of the checks are about the one that is open. The click path is
+pinned as bytes and the answer path end to end as well, and that is the three ways it is held.
 
 ### A report is answered to the page, and not printed here
 
@@ -1105,8 +1118,9 @@ back — and a `command` frame marked `panel` fills the reading rather than the 
 composition is pinned as bytes (`the_panel_reads_a_report_rather_than_sending_it`) and the drawing in
 Node (four checks), with the mutation checks recorded in `docs/web-mode.md` §11.
 
-**Not measured**: a report asked for *while a turn runs*, which needs a stub turn slow enough to
-click during; and a browser, as ever.
+**Not measured**: a report asked for *while a turn runs*, which needs a stub turn slow enough to click
+during — a report asked for between turns **is** measured in a browser now: the `/config` row was
+pressed with a real click, the answer was read in the panel, and the terminal gained not one byte.
 
 ### A selector's values ride on the row, and they are the permission too
 
@@ -1306,7 +1320,10 @@ a time, and a page form can send exactly one value, so doing it from the browser
 non-interactive `/provider add <name> <base_url>` *and* a frame row carrying several fields — the
 second is the same shape §11 refused for `/config edit`. The panel's grouping is also §8's classes
 rather than a task, so "set a key" means switching provider in one group and filling a masked box in
-another. Both are the next round's question. **Not measured**: a browser, as always.
+another. Both are the next round's question — and the masked box half is **measured in a browser since
+2026-09-17**: the `/provider key` field is `type=password`, a key typed into it reaches the run
+(`key saved`), the field is emptied, the secret is nowhere in the page's markup, and `config.toml`
+really did receive it, which is what stops the other three claims passing on a command that never ran.
 
 ### A conversation's row carries its own actions
 
@@ -1338,9 +1355,13 @@ from here`. `tests/web_view.rs` pins the composition over the page's own bytes, 
 the class and the `from` are required. Mutation-checked: asking `destroyingRows` for `"providers"`
 fails both the Node check and the policy test.
 
-**Not measured**: a browser, as ever — so the menu's placement, and its dismissal (the button toggles
-it, a `reset` clears it, and a click elsewhere does **not** close it) are reasoned rather than seen.
-That dismissal is the thing worth watching first when someone finally looks at this page with a mouse.
+**Measured in a browser since 2026-09-17**: the menu is opened by a real click on the row's `⋯`, and
+what it sends is checked against the run and against the disk — the open conversation's field renames
+it (`named: named from the sidebar`), and a fixture conversation's `/delete <n>` row removes that
+conversation's file while nothing at all was sent by the press that opened the menu. The *placement* is
+therefore seen; what is still reasoned rather than seen is the dismissal (the button toggles it, a
+`reset` clears it, and a click elsewhere does **not** close it). That dismissal is the thing worth
+watching first when someone finally looks at this page with a mouse.
 
 ### `--fork` copies a conversation instead of continuing it
 
@@ -1450,8 +1471,12 @@ the Node check drives `showCommands` through both states and reads back the rows
 way back, the destructive mark, and the empty list saying so. Mutation-checked: marking every row
 `from: "providers"` fails the e2e, and drawing no choices fails the Node check.
 
-**Not measured**: a browser, as ever — and the deletion itself, which is the terminal's own command
-reached through the composer's route. What the page adds is the two presses, and what stops a single
+**Measured in a browser since 2026-09-17**: a real click opens a `/delete <n|id>` row's choices, the
+run's stdout gains nothing, and backing out leaves the sessions directory byte-identical. The second
+press in *that* list was not made, and deliberately: it would delete a real conversation. It is made
+from the sidebar's own menu, on a conversation the harness wrote itself, where the deletion is a fair
+thing to ask a browser to do — and it is checked against the directory listing, which is the same
+witness one level out. What the page adds is the two presses, and what stops a single
 press is that there is nothing to press that sends.
 
 ### Still owed on the page
@@ -1496,7 +1521,18 @@ each with the reason it is left:
    thing in the header that grows without bound and it pushed the reading over the composer. §11's
    `The later controls, in a real browser` is the table and the method; what is still unmeasured is a
    short and named list — a native `<select>`'s open dropdown, the sidebar's own menu, and the drag
-   grips.
+   grips. **The last two of those three are now driven too, and the pickers are driven from the
+   keyboard**: the harness is 34 claims (was 20) and covers the sidebar's `⋯` menu on both kinds of
+   row — the open conversation's, whose rename field reaches the run and whose first press sends
+   nothing, and a fixture conversation's, whose second press carries *that row's* number and removes
+   that file, which the directory listing witnesses — both hands by a real pointer drag with the
+   button held, plus the arrow keys and the double-click reset, and `#pick-model` by focus and
+   ArrowDown, checked against the run's own `ok model …` line. A mutation proves the drag claims are
+   load-bearing rather than decorative: neutering the page's `pointermove` handler leaves the two
+   "takes a real drag" claims failing (32/34) while the arrow-key and double-click claims still pass.
+   What is left uncovered is one widget and one section: a native `<select>`'s open *popup*, which
+   belongs to the operating system and no protocol can reach into, and §11's own long answers and
+   reconnection, measured on macOS over a different harness.
 4. **Renaming from the sidebar** — ~~a `/name` field exists in the panel and works, and the sidebar
    has no affordance for it~~ **built 2026-09-17**, exactly as this line predicted: a `/name <text>`
    line through `/message` like every other row action, with no route of its own. The row's menu

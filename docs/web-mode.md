@@ -16,8 +16,9 @@ which is what makes the page a **composer** and gives it a sidebar. §11 records
 measured in a browser versus what has not, and as of 2026-09-17 that includes every control §8
 built: the switches, the panel, the buttons, the forms and the destructive rows have all been
 driven with real input events, and driving them found two defects. What is left is not a level but
-a polish list, named at the end of §11: a native `<select>`'s dropdown, the sidebar's own menu,
-and the drag grips. §8's "not doing" is still not being done.
+a polish list, named at the end of §11: a native `<select>`'s open popup, which is the operating
+system's, and the page's own long-answer and reconnection measurements. §8's "not doing" is still not
+being done.
 
 The token goes in two different places, and the difference is deliberate: `?token=` is accepted
 on `/` alone, because that is the URL `--web` prints and the only one a person pastes into an
@@ -44,9 +45,10 @@ headless Chrome and looked at, and §11 records what that measured. It is a weak
 a test and a stronger thing than reasoning: it immediately found a defect that no amount of
 reading would have. The same has since been done to every control in §8 — driven over the
 DevTools protocol by `scripts/browser-controls-test.js`, which found two more defects, one of
-them a page with no controls on it at all. What remains unmeasured is a named list at the end of
-§11 rather than a section: a native `<select>`'s open dropdown, the sidebar's own menu, and the
-drag grips. The *listener*'s own questions — §4's boundary, §6's routes, backpressure and
+them a page with no controls on it at all — and then, in the same harness, to the sidebar's own `⋯`
+menu, both drag grips and a picker from the keyboard, which were §11's last "reasoned rather than
+seen" residue. What remains unmeasured is one widget and one section, named at the end of §11: a
+native `<select>`'s open popup, and the page's long answers and reconnection. The *listener*'s own questions — §4's boundary, §6's routes, backpressure and
 reconnection — were measured in the macOS pass this file records, and the phrasing above used to
 say they were unmeasured "because the listener does not exist yet", which stopped being true when
 it was built.
@@ -900,9 +902,11 @@ be drawn before anything can be confirmed and the two lists are different ones. 
 **Measured in a browser since, 2026-09-17**: the first press is made with a real pointer on a real
 `/delete <n|id>` row, its candidates are read, and the way out is pressed — with the *nothing sent* half
 asserted against the run's own output and the sessions still on disk afterwards. See `The later
-controls, in a real browser`. The second press still has not been made from a browser, and that is on
-purpose: it would delete a real conversation, and what the two-press shape promises is exactly that the
-first press is not it.
+controls, in a real browser`. The second press is not made **in the panel**, and that is on purpose: it
+would delete a real conversation, and what the two-press shape promises is exactly that the first press
+is not it. The second press *is* made from the sidebar's own menu, on a conversation the harness put
+there for the purpose — which is the one place a deletion is a fair thing to ask a browser to do, and
+it is checked against the directory listing rather than against the page.
 
 ### The later controls, in a real browser — measured, 2026-09-17
 
@@ -912,6 +916,10 @@ Chrome DevTools protocol from `scripts/browser-controls-test.js` — node's own 
 is installed for it, and headless Chrome on Windows at 1374×800 — with the page's real font, a real
 window, and real input events: `Input.dispatchMouseEvent` at each element's own box and
 `Input.dispatchKeyEvent` for the switch.
+
+The same harness then closed the residue this section used to carry — the sidebar's own `⋯` menu, both
+drag grips, and a picker from the keyboard — so it is 34 claims rather than 20 and no control of the
+page's is left asserted-but-undriven. Those are the last six rows of the table below.
 
 **Every claim is checked against the run's stdout, not against the page.** That is the whole method: a
 click that sent nothing leaves the page looking exactly like a click that worked, so the witness has to
@@ -930,6 +938,12 @@ traffic, which is what turned the first failure from "the controls never appeare
 | The credential field is masked, and the secret does not come back | typing `sk-not-a-real-key-0000` into the `/provider key` field, then its submit | the input is `type=password`, the run printed `key saved`, the field was emptied, the secret is nowhere in the page's markup — and `config.toml` *does* contain it, which is what stops the other three passing on a command that never ran |
 | A destructive row opens its candidates instead of sending | a real click on `/delete <n|id>` | candidates drawn, the run's stdout gained nothing, and backing out left the sessions directory byte-identical |
 | The composer sends a line the run answers | `/usage` typed into the box, then a real click on `send` | the run printed, and the answer was in the transcript |
+| A conversation's row opens its own menu, and the press that opens it sends nothing | a real click on the row's `⋯`, then the terminal | the menu's rows are the frame's destructive commands with *this row's* number appended, the open conversation's menu carries the `/name` field and no other row's does, and the run's stdout gained nothing until a row was pressed |
+| A name typed into that field reaches the run | `Input.insertText` into the menu's own field, then its submit | the run printed `named: named from the sidebar` |
+| The second press in a row's menu carries that row's number | a real click on the `/delete` row of a conversation the harness created | that session file was gone from `sessions/`, read off the directory rather than the page — the terminal would agree with a menu that had sent the wrong number and been refused |
+| The sidebar's hand takes a real drag, and the arrow keys and a double-click belong to the same control | a pointer press, four moves with `buttons: 1`, a release; then `ArrowRight` on the focused hand; then two press/release pairs with `clickCount` 1 and 2 | `--side` grew by the drag, grew by 16 with the arrow, and the double-click removed the property rather than leaving a number — with `body.dragging` asserted *during* the drag, which is the page saying it accepted it. Mutation-checked: neutering the page's `pointermove` handler fails this row and the one below it (32/34) while the arrow-key and double-click claims still pass, so the two halves are independent |
+| The reading hand is the same control on the other boundary | the same gestures on `#read-grip`, dragging left | `--read` shrank by the drag, and its double-click reset its own width — and, as the check asserts, nobody else's |
+| A picker moves from the keyboard, and the run is told which model | focus `#pick-model`, `ArrowDown` | the page's value changed *and* the run printed `ok model …` for that value. The open *popup* is still the OS's and still unreachable, which is the residue below |
 
 **Two defects, and both were unreachable from the source.** The first: a run with `--web` that has not
 been spoken to yet answered **500** on `/session` — the run names its session when it starts, the *file*
@@ -950,11 +964,10 @@ hand inside it is positioned against it) and a *static* composer paints below it
 tree order puts the later sibling back on top, and a number would only be a number to escalate against
 the sidebar's own menu. The harness's check was red before the fix and is the reason to believe it.
 
-**What this does not cover, and it is a shorter list than it was.** The pickers: a native `<select>`'s
-open dropdown belongs to the operating system, so the page's own two pickers are still only pinned as
-bytes and as behaviour. The sidebar's `⋯` menu and the drag grips, which the earlier pass reported as
-reasoned rather than seen and which this one does not touch. Long answers and reconnection, which are
-§11's own performance section and were measured on macOS over a different harness. And the composer at
-the *keyboard*: this drives Enter's neighbour, the button, and a person's Enter was measured in the
-earlier pass.
+**What this does not cover, and it is one widget and one section now.** A native `<select>`'s open
+*popup* belongs to the operating system, so no protocol can reach into it; the picker itself is driven
+from the keyboard, which is the path a person takes through it, and what it sends is checked against the
+run. Long answers and reconnection, which are §11's own performance section and were measured on macOS
+over a different harness, are the other half — and the composer at the *keyboard* was measured in the
+earlier pass, with the button driven here.
 

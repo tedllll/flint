@@ -866,8 +866,13 @@ since had the same treatment from a committed harness rather than a one-off —
 `scripts/browser-controls-test.js` drives the switches, the command panel, an action button, the masked
 credential field and a destructive row's menu, checks every press against the run's own stdout, and
 found two more defects, both fixed (a fresh run's page drew no controls at all; the open panel covered
-the composer's send button). §11's `The later controls, in a real browser` is that table and the method,
-and what no browser has touched is the short named list at the end of the same section. The
+the composer's send button) — and the last residues were driven in the same harness: the sidebar's own
+`⋯` menu on both kinds of row, both drag grips by a real pointer drag with the arrow keys and the
+double-click reset beside them, and `#pick-model` from the keyboard. All of it passed, and the mutation
+that neuters the page's `pointermove` handler fails the two drag claims, so they are checks rather than
+decoration. §11's `The later controls, in a real browser` is that table and the method,
+and what no browser has touched is one widget and one section — a native `<select>`'s open popup, which
+is the operating system's, and the page's own long answers and reconnection. The
 fourth residue, the sidebar's rename, is built as well and is recorded below. The queue is what comes
 next.
 

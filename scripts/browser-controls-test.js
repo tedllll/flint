@@ -75,7 +75,8 @@ function scratch() {
   fs.writeFileSync(
     path.join(home, "config.toml"),
     'default_provider = "stub"\n\n[[providers]]\nname = "stub"\n' +
-      'base_url = "http://127.0.0.1:9/v1"\nmodel = "stub-model"\napi_key = "not-a-real-key"\n'
+      'base_url = "http://127.0.0.1:9/v1"\nmodel = "stub-model"\n' +
+      'models = ["stub-model-2", "stub-model-3"]\napi_key = "not-a-real-key"\n'
   );
   for (const [id, prompt] of [["111-1", "the older question"], ["222-1", "the newer question"]]) {
     const meta = JSON.stringify({
@@ -263,7 +264,62 @@ async function attach(target) {
     }
     await sleep(120);
   };
-  return { send, js, waitFor, click, key, close: () => ws.close() };
+  /// A drag, as a pointer does it: press on the element, move with the button held, let go. The move
+  /// has to be several events rather than one, because the page follows `pointermove` and a single
+  /// jump would also be satisfied by a handler that only ever reads the release point. `buttons: 1`
+  /// is what makes the moved events come with the button still down -- without it they arrive as
+  /// hover, and the page's `pointermove` never fires.
+  const drag = async (selector, dx, dy = 0) => {
+    const box = await js(
+      `(() => { const el = document.querySelector(${JSON.stringify(selector)});
+        if (!el) return null; const r = el.getBoundingClientRect();
+        return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; })()`
+    );
+    if (!box || typeof box.x !== "number") throw new Error(`no element to drag: ${selector}`);
+    await send("Input.dispatchMouseEvent", {
+      type: "mousePressed", x: box.x, y: box.y, button: "left", clickCount: 1,
+    });
+    let held = false;
+    for (let step = 1; step <= 4; step += 1) {
+      await send("Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x: box.x + Math.round((dx * step) / 4),
+        y: box.y + Math.round((dy * step) / 4),
+        button: "left",
+        buttons: 1,
+      });
+      await sleep(60);
+      // Asked while the button is still down: "the drag was accepted" is a different claim from
+      // "the width changed", and the page says so itself by putting `dragging` on the body.
+      held = held || (await js(`document.body.classList.contains("dragging")`));
+    }
+    await send("Input.dispatchMouseEvent", {
+      type: "mouseReleased", x: box.x + dx, y: box.y + dy, button: "left", clickCount: 1,
+    });
+    await sleep(150);
+    return held;
+  };
+  /// A real double-click: two press/release pairs inside the platform's interval, the second
+  /// carrying `clickCount: 2`, which is what makes the browser emit `dblclick`. Dispatching a
+  /// `dblclick` event by hand would test the handler and not the gesture.
+  const doubleClick = async (selector) => {
+    const box = await js(
+      `(() => { const el = document.querySelector(${JSON.stringify(selector)});
+        if (!el) return null; const r = el.getBoundingClientRect();
+        return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; })()`
+    );
+    if (!box || typeof box.x !== "number") throw new Error(`no element to double-click: ${selector}`);
+    for (const count of [1, 2]) {
+      for (const type of ["mousePressed", "mouseReleased"]) {
+        await send("Input.dispatchMouseEvent", {
+          type, x: box.x, y: box.y, button: "left", clickCount: count,
+        });
+      }
+      await sleep(40);
+    }
+    await sleep(150);
+  };
+  return { send, js, waitFor, click, key, drag, doubleClick, close: () => ws.close() };
 }
 
 /// A row of the command panel by the line it would send, which is what the frame put in it.
@@ -471,6 +527,218 @@ async function main() {
       "and backing out deletes nothing",
       JSON.stringify(sessionsBefore) === JSON.stringify(sessionsAfter),
       `${JSON.stringify(sessionsBefore)} -> ${JSON.stringify(sessionsAfter)}`
+    );
+
+    // ---- the sidebar's own menu --------------------------------------------
+    // `⋯` at the end of a conversation's row opens that conversation's actions, drawn from the same
+    // frame rows the panel uses with this row's number appended. §11 called this "reasoned rather
+    // than seen", so what is checked here is the two-press shape on the row itself: the press that
+    // opens the menu sends nothing, the row in it says the whole line before it sends it, and the
+    // line that goes out belongs to *that* conversation.
+    const rowState = () => page.js(
+      `(() => {
+        const rows = Array.from(document.querySelectorAll("#sessions li"));
+        const current = rows.find((li) => li.classList.contains("current")) || rows[0];
+        return { n: rows.length, current: current ? current.title : null,
+                 hasMore: !!(current && current.querySelector("button.more")) };
+      })()`
+    );
+    const rows = await rowState();
+    check(
+      "a conversation's row carries its own menu button",
+      rows.hasMore === true,
+      `rows: ${JSON.stringify(rows)}`
+    );
+    const beforeMenu = before();
+    await page.js(
+      `(() => { const li = document.querySelector("#sessions li.current") ||
+          document.querySelector("#sessions li");
+        li.querySelector("button.more").id = "harness-more"; return true; })()`
+    );
+    await page.click("#harness-more");
+    const menu = await page.js(
+      `(() => { const li = document.querySelector("#sessions li.current") ||
+          document.querySelector("#sessions li");
+        const m = li && li.querySelector(".menu"); if (!m) return null;
+        const n = (li.querySelector("span.n") || {}).textContent || "";
+        return { number: n,
+                 rows: Array.from(m.querySelectorAll("button.row")).map((b) => (b.querySelector("code") || {}).textContent),
+                 form: Array.from(m.querySelectorAll("form.field button.send")).map((b) => b.textContent) }; })()`
+    );
+    check(
+      "the menu opens with that conversation's actions and its own number",
+      !!menu && Array.isArray(menu.rows) && menu.rows.length > 0 &&
+        menu.rows.every((line) => String(line).endsWith(" " + menu.number)),
+      `menu: ${JSON.stringify(menu)}`
+    );
+    check(
+      "and opening it sent nothing",
+      flint.text().slice(beforeMenu).trim() === "",
+      `terminal gained: ${JSON.stringify(flint.text().slice(beforeMenu))}`
+    );
+    // The rename belongs to the row the run is writing and to no other, which is why it is looked
+    // for *here* rather than assumed: a menu that offered it on every row would rename whatever
+    // happened to be open.
+    check(
+      "the conversation being written offers a name field in the same menu",
+      !!menu && Array.isArray(menu.form) && menu.form.includes("/name"),
+      `menu forms: ${JSON.stringify(menu && menu.form)}`
+    );
+    const nameInput = `(() => { const li = document.querySelector("#sessions li.current") ||
+        document.querySelector("#sessions li");
+      const f = li.querySelector(".menu form.field");
+      if (!f) return null; f.querySelector("input").id = "harness-name";
+      f.querySelector("button.send").id = "harness-name-send"; return true; })()`;
+    if (await page.js(nameInput)) {
+      const beforeName = before();
+      await page.js(`document.getElementById("harness-name").focus(); true`);
+      await page.send("Input.insertText", { text: "named from the sidebar" });
+      await page.click("#harness-name-send");
+      let named = "";
+      for (let i = 0; i < 25 && !named.includes("named:"); i += 1) {
+        await sleep(200);
+        named = flint.text().slice(beforeName);
+      }
+      check(
+        "a name typed into that field reaches the run",
+        named.includes("named: named from the sidebar"),
+        `terminal gained: ${JSON.stringify(named.slice(0, 200))}`
+      );
+    }
+
+    // The second press is the one that sends, and it sends *this row's* number: the fixture session
+    // is removed by the menu on its own row, and the file is the witness (the terminal would agree
+    // with a menu that had sent the wrong conversation's number and been refused).
+    const victim = "111-1";
+    const victimThere = fs.existsSync(path.join(where.home, "sessions", `${victim}.jsonl`));
+    const beforeDelete = before();
+    const aimed = await page.js(
+      `(() => { const li = Array.from(document.querySelectorAll("#sessions li"))
+          .find((r) => r.title === ${JSON.stringify(victim)});
+        if (!li) return null; const b = li.querySelector("button.more");
+        if (!b) return null; b.id = "harness-victim"; return true; })()`
+    );
+    if (aimed) {
+      await page.click("#harness-victim");
+      const victimRow = await page.js(
+        `(() => { const li = Array.from(document.querySelectorAll("#sessions li"))
+            .find((r) => r.title === ${JSON.stringify(victim)});
+          const m = li && li.querySelector(".menu"); if (!m) return null;
+          const b = Array.from(m.querySelectorAll("button.row"))
+            .find((b) => String((b.querySelector("code") || {}).textContent).startsWith("/delete"));
+          if (!b) return null; b.id = "harness-delete-row";
+          return (b.querySelector("code") || {}).textContent; })()`
+      );
+      check(
+        "a fixture conversation's menu names the line it would send",
+        typeof victimRow === "string" && victimRow.startsWith("/delete "),
+        `row: ${JSON.stringify(victimRow)}`
+      );
+      check(
+        "and opening that menu sent nothing either",
+        flint.text().slice(beforeDelete).trim() === "",
+        `terminal gained: ${JSON.stringify(flint.text().slice(beforeDelete))}`
+      );
+      await page.click("#harness-delete-row");
+      let removed = "";
+      for (let i = 0; i < 25 && !removed.includes("deleted"); i += 1) {
+        await sleep(200);
+        removed = flint.text().slice(beforeDelete);
+      }
+      check(
+        "the second press sends the line, and the run removes that conversation",
+        victimThere && !fs.existsSync(path.join(where.home, "sessions", `${victim}.jsonl`)),
+        `run printed: ${JSON.stringify(removed.slice(0, 200))}, still there: ` +
+          `${fs.existsSync(path.join(where.home, "sessions", `${victim}.jsonl`))}`
+      );
+    }
+
+    // ---- the two hands -----------------------------------------------------
+    // The grips are the one control whose state is not in a frame: they set `--side` and `--read` on
+    // the app element and nothing else, so every claim here is read off the style and the run is not
+    // involved at all. Both are dragged the way a pointer drags them (press, move, release, with the
+    // button held), nudged with the arrow keys, and put back with a double-click -- the three
+    // gestures the page documents.
+    const widthOf = (property) =>
+      page.js(
+        `(() => { const app = document.getElementById("app");
+          const raw = app.style.getPropertyValue(${JSON.stringify(property)});
+          return { set: raw, px: parseFloat(raw) || null };
+        })()`
+      );
+    const sideBefore = await widthOf("--side");
+    const heldLeft = await page.drag("#grip", 72);
+    const sideAfter = await widthOf("--side");
+    check(
+      "the sidebar's hand takes a real drag",
+      heldLeft === true && sideAfter.px !== null && sideAfter.px > (sideBefore.px || 0) + 40,
+      `dragging: ${heldLeft}, --side: ${JSON.stringify(sideBefore)} -> ${JSON.stringify(sideAfter)}`
+    );
+    const sideNudged = await (async () => {
+      await page.js(`document.getElementById("grip").focus(); true`);
+      await page.key("ArrowRight", 39);
+      return widthOf("--side");
+    })();
+    check(
+      "and the arrow keys move the boundary it belongs to",
+      sideNudged.px !== null && sideNudged.px > (sideAfter.px || 0) + 8,
+      `--side: ${JSON.stringify(sideAfter)} -> ${JSON.stringify(sideNudged)}`
+    );
+    await page.doubleClick("#grip");
+    const sideReset = await widthOf("--side");
+    check(
+      "and a double-click puts the width back, rather than leaving a number behind",
+      sideReset.set === "",
+      `--side after the double-click: ${JSON.stringify(sideReset)}`
+    );
+
+    const readBefore = await widthOf("--read");
+    const heldRight = await page.drag("#read-grip", -64);
+    const readAfter = await widthOf("--read");
+    check(
+      "the reading hand takes a real drag, on the other side of the same control",
+      heldRight === true && readAfter.px !== null && readAfter.px < (readBefore.px || 9999) - 32,
+      `dragging: ${heldRight}, --read: ${JSON.stringify(readBefore)} -> ${JSON.stringify(readAfter)}`
+    );
+    await page.doubleClick("#read-grip");
+    const readReset = await widthOf("--read");
+    check(
+      "and its own double-click resets only its width",
+      readReset.set === "" && (await widthOf("--side")).set === "",
+      `--read: ${JSON.stringify(readReset)}, --side: ${JSON.stringify(await widthOf("--side"))}`
+    );
+
+    // ---- a picker, from the keyboard ---------------------------------------
+    // The header's two `<select>`s are drawn from the state frame. A native select's *open list*
+    // belongs to the operating system and no protocol can reach into it -- that is the residue §11
+    // keeps -- but the keyboard is the path a person takes through it, and it is drivable: focus,
+    // ArrowDown, and the value changes as a real input event. What matters is that the change is
+    // not merely painted: the run is told, and the model in force is the one pressed for.
+    const pickerBefore = await page.js(
+      `(() => { const s = document.getElementById("pick-model");
+        return { value: s.value, options: Array.from(s.options).map((o) => o.value) }; })()`
+    );
+    const beforePicker = before();
+    await page.js(`document.getElementById("pick-model").focus(); true`);
+    await page.key("ArrowDown", 40);
+    const pickerAfter = await page
+      .waitFor(
+        `document.getElementById("pick-model").value !== ${JSON.stringify(pickerBefore.value)} &&
+         document.getElementById("pick-model").value`,
+        "the model picker to move",
+        25
+      )
+      .catch(() => null);
+    let switched = "";
+    for (let i = 0; i < 25 && !switched.includes("ok model"); i += 1) {
+      await sleep(200);
+      switched = flint.text().slice(beforePicker);
+    }
+    check(
+      "a picker moves from the keyboard and the run is told which model",
+      pickerAfter !== null && switched.includes(`ok model ${pickerAfter}`),
+      `page: ${JSON.stringify(pickerBefore.value)} -> ${JSON.stringify(pickerAfter)}, ` +
+        `terminal: ${JSON.stringify(switched.slice(-200))}`
     );
 
     // ---- the composer, and whether it is reachable -------------------------
