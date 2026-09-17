@@ -86,6 +86,36 @@ pub enum SessionEvent {
         from_id: Option<String>,
         messages: usize,
     },
+    /// That this conversation is a branch: a conversation of its own, cut from an earlier one.
+    ///
+    /// `/fork` is the door, and `--fork` is the same act taken at startup. Asking again from an
+    /// earlier point is the thing this exists for -- "that went wrong four messages ago, start again
+    /// from there" -- and it is a *copy* for the reason `Import` gives: the conversation that got
+    /// there keeps every byte it had, and its tail is not cut off to make room for the retry. Written
+    /// before the messages it names, like `Import`, and its own event rather than a field on `Meta`
+    /// for the same reason: the file is append-only, and a fact that arrives at a moment is a line.
+    ///
+    /// Its own event rather than a second use of `Import`, because the two say different things: an
+    /// import brought a **whole** file in from elsewhere, and a fork kept a **prefix** of a
+    /// conversation that existed on this machine. `kept` is what carries that difference -- how many
+    /// of the source's messages the copy holds -- and it is absent when nothing was cut, which is
+    /// `--fork`'s case. So `{"type":"fork","from":…}` reads as "this is a copy of that whole
+    /// conversation" and `…,"kept":4` as "this is that conversation's first four messages".
+    ///
+    /// **Not `Meta.parent`**, which means something else (see the doc there): that is the run that
+    /// started this one, and it is what files a child's conversation under `children/` instead of in
+    /// the person's list. A fork is not a child. Keeping one field for both would make "who asked for
+    /// this run" and "which conversation is this a branch of" the same question, and no reader can
+    /// answer both from one field -- nor is either of them a thing `meta` should be saying about a
+    /// file that may be forked from years later.
+    Fork {
+        from: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_id: Option<String>,
+        /// How many of the source's messages the copy holds. Absent means the whole conversation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kept: Option<usize>,
+    },
     /// A peer left a message while this conversation was open.
     ///
     /// Its own event, and deliberately **not** a `Chat`: a peer's words are shown to the person and
@@ -149,8 +179,8 @@ pub enum SessionEvent {
 ///
 /// Used for one decision only: a line that failed to parse but names a type in here is
 /// damage, and a line that names anything else is somebody else's event.
-const KNOWN_TYPES: [&str; 8] = [
-    "meta", "chat", "import", "usage", "title", "switch", "schema", "peer",
+const KNOWN_TYPES: [&str; 9] = [
+    "meta", "chat", "import", "fork", "usage", "title", "switch", "schema", "peer",
 ];
 
 /// Whether a line names an event type this build knows.
@@ -172,6 +202,21 @@ pub struct SessionWriter {
     /// written at construction because a session file appears when the first thing is *said*, not when
     /// flint is opened -- see `append`.
     meta: Option<SessionEvent>,
+}
+
+/// A conversation being copied into a file of its own: the messages, the name they travel with, and the
+/// file they were read from.
+///
+/// The four fields are one fact -- this is a copy, and this is what it is a copy *of* -- which is why
+/// they travel together into [`SessionWriter::seed`] rather than as four arguments. The pair that
+/// matters most is `from` with `from_id`: they are the same fact read two ways (the path flint was
+/// pointed at, and the id that file's own `meta` line was created under), and a signature that took them
+/// side by side could be called with one file's path and another's id.
+pub struct Copy<'a> {
+    pub messages: &'a [Message],
+    pub title: Option<&'a str>,
+    pub from: &'a Path,
+    pub from_id: Option<&'a str>,
 }
 
 impl SessionWriter {
@@ -242,17 +287,28 @@ impl SessionWriter {
     /// `parent` is `create`'s, and it is passed rather than defaulted because a fork made *by a child*
     /// is still a child's conversation: a copy that surfaced in the person's list would be the same
     /// surprise this exists to remove.
+    ///
+    /// A copy names the file it was copied from (`forked_from`) between creating the writer and
+    /// writing the messages, because that is where the line belongs: directly under `meta`, above the
+    /// conversation it describes. It used to be three calls at each site -- `create`, `forked_from`,
+    /// `write_messages` -- and the reason it is one function is the reason it is written here rather
+    /// than at the call sites: the ordering is the guarantee, and a caller that wrote the messages
+    /// first would leave a file whose provenance arrives after the thing it is about.
+    ///
+    /// The copy itself arrives as one [`Copy`] rather than as four arguments, which is what keeps this
+    /// function's argument count honest -- and, more to the point, what keeps a source's path and its id
+    /// from being passed as two unrelated strings that a caller can mismatch.
     pub fn seed(
         dir: &Path,
         cwd: &Path,
         provider: &str,
         model: &str,
-        messages: &[Message],
-        title: Option<&str>,
         parent: Option<&str>,
+        copy: Copy<'_>,
     ) -> Result<Self> {
         let mut writer = Self::create(dir, cwd, provider, model, parent)?;
-        writer.write_messages(messages, title)?;
+        writer.forked_from(copy.from, copy.from_id, None)?;
+        writer.write_messages(copy.messages, copy.title)?;
         Ok(writer)
     }
 
@@ -297,6 +353,25 @@ impl SessionWriter {
             from: from.display().to_string(),
             from_id: from_id.map(str::to_string),
             messages,
+        })
+    }
+
+    /// Say that this conversation is a branch of an earlier one.
+    ///
+    /// The fork's half of `imported_from`, and the same ordering requirement: called between creating
+    /// the writer and writing the messages, so `meta` goes in first and this line lands directly under
+    /// it, ahead of the conversation it describes. `kept` is how many of the source's messages the copy
+    /// holds, or `None` when the whole conversation was copied -- see `SessionEvent::Fork`.
+    pub fn forked_from(
+        &mut self,
+        from: &Path,
+        from_id: Option<&str>,
+        kept: Option<usize>,
+    ) -> Result<()> {
+        self.append(&SessionEvent::Fork {
+            from: from.display().to_string(),
+            from_id: from_id.map(str::to_string),
+            kept,
         })
     }
 
@@ -487,24 +562,36 @@ pub struct LoadedSession {
     /// the conversation to the same contract it was held to when it was written -- the file says
     /// what that was, and nothing outside the file has to be passed again to continue it.
     pub output_schema: Option<serde_json::Value>,
-    /// Where this conversation was copied from, when it was copied in rather than started here.
+    /// Where this conversation came from, when it was copied rather than started here.
     ///
-    /// Read so that the two places a conversation is named to a person can say it: a conversation
-    /// that came from somebody else's file and one that was started here look identical on screen,
-    /// and a reader who has just resumed the wrong one has no other way to tell. `None` for every
-    /// conversation that was not imported.
-    pub imported: Option<Imported>,
+    /// Read so that the places a conversation is named to a person can say it: a copy and an original
+    /// look identical on screen, and a reader who has just resumed the branch has no other way to tell
+    /// it from the conversation it was cut from. `None` for every conversation that began here.
+    pub origin: Option<Origin>,
 }
 
 /// Where a conversation came from, as the file that holds it records it.
 ///
-/// The fields are `SessionEvent::Import`'s, and the doc there is where the reasoning is: the path is a
-/// fact of the moment rather than a pointer to follow, and the id is what a person can search for.
+/// The fields are the two provenance events', and the doc there is where the reasoning is: the path is
+/// a fact of the moment rather than a pointer to follow, and the id is what a person can search for.
+/// The two are one type here rather than two fields on `LoadedSession` because a file has one origin
+/// -- the last such line wins, as the last `title` does -- and because every reader of it (there is one
+/// function, in `main`) wants to say what it was, which means handling both anyway.
 #[derive(Debug, Clone)]
-pub struct Imported {
-    pub from: String,
-    pub from_id: Option<String>,
-    pub messages: usize,
+pub enum Origin {
+    /// The whole of a file brought in by `/import`, and how many messages came with it.
+    Imported {
+        from: String,
+        from_id: Option<String>,
+        messages: usize,
+    },
+    /// A prefix of a conversation, cut at a point and continued as a file of its own: `kept` is how
+    /// many messages the copy holds, or `None` when the whole conversation was copied (`--fork`).
+    Forked {
+        from: String,
+        from_id: Option<String>,
+        kept: Option<usize>,
+    },
 }
 
 /// Read a session file, tolerating (and reporting) damaged lines.
@@ -532,7 +619,7 @@ pub fn load(path: &Path) -> Result<LoadedSession> {
         messages: Vec::new(),
         last_usage: None,
         output_schema: None,
-        imported: None,
+        origin: None,
     };
 
     let mut damaged = 0usize;
@@ -565,10 +652,25 @@ pub fn load(path: &Path) -> Result<LoadedSession> {
                 from_id,
                 messages,
             }) => {
-                loaded.imported = Some(Imported {
+                loaded.origin = Some(Origin::Imported {
                     from,
                     from_id,
                     messages,
+                })
+            }
+            // The same read, one line in a different tense: a fork records the conversation it was cut
+            // from, so a branch read back later says what it branched off -- and a branch of a branch
+            // reads as a chain of files, because the copy holds no line from its source (the messages
+            // are copied, not the events).
+            Ok(SessionEvent::Fork {
+                from,
+                from_id,
+                kept,
+            }) => {
+                loaded.origin = Some(Origin::Forked {
+                    from,
+                    from_id,
+                    kept,
                 })
             }
             Ok(SessionEvent::Usage { usage }) => loaded.last_usage = Some(usage),
@@ -1255,10 +1357,17 @@ mod tests {
         );
 
         let loaded = load(writer.path()).expect("load the copy");
-        let imported = loaded.imported.expect("the import was not read back");
-        assert_eq!(imported.from, source.display().to_string());
-        assert_eq!(imported.from_id.as_deref(), Some("given-to-me"));
-        assert_eq!(imported.messages, 1);
+        let Some(Origin::Imported {
+            from,
+            from_id,
+            messages,
+        }) = loaded.origin
+        else {
+            panic!("the import was not read back: {:?}", loaded.origin);
+        };
+        assert_eq!(from, source.display().to_string());
+        assert_eq!(from_id.as_deref(), Some("given-to-me"));
+        assert_eq!(messages, 1);
         assert_eq!(
             loaded.title.as_deref(),
             Some("their conversation"),
@@ -1277,8 +1386,85 @@ mod tests {
             "a conversation that was not imported claims to have been: {plain_text}"
         );
         assert!(
-            load(plain.path()).expect("load").imported.is_none(),
+            load(plain.path()).expect("load").origin.is_none(),
             "a conversation that was not imported loaded as one that was"
+        );
+    }
+
+    /// A fork says which conversation it was cut from, and how much of it came along.
+    ///
+    /// The same three things the import test holds -- an event, written above the conversation it
+    /// describes, read back into something that says it -- plus the one fact a fork has and an import
+    /// does not: `kept`, the number of messages the copy holds. It is absent when nothing was cut,
+    /// which is `--fork`'s case, and the two readings have to be distinguishable: "a copy of that whole
+    /// conversation" and "the first four messages of it" are different claims about the same file.
+    #[test]
+    fn a_forked_session_says_which_conversation_it_was_cut_from() {
+        let root = TempDir::new("session-fork");
+        let project = TempDir::new("session-fork-project");
+        let source = root.0.join("20260101000000-1-777.jsonl");
+
+        let mut writer = SessionWriter::create(&root.0, &project.0, "p", "m", None).expect("create");
+        writer
+            .forked_from(&source, Some("20260101000000-1-777"), Some(4))
+            .expect("forked_from");
+        writer
+            .write_messages(
+                &[Message::user("the first question")],
+                Some("the branch"),
+            )
+            .expect("write_messages");
+
+        let text = std::fs::read_to_string(writer.path()).expect("read the branch");
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(
+            lines[0].contains(r#""type":"meta""#),
+            "the branch does not begin with its own meta line: {text}"
+        );
+        assert!(
+            lines[1].contains(r#""type":"fork""#)
+                && lines[1].contains("20260101000000-1-777.jsonl")
+                && lines[1].contains(r#""kept":4"#),
+            "the fork line is not directly under the meta line: {text}"
+        );
+        assert!(
+            lines[2].contains(r#""type":"chat""#),
+            "the conversation does not follow the line that recorded where it came from: {text}"
+        );
+
+        let loaded = load(writer.path()).expect("load the branch");
+        let Some(Origin::Forked {
+            from,
+            from_id,
+            kept,
+        }) = loaded.origin
+        else {
+            panic!("the fork was not read back: {:?}", loaded.origin);
+        };
+        assert_eq!(from, source.display().to_string());
+        assert_eq!(from_id.as_deref(), Some("20260101000000-1-777"));
+        assert_eq!(kept, Some(4));
+
+        // `--fork` copies the whole conversation, and says so by saying nothing about a cut.
+        let mut whole =
+            SessionWriter::create(&root.0, &project.0, "p", "m", None).expect("create whole");
+        whole
+            .forked_from(&source, Some("20260101000000-1-777"), None)
+            .expect("forked_from");
+        whole
+            .write_messages(&[Message::user("both questions")], None)
+            .expect("write_messages");
+        let whole_text = std::fs::read_to_string(whole.path()).expect("read");
+        assert!(
+            !whole_text.contains(r#""kept""#),
+            "a copy of a whole conversation claims a cut: {whole_text}"
+        );
+        assert!(
+            matches!(
+                load(whole.path()).expect("load").origin,
+                Some(Origin::Forked { kept: None, .. })
+            ),
+            "a whole-copy fork did not read back as an uncut one"
         );
     }
 
@@ -1548,9 +1734,14 @@ mod tests {
             Path::new("/tmp"),
             "other",
             "other-model",
-            &messages,
-            Some("a name"),
             None,
+            // Every `seed` is a copy now, and the file it names is where the lineage line comes from.
+            Copy {
+                messages: &messages,
+                title: Some("a name"),
+                from: Path::new("/tmp/the-original.jsonl"),
+                from_id: Some("the-original"),
+            },
         )
         .unwrap();
 
@@ -1558,6 +1749,18 @@ mod tests {
         assert_eq!(loaded.provider, "other");
         assert_eq!(loaded.model, "other-model");
         assert_eq!(loaded.title.as_deref(), Some("a name"));
+        assert!(
+            matches!(
+                loaded.origin,
+                Some(Origin::Forked {
+                    kept: None,
+                    from_id: Some(ref id),
+                    ..
+                }) if id == "the-original"
+            ),
+            "a seeded file does not say which conversation it was copied from: {:?}",
+            loaded.origin
+        );
         assert!(
             !loaded
                 .messages

@@ -43,24 +43,26 @@ conversation such a run could otherwise create by itself.
 
 ## One event per line
 
-Every line is a JSON object with a `type`. This build understands eight:
+Every line is a JSON object with a `type`. This build understands nine:
 
 | `type` | Written when | Fields |
 |---|---|---|
 | `meta` | once, as the first line | `v`, `id`, `created`, `cwd`, `provider`, `model`, `parent` (only when another run started this one) |
 | `chat` | a message is added to the conversation | `message` |
 | `import` | a conversation is copied in from a file (`/import`) | `from`, `from_id`, `messages` |
+| `fork` | this conversation is a copy of another one (`--fork`, `/fork <n>`) | `from`, `from_id`, `kept` (only when the copy is a prefix) |
 | `peer` | a peer left a message while this conversation was open | `from`, `text`, `at`, `heard` |
 | `usage` | the provider reports token counts | `usage` (`prompt_tokens`, `completion_tokens`, and `cache_hit_tokens` when the endpoint reported a cache split) |
 | `title` | the conversation is named | `name` |
 | `switch` | the provider or model in force changes | `provider`, `model` |
 | `schema` | the answer shape in force changes | `schema` (absent or `null` when cleared) |
 
-Two of the eight are not conversation and never become history: `peer` (a peer's words are shown to the
-person and kept out of `messages` on purpose — see its section) and `import` (provenance, read into
-`LoadedSession::imported` and read by the lines that name a conversation). An **unknown** `type` is
-skipped in silence, which is what lets a hand-edited file, or one written by a newer flint, still load;
-a line that names one of these eight and cannot be parsed is reported as damage instead.
+Three of the nine are not conversation and never become history: `peer` (a peer's words are shown to
+the person and kept out of `messages` on purpose — see its section), `import` and `fork` (both
+provenance, read into `LoadedSession::origin` and read by the lines that name a conversation). An
+**unknown** `type` is skipped in silence, which is what lets a hand-edited file, or one written by a
+newer flint, still load; a line that names one of these nine and cannot be parsed is reported as
+damage instead.
 
 A whole conversation, then — a real one is longer, this is the shape:
 
@@ -156,8 +158,52 @@ in force here) rather than to the file it came from. The source is not written t
 difference from `--resume <path>`: that continues *inside* the file it was handed.
 
 The record is read back: a conversation that came in this way says so wherever a conversation is named
-to a person — the startup `resumed` line and `/resume` both carry `, imported from <file>` — because a
-record nothing reads cannot be told apart from one that was never written.
+to a person — the startup `resumed` line and `/resume` both print `this conversation was imported from
+<file>` on the line under it — because a record nothing reads cannot be told apart from one that was
+never written.
+
+### `fork`
+
+```json
+{"type":"fork","from":"/home/you/.flint/sessions/C--work/1789512345-88-4412.jsonl","from_id":"1789512345-88-4412","kept":4}
+```
+
+Written when this conversation is **a copy of another one**: by `/fork <n>`, which cuts this
+conversation at the n-th question the person asked here, and by `--fork <file>` at startup, which copies
+the whole thing. Same place as `import` and for the same reason — above the conversation it describes —
+so the file answers "where did this come from" before it answers "what was said in it".
+
+The two kinds of copy are one event because they are one act with one difference, and the difference is
+`kept`:
+
+- `from` is the source's path **as this run read it**, a fact of the moment rather than a pointer, for
+  `import`'s reason: the file it names may have moved, and a copy that could not be read without it
+  would not be a copy.
+- `from_id` is the source's id as flint read it — the file's *stem*, which is the id its `meta` line
+  was created under, so the two agree by construction.
+- `kept` is how many messages this copy holds, written **only when the copy is a prefix** of the source.
+  An absent `kept` is a copy of the whole conversation (`--fork`); a present one is a cut (`/fork <n>`),
+  and it is stored rather than derived for `import`'s reason: this copy *grows* from there, so counting
+  its messages later would answer a different question than "where did the branch start".
+
+**This is deliberately not `meta.parent`.** That field means "another run started this one" and is what
+files a conversation under `children/`; a fork is a copy a person made of their own conversation, and
+writing `parent` would make `/sessions`, the sidebar and `--continue` treat a branch as somebody's
+child. It is a `fork` event rather than a field on `meta` because the file is append-only and a fact that
+arrives at a moment is a line — and because a copy copies *messages*, not events, so a chain of copies
+reads as a chain of files rather than as an original with a paragraph of history above it.
+
+The cut is always at a **question**: a `chat` line from the person, which is where a turn starts. That is
+the same boundary `trim_old_turns` cuts on and for the same mechanical reason — a tool result whose call
+was dropped is a request the provider rejects — with the addition that it is a boundary a person can
+name in the terminal, since it is a thing they typed.
+
+A forked conversation is otherwise ordinary: the same `chat` lines it kept, the same `title` if the
+source had one, and a `meta` line that belongs to this run (this machine's working directory, the
+provider and model in force here). The conversation it was cut from is not written to at all, and the
+record is read back the same way an import's is: the startup `resumed` line and `/resume` print
+`this conversation was forked from <file>, and holds the first <n> messages` under the line that names
+the conversation.
 
 ### `chat`
 

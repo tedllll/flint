@@ -58,8 +58,9 @@ takes away the ability to fix either.
 never the hard part — a session is created by its first event, so a run that says nothing writes
 nothing — and the decision that made the flag real is that a promise about what is written is only as
 good as the ways to write it. So `--continue`, `--resume`, `--fork` and `--name` refuse it on the
-command line, `/new` and `/resume` refuse it inside the run (through one function, so the page's
-sidebar rows and a typed line answer the same), and the funnel every mid-run switch goes through —
+command line, `/new`, `/resume`, `/import` and `/fork` refuse it inside the run (through one function,
+so the page's sidebar rows and a typed line answer the same), and the funnel every mid-run switch goes
+through —
 which *creates* the session when the old conversation has not said anything yet — is told once and
 carries the flag. The obvious shortcut is wrong for a reason worth keeping: the flag cannot be derived
 from "there is no writer", because a writer that has not appended yet and a run that will never write
@@ -69,6 +70,37 @@ than one shared `unattached/`, because two of these runs both number their spill
 And the flag reaches a `task` child, which is the part that is not obvious until you look at what
 excludes a child's conversation from the person's list: that is `FLINT_PARENT`, the parent's session id,
 which a run with no conversation does not have.
+
+**A fork is a copy, and its lineage is an event — never `meta.parent`.** `/fork <n>` cuts this
+conversation at the n-th question and starts a conversation of its own from what came before it;
+`--fork <file>` copies the whole thing at startup. The original keeps every byte, which is the whole
+point: "that went wrong four messages ago, start again from there" is a thing a person needs, and doing
+it by copying the file and deleting lines from it by hand is what people actually did. Both doors write
+one `fork` event — `from`, `from_id`, and `kept` when the copy is a prefix — and the reason it is not
+`meta.parent` is that `parent` means "another run started this one" and is what files a conversation
+under `children/`: a branch would then be excluded from `/sessions`, the sidebar and `--continue` as
+somebody's child, which is the opposite of what it is. It is an event rather than a field on `meta` for
+the reason `title`, `switch` and `import` are: the file is append-only, and a fact that arrives at a
+moment is a line.
+
+**A fork cuts at a question, and only at a question.** The unit is a `chat` line from the person — a
+turn boundary, the same one `trim_old_turns` cuts on, and for the same mechanical reason: a tool result
+whose call was left behind is a request the provider rejects. A question is also the only boundary a
+person can *name* at the prompt, which is why `/fork` takes the ordinal of a question rather than a
+message index: a count of chat lines is not a thing anybody knows about their own conversation, and the
+list `/fork` prints is what makes the number choosable. The alternatives were refused for their own
+reasons — cutting at the *first* question leaves a conversation with nothing in it (an empty file in the
+list that looks real, which is why `/new` is that act instead), and a bare `/fork` that cut at "the last
+exchange" would throw work away without being asked, which is the surprise `/sessions` exists to avoid.
+
+**Where a conversation came from is a sentence on its own line.** A copied conversation — imported or
+forked — says so when it is named to a person, on the `resumed` line and under `/resume`: `this
+conversation was forked from <file>, and holds the first <n> messages`. Not a fragment appended to the
+line that names the conversation, which is where it started and where it had to move: the line already
+carries the file in force and the model, and the two together with a provenance fragment passed 100
+columns — where what wrapped was the count a reader is looking for. It is one function for both kinds of
+copy and both doors, so no two of them can drift into saying different things about the same file, and
+the startup line on stderr says the same sentence for the same reason even though nothing wraps there.
 
 ## Context: instructions and skills
 

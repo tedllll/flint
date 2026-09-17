@@ -6,6 +6,83 @@ of it.
 
 ## Where things stand
 
+**The sixth of the twelve items taken from the reading of Pi is built: a fork from a chosen point.**
+`--fork` copied a whole conversation and its tail came with it, so "that went wrong four messages ago,
+start again from there" could only be approximated by forking everything and deleting lines from the
+copy by hand — which is what people actually did. `/fork <n>` now cuts *this* conversation at the n-th
+question the person asked here and starts a conversation of its own from what came before it, and a bare
+`/fork` lists the questions and writes nothing, because which point to cut at is the one thing the
+command may not guess. The cut is at a **question** — a `chat` line from the person, the same unit
+`trim_old_turns` counts turns in — for a mechanical reason and a human one: a tool result whose call was
+left behind is a request the provider rejects, and a question is the only boundary in a conversation a
+person can name at the prompt. A count of chat lines is not something anybody knows about their own
+conversation, which is why the ordinal is what the command takes and why the list is what makes it
+choosable.
+
+**The lineage is a session event, never `meta.parent`.** Both doors — `/fork <n>` and `--fork <file>` —
+write `{"type":"fork","from":…,"from_id":…,"kept":…}` above the conversation they describe, in the place
+`import` writes its own and for the same reason: the file answers "where did this come from" before it
+answers "what was said in it". `kept` is present only when the copy is a prefix, which is how one event
+covers both a cut and a whole copy, and it is stored rather than derived because the branch *grows* from
+there. **Writing `meta.parent` would have been actively wrong rather than merely imprecise**: that field
+means "another run started this one" and is what files a conversation under `children/`, so a branch
+would have been excluded from `/sessions`, the sidebar and `--continue` as somebody's child — the
+opposite of what a fork is. The event is read back into `LoadedSession::origin` (which replaced the
+`imported` field: both kinds of copy are one thing to every reader) and printed by the two doors that
+name a conversation.
+
+**Every provenance line moved onto a line of its own, for a reason that was measured rather than
+argued.** The first version appended a fragment — `, forked from <file> (the first 4 messages)` — to the
+line that names the conversation, and a test at 100 columns caught what that costs: the line already
+carries the file in force and the model, so the whole thing passed 100 columns and the terminal wrapped
+it *inside the count*, which is the part a reader is looking for. Both doors now print `this conversation
+was imported from <file>` / `this conversation was forked from <file>, and holds the first <n> messages`
+underneath, from one function (`origin_note`) — one wording, two doors, and no layout to keep in step.
+The import tests' assertions moved with it; the sentence is unchanged in meaning and better on screen,
+and the failure is worth keeping as the reason the line is shaped this way.
+
+**Red first by mutation, seven times, because the tests were written after the code and that claim has to
+be earned rather than asserted.** The cut moved one message (`asked[n - 1].0 + 1`) → the branch held the
+question it was cut at; the fork line written after the messages (`write_messages` before
+`forked_from`) → the ordering assertion failed with `meta, chat, chat, fork`; `kept` dropped to `None` →
+"the branch does not say what it was cut from"; the `Forked` arm of `origin_note` emptied → the resumed
+line said nothing about where it came from; bare `/fork` made to fall through to the usage line → the
+list test failed; the `no_session()` check disabled → the `--no-session` count came back 3 instead of 4;
+and the page's `/fork` values truncated to none → the picker test failed with the row present and
+`"values"` absent. All seven were reverted. Two of the six new tests drive the flag itself
+(`repl_of_with`, which takes arguments and merges stderr, because `flint: forking …` is on stderr), and
+one drives a real `--web` run to read the frame the page draws its rows from — the values that test
+asserts are computed from the conversation each time the frame is built, which is what makes the buttons
+the questions this conversation has actually been asked.
+
+**Gate: `cargo test` 600 passing, 1 ignored, clippy silent, both Node checks passing, and the browser
+harness 56/56 by hand.** Clippy's silence took a fix (below), and the browser harness was re-run because
+this round touches the page's rows: it was already passing before the run and passed after, which is the
+whole claim a hand-run harness can make — it does not press `/fork`, so what it shows is that the new row
+broke nothing the page already did.
+
+**Clippy caught the shape of `seed`, and the fix is better than the signature it replaced.** Handing the
+lineage to `seed` as an eighth argument (`from: (&Path, Option<&str>)`) made it fail the gate with `this
+function has too many arguments (8/7)` — and the honest read is that the function was being told four
+things that are one thing: the messages, the name they travel with, the file they came from and that
+file's id. They are now a [`session::Copy`] value, which is six arguments, and the pair that most needed
+keeping together is kept together: `from` with `from_id` is the same fact read two ways — the path flint
+was pointed at and the id that file's own `meta` was created under — and a signature taking them side by
+side invites a call that passes one file's path with another's id. This is the second time a lint has
+paid for itself this round; the first is not a lint but the byte guard described above.
+
+**Also in this round, and owed by the last one: the no-session door list was stale in three files.**
+`--no-session` refuses `/new`, `/resume`, `/import` and `/fork` inside a run, and `README.md`,
+`ROADMAP.md` and `docs/decisions.md` still said `/new` and `/resume` — the import round added the third
+door without editing the list. The four are named together now, in the same commit as the fourth, and
+the invariant is unchanged: one property, one sentence, every door that would open, copy into or name a
+conversation.
+
+**And one thing the previous round left behind: `docs/session-format.md` said "eight" event types.**
+`fork` is the ninth, and the count, the "not conversation and never become history" list (now three:
+`peer`, `import`, `fork`) and the damage rule all move together, because a count in prose is a claim the
+next reader can check against the table above it.
+
 **The fourth of the twelve items taken from the reading of Pi is built and pushed: the cache hit rate,
 beside the token counts it is a share of.** The number is what tells a person whether the prompt flint
 builds is stable from turn to turn -- a cached prefix is money and latency that a prompt reassembled in
@@ -371,8 +448,8 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 593 passing, 1 ignored on this machine
-(342 lib, 5 in the binary's own tests, 33 `agent_loop`, 86 `cli_output`, 36 `json_output` (7 structured
+As of the commit that carries this file, `cargo test` is 600 passing, 1 ignored on this machine
+(343 lib, 5 in the binary's own tests, 33 `agent_loop`, 92 `cli_output`, 36 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
 be able to read, 4 the answer written where the caller asked, 3 the file inlined into the prompt,
@@ -922,7 +999,7 @@ still building when the second landed.
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
 cargo build                                       # the Python and browser checks run this binary
-cargo test                                        # 593 passing, 1 ignored
+cargo test                                        # 600 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed

@@ -1813,14 +1813,25 @@ from a page that was loaded. It was read on 2026-09-17, and **the list below was
 are agreed, not scheduled, and each is one commit that edits its own line here when it lands. The
 argument, the cost and what flint has today are in the document, §3.
 
-- **A fork from a chosen point** — `--fork` copies the whole conversation and its tail comes with it;
-  Pi's `/fork` cuts at a user message and its file records the lineage it came from.
+- **A fork from a chosen point — built, 2026-09-17.** `--fork` copied the whole conversation and its
+  tail came with it; `/fork <n>` now cuts at the n-th question the person asked **here**, keeps what
+  came before it, and starts a conversation of its own from that — the retry after a wrong turn, which
+  used to be performed with `cp` and an editor. A bare `/fork` lists the questions and writes nothing,
+  because which point to cut at is the one thing the command may not guess, and the cut is at a
+  *question* (a turn boundary, the same unit `trim_old_turns` cuts on) since a tool result whose call
+  was left behind is a request the provider rejects. Both doors now record the lineage as a session
+  **event** — `{"type":"fork","from":…,"from_id":…,"kept":…}`, `kept` present only for a cut — and
+  never as `meta.parent`, which means "another run started this one" and is what files a conversation
+  under `children/`: a branch is not somebody's child, and writing `parent` would have hidden it from
+  `/sessions`, the sidebar and `--continue`. The original keeps every byte, the branch's `meta` belongs
+  to this run, and where it came from is read back on the startup `resumed` line and under `/resume`.
 - **A follow-up message that does not interrupt the turn** — a plain line typed mid-turn is steering
   and drops the in-flight request, by design; this is the second way to send one.
 - **`--no-session` — built, 2026-09-17.** A run that writes no conversation: no file, nothing in any
   list, nothing to continue from. It is a property of the whole run rather than of one command, which
-  is why it refuses `--continue`, `--resume`, `--fork` and `--name` at the command line and `/new` and
-  `/resume` inside the run — each of those opens or names the file the flag promised not to write — and
+  is why it refuses `--continue`, `--resume`, `--fork` and `--name` at the command line and `/new`,
+  `/resume`, `/import` and `/fork` inside the run — each of those opens or names the file the flag
+  promised not to write — and
   why the one path every mid-run switch goes through cannot create one either. What the run still
   writes is what it needs to work: spilled tool output and a background command's log, under
   `spill/unattached-<pid>/`, a directory of its own so two such runs cannot overwrite each other. A

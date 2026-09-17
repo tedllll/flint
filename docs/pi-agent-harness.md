@@ -116,11 +116,16 @@ visible.
 
 ### 3.1 A fork from a chosen point, in the session you are in
 
-Flint already has `--fork`, which copies a session into a new file and continues the copy; what it
-cannot do is fork from a *point*. Pi's `/fork` opens a selector, copies the active path up to the
+**Built, 2026-09-17.** `/fork <n>` cuts at the n-th question asked in this conversation and starts a
+conversation of its own from what came before it; `--fork <file>` copies the whole thing at startup. A
+bare `/fork` lists the questions, because which point to cut at is the one thing the command may not
+guess.
+
+Flint already had `--fork`, which copies a session into a new file and continues the copy; what it
+could not do was fork from a *point*. Pi's `/fork` opens a selector, copies the active path up to the
 chosen user message, and puts that prompt back in the editor for editing before it is sent. That is
 the shape of "that went wrong four messages ago, start again from there" -- the thing `--fork` plus
-hand-editing a JSONL file can only approximate, because the whole tail comes along.
+hand-editing a JSONL file could only approximate, because the whole tail came along.
 
 The change is small and needs no format change: a session is append-only, so a fork from message *n*
 is the first *n* lines of the file written into a new one, through the same `SessionWriter` that
@@ -137,6 +142,31 @@ it was forked from. Flint's `meta` line already has a `parent` field, but it mea
 today -- the run that started this one -- so a fork's lineage needs either a second field or a
 deliberate decision to share one, and that decision is worth making out loud rather than by picking
 whichever name is closer to hand.
+
+**Which way that decision went, and the one place this reading was wrong about the mechanism.** The
+lineage is neither a second `meta` field nor the shared `parent`: it is a `fork` **event**, for the
+reason `title`, `switch` and `import` are events -- the file is append-only, and a fact that arrives at
+a moment is a line. Writing `meta.parent` would have been actively wrong, not merely imprecise: that
+field is what files a conversation under `children/` and keeps it out of `/sessions`, the sidebar and
+`--continue`, so a branch would have been hidden from its own author as somebody's child. The event
+carries `from`, `from_id` and `kept` (present only when the copy is a prefix, which is what tells a cut
+from a whole copy).
+
+The mechanism in the sketch above is also slightly off, and the difference is the format's own rule:
+the copy is *messages*, not the first *n* lines of the file. `SessionWriter::write_messages` writes the
+`chat` lines of the prefix and nothing else -- no `meta`, no `usage`, no `title`, no earlier `import`
+or `fork` line -- so a chain of copies reads as a chain of files rather than as an original with a
+paragraph of history above it, and the branch's `meta` belongs to the run that made it. The cut itself
+is at a **question** rather than at a message index, which is where this went one step past Pi: a
+question is a turn boundary (the same unit `trim_old_turns` cuts on, because a tool result whose call
+was dropped is a request the provider rejects) *and* it is the only boundary a person can name at the
+prompt.
+
+Pi's selector has a counterpart here that the sketch did not ask for, and it fell out of the frame the
+page already draws: `/fork`'s values are computed from the conversation each time the page's command
+frame is built, so the browser offers the questions of *this* conversation as buttons. It is the same
+mechanism `/skills` and `/prompt` use for their names — the page composes `/<name> <value>`, which is
+why the value is the ordinal and not the question's text.
 
 ### 3.2 A follow-up message, as distinct from an interruption
 

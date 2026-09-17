@@ -150,9 +150,9 @@ is a session like any other — same format, readable, `--resume <path>` opens i
 **A run can keep nothing at all.** `--no-session` writes no conversation: nothing to continue
 from later, nothing in any list, no file on disk. It is a property of the whole *run* rather than
 of one command, so it refuses `--continue`, `--resume`, `--fork` and `--name` on the command line,
-and `/new` and `/resume` typed inside the run, because each of those opens or names the file the
-flag promised not to write; a provider switch, which normally creates the file if the conversation
-has not said anything yet, cannot sneak one in either. What the run still writes is what it needs
+and `/new`, `/resume`, `/import` and `/fork` typed inside the run, because each of those opens, copies
+into or names the file the flag promised not to write; a provider switch, which normally creates the
+file if the conversation has not said anything yet, cannot sneak one in either. What the run still writes is what it needs
 to work — spilled tool output, and a background command's log — under
 `~/.flint/spill/unattached-<pid>/`, a directory of its own so two such runs cannot overwrite each
 other's `1.txt`. A `task` child is started with the same flag: a child is a conversation *this* run
@@ -193,8 +193,10 @@ you were doing when you broke it.
 the conversation into a new session, and continues there. The original is not written
 to, which is the point: `cp` can already do this, but wanting to try something without
 losing the conversation you have should not require knowing where flint keeps its
-sessions. The copy carries the conversation and the name, and the run says which file
-it is writing.
+sessions. The copy carries the conversation and the name, the run says which file
+it is writing, and the copy records what it was copied from — see
+[cutting a conversation at an earlier question](#cutting-a-conversation-at-an-earlier-question),
+which is the same act taken at a point inside a conversation rather than at startup.
 
 Inside the REPL:
 
@@ -222,6 +224,7 @@ Inside the REPL:
 | `/sessions` | list past sessions, numbered |
 | `/resume <n\|id>` | switch to one of them, without restarting — it prints the conversation it moved to, as `--resume` does |
 | `/import <file>` | copy a conversation in from a session file you were given or hand-edited; the file you name is not written to |
+| `/fork [n]` | start a new conversation cut at question `n` of this one, keeping what came before it (bare, it lists the questions) |
 | `/name [text]` | show or set a name for this conversation |
 | `/archive <n\|id>` | move a session into `sessions/archive/` |
 | `/delete <n\|id>` | delete a session file |
@@ -707,6 +710,12 @@ Three things about the view are deliberate, and each one was a decision rather t
   top starts a conversation, and it is `/new`: the page has no separate idea of what starting
   one means.
 
+  The command panel offers the arguments a command takes, and `/fork` is the one whose arguments are
+  about *this conversation*: the questions asked in it, as buttons, rebuilt every time the frame is —
+  press the second one and the page sends `/fork 2`. The value is the number, not the question: the page
+  composes `/<name> <value>`, so a button carrying the question's own text would send it as part of the
+  line.
+
 What it shows is the conversation the process is in, read from the session file on disk, plus
 the live event stream — the same events `--json` writes, produced by the same code. So a tool
 call, a streamed answer, a reasoning delta and the status line all appear, and `/new`,
@@ -1162,15 +1171,50 @@ The copy says where it came from, on a line above the conversation:
 
 `from` is the path as you gave it — a fact of the moment, not a pointer to follow, since the file may
 have moved since or never have been on this machine. `from_id` is the source's own id (or its file name
-when it had no `meta` line at all), which is what you would search another sessions directory for.
-`imported from <file>` is appended wherever a conversation is named later — `/resume`, and the line a
-startup resume prints — so a copy can never be mistaken for a conversation that began here.
+when it had no `meta` line at all), which is what you would search another sessions directory for. A
+sentence under the line that names the conversation later — `/resume`, and the line a startup resume
+prints — says `this conversation was imported from <file>`, so a copy can never be mistaken for a
+conversation that began here.
 
 Three things are refused rather than half-done: a file with **no conversation in it** (importing
 nothing would leave a session in the list that looks real), the file **this run is currently writing**
 (that would copy a growing conversation into itself; `--fork` at startup is that act), and a run
 started with `--no-session`, which refuses `/import` like every other door that would create a
 conversation.
+
+### Cutting a conversation at an earlier question
+
+The other direction is a conversation you are already in and want to take back. `/fork 2` starts a new
+conversation from the first two questions and their answers, so the third question can be asked again
+differently in a conversation that never saw the answer that went wrong:
+
+```text
+/fork
+   1. why does the socket close early
+   2. what about the retry path
+   3. and the timeout
+     /fork <n> starts a new conversation cut at question n, keeping what came before it (3 questions)
+/fork 2
+forked: 20260101000000-1-777.jsonl → 1789639658-585-17152.jsonl
+  2 messages kept, cut at question 2 of 3: what about the retry path
+```
+
+Bare `/fork` lists the questions and writes nothing, because which point to cut at is the one thing the
+command may not guess. The cut is always at a **question** — a turn boundary, and the only point in a
+conversation a person can name from the prompt — since cutting between a tool call and its result would
+leave a request the provider rejects. The conversation you came from keeps every byte; the branch is a
+file of its own, with a `fork` line above the conversation saying what it was cut from and how much of
+it was kept:
+
+```json
+{"type":"fork","from":"/home/you/.flint/sessions/C--work/1789512345-88-4412.jsonl","from_id":"1789512345-88-4412","kept":2}
+```
+
+`--fork <file>` at startup writes the same line without `kept`, because it copies the whole
+conversation rather than a prefix. `/fork 1` is refused (cutting at the first question would leave an
+empty conversation, which is what `/new` is for), as is a number past the end, and `--no-session`
+refuses the door like the others. A startup resume and `/resume` say where the branch came from
+underneath the line naming it.
 
 ## Build from source
 
@@ -1194,8 +1238,9 @@ per line. A damaged line is skipped and reported rather than taking the session
 down. A resumed session is appended to, not rewritten, so nothing said after
 `--continue` is lost.
 
-**A conversation you go back to is drawn, not merely loaded.** `--continue`, `--resume`, `--fork`
-and `/resume <n|id>` all print the tail of the conversation they open — the last twelve messages,
+**A conversation you go back to is drawn, not merely loaded.** `--continue`, `--resume`, `--fork`,
+`/resume <n|id>` and `/fork <n>` all print the tail of the conversation they open — the last twelve
+messages,
 under a line that says how many earlier ones were left out — before the prompt comes back. The
 reason is that a line naming a file, on a screen that still holds the conversation you just left,
 cannot be told apart from a switch that opened nothing: seeing where the conversation got to is the

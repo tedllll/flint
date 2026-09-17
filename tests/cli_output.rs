@@ -1979,7 +1979,10 @@ const KEEPS_NO_CONVERSATION: &str = "this run keeps no conversation (--no-sessio
 /// in the startup path. `/resume` is the third door, and a session is written first so its refusal is
 /// about the flag rather than about there being nothing to resume. `/import` is the fourth and it is
 /// the one that needs the refusal most: it would *create* a conversation out of a file the run was
-/// pointed at, which is the flag's whole promise undone by one command.
+/// pointed at, which is the flag's whole promise undone by one command. `/fork` is the fifth, and the
+/// same claim from the other side -- it would create a conversation out of *this* run's, which a run
+/// that keeps none does not have; the check is first in its arm, so what is being held here is the
+/// flag rather than an empty history.
 #[cfg(debug_assertions)]
 #[tokio::test]
 async fn a_run_that_writes_no_conversation_refuses_to_start_one_mid_run() {
@@ -2021,7 +2024,7 @@ async fn a_run_that_writes_no_conversation_refuses_to_start_one_mid_run() {
             .stdin
             .as_mut()
             .expect("no stdin handle")
-            .write_all(format!("/reload\n/new\n/resume 1\n/import {}\n/exit\n", given.display()).as_bytes())
+            .write_all(format!("/reload\n/new\n/resume 1\n/import {}\n/fork 1\n/exit\n", given.display()).as_bytes())
             .expect("failed to write stdin");
     }
     let out = child.wait_with_output().expect("flint did not finish");
@@ -2033,9 +2036,9 @@ async fn a_run_that_writes_no_conversation_refuses_to_start_one_mid_run() {
     );
     assert_eq!(
         text.matches(KEEPS_NO_CONVERSATION).count(),
-        3,
-        "/new, /resume and /import are the doors that must refuse, and /new refusing after /reload is \
-         how the flag surviving a rebuild is shown: {text:?}"
+        4,
+        "/new, /resume, /import and /fork are the doors that must refuse, and /new refusing after \
+         /reload is how the flag surviving a rebuild is shown: {text:?}"
     );
     let written = jsonl_files(&home.join("sessions"));
     assert_eq!(
@@ -2984,10 +2987,366 @@ fn a_resumed_import_says_where_it_came_from() {
         "the resumed line does not say where the conversation was copied from: {text:?}"
     );
     assert!(
-        text.contains("(2 messages, model stub-model), imported from given-to-me.jsonl"),
+        text.contains("(2 messages, model stub-model)"),
         "the resumed line does not read as a person would write it: {text:?}"
     );
+    assert!(
+        text.contains("this conversation was imported from given-to-me.jsonl"),
+        "the resumed line does not say where the conversation came from: {text:?}"
+    );
     let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A fork from a chosen point keeps what came before it, and leaves the original whole.
+///
+/// The point of the command, in one test: cutting at question 2 of 3 keeps the first exchange, the
+/// question that was cut at is named so it can be asked again, and the conversation that got that far
+/// keeps every byte -- a fork is a copy, which is the whole reason it is not a resume. The line the
+/// branch is written with is checked in the same place, because the file is what the next reader
+/// (a person, or `--resume`) has to go on.
+#[test]
+fn a_fork_from_a_chosen_point_keeps_what_came_before_it() {
+    let home = test_home("fork-cut", "http://127.0.0.1:1/v1");
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("working directory");
+    let source = write_session(
+        &home.join("sessions"),
+        "20260101000000-1-777.jsonl",
+        &[
+            &meta_line("20260101000000-1-777"),
+            r#"{"type":"chat","message":{"role":"user","content":"why does the socket close early"}}"#,
+            r#"{"type":"chat","message":{"role":"assistant","content":"because the peer half-closes"}}"#,
+            r#"{"type":"chat","message":{"role":"user","content":"what about the retry path"}}"#,
+            r#"{"type":"chat","message":{"role":"assistant","content":"it backs off twice"}}"#,
+            r#"{"type":"chat","message":{"role":"user","content":"and the timeout"}}"#,
+            r#"{"type":"chat","message":{"role":"assistant","content":"thirty seconds"}}"#,
+        ],
+        0,
+    );
+    let before = std::fs::read(&source).expect("read the original");
+
+    let text = repl_of(
+        &home,
+        &work,
+        &["/resume 20260101000000-1-777", "/fork 2", "/exit"],
+    );
+
+    assert!(
+        text.contains("forked: 20260101000000-1-777.jsonl"),
+        "/fork did not say which conversation it cut from: {text:?}"
+    );
+    assert!(
+        text.contains("2 messages kept, cut at question 2 of 3: what about the retry path"),
+        "/fork did not say where it cut and what it left out: {text:?}"
+    );
+    assert_eq!(
+        std::fs::read(&source).expect("read the original again"),
+        before,
+        "/fork wrote to the conversation it copied; that is what --resume is for"
+    );
+
+    // The branch: a conversation of this run's own, with the first exchange in it and a line saying
+    // what it was cut from -- so a reader who finds it later is not looking at a conversation that
+    // began from nothing.
+    let written = jsonl_files(&home.join("sessions"));
+    assert_eq!(
+        written.len(),
+        2,
+        "the fork did not leave exactly one conversation of its own: {written:?}"
+    );
+    let branch = written
+        .iter()
+        .find(|p| p.file_name().map(|n| n != "20260101000000-1-777.jsonl") == Some(true))
+        .expect("the branch");
+    let copy = std::fs::read_to_string(branch).expect("read the branch");
+    assert!(
+        copy.contains("why does the socket close early")
+            && copy.contains("because the peer half-closes"),
+        "the branch does not hold the conversation it kept: {copy:?}"
+    );
+    assert!(
+        !copy.contains("what about the retry path"),
+        "the branch holds the question it was cut at: {copy:?}"
+    );
+    assert!(
+        copy.contains(r#""type":"fork""#)
+            && copy.contains(r#""from_id":"20260101000000-1-777""#)
+            && copy.contains(r#""kept":2"#),
+        "the branch does not say what it was cut from: {copy:?}"
+    );
+    let lines: Vec<&str> = copy.lines().collect();
+    let lineage = lines
+        .iter()
+        .position(|l| l.contains(r#""type":"fork""#))
+        .expect("the fork line");
+    let conversation = lines
+        .iter()
+        .position(|l| l.contains(r#""type":"chat""#))
+        .expect("the first kept message");
+    assert!(
+        lineage < conversation,
+        "the branch records where it came from below the conversation: {copy:?}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// The questions are listed rather than guessed at, and listing writes nothing.
+///
+/// `/fork` with no argument is the terminal's half of the picker the page offers: cutting at the
+/// wrong point is a copy of a conversation made for nothing, so the one thing this command may not do
+/// is choose for the person.
+#[test]
+fn asking_for_the_questions_lists_them_and_writes_nothing() {
+    let home = test_home("fork-list", "http://127.0.0.1:1/v1");
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("working directory");
+    write_session(
+        &home.join("sessions"),
+        "20260101000000-1-777.jsonl",
+        &[
+            &meta_line("20260101000000-1-777"),
+            r#"{"type":"chat","message":{"role":"user","content":"why does the socket close early"}}"#,
+            r#"{"type":"chat","message":{"role":"assistant","content":"because the peer half-closes"}}"#,
+            r#"{"type":"chat","message":{"role":"user","content":"what about the retry path"}}"#,
+        ],
+        0,
+    );
+
+    let text = repl_of(
+        &home,
+        &work,
+        &["/resume 20260101000000-1-777", "/fork", "/exit"],
+    );
+
+    assert!(
+        text.contains("1. why does the socket close early")
+            && text.contains("2. what about the retry path"),
+        "/fork did not list the questions in this conversation: {text:?}"
+    );
+    assert!(
+        text.contains("/fork <n> starts a new conversation cut at question n"),
+        "/fork did not say how to use the list it just printed: {text:?}"
+    );
+    assert!(
+        text.contains("2 questions"),
+        "the list does not say how many questions there are: {text:?}"
+    );
+    assert_eq!(
+        jsonl_files(&home.join("sessions")).len(),
+        1,
+        "asking for the list wrote a conversation"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Three refusals, and each of them is a decision rather than an error path.
+///
+/// Cutting at the first question leaves a conversation with nothing in it -- a file that would sit in
+/// the list looking real, which is the same fault the empty import is refused for. A number past the
+/// end is answered with the range rather than an empty copy. And a run that promised to keep nothing
+/// does not create a conversation: the check is the same sentence every other door gets, and it is
+/// checked *first*, before anything has been said -- so `--no-session` is a property of the run and
+/// not of the file it was aimed at.
+#[test]
+fn a_fork_that_would_keep_nothing_is_refused() {
+    let home = test_home("fork-refusals", "http://127.0.0.1:1/v1");
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("working directory");
+    write_session(
+        &home.join("sessions"),
+        "20260101000000-1-777.jsonl",
+        &[
+            &meta_line("20260101000000-1-777"),
+            r#"{"type":"chat","message":{"role":"user","content":"the only question"}}"#,
+            r#"{"type":"chat","message":{"role":"assistant","content":"the only answer"}}"#,
+        ],
+        0,
+    );
+
+    let text = repl_of(
+        &home,
+        &work,
+        &[
+            "/resume 20260101000000-1-777",
+            "/fork 1",
+            "/fork 4",
+            "/fork soon",
+            "/exit",
+        ],
+    );
+
+    assert!(
+        text.contains("nothing to keep"),
+        "cutting at the first question was allowed: {text:?}"
+    );
+    assert!(
+        text.contains("no question 4") && text.contains("asked 1 question"),
+        "/fork did not answer a number past the end with the range: {text:?}"
+    );
+    assert!(
+        text.contains("usage: /fork <n>"),
+        "a word where a number belongs got no usage line: {text:?}"
+    );
+    assert_eq!(
+        jsonl_files(&home.join("sessions")).len(),
+        1,
+        "a refused fork created a conversation"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A branch says what it was cut from when it is named later.
+///
+/// The file records it and one function prints it, so both doors that name a conversation -- the
+/// startup `resumed` line and `/resume` -- say the same thing. It is the import test's claim one step
+/// over: a record nothing reads is damage, and a branch is exactly the conversation a person comes
+/// back to a week later wanting to know where it came from.
+#[test]
+fn a_resumed_branch_says_what_it_was_cut_from() {
+    let home = test_home("fork-resumed", "http://127.0.0.1:1/v1");
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("working directory");
+    write_session(
+        &home.join("sessions"),
+        "20260101000000-1-777.jsonl",
+        &[
+            &meta_line("20260101000000-1-777"),
+            r#"{"type":"fork","from":"/home/somebody/.flint/sessions/20251231000000-1-9.jsonl","from_id":"20251231000000-1-9","kept":4}"#,
+            r#"{"type":"chat","message":{"role":"user","content":"the first question"}}"#,
+            r#"{"type":"chat","message":{"role":"assistant","content":"the first answer"}}"#,
+        ],
+        0,
+    );
+
+    let text = repl_of(
+        &home,
+        &work,
+        &["/resume 20260101000000-1-777", "/exit"],
+    );
+
+    assert!(
+        text.contains("(2 messages, model stub-model)"),
+        "the resumed line does not read as a person would write it: {text:?}"
+    );
+    assert!(
+        text.contains("this conversation was forked from 20251231000000-1-9.jsonl, and holds the first 4 messages"),
+        "the resumed line does not say what the conversation was cut from: {text:?}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// `--fork` records its lineage too: it is the same act, taken before the conversation is open.
+///
+/// The startup path copied a conversation into a new file and said nothing in that file about where it
+/// came from, which made a forked conversation indistinguishable from one that began here -- the gap
+/// the in-run fork closed, closed on both doors at once because it is one function that writes the
+/// line.
+#[test]
+fn forking_at_startup_records_where_the_copy_came_from() {
+    let home = test_home("fork-startup", "http://127.0.0.1:1/v1");
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("working directory");
+    write_session(
+        &home.join("sessions"),
+        "20260101000000-1-777.jsonl",
+        &[
+            &meta_line("20260101000000-1-777"),
+            r#"{"type":"chat","message":{"role":"user","content":"the question from yesterday"}}"#,
+            r#"{"type":"chat","message":{"role":"assistant","content":"the answer from yesterday"}}"#,
+        ],
+        0,
+    );
+
+    let text = repl_of_with(
+        &home,
+        &work,
+        &["--fork", "20260101000000-1-777"],
+        &["/exit"],
+    );
+    assert!(
+        text.contains("forking 20260101000000-1-777.jsonl"),
+        "the startup fork did not say what it was copying: {text:?}"
+    );
+
+    let written = jsonl_files(&home.join("sessions"));
+    let copy = written
+        .iter()
+        .find(|p| p.file_name().map(|n| n != "20260101000000-1-777.jsonl") == Some(true))
+        .expect("the forked copy");
+    let branch = std::fs::read_to_string(copy).expect("read the copy");
+    assert!(
+        branch.contains(r#""type":"fork""#)
+            && branch.contains(r#""from_id":"20260101000000-1-777""#),
+        "a startup fork did not record where the copy came from: {branch:?}"
+    );
+    assert!(
+        !branch.contains(r#""kept""#),
+        "a copy of the whole conversation claims a cut: {branch:?}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// The page is offered this conversation's questions to cut at, rather than a number to remember.
+///
+/// `/fork` is the fourth selector and the only one whose values are about *this conversation* rather
+/// than about the machine: the questions a person asked here, in order. The frame is rebuilt as the
+/// conversation moves, so a page open since the second question does not offer a third until it has been
+/// asked — which is the same property the sidebar's conversation list has, and the reason the values are
+/// computed rather than kept. The value is the **ordinal alone**: the page composes `/<name> <value>`,
+/// so a value carrying the question's own text would be sent as part of the command line.
+#[tokio::test]
+async fn the_page_is_offered_the_questions_this_conversation_was_asked() {
+    let server = MockServer::start().await;
+    let home = test_home("fork-picker", &server.uri());
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("working directory");
+    write_session(
+        &home.join("sessions"),
+        "20260101000000-1-777.jsonl",
+        &[
+            &meta_line("20260101000000-1-777"),
+            r#"{"type":"chat","message":{"role":"user","content":"why does the socket close early"}}"#,
+            r#"{"type":"chat","message":{"role":"assistant","content":"because the peer half-closes"}}"#,
+            r#"{"type":"chat","message":{"role":"user","content":"what about the retry path"}}"#,
+        ],
+        0,
+    );
+    let log = home.join("transcript.txt");
+    let mut child = binary()
+        .arg("--web")
+        .args(["--resume", "20260101000000-1-777"])
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .current_dir(&work)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::fs::File::create(&log).expect("transcript file"))
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to run flint");
+
+    let (port, token) = port_and_token(&wait_for_url(&log));
+    let mut watching = http_stream(port, "/events", &token);
+    // The frame the page is handed before anything happens, which is where its rows are drawn from.
+    let opening = read_until(&mut watching, "\"type\":\"state\"", 20);
+    drop(watching);
+    drop(child.stdin.take());
+    let exited = wait_for_exit(&mut child, 20);
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit");
+    let commands = opening
+        .split("\"commands\":[")
+        .nth(1)
+        .and_then(|rest| rest.split("],\"model\"").next())
+        .unwrap_or_default();
+    assert!(
+        commands.contains("\"send\":\"/fork\""),
+        "the page has no row to cut this conversation at: {commands:?}"
+    );
+    assert!(
+        commands.contains("\"values\":[\"1\",\"2\"]"),
+        "the row does not carry the questions this conversation was asked: {commands:?}"
+    );
 }
 
 /// Drive the REPL from a working directory of its own, with no model behind it.
@@ -2997,8 +3356,20 @@ fn a_resumed_import_says_where_it_came_from() {
 /// a test that means to hold one line of output does not want either. No request is made here: every
 /// line handed to it is a command, and the provider in the config is a port that refuses.
 fn repl_of(home: &std::path::Path, cwd: &std::path::Path, lines: &[&str]) -> String {
+    repl_of_with(home, cwd, &[], lines)
+}
+
+/// `repl_of` with flags, for the commands whose whole subject is a flag (`--fork`).
+fn repl_of_with(
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+    args: &[&str],
+    lines: &[&str],
+) -> String {
     use std::io::Write;
-    let mut child = binary()
+    let mut command = binary();
+    command
+        .args(args)
         .current_dir(cwd)
         .env("FLINT_HOME", home)
         .env("FLINT_TERM_CAPTURE", "1")
@@ -3006,9 +3377,8 @@ fn repl_of(home: &std::path::Path, cwd: &std::path::Path, lines: &[&str]) -> Str
         .env_remove("NO_COLOR")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("failed to run flint");
+        .stderr(std::process::Stdio::piped());
+    let mut child = command.spawn().expect("failed to run flint");
     {
         let stdin = child.stdin.as_mut().expect("no stdin handle");
         stdin
@@ -3016,7 +3386,11 @@ fn repl_of(home: &std::path::Path, cwd: &std::path::Path, lines: &[&str]) -> Str
             .expect("failed to write stdin");
     }
     let out = child.wait_with_output().expect("flint did not finish");
-    String::from_utf8_lossy(&out.stdout).to_string()
+    let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+    // The startup lines (`flint: forking …`, `flint: forked into …`) are on stderr, and a test about
+    // a flag has to be able to see what the flag said.
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    text
 }
 
 /// Drive a real REPL with one line typed into it: what it drew, and what the model was sent.

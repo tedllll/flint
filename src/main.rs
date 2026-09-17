@@ -12,7 +12,7 @@
 
 use flint::{
     agent, attach, config, context, display, engine, event, live, ndjson, provider, schema, search,
-    session, sink, term, tools, web,
+    session, sink, term, tools, util, web,
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -411,27 +411,95 @@ fn counted(n: usize, noun: &str) -> String {
     }
 }
 
+/// What `--fork` copied, on its way to becoming a new file.
+///
+/// Its own type rather than a tuple because a copy now has four parts and three of them are facts
+/// about *where it came from*: a tuple of four would be read at the call site by counting commas, and
+/// the one thing that has to be right there is which of them is the source's id.
+struct Forked {
+    messages: Vec<event::Message>,
+    title: Option<String>,
+    /// The file this run was told to fork, as given.
+    from: PathBuf,
+    /// The source's own id, as flint read it out of the file.
+    from_id: String,
+}
+
 /// The file name at the end of a path, whoever wrote the path.
 ///
-/// Used for the provenance of an imported conversation, where the path is a string that came out of
-/// somebody else's file: it may separate its parts with a slash, a backslash, or both, and it is not
-/// this machine's business to resolve it -- the fact is what was given, and the reader wants the name.
+/// Used for the provenance of a copy, where the path is a string that came out of somebody else's
+/// file: it may separate its parts with a slash, a backslash, or both, and it is not this machine's
+/// business to resolve it -- the fact is what was given, and the reader wants the name.
 fn file_name_of(path: &str) -> String {
     path.rsplit(['/', '\\']).next().unwrap_or(path).to_string()
 }
 
-/// "…, imported from <file>" for a line that names a conversation, or nothing.
+/// What a copy says about where it came from, as a sentence, or nothing for a conversation that began
+/// here.
 ///
-/// Two doors name a conversation to a person -- the startup `resumed` line and `/resume` -- and a
-/// conversation that was copied in from somebody else's file looks exactly like one that began here.
-/// One wording in one place, so the two lines cannot drift into telling a person different things
-/// about the same file.
-fn imported_note(loaded: &session::LoadedSession) -> String {
-    match &loaded.imported {
-        Some(imported) => format!(", imported from {}", file_name_of(&imported.from)),
+/// Every door that names a conversation to a person says this -- the startup `resumed`/`forking` line
+/// and `/resume` -- and it is one function so they cannot drift into telling different things about the
+/// same file. A copy and an original look exactly alike on screen, and a reader who has resumed the
+/// branch with no idea it was one has no other way to find out.
+///
+/// A **sentence on a line of its own**, not a fragment appended to the line above it, and that is a
+/// measured decision rather than a taste: the line above already carries two session-file names (the
+/// one in force and the model), and `, forked from 20260601000000-1-9.jsonl, and holds the first 4
+/// messages` pushed it past 100 columns -- where what wrapped was the count, which is the part a
+/// reader is looking for. The startup line is on stderr and wraps nowhere, and it says the same
+/// sentence for the same reason: one wording, two doors, no layout to keep in step.
+fn origin_note(loaded: &session::LoadedSession) -> String {
+    match &loaded.origin {
+        Some(session::Origin::Imported { from, .. }) => {
+            format!("this conversation was imported from {}", file_name_of(from))
+        }
+        // The cut is said out loud when there was one, and only then: `--fork` copies the whole
+        // conversation, and "the first 12 messages" about a copy of all twelve would be strange.
+        Some(session::Origin::Forked {
+            from,
+            kept: Some(kept),
+            ..
+        }) => format!(
+            "this conversation was forked from {}, and holds the first {}",
+            file_name_of(from),
+            counted(*kept, "message")
+        ),
+        Some(session::Origin::Forked { from, kept: None, .. }) => {
+            format!("this conversation was forked from {}", file_name_of(from))
+        }
         None => String::new(),
     }
 }
+
+/// The things the person asked in this conversation, in order: where each one sits in the history, and
+/// its first line for a list.
+///
+/// The unit `/fork` cuts on, and the same unit `agent::trim_old_turns` counts turns in -- a `User`
+/// message, which is where a turn starts. A steering line typed mid-turn is one of these too, and it
+/// should be: it is something the person said, and cutting before it is as meaningful as cutting before
+/// a question asked at the prompt. What is *not* here is a tool result or an assistant message, because
+/// a fork cannot land on one without leaving a call without its result.
+///
+/// The first line rather than the whole message: a question can be a pasted document, and this list is
+/// for choosing between them -- `util::preview` is what says "there is more of this" without printing
+/// it.
+fn questions(history: &[event::Message]) -> Vec<(usize, String)> {
+    history
+        .iter()
+        .enumerate()
+        .filter_map(|(at, message)| match message {
+            event::Message::User { content } => {
+                Some((at, util::preview(content, QUESTION_PREVIEW)))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// How much of a question `/fork`'s list shows before the ellipsis.
+///
+/// Long enough to tell two questions apart, short enough that a list of eight of them is still a list.
+const QUESTION_PREVIEW: usize = 64;
 
 fn print_transcript(history: &[event::Message], printer: &Printer<'_>) {
     const TAIL: usize = 12;
@@ -776,11 +844,11 @@ async fn real_main(args: Args) -> Result<i32> {
     }
     let mut history: Vec<event::Message> = Vec::new();
     let mut resumed: Option<PathBuf> = None;
-    // The conversation `--fork` copied, as the pair the seeding needs: the messages to write into
-    // the new file and the name to carry with them. Kept here rather than in `resumed` because the
-    // two do opposite things with the file -- a resume appends to the session it opened, and a fork
-    // must not touch it at all.
-    let mut forked: Option<(Vec<event::Message>, Option<String>)> = None;
+    // The conversation `--fork` copied, as what the new file needs: the messages to write into it,
+    // the name to carry with them, and the session they came from -- which the copy records as its
+    // lineage. Kept here rather than in `resumed` because the two do opposite things with the file --
+    // a resume appends to the session it opened, and a fork must not touch it at all.
+    let mut forked: Option<Forked> = None;
     // Kept whole, not just its messages: the transcript is printed from it after the
     // terminal exists, and an empty screen cannot be told apart from a failed load.
     let mut resumed_history: Option<session::LoadedSession> = None;
@@ -799,20 +867,32 @@ async fn real_main(args: Args) -> Result<i32> {
                 }
                 let copied = args.fork.is_some();
                 eprintln!(
-                    "flint: {} {} ({}{}){}",
+                    "flint: {} {} ({}){}",
                     if copied { "forking" } else { "resumed" },
                     path.file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_default(),
                     counted(history.len(), "message"),
-                    imported_note(&loaded),
                     match loaded.title.as_deref() {
                         Some(name) => format!(" — {name}"),
                         None => String::new(),
                     }
                 );
+                // Where it came from, on its own line: the line above is already naming a file and a
+                // model, and the two together overflow a terminal. See `origin_note`.
+                let note = origin_note(&loaded);
+                if !note.is_empty() {
+                    eprintln!("flint: {note}");
+                }
                 if copied {
-                    forked = Some((history.clone(), loaded.title.clone()));
+                    forked = Some(Forked {
+                        messages: history.clone(),
+                        title: loaded.title.clone(),
+                        // The source, as a copy records it: the path this run was pointed at and the id
+                        // flint read out of the file. `--fork` cuts nothing, so there is no `kept`.
+                        from: path.clone(),
+                        from_id: loaded.id.clone(),
+                    });
                 } else {
                     resumed = Some(path);
                 }
@@ -869,14 +949,18 @@ async fn real_main(args: Args) -> Result<i32> {
     } else {
         match (&resumed, &forked) {
             (Some(path), _) => Some(session::SessionWriter::resume(path)?),
-            (None, Some((messages, title))) => Some(session::SessionWriter::seed(
+            (None, Some(fork)) => Some(session::SessionWriter::seed(
                 &config::sessions_dir(),
                 &cwd,
                 &provider_cfg.name,
                 &provider_cfg.model,
-                messages,
-                title.as_deref(),
                 parent_session().as_deref(),
+                session::Copy {
+                    messages: &fork.messages,
+                    title: fork.title.as_deref(),
+                    from: &fork.from,
+                    from_id: Some(fork.from_id.as_str()),
+                },
             )?),
             (None, None) => Some(session::SessionWriter::create(
                 &config::sessions_dir(),
@@ -2747,6 +2831,7 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp::row("/agents [name]", "/agents", "list agent profiles (.flint/agents/*.md), or print one", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/sessions", "/sessions", "list past sessions, numbered", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/resume <n|id>", "/resume", "switch to one of them", HelpSection::Commands, OnPage::Selector),
+    CommandHelp::row("/fork [n]", "/fork", "start a new conversation cut at question n", HelpSection::Commands, OnPage::Selector),
     CommandHelp::field_row("/import <file>", "/import", "copy a conversation in from a session file", HelpSection::Commands, OnPage::Form, &IMPORT_ARG),
     CommandHelp::field_row("/name [text]", "/name", "name this conversation", HelpSection::Commands, OnPage::Form, &NAME_ARG),
     CommandHelp::destroying("/archive <n|id>", "/archive", "file one away, out of the list", ArgFrom::Sessions),
@@ -4076,15 +4161,22 @@ async fn handle_command(
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
             printer.term().line(format_args!(
-                "{green}resumed:{reset} {name} ({}{}){}",
+                "{green}resumed:{reset} {name} ({}{})",
                 counted(count, "message"),
                 if loaded.model.is_empty() {
                     String::new()
                 } else {
                     format!(", model {}", provider_cfg.model)
-                },
-                imported_note(&loaded)
+                }
             ));
+            // Under it, where the conversation came from, when it was a copy. See `origin_note` for
+            // why this is not a fragment of the line above.
+            let note = origin_note(&loaded);
+            if !note.is_empty() {
+                printer
+                    .term()
+                    .line(format_args!("{}", printer.dim(&format!("  {note}"))));
+            }
             // Draw it, and not merely load it: the reading the startup path already gives the same
             // thing. One line naming a file, on a screen that still holds the conversation just
             // left, cannot be told apart from a switch that loaded nothing -- and seeing where a
@@ -4186,6 +4278,145 @@ async fn handle_command(
             print_transcript(&loaded.messages, printer);
             new_agent.set_last_usage(loaded.last_usage);
             new_agent.splice_loaded_history(cfg, &cwd, loaded.messages);
+            return Ok(Flow::NewAgent(new_agent, provider_cfg.clone()));
+        }
+
+        "/fork" => {
+            // Start a conversation of its own from an earlier point in this one.
+            //
+            // The conversation that got there keeps every byte: this is a copy, for `SessionEvent::Fork`'s
+            // reason. `--fork` is the same act taken at startup, and until now it was the *only* way to
+            // take it -- the whole tail came along, so "that went wrong four messages ago, start again
+            // from there" could be approximated only by forking everything and deleting lines from a
+            // file by hand. What the point buys is the retry: the question is asked again, differently,
+            // in a conversation that never saw the answer that went wrong.
+            //
+            // The point is a **question**, and the cut falls just before it. A turn boundary is the
+            // only place a conversation can be cut -- a tool result whose call was left behind is a
+            // request the provider rejects, which is the same reason `agent::trim_old_turns` cuts where
+            // it does -- and a question is the boundary a person can name.
+            if agent.no_session() {
+                return Ok(keeps_no_conversation(cmd, printer));
+            }
+            let asked = questions(agent.history());
+            let Some(path) = agent.session_path() else {
+                printer
+                    .term()
+                    .line(format_args!("{dim}this conversation is not being saved{reset}"));
+                return Ok(Flow::Continue);
+            };
+            // A conversation is only a file once something has been said in it, and `--fork`'s lesson
+            // applies here: a fork of a conversation that was never written has no source to name.
+            if !path.exists() || asked.is_empty() {
+                printer.term().line(format_args!(
+                    "{yellow}nothing to fork:{reset} this conversation has not said anything yet"
+                ));
+                return Ok(Flow::Continue);
+            }
+            if arg.is_empty() {
+                // The list, and not a fork: which point to cut at is the one thing this command cannot
+                // guess, and a bare `/fork` that silently threw away the last exchange would be the
+                // surprise `/sessions` exists to avoid. Same shape as `/sessions`, same reason.
+                for (index, (_, line)) in asked.iter().enumerate() {
+                    printer
+                        .term()
+                        .line(format_args!("  {:>2}. {line}", index + 1));
+                }
+                printer.term().line(format_args!(
+                    "{}",
+                    printer.dim(&format!(
+                        "     /fork <n> starts a new conversation cut at question n, keeping what came \
+                         before it ({})",
+                        counted(asked.len(), "question")
+                    ))
+                ));
+                return Ok(Flow::Continue);
+            }
+            let Ok(n) = arg.parse::<usize>() else {
+                printer
+                    .term()
+                    .line(format_args!("usage: /fork <n>  (/fork to list the questions)"));
+                return Ok(Flow::Continue);
+            };
+            if n == 0 || n > asked.len() {
+                printer.term().line(format_args!(
+                    "{yellow}no question {n}:{reset} this conversation has asked {} (/fork to list \
+                     them)",
+                    counted(asked.len(), "question")
+                ));
+                return Ok(Flow::Continue);
+            }
+            if n == 1 {
+                // Cutting at the first question leaves a conversation with nothing in it, which is not
+                // a conversation: an empty file would sit in the list looking like one, and the first
+                // thing typed into it would be the first thing ever said. `/new` is that act.
+                printer.term().line(format_args!(
+                    "{yellow}nothing to keep:{reset} cutting at the first question would leave an \
+                     empty conversation (/new starts one)"
+                ));
+                return Ok(Flow::Continue);
+            }
+            let cut = asked[n - 1].0;
+            let copy: Vec<event::Message> = agent.history()[..cut]
+                .iter()
+                .filter(|m| !matches!(m, event::Message::System { .. }))
+                .cloned()
+                .collect();
+            let kept = copy.len();
+            let cwd = agent.cwd().clone();
+            let provider = provider::Provider::new(provider_cfg.clone())?;
+            // The branch is this run's, exactly as an imported copy is: a fresh file in this run's own
+            // sessions, which is also what keeps `parent_session` right -- a child that forks is still a
+            // child, and its conversation still belongs under `children/`.
+            let mut writer = session::SessionWriter::create(
+                &config::sessions_dir(),
+                &cwd,
+                &provider_cfg.name,
+                &provider_cfg.model,
+                parent_session().as_deref(),
+            )?;
+            let source_name = file_name_of(&path.display().to_string());
+            // The id as flint reads it for its own conversation is the file's stem -- `Meta.id` is the
+            // name it was created under, so the two agree by construction and no read is needed.
+            let source_id = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| source_name.clone());
+            // The name travels with the branch, as it does through `--fork`: a name is a line in the
+            // file it was given to, and a retry of the same question is the same conversation's work.
+            let title = session::scan(&path)?.title;
+            writer.forked_from(&path, Some(&source_id), Some(kept))?;
+            writer.write_messages(&copy, title.as_deref())?;
+            let branch = writer
+                .path()
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let mut new_agent =
+                agent::Agent::new(cfg, provider, agent.readonly(), cwd.clone(), Some(writer));
+            // Two lines rather than one, because one line carrying both file names and the cut
+            // overflows a terminal that is 80 columns wide -- and the fact that wrapped was the *kept*
+            // count, which is the number a reader is looking for. Which file became which belongs on
+            // the first line; where the branch starts belongs on the second.
+            printer.term().line(format_args!(
+                "{green}forked:{reset} {source_name} → {bold}{branch}{reset}"
+            ));
+            // The question it cut at, printed: the whole point is to ask it again, differently, and it
+            // is the one line of the conversation the branch does not contain. Named rather than left
+            // for the person to scroll back for -- the screen is about to be redrawn without it.
+            printer.term().line(format_args!(
+                "{}",
+                printer.dim(&format!(
+                    "  {} kept, cut at question {n} of {}: {}",
+                    counted(kept, "message"),
+                    asked.len(),
+                    asked[n - 1].1
+                ))
+            ));
+            // Drawn, like `/resume` and `/import`: what is on screen has to be the conversation the run
+            // is now in, and the tail that was dropped from it is the part a person needs to see go.
+            print_transcript(&copy, printer);
+            new_agent.splice_loaded_history(cfg, &cwd, copy);
             return Ok(Flow::NewAgent(new_agent, provider_cfg.clone()));
         }
 
@@ -5127,6 +5358,15 @@ fn page_rows(
                     ("/model", OnPage::Selector) => provider_cfg.choices(),
                     // `/resume <n|id>` is the third selector and has no values on purpose: its list is
                     // the sidebar's, where the numbers are and where a press already resumes.
+                    //
+                    // `/fork`'s values are the questions of *this* conversation, which is what makes it
+                    // a picker rather than a number to remember: the frame is rebuilt as the
+                    // conversation moves, so the buttons are the questions the run has been asked. The
+                    // value is the ordinal alone -- the page composes `/<name> <value>`, and a label
+                    // carrying the question's text would be sent as part of the command line.
+                    ("/fork", _) => (1..=questions(agent.history()).len())
+                        .map(|n| n.to_string())
+                        .collect(),
                     _ => Vec::new(),
                 },
                 args: row.args,
