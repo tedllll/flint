@@ -137,6 +137,53 @@ fn a_path_opens_in_this_page_or_not_at_all() {
     );
 }
 
+/// The jobs panel reads the run's list, and a row is a press that stays in this page.
+///
+/// Two policies, in one place because they are the same policy seen twice. The list is a *route*
+/// (`GET /jobs`) that a frame says is stale -- carrying the jobs on the stream would be a second
+/// answer that can disagree with the route -- and a row is a door onto a job's output, through the
+/// same `GET /file` a path in the transcript uses, so nothing about a job can navigate the page away
+/// from the conversation it belongs to.
+#[test]
+fn the_jobs_panel_reads_the_route_and_a_row_stays_in_this_page() {
+    let html = view();
+    assert!(
+        html.contains("fetch(\"/jobs\", { headers: authHeader() })"),
+        "the list comes from the route, with the token in the header like every other request"
+    );
+    assert!(
+        html.contains("frame.event === \"jobs\""),
+        "and the frame only says to re-read it"
+    );
+    assert!(
+        html.contains("openPreview(job.path, 0)"),
+        "a row opens the job's output in the preview column, not in a second window"
+    );
+    // The panel is drawn from the route's fields, and each row is text: a command line is a command
+    // line, and the exit code is a sentence the route wrote rather than one the page made up. The
+    // text arrives through `el`, which is the one place on this page that sets `textContent`.
+    let row = from("function jobRow(job)", 40);
+    assert!(
+        !row.contains("innerHTML") && row.contains("el(\"span\", \"dot\")"),
+        "a row is built from elements and text like the rest of the page:\n{row}"
+    );
+    assert!(
+        row.contains("job.detail"),
+        "the exit code the route sent is what the row shows:\n{row}"
+    );
+    // And the ticking, which must not be a request: the page counts from the absolute times the
+    // route sent, so a page open for an hour is still right about a job it heard about at the start.
+    let tick = from("function tickJobs()", 16);
+    assert!(
+        !tick.contains("fetch("),
+        "the clock is arithmetic, not a poll:\n{tick}"
+    );
+    assert!(
+        tick.contains("Date.now()"),
+        "and it counts from the reader's own clock:\n{tick}"
+    );
+}
+
 /// A file the page cannot show says why, in the route's own words.
 ///
 /// The alternative -- an empty panel, or a spinner that stops -- is the failure this project keeps

@@ -1380,6 +1380,71 @@ check("the preview says which line, and how much of a cut file is here", () => {
   eq(viewer.bytesLabel(12 * 1024 * 1024), "12 MB", "megabytes");
 });
 
+console.log("the run's jobs");
+
+check("a job is read off the route, and a row that is not a job is dropped", () => {
+  // The route's shape, in full: what the page reads and what it refuses to guess at. `jobs_listed`
+  // in the run sorts running-first and newest-first, and this list keeps that order rather than
+  // re-sorting -- two orders for one list is one order too many.
+  const listed = viewer.jobsFrom({
+    jobs: [
+      {
+        pid: 41288, kind: "command", label: "cargo build --release",
+        status: "running", detail: "", started_secs: 1789290356, ended_secs: null,
+        path: "C:\\work\\.flint\\spill\\s\\background-bash-1.log",
+      },
+      {
+        pid: 41290, kind: "child", label: "write a summary of src/web.rs",
+        status: "completed", detail: "exit code 0 (finished)", started_secs: 1789290000,
+        ended_secs: 1789290042, path: "C:\\work\\.flint\\sessions\\x\\children\\a.jsonl",
+      },
+    ],
+  });
+  eq(listed.length, 2, "both jobs, in the order the run listed them");
+  eq(listed[0].kind, "command", "a command stays a command");
+  eq(listed[0].ended, 0, "a job that has not ended has no end time");
+  eq(listed[1].kind, "child", "a child stays a child");
+  eq(listed[1].detail, "exit code 0 (finished)", "the fact sentence travels with the word");
+
+  // A kind the page does not know is drawn as a child rather than dropped: the row is still a job,
+  // and a job nobody can see is the one thing the list must not do.
+  eq(viewer.jobsFrom({ jobs: [{ pid: 1, kind: "martian" }] })[0].kind, "child", "an unknown kind is still a job");
+  eq(viewer.jobsFrom({ jobs: [] }).length, 0, "no jobs is an empty list");
+  eq(viewer.jobsFrom(null).length, 0, "no answer at all is an empty list");
+  eq(viewer.jobsFrom({ jobs: [{ kind: "child" }, null, "x"] }).length, 0, "a row with no pid is not a job");
+});
+
+check("a job's line says whether it is still going, and how long for", () => {
+  // The two words, and the clock. `nowSecs` is handed in, so "three minutes" means three minutes
+  // here without this check waiting for three minutes.
+  const running = { status: "running", started: 1000, ended: 0 };
+  eq(viewer.jobWhen(running, 1000), "running for 0s", "just started");
+  eq(viewer.jobWhen(running, 1003), "running for 3s", "and it counts");
+  eq(viewer.jobWhen({ status: "running", started: 1000, ended: 0 }, 1072), "running for 1m 12s", "past a minute");
+  eq(
+    viewer.jobWhen({ status: "completed", started: 1000, ended: 1004 }, 9999),
+    "took 4s",
+    "a duration that has stopped says so, and does not grow with the clock"
+  );
+  eq(
+    viewer.jobWhen({ status: "failed", started: 1000, ended: 1003 }, 9999),
+    "took 3s",
+    "how long a failure took is worth knowing too"
+  );
+  // A job whose times are missing is not given an invented duration: it says the status word it
+  // came with. A page that guessed would be the second answer to a question the route answered.
+  eq(viewer.jobWhen({ status: "killed", started: 0, ended: 0 }, 9999), "killed", "no times, no number");
+  eq(viewer.durationLabel(0), "0s", "seconds");
+  eq(viewer.durationLabel(59), "59s", "the last second before a minute");
+  eq(viewer.durationLabel(60), "1m 00s", "a minute, with its seconds padded");
+  eq(viewer.durationLabel(3599), "59m 59s", "the last second before an hour");
+  eq(viewer.durationLabel(3600), "1h 00m", "an hour");
+  eq(viewer.durationLabel(86399), "23h 59m", "and a long build's duration");
+  eq(viewer.durationLabel(-5), "0s", "a clock that is behind is not a negative duration");
+  eq(viewer.jobIsLive({ status: "running" }), true, "running is live");
+  eq(viewer.jobIsLive({ status: "completed" }), false, "and nothing else is");
+});
+
 if (failures) {
   console.log(`\n${failures} failed`);
   process.exit(1);

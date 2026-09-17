@@ -962,6 +962,110 @@ fn jobs_listed() -> Vec<std::sync::Arc<Job>> {
     jobs
 }
 
+/// A counter that changes whenever a job is registered or settles.
+///
+/// The page cannot see this process's memory, and a job that ends while nobody is waiting for it
+/// happens between requests -- so the one thing the web feed needs is "the list is not what it was",
+/// which is a number rather than a copy of the list: the route (`GET /jobs`) is where the list
+/// lives, and a frame that carried the jobs would be a second answer that can disagree with it.
+/// The same shape as the `sessions` frame, and for the same reason.
+///
+/// A number rather than a flag, because a reader that missed one change must still see the next:
+/// only the *difference* matters, and a counter cannot lose one the way a boolean cleared by two
+/// readers can.
+pub fn jobs_revision() -> u64 {
+    JOBS_REVISION.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+static JOBS_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn jobs_changed() {
+    JOBS_REVISION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The jobs this run started, as the page's list shows them.
+///
+/// `GET /jobs` answers with this, and the shape is the page's rather than the model's: `job_op
+/// status` writes a sentence for a reader who is thinking, and this is a row for a reader who is
+/// scanning. Three of its fields exist because the page has no clock of the server's:
+///
+///   * `started_secs` and `ended_secs` are absolute epoch seconds, so a page that has been open for
+///     an hour shows the true age of a job rather than counting from whenever it last heard.
+///   * `status` is a word rather than a sentence -- `running`, `completed`, `killed`, `failed` --
+///     and `detail` carries the fact sentence beside it, because a row needs a word it can colour
+///     and a person wants the exit code.
+///   * `path` is where the job's output is: a child's conversation, or a command's log. It is what a
+///     row opens, through the same `GET /file` a path in the transcript uses.
+///
+/// Nothing here is a new record: every field is read off the `Job` the handle already is, which is
+/// why the page cannot come to disagree with `job_op`.
+pub fn jobs_snapshot() -> serde_json::Value {
+    let now = std::time::SystemTime::now();
+    let jobs: Vec<serde_json::Value> = jobs_listed()
+        .iter()
+        .map(|job| {
+            let finished = job.finished.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let ended = *job.ended.lock().unwrap_or_else(|e| e.into_inner());
+            let (status, detail) = match &finished {
+                Some(finished) => (
+                    job_status(finished.code),
+                    format!("exit code {} ({})", finished.code, task_exit_meaning(finished.code)),
+                ),
+                None => ("running", String::new()),
+            };
+            let path = match job.kind {
+                JobKind::Child => job.session(),
+                JobKind::Command => job.log.as_ref().map(|path| path.display().to_string()),
+            };
+            serde_json::json!({
+                "pid": job.pid,
+                "kind": match job.kind {
+                    JobKind::Child => "child",
+                    JobKind::Command => "command",
+                },
+                // What it was asked, which is the row's own text: a command's command line, or a
+                // child's prompt. There is deliberately no separate "which tool started it" field --
+                // for a child that word is `task`/`tasks`, and for a command `job.label` *is* the
+                // command line, so a field carrying it would be the same string twice in one row.
+                "label": util::truncate(&job.prompt, 200),
+                "status": status,
+                "detail": detail,
+                "started_secs": epoch_secs(now, job.started.elapsed()),
+                "ended_secs": ended.map(|ended| epoch_secs(now, ended.elapsed())),
+                "path": path,
+            })
+        })
+        .collect();
+    serde_json::json!({ "jobs": jobs })
+}
+
+/// The one word for how a job ended, from the only thing that says: its exit code.
+///
+/// -1 is what an exit status carries when a signal ended the process, so it is a different fact from
+/// a failure and gets a different word: "it said it was done", "it broke" and "it was killed" are
+/// the three answers a person is looking for in a list of work, and a row that said "failed" for a
+/// kill would send somebody looking for a bug that is not there.
+fn job_status(code: i32) -> &'static str {
+    match code {
+        0 => "completed",
+        -1 => "killed",
+        _ => "failed",
+    }
+}
+
+/// When something that happened `ago` before `now` happened, in epoch seconds.
+///
+/// The job holds an `Instant` because that is what measures an elapsed time correctly, and the page
+/// needs a wall clock because that is what survives a page that was open across the two. This is the
+/// one conversion between them, and it is derived rather than stored: a second field on the job
+/// would be the same fact recorded twice, and the rule here is that only one of them can be wrong.
+fn epoch_secs(now: std::time::SystemTime, ago: std::time::Duration) -> u64 {
+    now.duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .saturating_sub(ago.as_secs())
+}
+
 /// One child by pid, when this run is the one that started it.
 fn job_by_pid(pid: u32) -> Option<std::sync::Arc<Job>> {
     jobs().iter().find(|job| job.pid == pid).cloned()
@@ -2071,6 +2175,8 @@ async fn start_background_command(
     });
     forget_old_finished();
     jobs().push(std::sync::Arc::clone(&job));
+    // The page is told the list changed, not what changed: `GET /jobs` is the list.
+    jobs_changed();
 
     // The supervisor, for the same reason a child has one: a `timeout_secs` that only a waiter could
     // enforce would be a budget that never comes due for a job nobody is waiting for.
@@ -2123,6 +2229,10 @@ async fn start_background_command(
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
         supervisor.done.notify_waiters();
+        // A job that ended is news to a page that is showing it as running, whether or not anybody
+        // was waiting for it -- and the notice below goes to the *person's* screen, which is a
+        // different reader from the page.
+        jobs_changed();
         // The person's lane, exactly as for a child: a command started in the background is a job
         // nobody is waiting for, and a build that ended while they were reading is news.
         if !supervisor.was_reported() {
@@ -4943,6 +5053,9 @@ fn start_child(child: Child) -> Result<std::sync::Arc<Job>> {
     });
     forget_old_finished();
     jobs().push(std::sync::Arc::clone(&job));
+    // Registered is a change of the list the page draws: a job that exists but is not shown is the
+    // one thing the page must not do, because a job nobody can see is a job nobody stops.
+    jobs_changed();
 
     let reader_label = label.clone();
     let reader_job = std::sync::Arc::clone(&job);
@@ -5010,6 +5123,9 @@ fn start_child(child: Child) -> Result<std::sync::Arc<Job>> {
         // have been dropped long before, which is what a `task` child outliving its turn proved.
         supervisor_job.stdin.lock().unwrap_or_else(|e| e.into_inner()).take();
         supervisor_job.done.notify_waiters();
+        // The page's list again: its row for this job has been saying "running" for as long as the
+        // child took, and the exit code is the fact it is waiting for.
+        jobs_changed();
         // Tell the person, whose session this is. Only for a job nobody was waiting for -- a child
         // waited on hands its answer over in the tool result, and the same news twice is noise -- and
         // only if nobody has read it: this lane and the report the model gets on its next request are
@@ -6098,6 +6214,95 @@ mod background_command_tests {
         let _ = tools
             .invoke("job_op", &json!({ "action": "stop", "pid": pid }))
             .await;
+    }
+
+    /// The three words a row can carry, from the exit code alone. Pure, because the mapping is the
+    /// whole of the decision: a job that was killed and a job that failed look the same from the
+    /// outside, and a person reading the list is asking which one it was.
+    #[test]
+    fn a_jobs_state_word_is_its_exit_code_read_the_way_a_person_reads_it() {
+        assert_eq!(job_status(0), "completed");
+        assert_eq!(job_status(-1), "killed");
+        assert_eq!(job_status(1), "failed");
+        assert_eq!(job_status(130), "failed");
+    }
+
+    /// What the page's list is drawn from, for a job that is still running and then for the same job
+    /// after it ends. The row has to be the *same* record both times -- one fact later -- and the
+    /// clock has to be absolute, because the page computes an age from it rather than counting.
+    #[tokio::test]
+    async fn a_job_is_snapshotted_while_it_runs_and_again_when_it_has_ended() {
+        let dir = TempDir::new("jobs-snapshot");
+        let tools = toolbox(&dir, false);
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let handle = tools
+            .invoke(
+                "bash",
+                &json!({ "command": slow_command(), "background": true }),
+            )
+            .await
+            .expect("background bash");
+        let (pid, log) = handle_of(&handle);
+
+        let running = job_row(pid);
+        assert_eq!(running["kind"], "command", "a command, not a child: {running}");
+        assert_eq!(running["status"], "running", "{running}");
+        assert_eq!(
+            running["label"],
+            slow_command(),
+            "the row says what was asked, which for a command is its command line: {running}"
+        );
+        assert_eq!(running["detail"], "", "a running job has no ending to report");
+        assert_eq!(
+            running["path"],
+            log.display().to_string(),
+            "the row has to open the log the handle named: {running}"
+        );
+        let started = running["started_secs"].as_u64().expect("a start time");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(
+            started >= before && started <= now,
+            "the start is not on the wall clock: {started} not in {before}..={now}"
+        );
+        assert!(running["ended_secs"].is_null(), "it has not ended: {running}");
+
+        tools
+            .invoke("job_op", &json!({ "action": "wait", "pid": pid, "timeout_secs": 30 }))
+            .await
+            .expect("wait");
+
+        let ended = job_row(pid);
+        assert_eq!(ended["status"], "completed", "{ended}");
+        assert_eq!(ended["pid"], running["pid"], "the same job, not a new one");
+        assert_eq!(ended["started_secs"], running["started_secs"], "the same start");
+        assert!(
+            ended["detail"].as_str().unwrap_or_default().contains("exit code 0"),
+            "the fact sentence has the code in it: {ended}"
+        );
+        assert!(
+            ended["ended_secs"].as_u64().unwrap_or(0) >= started,
+            "it ended before it started: {ended}"
+        );
+    }
+
+    /// One job's row out of the snapshot, by pid. A helper rather than an index, because the list is
+    /// the whole process's and another test running beside this one may have started a job of its
+    /// own -- which is the same reason the page shows every job rather than only the newest.
+    fn job_row(pid: u32) -> serde_json::Value {
+        let snapshot = jobs_snapshot();
+        snapshot["jobs"]
+            .as_array()
+            .expect("an array of jobs")
+            .iter()
+            .find(|job| job["pid"] == pid)
+            .unwrap_or_else(|| panic!("no row for pid {pid} in {snapshot}"))
+            .clone()
     }
 
     /// Reading while it runs, then collecting the whole of it: two different questions, and the

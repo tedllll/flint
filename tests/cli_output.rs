@@ -1930,6 +1930,170 @@ async fn renaming_a_conversation_tells_the_page_to_read_the_list_again() {
     );
 }
 
+/// The run's background work, as the page sees it: the frame that says the list changed, the list
+/// itself, and the same list again once the job has ended.
+///
+/// The third one is the point of the whole round. A job nobody is waiting for is exactly the thing a
+/// person cannot see from the terminal and cannot ask the model about without interrupting it -- and
+/// the fact they are looking for is the exit code, which arrives *after* the frame that announced the
+/// job. Driven through the real binary because it is the wiring being tested: a tool call deep in the
+/// loop, the record it leaves, the revision counter, and a listener in another task.
+#[tokio::test]
+async fn a_background_command_is_a_job_the_page_can_watch_end() {
+    // A command that takes a few seconds, in the words the platform's own shell understands -- the
+    // same shape `tools::tests` uses for the same reason: long enough to be seen running, short
+    // enough that no test waits on it.
+    let command = if cfg!(windows) {
+        "echo one & ping -n 4 127.0.0.1 >NUL & echo two"
+    } else {
+        "echo one; sleep 3; echo two"
+    };
+
+    let server = MockServer::start().await;
+    // The first turn asks for the command in the background. Built with `serde_json` rather than
+    // written by hand: the command line carries quotes, `&` and `>`, and an escaping mistake here
+    // would be a test that quietly asks for something else.
+    let arguments = serde_json::json!({ "command": command, "background": true }).to_string();
+    let call = serde_json::json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0, "id": "call_0",
+                    "function": { "name": "bash", "arguments": arguments },
+                }],
+            },
+        }],
+    });
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(&[
+                    &format!("data: {call}"),
+                    r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+                    "data: [DONE]",
+                ])),
+        )
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    // Then the model is asked again, with the handle in front of it, and answers.
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream").set_body_string(sse(&[
+            r#"data: {"choices":[{"delta":{"content":"started it"}}]}"#,
+            r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+            "data: [DONE]",
+        ])))
+        .mount(&server)
+        .await;
+
+    let home = test_home("jobs-frame", &server.uri());
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("the working directory");
+    let log = home.join("transcript.txt");
+    let mut child = binary()
+        .arg("--web")
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .current_dir(&work)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::fs::File::create(&log).expect("transcript file"))
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to run flint");
+
+    let (port, token) = port_and_token(&wait_for_url(&log));
+    // Connected before the job starts, so the frame below is one a page that is open right now
+    // receives rather than one it would have to re-read for.
+    let mut watching = http_stream(port, "/events", &token);
+    let opening = read_until(&mut watching, "\"model\":\"stub-model\"", 20);
+
+    let answered = post_message(port, &token, "start it");
+    let started = read_until(&mut watching, "event: jobs", 30);
+    let listed = http_get(port, "/jobs", &token);
+    let running: serde_json::Value =
+        serde_json::from_str(&listed).unwrap_or_else(|e| panic!("not JSON ({e}): {listed:?}"));
+    let row = running["jobs"]
+        .as_array()
+        .expect("a list of jobs")
+        .first()
+        .cloned()
+        .unwrap_or_else(|| panic!("the run started a job and the page cannot see it: {listed}"));
+    let path = row["path"].as_str().unwrap_or_default().to_string();
+
+    // Wait for it to end, the way a page does: by re-reading the route. The exit code is what the
+    // list is for, and it only exists after the command does.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut settled: serde_json::Value = row.clone();
+    while std::time::Instant::now() < deadline {
+        let again = http_get(port, "/jobs", &token);
+        settled = serde_json::from_str::<serde_json::Value>(&again)
+            .unwrap_or_else(|e| panic!("not JSON ({e}): {again:?}"))["jobs"]
+            .as_array()
+            .and_then(|rows| rows.first().cloned())
+            .unwrap_or_else(|| panic!("the job disappeared from the list: {again}"));
+        if settled["status"] != "running" {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    // The second frame, and it is a second one: the page was told the list had changed when the job
+    // started and is told again when it ends, which is the difference between a list that is right
+    // and a list that is right for a moment.
+    let ended = read_until(&mut watching, "event: jobs", 30);
+
+    drop(watching);
+    drop(child.stdin.take());
+    let exited = wait_for_exit(&mut child, 20);
+    let output = std::fs::read_to_string(&path).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit");
+    assert!(
+        opening.contains("\"type\":\"state\""),
+        "nothing before the job was measurable: {opening:?}"
+    );
+    assert!(
+        answered.contains("202 Accepted"),
+        "the line never reached the run: {answered:?}"
+    );
+    assert!(
+        started.contains("event: jobs"),
+        "the job was invisible to the page: {started:?}"
+    );
+    assert_eq!(row["kind"], "command", "the kind a command's row carries: {row}");
+    assert_eq!(row["status"], "running", "it was listed while it ran: {row}");
+    assert_eq!(
+        row["label"], command,
+        "the row has to say what was asked, or two running jobs look alike: {row}"
+    );
+    // The path is checked once the command has ended, not here: the shell creates its own redirect
+    // a moment after the spawn, so a file that does not exist yet is not a defect -- and asserting on
+    // the *output* below is the claim that matters.
+    assert!(
+        path.ends_with("background-bash-1.log"),
+        "the row must point at the command's own log: {row}"
+    );
+    assert_eq!(
+        settled["status"], "completed",
+        "the command ended and the page still says otherwise: {settled}"
+    );
+    assert!(
+        settled["detail"].as_str().unwrap_or_default().contains("exit code 0"),
+        "the list must carry the fact a person is looking for: {settled}"
+    );
+    assert!(
+        ended.contains("event: jobs"),
+        "the end of the job was never announced, so the page would show it running until something \
+         else happened: {ended:?}"
+    );
+    assert!(
+        output.contains("one") && output.contains("two"),
+        "the log the row points at is not the command's output: {output:?}"
+    );
+    assert!(path.contains("spill"), "and it is where this run keeps its files: {path:?}");
+}
+
 /// The `debug` namespace says what it knows rather than failing silently.
 #[test]
 fn an_unknown_debug_subcommand_names_the_ones_that_exist() {

@@ -1247,9 +1247,27 @@ capability arguments (why serving any readable file adds nothing, and why a cwd 
 and the ten browser claims that hold it — including one `every()` on an empty array that swallowed
 every bare filename until `Cargo.toml` was in the test.
 
-**Still open in this section, and it is what §9 was written about:** the page cannot see the run's
-*background work* — the `task` children and the background commands §4 of `docs/agents.md` built —
-which is the next round.
+**Then the other half of the same complaint: the run's background work was invisible in the page —
+fixed, 2026-09-17.** *"现在看不到子代理和后台任务的情况，在 web 页面上面，你可以参考 dsh加上功能"*. The header
+now carries a **jobs** panel, drawn from a new route (`GET /jobs`) that answers off the same `Job`
+records `job_op` uses: the `task` children and the background commands this process started, running
+first, each row badged with its kind, saying what was asked, ticking its duration once a second while
+it runs, and carrying the exit code in words when it ends. A row is a door — pressing it opens that
+job's log, or a child's conversation, in the preview column the paragraph above built. The frame that
+says the list changed is a **revision counter**, not the list: `tools::jobs_revision()` is compared by
+the SSE loop on every frame it forwards and on a four-second timer, which is the one change with no
+traffic to ride on (a command ending while the run is idle). DSH's job popover is the shape, and the two
+things refused from it are the live-tail inside the list (the preview column already reads a job's
+output) and a `stopping` status (nothing records a stop until it has ended). `docs/web-mode.md` §13 has
+the measured record, including the two claims that were written wrong — one looked for *any* settled
+job when the child settles seconds before the command, and one reused a row's `id` and so pressed the
+wrong row the second time.
+
+**Still open in this section:** the item §9 was written about is now built, and the next round is
+whatever using it turns up. Two limits are recorded rather than owed: a `stopping` state would need a
+flag on the `Job` that nothing sets today, and a job started by an *earlier* run of flint is not in the
+list at all — a handle is what this process started, and deriving a list from files is the thing this
+repository does not do.
 
 ### 10. flint as a function a program can call — **done: steps 1–7 landed (B7 included, and the duration half of B5)**
 

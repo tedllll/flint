@@ -787,6 +787,13 @@ pub fn respond(request: &Request, body: &str, state: &State) -> Answer {
         // program. The one route that reads a path from the wire: see `serve_file`, and §12 of
         // `docs/web-mode.md` for what it will and will not serve.
         ("GET", "/file") => serve_file(request, state),
+        // The run's own background work: the `task` children and the background commands this
+        // process started, and the only place a person sees them without asking the model. Read off
+        // the same `Job` records `job_op` answers from, so the page and the tool cannot describe one
+        // job two ways -- §13 of `docs/web-mode.md` is the record.
+        ("GET", "/jobs") => {
+            Response::json(200, "OK", crate::tools::jobs_snapshot().to_string())
+        }
         // Everything since, and then everything as it happens.
         ("GET", "/events") => return Answer::Events {
             last: last_event_id(request),
@@ -1643,6 +1650,36 @@ const SSE_STATE_SNAPSHOT: &str = "event: state\n";
 /// the *transport* -- the vocabulary is deliberately closed, and this does not belong in it.
 const SSE_RESET: &str = "event: reset\ndata: {}\n\n";
 
+/// Tell a client the run's job list is stale, so it re-reads `GET /jobs`.
+///
+/// The third named frame of the same kind, and empty for the same reason as `reset`: what changed
+/// is a route's answer, and a copy of it on the stream would be a second answer.
+const SSE_JOBS: &str = "event: jobs\ndata: {}\n\n";
+
+/// How often the stream asks whether the job list changed.
+///
+/// The one change that happens while *nothing else is going on*: a background command ending has no
+/// turn to ride on, so without a clock of its own the page's row would say "running" for up to a
+/// heartbeat. Four seconds is short enough that a person sees it, and long enough that it is one
+/// timer wake per open page. It is only the *fallback* -- a change is also noticed on every frame
+/// this connection forwards, which is what makes a job appearing during a turn immediate.
+const JOBS_POLL: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// Send the `jobs` frame if the run's job list has changed since this client last heard.
+///
+/// The revision is a counter rather than a copy of the list, so a client that missed a change still
+/// hears about the next one, and two changes that arrive together are one frame -- which is what
+/// the page needs, since it re-reads the whole route either way. The revision is compared here
+/// rather than pushed from `tools`, because the tool code has no way to reach a connection and
+/// should not grow one: the counter is the whole of the interface.
+async fn send_jobs_if_changed(stream: &mut TcpStream, seen: &mut u64) -> Result<()> {
+    let now = crate::tools::jobs_revision();
+    if now != *seen {
+        *seen = now;
+        stream.write_all(SSE_JOBS.as_bytes()).await?;
+    }
+    Ok(())
+}
 /// The answer so far, if there is one, as the named event that says it is state.
 async fn write_answer_snapshot(stream: &mut TcpStream, live: &Live) -> Result<()> {
     let answer = live.answer_so_far();
@@ -1714,11 +1751,24 @@ async fn stream_events(mut stream: TcpStream, state: &State, last: Option<u64>) 
     // The first tick of an interval is immediate; a heartbeat now would be noise on a
     // connection that has this second been handed a response.
     heartbeat.tick().await;
+    // A page that connects while jobs are running is told to read them, which is the same frame the
+    // changes below send: zero as the starting "seen" revision means the first check always sends
+    // one if this run has ever started a job, and a page with no jobs is not missing anything.
+    let mut jobs_seen = 0u64;
+    let mut jobs_tick = tokio::time::interval(JOBS_POLL);
+    jobs_tick.tick().await;
+    send_jobs_if_changed(&mut stream, &mut jobs_seen).await?;
 
     loop {
         tokio::select! {
             received = rx.recv() => match received {
-                Ok(frame) => stream.write_all(frame.render().as_bytes()).await?,
+                Ok(frame) => {
+                    stream.write_all(frame.render().as_bytes()).await?;
+                    // Checked here as well as on the timer, so a job started by a tool call during
+                    // this very turn appears while the turn is still running rather than up to four
+                    // seconds later.
+                    send_jobs_if_changed(&mut stream, &mut jobs_seen).await?;
+                }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
                     // The client could not keep up and frames were dropped. Saying so is the
                     // only honest option -- the alternative is a transcript with a hole in
@@ -1741,12 +1791,21 @@ async fn stream_events(mut stream: TcpStream, state: &State, last: Option<u64>) 
                             .await?;
                     }
                     write_answer_snapshot(&mut stream, live).await?;
+                    // The job list goes with the answer snapshot: whatever the client missed may
+                    // have included a job starting or ending, and a list it re-reads costs one
+                    // request.
+                    send_jobs_if_changed(&mut stream, &mut jobs_seen).await?;
                     rx = live.subscribe();
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             },
             _ = heartbeat.tick() => {
                 stream.write_all(b": ping\n\n").await?;
+            }
+            _ = jobs_tick.tick() => {
+                // The fallback, and the only reason it exists: a background command that ended
+                // while this connection was quiet. Everything else is noticed above.
+                send_jobs_if_changed(&mut stream, &mut jobs_seen).await?;
             }
         }
     }
@@ -2299,6 +2358,41 @@ mod tests {
             }
         }
         out
+    }
+
+    /// The list the page's jobs panel is drawn from, on the wire.
+    ///
+    /// The *contents* belong to `tools::tests` (a job is a job, and only that module can start one);
+    /// what is asserted here is the route's half: it answers with an object holding an array, it
+    /// needs the token like everything else, and it is a read -- `POST /jobs` is not a route.
+    #[test]
+    fn the_jobs_route_answers_with_the_runs_own_jobs() {
+        let state = state();
+        let response = ask(&ours("/jobs"), &state);
+        assert_eq!(response.status, 200, "{}", response.body);
+        assert_eq!(response.content_type, "application/json; charset=utf-8");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&response.body).expect("the route answers with JSON");
+        assert!(
+            parsed["jobs"].is_array(),
+            "the page iterates this, so it has to be a list: {}",
+            response.body
+        );
+
+        let none = ask(
+            "GET /jobs HTTP/1.1\r\nHost: 127.0.0.1:7777\r\n\r\n",
+            &state,
+        );
+        assert_eq!(none.status, 403, "a job's command line is not public");
+
+        let posted = ask(
+            &format!(
+                "POST /jobs HTTP/1.1\r\nHost: 127.0.0.1:7777\r\nX-Flint-Token: {}\r\n\r\n",
+                state.token
+            ),
+            &state,
+        );
+        assert_eq!(posted.status, 404, "there is nothing to write here");
     }
 
     /// One file the transcript named, opened. This is the route §12 exists for.

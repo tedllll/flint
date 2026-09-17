@@ -6,7 +6,16 @@ of it.
 
 ## Where things stand
 
-**The round that was open is §10 of `ROADMAP.md`: "flint as a function a program can call" — the
+**The two rounds after §10 were §9's page work, both asked for in the same breath on 2026-09-17, and
+both are built and pushed.** A file path in the transcript is a button that opens the file beside the
+conversation (`GET /file`, `docs/web-mode.md` §12); and the run's own background work — a `task` child,
+or a `bash`/`pwsh`/`exec` command started with `background: true` — is a **jobs** list in the header,
+drawn from `GET /jobs` and told to re-read itself by an `event: jobs` frame that carries a revision
+rather than the list (`docs/web-mode.md` §13). Both were measured in a real browser from a harness that
+starts its own scripted model, which is what lets a claim be about a real turn rather than an empty
+transcript. The records are in the sections below, and §9 of `ROADMAP.md` now points at them.
+
+**Before those, the round that was open was §10 of `ROADMAP.md`: "flint as a function a program can call" — the
 agents work landed in front of it, and §10 itself is now done, steps 1–7.** The section is an audit in
 three buckets (what cannot be done at all, what cannot be told apart, what is a hole), the reference
 points it was measured against (Claude Code's `-p --output-format json`, `llm`, and the `sysexits.h`
@@ -97,21 +106,23 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 556 passing, 1 ignored on this machine
-(328 lib, 5 in the binary's own tests, 33 `agent_loop`, 68 `cli_output`, 35 `json_output` (7 structured
+As of the commit that carries this file, `cargo test` is 561 passing, 1 ignored on this machine
+(331 lib, 5 in the binary's own tests, 33 `agent_loop`, 69 `cli_output`, 35 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
 be able to read, 4 the answer written where the caller asked, 3 the file inlined into the prompt,
 1 the stream checked on its bytes, 1 how long a turn took),
-7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 25 `web_view`,
+7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 26 `web_view`,
 10 `who`, 15 `task`, 6 `say`),
 and one more on Unix, `tty_hangup`, which is `#![cfg(unix)]` and needs a real pty — as is the Unix
 half of the process-group kill, `a_killed_command_takes_its_children_with_it_on_unix`. `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
-pass, and `node scripts/browser-controls-test.js` is **44 of 44** — the browser harness, run by hand
+pass, and `node scripts/browser-controls-test.js` is **53 of 53** — the browser harness, run by hand
 because CI has no browser, and the only place the two defects in the page's later controls were ever
-visible (the last two were found by the file-preview claims: a fixed panel that covered the block the
-path was pressed in, and a covered path that could not be pressed at all until the block was opened).
+visible (the first two were found by the file-preview claims: a fixed panel that covered the block the
+path was pressed in, and a covered path that could not be pressed at all until the block was opened;
+the jobs claims then found two *harness* defects rather than page ones, both recorded in
+`docs/web-mode.md` §13, and each looked like a page bug until it was read properly).
 `python examples/python/test_call.py` is 118 checks, all passing (one of them waits out the
 fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from), and
 `python examples/mcp/test_mcp.py` passes its own 23.
@@ -634,11 +645,11 @@ open, so the copy needs every flint window closed first — measured twice.
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
 cargo build                                       # the Python and browser checks run this binary
-cargo test                                        # 556 passing, 1 ignored
+cargo test                                        # 561 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed
-node scripts/browser-controls-test.js             # 44/44 -- needs a browser, so it is not in CI
+node scripts/browser-controls-test.js             # 53/53 -- needs a browser, so it is not in CI
 cargo test --test term_capture -- --ignored --nocapture measured_cost_of_streaming   # the cost number
 ```
 
@@ -1483,7 +1494,7 @@ press is that there is nothing to press that sends.
 
 ### A path in the transcript opens the file, and the panel is a column
 
-Asked for in two sentences: *"现在看不到子代理和后台任务的情况，在web页面上面"* and *"他对话里显示的文件真实地址，没做超链接，不能直接点开文件，有点麻烦"*. The first half (background work on the page) is the next round; this one is the second, and it is one commit: `feat: a path in the transcript opens in the page`.
+Asked for in two sentences: *"现在看不到子代理和后台任务的情况，在web页面上面"* and *"他对话里显示的文件真实地址，没做超链接，不能直接点开文件，有点麻烦"*. This one is the second half, and it is one commit: `feat: a path in the transcript opens in the page`.
 
 **The route.** `GET /file?path=…` (`serve_file` in `src/web.rs`), added beside `/sessions` in the same literal table. It takes the string the transcript wrote — `?path=` is a *parameter*, so the route table keeps its shape and §6's "nothing is served from disk" stays true in the form that matters: nothing is served that a tool result already in the transcript did not name. Three decisions inside it: a relative path resolves against **the run's working directory** (`Viewer::asked` gained `cwd`, fed from `agent.cwd()`, because `--cwd` moves what every relative path in a conversation means); a trailing `:line` or `:line:column` is stripped and answered in an `X-Flint-Line` header rather than being treated as part of the name (`split_line` — and the *first* thing tried is the literal path, so a file genuinely called `a:1` still opens); and a file longer than 512 KB is **cut, not refused** — its own bytes, with `X-Flint-Cut` and `X-Flint-Size`, because half a 40 MB log honestly labelled is what a reader wants. What *is* refused, each with its own sentence: not valid UTF-8 (no lossy conversion — a page of replacement characters is worse than "not text this page can show"), a directory, and over 64 MB.
 
@@ -1491,7 +1502,23 @@ Asked for in two sentences: *"现在看不到子代理和后台任务的情况�
 
 **Two things the browser settled, and both were changes to the design rather than to the code.** The panel was `position: fixed` over the right edge; with it open, `elementFromPoint` at the next path's centre answered `pre#preview-text`, so the second path in a turn could not be pressed at all. It is now a fourth grid column (`#preview` inside `#app`, `grid-column: 4`, `.app.plain #preview { grid-column: 2 }`), which narrows the transcript instead of covering it — the same shape as DSH's sidebar preview, which is where the feature came from. And the Node checks caught `segments.slice(1).every(…)` being `true` for a name with no separator at all, which swallowed every bare filename (`Cargo.toml`) until it was in the test.
 
-**Measured.** `cargo test` (the new `web::tests` cases: the file the transcript names, a `:line`, a missing file, a directory, a binary, a cut file counted on a character boundary, and the token still required), the page's policy tests in `tests/web_view.rs` (`a_path_opens_in_this_page_or_not_at_all` forbids `window.open` and `target="_blank"`, and pins the percent-encoding of the route), three checks in `scripts/web-view-test.js`, and ten claims in the browser harness — 44/44, against a run whose turns are scripted by a stub model the harness now starts itself. Mutation-checked on the route: with `cwd.join(path)` replaced by `path.to_path_buf()` and `split_line` forced to `None`, exactly four tests fail.
+**Measured.** `cargo test` (the new `web::tests` cases: the file the transcript names, a `:line`, a missing file, a directory, a binary, a cut file counted on a character boundary, and the token still required), the page's policy tests in `tests/web_view.rs` (`a_path_opens_in_this_page_or_not_at_all` forbids `window.open` and `target="_blank"`, and pins the percent-encoding of the route), three checks in `scripts/web-view-test.js`, and ten claims in the browser harness — 44/44 at the time, against a run whose turns are scripted by a stub model the harness now starts itself; the jobs panel has since taken it to 53. Mutation-checked on the route: with `cwd.join(path)` replaced by `path.to_path_buf()` and `split_line` forced to `None`, exactly four tests fail.
+
+### The run's background work is in the header, and a frame says it changed
+
+The other half of the same request: *"现在看不到子代理和后台任务的情况，在 web 页面上面，你可以参考 dsh加上功能"*. One commit: `feat: the page shows the run's jobs`.
+
+**What was invisible, and why it mattered.** A `task` child and a `bash`/`pwsh`/`exec` command started with `background: true` are one record in `src/tools.rs` (`Job`, in `CHILDREN`), with a handle and three verbs — and the page had no way to see any of it. The terminal says one line when a job ends and `job_op` answers whoever asks; in a browser there was nothing at all, so a build started and forgotten, or a child left running, could only be found by asking the model to interrupt itself.
+
+**The route, and the one decision inside it.** `GET /jobs` answers `tools::jobs_snapshot()` — read off the same records `job_op` reads, so the page and the tool cannot describe one job two ways — in the run's own listing order (running first, then newest first). A row carries `pid`, `kind`, the label, the status word, the exit code in a sentence, and `started_secs`/`ended_secs`. Three of those fields exist because the reader is a page and not a model. The times are **absolute epoch seconds**, derived at read time from the job's `Instant` rather than stored, so a page open for an hour is still right about a job it heard about when it opened, and the ticking is the page's own arithmetic rather than a request; a status word is **the exit code read as a person reads it** (`running`/`completed`/`killed`/`failed`, `-1` being its own word, because a kill and a failure look identical from outside and "failed" sends somebody looking for a bug that is not there); and `path` is what makes a row a door — a command's log or a child's conversation, opened through the same `GET /file` §12 built.
+
+**The change signal is a revision, not the list.** `tools::jobs_revision()` is one process-global `AtomicU64`, bumped when a job is registered and when one settles, and `web.rs` sends an empty `event: jobs` when it differs. Three reasons, each the reason for the next: the *list* is the route (a frame carrying it would be a second answer that can disagree with `GET /jobs`), a *counter* rather than a flag (a reader that missed one change still sees the next, and a boolean cleared by two readers can lose one), and **the tool code grows no way to reach a connection** — nothing in `tools.rs` knows a listener exists, which is why this works for `--web` and `/web` alike with nothing threaded through `main.rs`. It is compared on connect, after every frame the connection forwards (so a job started by a tool call appears during the turn that started it) and on a four-second timer, which exists for the one change with no traffic to ride on: a background command ending while the run is idle.
+
+**The page.** DSH's job popover is the shape, and the two things refused from it are stated in `docs/web-mode.md` §13: the live tail inside the list (the preview column already reads a job's output) and a `stopping` status (nothing on the `Job` records a stop until it has ended, so the word would be a claim the run cannot back). The panel is a `<details>` in the header, present only when there is a job; the summary reads `jobs (2) · 1 running`; each row is a dot coloured by status, the kind, the label, the detail and the ticking `running for 3s` / `took 4s`; a row with a `path` is a button that closes the list and opens the preview; Escape closes the list, and the clock gets cleared with it.
+
+**Measured, and what each layer caught.** `tools::tests` gained two cases (the status word from an exit code, and a real background command snapshotted while it runs and again after `job_op wait`) — and the second one caught a **design mistake**: the first version also sent a `tool` field read from `job.label`, which for a command *is* the command line, so every command row would have carried the same string twice. The field was removed rather than filled in. `tests/cli_output::a_background_command_is_a_job_the_page_can_watch_end` drives the real binary with a stub model that backgrounds a command, watches `/events` for two `event: jobs` frames and polls `/jobs` until it settles, then reads the log's own bytes; with the settle-time `jobs_changed()` removed it fails with "the end of the job was never announced". `tests/web_view.rs` gained `the_jobs_panel_reads_the_route_and_a_row_stays_in_this_page` (the route with the token in a header, the frame as a re-read, the row's press going to `openPreview`, no `fetch` in the tick). `scripts/web-view-test.js` holds the route's shape and the two words with every duration boundary — mutation-checked on the minute boundary. And `scripts/browser-controls-test.js` went from 44 claims to **53**, driving a scripted turn that starts a fifteen-second command *and* a `task` child: the count, the running row's kind and label, the duration **ticking** with nothing fetched, the settled row's `exit code 0` and `took Ns`, the child's row opening the child's own conversation, the command's row opening its log (first the line printed while it ran, then both lines after it settled), and Escape.
+
+**Two claims were written wrong, and both are worth keeping because each looked like a page bug.** One looked for *any* settled row, and the child settles seconds before the command does — so the assertion "the job ended" was true while the log it then read was still half-written. The other marked a row with an `id` and never cleared it, so the second press found the *first* row by `querySelector` and re-opened the command's log when the claim was about the child. A harness that asserts on a list has to say which row it means, in both directions.
 
 ### Still owed on the page
 
@@ -1536,7 +1563,7 @@ each with the reason it is left:
    `The later controls, in a real browser` is the table and the method; what is still unmeasured is a
    short and named list — a native `<select>`'s open dropdown, the sidebar's own menu, and the drag
    grips. **The last two of those three are now driven too, and the pickers are driven from the
-   keyboard**: the harness is 44 claims (was 34, and 20 before that) and covers the sidebar's `⋯` menu
+   keyboard**: the harness is 53 claims (was 44, then 34, then 20) and covers the sidebar's `⋯` menu
    on both kinds of
    row — the open conversation's, whose rename field reaches the run and whose first press sends
    nothing, and a fixture conversation's, whose second press carries *that row's* number and removes
@@ -1549,17 +1576,21 @@ each with the reason it is left:
    belongs to the operating system and no protocol can reach into, and §11's own long answers and
    reconnection, measured on macOS over a different harness.
 
-   **The ten claims the file preview added are the newest, and building them changed the harness
-   itself**: it now starts a *scripted model* (`stubModel`, the SSE shape `tests/task.rs` serves) so a
-   browser claim can be about a real turn — a `write`, a `read` of that file, a `read` of a file that
-   is not there, and a `grep` whose output carries a line number — rather than about a transcript that
-   is empty because nothing was ever asked. That is what makes "the panel shows the file the run just
-   wrote" an end-to-end claim: the bytes in the panel travelled from the model's tool call, through
-   `write`, through `GET /file`, into the page. §12 of `docs/web-mode.md` is the table. Two of these
-   claims found defects rather than confirming the design: the fixed panel covered the block the path
-   was pressed in (the panel is a grid column now, and the harness's own coverage check is what
-   caught it), and `every()` on an empty array — a JavaScript trap in the path splitter — swallowed
-   every bare filename until `Cargo.toml` was in the Node checks.
+   **The ten claims the file preview added changed the harness itself, and the nine the jobs panel
+   added used what that built**: it starts a *scripted model* (`stubModel`, the SSE shape
+   `tests/task.rs` serves) so a browser claim can be about a real turn — a `write`, a `read` of that
+   file, a `read` of a file that is not there, a `grep` whose output carries a line number, and now a
+   background command plus a `task` child — rather than about a transcript that is empty because
+   nothing was ever asked. That is what makes "the panel shows the file the run just wrote" an
+   end-to-end claim: the bytes in the panel travelled from the model's tool call, through `write`,
+   through `GET /file`, into the page. §12 of `docs/web-mode.md` is the preview table and §13 the jobs
+   one. Two of the preview claims found defects rather than confirming the design: the fixed panel
+   covered the block the path was pressed in (the panel is a grid column now, and the harness's own
+   coverage check is what caught it), and `every()` on an empty array — a JavaScript trap in the path
+   splitter — swallowed every bare filename until `Cargo.toml` was in the Node checks. The jobs claims
+   found two defects *in the claims themselves*, which is the same lesson one level in: one accepted
+   any settled row when the child settles before the command, and one reused a row's `id` and so
+   pressed the wrong row the second time.
 4. **Renaming from the sidebar** — ~~a `/name` field exists in the panel and works, and the sidebar
    has no affordance for it~~ **built 2026-09-17**, exactly as this line predicted: a `/name <text>`
    line through `/message` like every other row action, with no route of its own. The row's menu

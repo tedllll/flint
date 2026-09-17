@@ -124,6 +124,38 @@
      the run rather than something to press. The hover says where its control is. */
   .panel .row.reference code, .panel .row.reference span { color: var(--dim); opacity: .75; }
   .panel .row.reference { cursor: help; }
+  /* A job's row: the shape of every other row, with the three things a list of running work needs --
+     a state dot, the kind, and a duration in figures that do not jitter as they tick. `nowrap` on the
+     label because the interesting end of "write me a summary of src/web.rs" is the end, and `title`
+     carries the whole of it. */
+  #jobs .row.job { gap: 7px; }
+  #jobs .row.job .dot {
+    flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--dim); align-self: center;
+  }
+  #jobs .row.job.running .dot { background: var(--warn); }
+  #jobs .row.job.completed .dot { background: var(--ok); }
+  #jobs .row.job.failed .dot, #jobs .row.job.killed .dot { background: var(--bad); }
+  #jobs .row.job .kind {
+    flex: 0 0 auto; font-size: 11px; letter-spacing: .06em; text-transform: uppercase;
+    color: var(--dim);
+  }
+  #jobs .row.job code.label {
+    flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  }
+  /* The ending, when there is one: short, dim, and allowed to shrink before the label does -- the
+     label is what tells two rows apart, and an exit code cut off would be the fact this list
+     exists for. */
+  #jobs .row.job .detail {
+    flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 12px; color: var(--dim);
+  }
+  #jobs .row.job.failed .detail, #jobs .row.job.killed .detail { color: var(--bad); }
+  #jobs .row.job .when {
+    flex: 0 0 auto; font-size: 12px; color: var(--dim);
+    /* Tabular figures: a duration that changes width every second drags the column beside it. */
+    font-variant-numeric: tabular-nums;
+  }
   /* A row that can be read: the same shape as the rows above, made pressable. Reset to look like
      them rather than like a control, because the panel is a list of what the terminal takes and a
      row of chrome would make one command look different from the others. */
@@ -471,6 +503,15 @@
       <details class="panel" id="commands" hidden>
         <summary>commands</summary>
         <div class="body" id="command-list"></div>
+      </details>
+      <!-- The run's background work -- the `task` children and the background commands this process
+           started -- drawn from `GET /jobs`. Hidden until there is one: a run that has started
+           nothing has nothing to show, and a control that says "0" is a control nobody presses.
+           DSH's page has the same thing in its session header; this is that row, read off the same
+           `Job` records `job_op` answers from rather than from a second bookkeeping of its own. -->
+      <details class="panel" id="jobs" hidden>
+        <summary id="jobs-summary">jobs</summary>
+        <div class="body" id="job-list"></div>
       </details>
       <div class="meta" id="meta"></div>
     </header>
@@ -987,6 +1028,60 @@ function bytesLabel(n) {
     if (n >= size) return Math.round(n / size) + " " + unit;
   }
   return n + " bytes";
+}
+
+/// The run's jobs, as `GET /jobs` answers them, sorted the way the panel draws them.
+///
+/// Pure, and deliberately dumb about what a job *is*: it reads the route's fields, keeps the ones
+/// the rows need, and drops anything that is not a job. The order is the run's own -- running
+/// first, newest first -- and it is *kept* rather than re-sorted here, because two lists that
+/// sorted by different rules would show the same jobs in two orders and neither would be wrong.
+function jobsFrom(json) {
+  const listed = json && Array.isArray(json.jobs) ? json.jobs : [];
+  const shown = [];
+  for (const job of listed) {
+    if (!job || typeof job.pid !== "number") continue;
+    shown.push({
+      pid: job.pid,
+      kind: job.kind === "command" ? "command" : "child",
+      label: typeof job.label === "string" ? job.label : "",
+      status: typeof job.status === "string" ? job.status : "running",
+      detail: typeof job.detail === "string" ? job.detail : "",
+      started: Number(job.started_secs) || 0,
+      ended: Number(job.ended_secs) || 0,
+      path: typeof job.path === "string" ? job.path : "",
+    });
+  }
+  return shown;
+}
+
+/// How long a job ran, or has been running, in the words a person reads.
+///
+/// `now` is handed in rather than read from the clock, so the ticking display and the test that
+/// checks it agree about what "three minutes" means without either of them waiting.
+function durationLabel(secs) {
+  const s = Math.max(0, Math.floor(secs));
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m " + String(s % 60).padStart(2, "0") + "s";
+  return Math.floor(s / 3600) + "h " + String(Math.floor((s % 3600) / 60)).padStart(2, "0") + "m";
+}
+
+/// The one line beside a job's row: where it is, or what it ended with.
+///
+/// `Running for` and `Took` rather than a bare number, because the two are different facts: one is
+/// a clock still going and the other is a duration that has stopped. DSH's job list says the same
+/// two words, which is where this came from.
+function jobWhen(job, nowSecs) {
+  if (job.status === "running") {
+    return job.started ? "running for " + durationLabel(nowSecs - job.started) : "running";
+  }
+  const took = job.started && job.ended ? durationLabel(job.ended - job.started) : "";
+  return took ? "took " + took : job.status;
+}
+
+/// Whether a job is still going, which is the only thing that makes the page tick.
+function jobIsLive(job) {
+  return job.status === "running";
 }
 
 /// The token, out of the URL that `--web` printed.
@@ -2081,6 +2176,142 @@ function scrollToLine(text, line) {
 }
 
 // ---------------------------------------------------------------------------
+// the jobs: what this run left running
+// ---------------------------------------------------------------------------
+
+/// The run's jobs as last read, and the clock that repaints the running ones.
+///
+/// A list rather than a document: the panel is a few rows, and the only thing that changes without
+/// a new answer from the route is the elapsed time. Keeping the seconds out of the re-read is what
+/// lets the page tick once a second without asking the run anything.
+let listedJobs = [];
+let jobsClock = null;
+
+/// Read `GET /jobs` and draw it. Everything that changes the list calls this: the `jobs` frame, the
+/// boot, and a `reset` (a run that moved conversations has not changed its jobs, but the frame was
+/// the one thing the page may have missed).
+async function readJobs() {
+  if (!canSend) return;
+  let response;
+  try {
+    response = await fetch("/jobs", { headers: authHeader() });
+  } catch (e) {
+    return; // A page that cannot read has already said so on the stream: see `setHint`.
+  }
+  if (!response.ok) return;
+  let json = null;
+  try {
+    json = await response.json();
+  } catch (e) {
+    return; // Not JSON: nothing this page can draw, and the run's own log has the rest.
+  }
+  paintJobs(jobsFrom(json));
+}
+
+/// Draw the list, and start or stop the clock that keeps a running job's duration honest.
+///
+/// The trigger is hidden when there is nothing: an empty panel in the header would be a control
+/// that opens onto nothing, and the count is the only reason to look.
+function paintJobs(list) {
+  listedJobs = list;
+  const panel = document.getElementById("jobs");
+  const summary = document.getElementById("jobs-summary");
+  const body = document.getElementById("job-list");
+  if (!panel || !summary || !body) return;
+  panel.hidden = listedJobs.length === 0;
+  body.textContent = "";
+  // The count, and a word when something is still going: a count alone cannot say whether the
+  // number is work in progress or a list of things that are done.
+  const live = listedJobs.filter(jobIsLive).length;
+  summary.textContent = listedJobs.length
+    ? "jobs (" + listedJobs.length + ")" + (live ? " · " + live + " running" : "")
+    : "jobs";
+  if (!listedJobs.length) {
+    stopJobsClock();
+    return;
+  }
+  for (const job of listedJobs) body.appendChild(jobRow(job));
+  if (listedJobs.some(jobIsLive)) startJobsClock();
+  else stopJobsClock();
+}
+
+/// One row: the state dot, what kind of job it is, what it was asked, and where it is in time.
+///
+/// A button when the job has somewhere to read -- a child's conversation or a command's log --
+/// because that is the thing a person wants next, and it opens in the same panel a path in the
+/// transcript opens in (`GET /file`, §12). Nothing is drawn as pressable when it has nothing behind
+/// it: a job that has not named its session yet is a row, not a button.
+function jobRow(job) {
+  const row = document.createElement(job.path ? "button" : "div");
+  row.className = "row job " + job.status;
+  if (job.path) {
+    row.type = "button";
+    row.title = job.path;
+    row.addEventListener("click", (e) => {
+      e.preventDefault();
+      // The drawer covers the row it was opened from otherwise -- the same defect the workspace
+      // preview had, and closing the list first is the cheaper answer than a second column.
+      const panel = document.getElementById("jobs");
+      if (panel) panel.open = false;
+      openPreview(job.path, 0);
+    });
+  }
+  row.appendChild(el("span", "dot"));
+  row.appendChild(el("span", "kind", job.kind));
+  // The row's own text: what was asked. A command's command line, or a child's prompt -- and the
+  // whole of it in the tooltip, because a label cut at the width of a panel is not the question.
+  const label = el("code", "label", job.label || "(a job)");
+  label.title = job.label || "";
+  row.appendChild(label);
+  // The fact an ended job leaves behind: its exit code, in the route's own sentence. Drawn as its
+  // own span rather than folded into the duration because the two answer different questions --
+  // how long it took, and whether it worked -- and a row that said only "took 3s" would send a
+  // person into the log to find out which.
+  if (job.detail) {
+    const detail = el("span", "detail", job.detail);
+    detail.title = job.detail;
+    row.appendChild(detail);
+  }
+  row.appendChild(el("span", "when", jobWhen(job, Date.now() / 1000)));
+  return row;
+}
+
+/// Repaint the durations of the running rows, once a second.
+///
+/// Only the `when` spans: rebuilding the rows would take the focus off a row somebody is on, and the
+/// list is not the thing that changed -- the clock is. Nothing is fetched: the route sends absolute
+/// epoch seconds, so this arithmetic is the same one the run would do, and a page that has been open
+/// for an hour is still right about a job it heard about when it opened. A closed panel is not
+/// repainted at all -- there is nothing on screen to be right about -- and the open event calls this
+/// once, so the rows are correct from the moment they appear.
+function tickJobs() {
+  const panel = document.getElementById("jobs");
+  const body = document.getElementById("job-list");
+  if (!panel || !panel.open || !body) return;
+  const rows = body.children || [];
+  const now = Date.now() / 1000;
+  for (let i = 0; i < rows.length && i < listedJobs.length; i += 1) {
+    // Found by class rather than by position: not every row has a detail span (a running job has
+    // nothing to report yet), and an index would then write the duration into the wrong cell.
+    const when = rows[i].querySelector ? rows[i].querySelector(".when") : null;
+    if (when && jobIsLive(listedJobs[i])) when.textContent = jobWhen(listedJobs[i], now);
+  }
+}
+
+/// The clock, which exists only while something is running: a timer that repaints settled rows
+/// would be a wake-up per second for a page whose list is not changing.
+function startJobsClock() {
+  if (jobsClock !== null || typeof setInterval !== "function") return;
+  jobsClock = setInterval(tickJobs, 1000);
+}
+
+function stopJobsClock() {
+  if (jobsClock === null || typeof clearInterval !== "function") return;
+  clearInterval(jobsClock);
+  jobsClock = null;
+}
+
+// ---------------------------------------------------------------------------
 // typing
 // ---------------------------------------------------------------------------
 
@@ -2270,6 +2501,13 @@ async function follow() {
             await readSessions();
             continue;
           }
+          // The run's jobs changed -- one started, or one ended. Like `sessions` this is a route
+          // that went stale rather than a fact, so the page re-reads it: a job that ended while a
+          // background command was running has an exit code the frame does not carry.
+          if (frame.event === "jobs") {
+            await readJobs();
+            continue;
+          }
           // The third named event, and the other half of what a cursor cannot express: what the
           // turn in flight has written so far. State, applied without a cursor -- and the only
           // way a page that loaded, reconnected or was reset mid-turn can learn the part of the
@@ -2410,6 +2648,20 @@ if (typeof document !== "undefined" && document.getElementById) {
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && preview) closePreview();
   });
+
+  // The jobs panel, which is news rather than an answer: opening it repaints the running rows from
+  // the clock, because the durations were last written when the list was read and a panel opened a
+  // minute later would show a minute-old number. Escape closes it for the same reason it closes the
+  // preview: one key means "put that away", wherever the pointer happens to be.
+  const jobsPanel = document.getElementById("jobs");
+  if (jobsPanel) {
+    jobsPanel.addEventListener("toggle", () => {
+      if (jobsPanel.open) tickJobs();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && jobsPanel.open) jobsPanel.open = false;
+    });
+  }
 
   if (servedByFlint()) {
     // Served by a running flint: there is nothing to drop, and the conversation is the
@@ -2584,6 +2836,10 @@ if (typeof document !== "undefined" && document.getElementById) {
       postLog("boot · sidebar drawn");
       readSessions().catch((e) => postLog("sessions failed: " + describe(e)));
       postLog("boot · sessions asked for");
+      // The run's jobs, before the feed has said anything. A page opened while a long build is
+      // running must show it: the `jobs` frame at connect may already have been sent, but the page
+      // booting does not depend on having caught it.
+      readJobs().catch((e) => postLog("jobs failed: " + describe(e)));
     } catch (e) {
       // The boot had no error surface at all: a throw here skipped the sidebar, the sessions and
       // the feed together, and the only thing that arrived was "page opened" -- which is exactly
@@ -2610,6 +2866,7 @@ if (typeof module !== "undefined" && module.exports) {
     paint, feedTrouble, tokenRefused, feedTrace, debugFeed, applyState, showState, fillSelect,
     showToggles, showCommands, showActions, sessionRow, formLine,
     pathParts, asPath, bytesLabel, previewNote, linkNodes, renderBlock, fileRoute,
+    jobsFrom, durationLabel, jobWhen, jobIsLive,
   };
 }
 </script>

@@ -218,7 +218,7 @@ would disagree with.
 
 ## 6. The HTTP surface, small on purpose
 
-Seven routes. No cookies, no HTTP/2, no TLS, no keep-alive, no streaming request bodies.
+Eight routes. No cookies, no HTTP/2, no TLS, no keep-alive, no streaming request bodies.
 
 | Route | Returns |
 |---|---|
@@ -229,11 +229,13 @@ Seven routes. No cookies, no HTTP/2, no TLS, no keep-alive, no streaming request
 | `POST /report` | one command *read* from the browser: same channel, and its answer is captured with the terminal quiet (§11) |
 | `GET /sessions` | the conversations `/resume` can reach, numbered the way `/resume` numbers them |
 | `GET /file` | a file the transcript named, for the preview drawer (§12). `?path=` takes what the transcript says, including a trailing `:line` or `:line:column`; a relative path is resolved against the run's own working directory. `text/plain` with `X-Flint-Line` when a line was named, and `X-Flint-Cut`/`X-Flint-Size` when the file was longer than the preview cap |
+| `GET /jobs` | the `task` children and background commands this run started, as `{"jobs":[…]}` in the run's own order (running first, newest first) — for the header's jobs panel (§13). Each row carries `pid`, `kind`, what was asked, a status word, the exit code in words beside it, absolute epoch seconds for its start and end, and `path`: a child's conversation or a command's log |
 | *`event: sessions`* | not a route but its counterpart: the list has changed, re-read it |
+| *`event: jobs`* | the same for `GET /jobs`: a job started or ended, re-read it |
 | *`event: state`* | the run's own configuration: provider, model, what each provider offers, the toggles, and the command list with §8's class for each row — a row also carries `values` when the page may send that command with an argument the frame names (a *read* on a `panel` row, a line the page types for you on a `selector`), `fields` when the page may collect its answers (one entry per word the line wants, each with the input's kind, the argument's name, and whether the command works without it), and `from` when it destroys something and the argument is one of a list (§11) |
 | `type: command` | what a command answered, on the same stream as the turn's events: `input` and `text` — which is also what a header button's answer arrives on. Carries `panel: true` when the page asked to read it rather than typing it, and `input` is the command's own `send` rather than the line in the one case the line carries a credential (§11) |
 
-**All seven are implemented.** `/session` and `/events` read the session path and the event feed
+**All eight are implemented.** `/session` and `/events` read the session path and the event feed
 through a shared handle, which is what lets `/new` and `/resume` move an open window to the
 conversation the terminal moved to. `/sessions` is the sidebar's source and goes through
 `session::list` — the same function `resolve_session` uses — so the numbers in the page *are*
@@ -1057,4 +1059,106 @@ replacement characters: a lossy conversion would print something no editor would
 text this page can show" is a better answer than a screen of U+FFFD. And there is no highlight on the line a
 hit came from — the panel scrolls to it and says which line it is, and a highlight would be a second
 render path over the file's own text.
+
+---
+
+## 13. The run's background work, on the page
+
+The complaint was the plainest kind: *"现在看不到子代理和后台任务的情况，在 web 页面上面"* — a run's
+children and background commands were invisible in the browser. The terminal has one line for them (the
+notice a job leaves when it ends, and `job_op` for whoever remembers to ask); the page had nothing, so a
+build started and forgotten, or a child left running, could only be found by reading the session file or
+asking the model to interrupt itself.
+
+**The shape is DSH's job popover, and the two things adopted are the two that are about a person.** DSH
+puts a jobs action in the session header that appears only when there is at least one job, opens a list
+of them on a press, sorts running work first, badges each row with its kind, ticks the duration of the
+live ones, and closes on `Escape`. All five are here. Refused: the live-tail of a job's output inside the
+list. That is a reader with a scroll position and a growth rate of its own, and the page already has one
+place a job's output can be read — the preview column §12 built, which a row opens.
+
+**One record, no second bookkeeping.** `GET /jobs` answers with `tools::jobs_snapshot()`, read off the
+same `Job` records `job_op` answers from — the same `finished`, the same `log`/`session`, the same
+`started` — so the page and the tool cannot describe one job two ways. Three fields exist because the
+page is not the model:
+
+- **`started_secs`/`ended_secs` are absolute epoch seconds**, derived at read time from the job's
+  `Instant` (`SystemTime::now() - elapsed`) rather than stored: a stored second field would be the same
+  fact recorded twice, and the point of the absolute clock is that a page which has been open for an
+  hour still shows the true age of a job it heard about when it opened. Ticking is the page's own
+  arithmetic — one `setInterval` that rewrites the `.when` text of the *running* rows, no request.
+- **A status word beside the fact.** `running`, `completed`, `killed`, `failed`, from the exit code
+  alone (`job_status`), with `exit code 0 (finished)` beside it in the row. A kill and a failure look
+  identical from outside, and a row that said "failed" for a kill sends somebody looking for a bug that
+  is not there.
+- **`path`**, so a row is a door: a command's log or a child's conversation, opened through the same
+  `GET /file` a path in the transcript uses. Nothing is drawn pressable when it has nothing behind it —
+  a child that has not named its session yet is a row, not a button.
+
+**The frame is a revision, not a list.** `tools.rs` keeps one `AtomicU64` that changes when a job is
+registered and when one settles; `web.rs` compares it (`send_jobs_if_changed`) and sends an empty
+`event: jobs` when it differs. Three properties fall out of that and each is the reason for the choice:
+
+- **The list is a route.** A frame carrying the jobs would be a second answer that can disagree with
+  `GET /jobs`; empty data means "re-read it", exactly like `event: sessions`.
+- **A counter, not a flag.** A reader that missed one change must still see the next, and a boolean
+  cleared by two readers can lose one. Two changes that arrive together are one frame, which is what the
+  page wants anyway.
+- **The tool code grows no way to reach a connection.** The counter is the whole interface; nothing in
+  `tools.rs` knows a listener exists, which is why this works for `--web` and `/web` alike and why
+  nothing had to be threaded through `main.rs`.
+
+The revision is compared on every frame the connection forwards — so a job started by a tool call
+appears *during* the turn that started it — and on a **four-second timer** (`JOBS_POLL`), which exists
+for the one change with no traffic to ride on: a background command ending while the run is idle. A page
+that is opened while jobs are running is told at connect, because the counter starts at zero for that
+connection.
+
+**What was measured, and what the measuring found.**
+
+- `tools::tests` — `a_jobs_state_word_is_its_exit_code_read_the_way_a_person_reads_it` (pure), and
+  `a_job_is_snapshotted_while_it_runs_and_again_when_it_has_ended`, which starts a real background
+  command and asserts the row's kind, its label, the log path, and that the start is on the wall clock;
+  then waits for it and asserts the same pid with `completed` and an `ended_secs` after its start. This
+  test caught a real design mistake: the first version sent a `tool` field read from `job.label`, which
+  for a *command* is the command line — so every command row would have carried the same string twice.
+  The field was removed rather than filled in: the kind badge already says `command`, and the label is
+  what was asked.
+- `tests/cli_output::a_background_command_is_a_job_the_page_can_watch_end` — the real binary, a stub
+  model that calls `bash` with `background: true`, a live `/events` connection, `GET /jobs` while it
+  runs, then again until it settles, then the log's own bytes. Two `event: jobs` frames are asserted,
+  and the second one is load-bearing: with the settle-time `jobs_changed()` removed the test fails with
+  "the end of the job was never announced", because the forwarded-frame and timer paths see a revision
+  that has not moved.
+- `scripts/web-view-test.js` — the route's shape (`jobsFrom`), the two words and the clock
+  (`jobWhen`/`durationLabel`: `running for 0s` → `1m 12s`, `took 4s`, and no invented duration for a job
+  whose times are missing). Mutation-checked: changing the minute boundary in `durationLabel` fails
+  exactly this check.
+- `scripts/browser-controls-test.js` — nine claims, against a scripted model that starts **both** kinds
+  of job (a fifteen-second `node -e` command and a `task` child). 53/53 held. The claims that could not
+  be made any other way: the duration *ticks* (the same row's text changes while nothing is fetched),
+  a settled row carries `exit code 0` and `took Ns`, a child's row opens the child's own conversation
+  (`…/children/<stamp>.jsonl`, with `say hi` in it), and a command's row opens its log — first with the
+  line it had printed while it was still running, then, pressed again after it ended, with both lines.
+
+Two of those claims were written wrong and are worth recording, because each looked like a page bug and
+was not. The first looked for *any* settled row, and the child settles seconds before the command does —
+so "the job ended" was true, and the log it then read was still half-written. The second marked a row
+with an `id` and never cleared it, so the second press found the *first* row by `querySelector` and
+re-opened the command's log when the claim was about the child. A harness that asserts on a list needs
+to say *which* row it means, in both directions.
+
+**Restraint, and the honest limits.**
+
+- `stopping` is not a status. A stop is a write to a child's stdin or a kill, and neither has a state
+  the `Job` records until it has ended; a status word invented to fill that gap would be a claim the run
+  cannot back. The row says `running` until it is not.
+- `KEEP_FINISHED = 8` is the panel's horizon, and it is the process's, not the page's: a job that fell
+  off the end is still in the session file it wrote, and there is no persisted job list to grow into a
+  second history — the same rule as everywhere else here.
+- A job started by an *earlier* run of flint is not in this list. A child's own conversation is on disk
+  and `flint who` names the run, but "the jobs this process started" is what a handle is, and pretending
+  otherwise would mean deriving a list from files, which is the thing this repository does not do.
+- The panel is in the header, so it is bound by §11's rule: `max-height: 40vh` with the list scrolling
+  inside itself, because a reference list must never be able to push the composer off the screen.
 

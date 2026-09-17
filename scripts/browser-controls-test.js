@@ -385,12 +385,28 @@ async function main() {
     process.exit(2);
   }
   // The scripted model: a file is written, read back, and missed, and a grep prints a line number
-  // -- the four shapes a path appears in a transcript. Then prose, which ends the turn.
+  // -- the four shapes a path appears in a transcript -- then the run's two kinds of job are
+  // started, and prose ends the turn.
+  //
+  // The command is `node -e` rather than a shell builtin: it is the one program this harness knows
+  // is on `PATH` (it is running under it), it prints two lines fifteen seconds apart on every
+  // platform, and those two lines are what the panel has to be able to show afterwards. The `task`
+  // child makes a request of its own, which this same server answers -- a child inherits the
+  // parent's provider -- so the bodies after the `task` are the child's answer and then the
+  // parent's.
+  //
+  // Fifteen seconds, not three: two of the claims below are about a job that is still running when
+  // they are made, and the preview claims in between take several seconds of their own. The log's
+  // second line is what proves a row opens the *command's* output rather than an empty file.
+  const slow = `node -e "console.log('one'); setTimeout(() => console.log('two'), 15000)"`;
   const model = await stubModel([
     toolCall("write", { path: "notes.txt", content: "one\ntwo\nthree\n" }),
     toolCall("read", { path: "notes.txt" }),
     toolCall("read", { path: "gone.txt" }),
     toolCall("grep", { pattern: "two", path: "." }),
+    toolCall("bash", { command: slow, background: true }),
+    toolCall("task", { prompt: "say hi" }),
+    prose("the child's answer"),
     prose("all done"),
   ]);
   const where = scratch(`http://127.0.0.1:${model.port}/v1`);
@@ -880,6 +896,91 @@ async function main() {
         `paths: ${JSON.stringify(labels)}`
     );
 
+    // ---- the run's background work -----------------------------------------
+    // The turn above started a command nobody waits for and a `task` child. Both are in the
+    // transcript as a one-line handle, which is what the model reads; what a *person* reads is this
+    // panel, and none of these claims can be made from the terminal's own text -- a job that ends
+    // while the run is busy is in no transcript line at all.
+    //
+    // Read here, at the start rather than at the end, because two of the claims are about a job that
+    // is still *running*: the command below lives fifteen seconds, and the preview claims after this
+    // take long enough that it would have ended by the time they were done.
+    const panel = await page
+      .waitFor(
+        `(() => { const p = document.getElementById("jobs");
+          if (!p || p.hidden) return null;
+          return { summary: document.getElementById("jobs-summary").textContent,
+                   open: p.open,
+                   rows: document.querySelectorAll("#job-list .row").length }; })()`,
+        "the jobs panel",
+        60
+      )
+      .catch(() => null);
+    // The number on the trigger and the rows under it are the same list, so they are one claim: a
+    // count that disagrees with what the panel shows is worse than no count at all.
+    const counted = panel ? Number((panel.summary.match(/\((\d+)\)/) || [])[1]) : NaN;
+    check(
+      "a run that started work shows it in the header, with the count of it",
+      !!panel && /^jobs \(\d+\)/.test(panel.summary) && counted === panel.rows && panel.rows >= 1,
+      `panel: ${JSON.stringify(panel)}`
+    );
+
+    const running = await page.js(
+      `(() => { const row = document.querySelector("#job-list .row.running");
+        if (!row) return null;
+        const label = row.querySelector("code.label");
+        return { kind: row.querySelector(".kind").textContent,
+                 label: label.textContent, title: label.title,
+                 when: row.querySelector(".when").textContent,
+                 path: row.title, isButton: row.tagName === "BUTTON" }; })()`
+    );
+    check(
+      "a running job's row names its kind and what was asked, and says how long it has been going",
+      !!running &&
+        running.kind === "command" &&
+        running.title.includes("console.log") &&
+        /^running for \d+s$/.test(running.when) &&
+        running.isButton === true,
+      `row: ${JSON.stringify(running)}`
+    );
+
+    // The clock, which is the one thing in this panel that is not a frame from the run: the row was
+    // read once, so the claim is that the *same* row's text changed while nothing was fetched. The
+    // list is opened first, and that is not a convenience -- the tick repaints rows that are on
+    // screen, and a closed list has none.
+    //
+    // Polled rather than read after a sleep: the tick lands on the interval's own second, and a row
+    // painted at 0.9s and repainted at 1.9s reads "0s" twice. Waiting for the *change* is the claim;
+    // how many ticks it took is not.
+    await page.click("summary#jobs-summary");
+    const ticked = await page
+      .waitFor(
+        `(() => { const row = document.querySelector("#job-list .row.running");
+          const when = row && row.querySelector(".when");
+          if (!when || when.textContent === ${JSON.stringify(running && running.when)}) return null;
+          return { when: when.textContent, open: document.getElementById("jobs").open }; })()`,
+        "the duration to tick",
+        20
+      )
+      .catch(() => null);
+    check(
+      "the duration ticks once a second while the job runs, and the list is open to see it",
+      typeof running === "object" &&
+        !!ticked &&
+        ticked.open === true &&
+        /^running for \d+s$/.test(ticked.when),
+      `was ${running && running.when}, now ${JSON.stringify(ticked)}`
+    );
+
+    // Kept outside the scratch home, which a green run deletes: what a list of running work looks
+    // like in this header is a judgement no claim here makes, and a picture is how it gets made.
+    const shotOfJobs = await page.send("Page.captureScreenshot", { format: "png" });
+    if (shotOfJobs.result && shotOfJobs.result.data) {
+      const file = path.join(os.tmpdir(), "flint-jobs.png");
+      fs.writeFileSync(file, Buffer.from(shotOfJobs.result.data, "base64"));
+      console.log(`        screenshot: ${file}`);
+    }
+
     // The block a path sits in is a `summary`, and pressing a path must not also fold the block
     // open: the file would appear and the line that named it would slide away under it.
     const folded = (text, nth = 0) =>
@@ -1029,6 +1130,154 @@ async function main() {
       "Escape closes the panel and leaves the reading alone",
       !!closed && closed.hidden === true && closed.transcript > 0,
       `after Escape: ${JSON.stringify(closed)}`
+    );
+
+    // ---- what the jobs panel does with them --------------------------------
+    // Then the command ends, and the ending is the fact the whole panel exists for: a job nobody
+    // waited for has its exit code nowhere else a person can look. The *command's* row is waited
+    // for, not whichever row settles first -- the child ends long before it, and a claim that the
+    // log below is complete has to be made about the job that wrote it.
+    const settled = await page
+      .waitFor(
+        `(() => { const row = Array.from(document.querySelectorAll("#job-list .row")).find((r) =>
+            /(completed|failed|killed)/.test(r.className) &&
+            (r.querySelector(".kind") || {}).textContent === "command");
+          if (!row) return null;
+          const detail = row.querySelector(".detail");
+          return { status: String(row.className).split(" ").pop(),
+                   detail: detail ? detail.textContent : null,
+                   when: row.querySelector(".when").textContent }; })()`,
+        "the command to end",
+        110
+      )
+      .catch(() => null);
+    check(
+      "a job that ended carries its exit code and how long it took",
+      !!settled &&
+        settled.status === "completed" &&
+        /exit code 0/.test(String(settled.detail)) &&
+        /^took \d+s/.test(settled.when),
+      `row: ${JSON.stringify(settled)}`
+    );
+
+    // The child, which is the other kind: a run this one started, whose output is a conversation
+    // rather than a log. Same row shape, different thing behind it.
+    const child = await page.js(
+      `(() => { const rows = Array.from(document.querySelectorAll("#job-list .row"));
+        const row = rows.find((r) => (r.querySelector(".kind") || {}).textContent === "child");
+        if (!row) return null;
+        const label = row.querySelector("code.label");
+        return { label: label.textContent, path: row.title, isButton: row.tagName === "BUTTON" }; })()`
+    );
+    check(
+      "and a child is the same row, opening the conversation it had instead of a log",
+      !!child && child.label === "say hi" && /children/.test(child.path) && child.isButton === true,
+      `row: ${JSON.stringify(child)}`
+    );
+
+    // Pressing a row is what the panel is for, and the list closes behind it: the panel opens beside
+    // the reading, and a list left open over it would be the same defect the preview's own column
+    // fixed. The id is cleared before it is set, because a row that kept it would be the one every
+    // later press found -- the same id twice, and `querySelector` answers with the first.
+    const openList = async () => {
+      if ((await page.js(`document.getElementById("jobs").open`)) !== true) {
+        await page.click("summary#jobs-summary");
+      }
+    };
+    const pressRow = async (kind) => {
+      await openList();
+      const tagged = await page.js(
+        `(() => { const old = document.getElementById("harness-job");
+          if (old) old.removeAttribute("id");
+          const row = Array.from(document.querySelectorAll("#job-list .row"))
+            .find((r) => (r.querySelector(".kind") || {}).textContent === ${JSON.stringify(kind)});
+          if (!row) return false; row.id = "harness-job"; return true; })()`
+      );
+      if (tagged !== true) return false;
+      await page.click("#harness-job");
+      return true;
+    };
+    const readPanel = () =>
+      page.js(
+        `({ hidden: document.getElementById("preview").hidden,
+            path: document.getElementById("preview-path").textContent,
+            note: document.getElementById("preview-note").textContent,
+            body: document.getElementById("preview-text").textContent,
+            listOpen: document.getElementById("jobs").open })`
+      );
+
+    // The log of a command that is still running: the reader gets what it has printed *so far*, and
+    // the second line is not there yet -- which is the honest answer, and the reason the reload
+    // button exists. Read while it runs so the claim is about a live log rather than a finished one.
+    await pressRow("command");
+    const logShown = await page
+      .waitFor(
+        `document.getElementById("preview-text").textContent.includes("one")
+           ? { body: document.getElementById("preview-text").textContent,
+               path: document.getElementById("preview-path").textContent,
+               listOpen: document.getElementById("jobs").open }
+           : null`,
+        "the command's log in the panel",
+        30
+      )
+      .catch(() => null);
+    check(
+      "pressing a job's row opens what it has printed",
+      !!logShown &&
+        logShown.body.includes("one") &&
+        /background-bash/.test(logShown.path) &&
+        logShown.listOpen === false,
+      `panel: ${JSON.stringify(logShown || (await readPanel()))}`
+    );
+
+    // Then the same row again once the command has ended: the whole of the log, both lines, through
+    // the same press -- which is what "the path is where the output is" means for a finished job.
+    await pressRow("command");
+    const whole = await page
+      .waitFor(
+        `document.getElementById("preview-text").textContent.includes("two")
+           ? { body: document.getElementById("preview-text").textContent }
+           : null`,
+        "the rest of the log",
+        30
+      )
+      .catch(() => null);
+    check(
+      "and the same row again shows the whole of what it printed",
+      !!whole && whole.body === "one\ntwo\n",
+      `panel: ${JSON.stringify(whole || (await readPanel()))}`
+    );
+
+    // The child, which is the other kind: a run this one started, whose output is a conversation
+    // rather than a log. Same row, different thing behind it.
+    await pressRow("child");
+    const childShown = await page
+      .waitFor(
+        `(() => { const text = document.getElementById("preview-text").textContent;
+          if (!text.includes("say hi")) return null;
+          return { path: document.getElementById("preview-path").textContent,
+                   lines: text.split("\\n").length,
+                   head: text.slice(0, 80) }; })()`,
+        "the child's conversation in the panel",
+        30
+      )
+      .catch(() => null);
+    check(
+      "and pressing a child's row opens the child's own conversation",
+      !!childShown && /children/.test(childShown.path) && childShown.lines >= 2,
+      `panel: ${JSON.stringify(childShown || (await readPanel()))}`
+    );
+
+    // Escape, the same key as the preview's: the list is in the header and the panel is beside the
+    // reading, and one key puts away whichever is open.
+    await openList();
+    const listWasOpen = await page.js(`document.getElementById("jobs").open`);
+    await page.key("Escape", 27);
+    const listNow = await page.js(`document.getElementById("jobs").open`);
+    check(
+      "Escape closes the job list too",
+      listWasOpen === true && listNow === false,
+      `open: ${listWasOpen} -> ${listNow}`
     );
   } finally {
     page.close();

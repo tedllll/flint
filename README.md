@@ -682,6 +682,16 @@ path is the path of the process that wrote it, so `src/web.rs` means the run's `
 nothing else; §12 of `docs/web-mode.md` has the rule for what in a line counts as a path and the
 measured record from a real browser.
 
+**The run's background work is in the header.** A `task` child, or a `bash`/`pwsh`/`exec` command
+started with `background: true`, appears in a **jobs** list — one row per job, badged with what it is,
+saying what was asked, and ticking how long it has been going. A job that ends keeps its row and gains
+its exit code in words (`exit code 0 (finished)`) and how long it took, so a build you started and
+forgot about is still there when you come back. Pressing a row opens the job's own output in the panel
+above: a command's log, or a child's conversation. The list is `GET /jobs`, read off the same records
+`job_op` answers from; the page is told to re-read it on an `event: jobs` frame, checked when a job
+starts and when one ends — including a command that ends while the run is idle, which is what the
+four-second timer is for. `docs/web-mode.md` §13.
+
 **What that costs, stated plainly:** a caller who has the port and the token can run the agent,
 because that is what an input box is. What keeps it acceptable is §4 of `docs/web-mode.md` —
 loopback only, the `Host` and `Origin` checks, and a token another origin's page cannot set. Any
