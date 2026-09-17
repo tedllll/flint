@@ -2095,6 +2095,159 @@ async fn a_background_command_is_a_job_the_page_can_watch_end() {
     assert!(path.contains("spill"), "and it is where this run keeps its files: {path:?}");
 }
 
+/// A person can read the run's jobs and end one -- and the page reaches both through its own rows.
+///
+/// The panel is a *reading*: DSH's jobs panel has no kill control either, and until this the only
+/// thing that could end a job was `job_op`, which is a tool and therefore the model's. So a person
+/// watching a build they no longer wanted had nothing to type: `/jobs` lists what this run started
+/// and `/jobs stop <pid>` ends one, and the page is handed both the way it is handed every other
+/// command -- the listing as a report (`POST /report`, the `panel` class) and the stop as a
+/// destructive row whose candidates are the pids the jobs panel is already showing.
+///
+/// The command is deliberately longer than any test would wait: what is being measured is that the
+/// stop arrives, not that the job could have ended on its own.
+#[tokio::test]
+async fn a_person_can_read_the_run_s_jobs_and_stop_one() {
+    let command = if cfg!(windows) {
+        "ping -n 30 127.0.0.1 >NUL & echo never"
+    } else {
+        "sleep 30; echo never"
+    };
+
+    let server = MockServer::start().await;
+    let arguments = serde_json::json!({ "command": command, "background": true }).to_string();
+    let call = serde_json::json!({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0, "id": "call_0",
+                    "function": { "name": "bash", "arguments": arguments },
+                }],
+            },
+        }],
+    });
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(&[
+                    &format!("data: {call}"),
+                    r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+                    "data: [DONE]",
+                ])),
+        )
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream").set_body_string(sse(&[
+            r#"data: {"choices":[{"delta":{"content":"started it"}}]}"#,
+            r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+            "data: [DONE]",
+        ])))
+        .mount(&server)
+        .await;
+
+    let home = test_home("jobs-stop", &server.uri());
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("the working directory");
+    let log = home.join("transcript.txt");
+    let mut child = binary()
+        .arg("--web")
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .current_dir(&work)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::fs::File::create(&log).expect("transcript file"))
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to run flint");
+
+    let (port, token) = port_and_token(&wait_for_url(&log));
+    let mut watching = http_stream(port, "/events", &token);
+    // The frame the page is handed before anything happens: the two rows a person stops a job with
+    // have to be in it, because they are drawn from it.
+    let opening = read_until(&mut watching, "\"type\":\"state\"", 20);
+
+    post_message(port, &token, "start it");
+    let _started = read_until(&mut watching, "event: jobs", 30);
+    // The pid is the page's to hold: its rows carry it, which is what makes it a candidate for the
+    // destructive row below rather than something the page has to parse out of a sentence.
+    let listed = http_get(port, "/jobs", &token);
+    let row: serde_json::Value = serde_json::from_str::<serde_json::Value>(&listed)
+        .unwrap_or_else(|e| panic!("not JSON ({e}): {listed:?}"))["jobs"]
+        .as_array()
+        .and_then(|rows| rows.first().cloned())
+        .unwrap_or_else(|| panic!("the run started a job and the page cannot see it: {listed}"));
+    let pid = row["pid"].as_u64().expect("a pid");
+
+    // `/jobs` as the page asks for it: a *report*, which is the class the row carries in the frame
+    // above. The answer arrives on the same stream as a turn's events, in the panel it opened.
+    let asked = post_to(port, &token, "/report", "/jobs");
+    let report = read_until(&mut watching, "\"panel\":true", 20);
+    // And the stop, as the page's second press sends it: the line the destructive row composes.
+    let stopped = post_message(port, &token, &format!("/jobs stop {pid}"));
+    let _ended = read_until(&mut watching, "event: jobs", 30);
+
+    // The kill has to land, and the list is where a person sees that it did.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut settled: serde_json::Value = row.clone();
+    while std::time::Instant::now() < deadline {
+        let again = http_get(port, "/jobs", &token);
+        settled = serde_json::from_str::<serde_json::Value>(&again)
+            .unwrap_or_else(|e| panic!("not JSON ({e}): {again:?}"))["jobs"]
+            .as_array()
+            .and_then(|rows| rows.first().cloned())
+            .unwrap_or_else(|| panic!("the job disappeared from the list: {again}"));
+        if settled["status"] != "running" {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+
+    drop(watching);
+    drop(child.stdin.take());
+    let exited = wait_for_exit(&mut child, 30);
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit");
+    // Only the command list, so a failure here is readable: the whole `state` frame is one long line
+    // and the interesting part of it is a third of the way in.
+    let commands = opening
+        .split("\"commands\":[")
+        .nth(1)
+        .and_then(|rest| rest.split("],\"model\"").next())
+        .unwrap_or_default();
+    assert!(
+        commands.contains("\"send\":\"/jobs\"") && commands.contains("\"class\":\"panel\""),
+        "the listing is not a row the page can ask for: {commands:?}"
+    );
+    assert!(
+        commands.contains("\"send\":\"/jobs stop\"") && commands.contains("\"from\":\"jobs\""),
+        "the page has no stop to offer, or does not know where its candidates are: {commands:?}"
+    );
+    assert!(
+        asked.contains("202 Accepted"),
+        "the report never reached the run: {asked:?}"
+    );
+    assert!(
+        report.contains(&format!("pid {pid}")) && report.contains("running for"),
+        "the listing a person asked for does not say what is running: {report:?}"
+    );
+    assert!(
+        stopped.contains("202 Accepted"),
+        "the stop line never reached the run: {stopped:?}"
+    );
+    assert_eq!(
+        settled["status"], "killed",
+        "the job was asked to stop and the list does not say so: {settled}"
+    );
+    assert!(
+        settled["detail"].as_str().unwrap_or_default().contains("exit code -1"),
+        "a kill and a failure have to read differently, and this is where: {settled}"
+    );
+}
+
 /// The `debug` namespace says what it knows rather than failing silently.
 #[test]
 fn an_unknown_debug_subcommand_names_the_ones_that_exist() {
@@ -5037,11 +5190,22 @@ async fn a_destructive_row_says_where_its_argument_comes_from() {
         "the row that deletes a provider does not say that its argument is one of the providers, so \
          a page would have to tell the two lists apart by reading the command's name: {opening:?}"
     );
-    // And only those three: a `from` on a report row would have the page offer candidates for a
+    // And the jobs row's argument is one of the jobs the page's own panel is showing, which is the
+    // list a `/jobs stop` can actually take: the pids the panel drew a moment ago.
+    assert!(
+        opening.contains(
+            "\"from\":\"jobs\",\"help\":\"end one of them\",\"label\":\"/jobs stop <pid>\",\"send\":\"/jobs stop\""
+        ),
+        "the row that ends a job does not say that its argument is one of the run's jobs, so the \
+         page would have to guess where a pid comes from: {opening:?}"
+    );
+    // And only those four: a `from` on a report row would have the page offer candidates for a
     // command that reads, and the count is what says the mark is a decision rather than a default.
+    // The fourth arrived with `/jobs stop`, and the count moved deliberately rather than by making
+    // the assertion a `>=`: a fifth mark added without thinking about it should fail here.
     assert_eq!(
         opening.matches("\"from\":").count(),
-        3,
+        4,
         "the frame marks a row as taking its argument from a list when it does not: {opening:?}"
     );
 }

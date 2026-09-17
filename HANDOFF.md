@@ -15,6 +15,21 @@ rather than the list (`docs/web-mode.md` §13). Both were measured in a real bro
 starts its own scripted model, which is what lets a claim be about a real turn rather than an empty
 transcript. The records are in the sections below, and §9 of `ROADMAP.md` now points at them.
 
+**The jobs round has two halves and both are in, the second one last.** Seeing a job you no longer want
+is only useful if you can end it, and until the second half the only door onto that was `job_op`'s
+`stop`, which is a tool: a person who started a ten-minute build by accident had to ask the model to
+stop it, or kill flint and take the child with it. `/jobs` now prints the same listing the panel shows
+and `job_op status` returns (`tools::jobs_report`), `/jobs stop <pid>` ends one through the same
+`tools::stop_job` the tool calls, and the page reaches it as a `danger` row whose candidates are the
+live rows of the jobs panel — the pids already on screen, so nothing new had to be sent for it. The
+defect that came out of building it is the one worth remembering: **a kill's exit status is the shell's,
+not the command's**, so a job a person stopped deliberately was listed as `failed` on Windows
+(`taskkill /T /F` leaves the `cmd.exe` reporting 1) while Unix reported -1 and read correctly. `Job`
+now records that *this* run ended it (`ended_by_us`, set before the signal) instead of inferring it from
+a number afterwards (the budget ending a command counts as this run ending it too, with the note saying
+why). `docs/web-mode.md` §13 has the measured record; the browser harness is **56 of 56** now, up from
+53.
+
 **Before those, the round that was open was §10 of `ROADMAP.md`: "flint as a function a program can call" — the
 agents work landed in front of it, and §10 itself is now done, steps 1–7.** The section is an audit in
 three buckets (what cannot be done at all, what cannot be told apart, what is a hole), the reference
@@ -106,23 +121,24 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 561 passing, 1 ignored on this machine
-(331 lib, 5 in the binary's own tests, 33 `agent_loop`, 69 `cli_output`, 35 `json_output` (7 structured
+As of the commit that carries this file, `cargo test` is 564 passing, 1 ignored on this machine
+(332 lib, 5 in the binary's own tests, 33 `agent_loop`, 70 `cli_output`, 35 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
 be able to read, 4 the answer written where the caller asked, 3 the file inlined into the prompt,
 1 the stream checked on its bytes, 1 how long a turn took),
-7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 26 `web_view`,
+7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 27 `web_view`,
 10 `who`, 15 `task`, 6 `say`),
 and one more on Unix, `tty_hangup`, which is `#![cfg(unix)]` and needs a real pty — as is the Unix
 half of the process-group kill, `a_killed_command_takes_its_children_with_it_on_unix`. `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
-pass, and `node scripts/browser-controls-test.js` is **53 of 53** — the browser harness, run by hand
+pass, and `node scripts/browser-controls-test.js` is **56 of 56** — the browser harness, run by hand
 because CI has no browser, and the only place the two defects in the page's later controls were ever
 visible (the first two were found by the file-preview claims: a fixed panel that covered the block the
 path was pressed in, and a covered path that could not be pressed at all until the block was opened;
 the jobs claims then found two *harness* defects rather than page ones, both recorded in
-`docs/web-mode.md` §13, and each looked like a page bug until it was read properly).
+`docs/web-mode.md` §13, and each looked like a page bug until it was read properly; the three stop
+claims are the ones that hold a kill to reading as `killed`).
 `python examples/python/test_call.py` is 118 checks, all passing (one of them waits out the
 fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from), and
 `python examples/mcp/test_mcp.py` passes its own 23.
@@ -656,7 +672,7 @@ still building when the second landed.
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
 cargo build                                       # the Python and browser checks run this binary
-cargo test                                        # 561 passing, 1 ignored
+cargo test                                        # 564 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed
@@ -1530,6 +1546,18 @@ The other half of the same request: *"现在看不到子代理和后台任务的
 **Measured, and what each layer caught.** `tools::tests` gained two cases (the status word from an exit code, and a real background command snapshotted while it runs and again after `job_op wait`) — and the second one caught a **design mistake**: the first version also sent a `tool` field read from `job.label`, which for a command *is* the command line, so every command row would have carried the same string twice. The field was removed rather than filled in. `tests/cli_output::a_background_command_is_a_job_the_page_can_watch_end` drives the real binary with a stub model that backgrounds a command, watches `/events` for two `event: jobs` frames and polls `/jobs` until it settles, then reads the log's own bytes; with the settle-time `jobs_changed()` removed it fails with "the end of the job was never announced". `tests/web_view.rs` gained `the_jobs_panel_reads_the_route_and_a_row_stays_in_this_page` (the route with the token in a header, the frame as a re-read, the row's press going to `openPreview`, no `fetch` in the tick). `scripts/web-view-test.js` holds the route's shape and the two words with every duration boundary — mutation-checked on the minute boundary. And `scripts/browser-controls-test.js` went from 44 claims to **53**, driving a scripted turn that starts a fifteen-second command *and* a `task` child: the count, the running row's kind and label, the duration **ticking** with nothing fetched, the settled row's `exit code 0` and `took Ns`, the child's row opening the child's own conversation, the command's row opening its log (first the line printed while it ran, then both lines after it settled), and Escape.
 
 **Two claims were written wrong, and both are worth keeping because each looked like a page bug.** One looked for *any* settled row, and the child settles seconds before the command does — so the assertion "the job ended" was true while the log it then read was still half-written. The other marked a row with an `id` and never cleared it, so the second press found the *first* row by `querySelector` and re-opened the command's log when the claim was about the child. A harness that asserts on a list has to say which row it means, in both directions.
+
+### Stopping one: `/jobs`, `/jobs stop <pid>`, and a kill that read as a failure
+
+The second half of the same complaint, and its own commit: `feat: a person can stop a job`. Seeing the run's work was half of it; the other half is that until this landed the only door onto stopping a job was `job_op`'s `stop`, which is a tool. A person who started a ten-minute build by accident had to ask the model to stop it, or kill flint and take the child with it — which is exactly the shape `docs/agents.md` records as the reason the handle exists at all.
+
+**Two commands, and one answer for three readers.** `/jobs` prints `tools::jobs_report(None)` line by line; `job_op status` returns it; the page's panel rows are the same record. `/jobs stop <pid>` goes through `tools::stop_job(pid, None)`, which is the function `job_op`'s `stop` arm now calls — the `status`/`stop` bodies were factored out of the tool so that a person and a model cannot come to disagree about what is running or about what happened when somebody stopped it. The two doors differ in exactly one place, and it is not an oversight: `job_op stop` with no pid acts on the only job in play (a model that has just started one is unambiguous), while `/jobs stop` with no pid is **refused** with a sentence pointing at the listing, because a person typing a kill is naming what to kill and a wrong guess is irreversible. A non-numeric pid and a third word are refused the same way. `ArgFrom::Jobs` is the third candidate list, `word()` reads `"jobs"`, and the page resolves it to `listedJobs.filter(jobIsLive)` — the pids already on screen, so nothing new had to be sent for the feature.
+
+**The defect this found is the part to remember: a kill's exit status is the shell's, not the command's.** The new e2e ran red with `{"detail":"exit code 1 (failed, cause not classified)","status":"failed"}` where the claim was `killed` — Windows `taskkill /PID … /T /F` leaves the `cmd.exe` it signalled reporting **1**, so a job a person stopped deliberately was listed as `failed`, the one word that sends somebody looking for a bug that is not there. Unix reports `-1` (a signal) and had read correctly all along, which is exactly the platform difference a status word must not depend on. `Job` gained `ended_by_us`, set in `kill()` **before** the signal (the supervisor records the exit status as soon as it has one, so a flag set afterwards would sometimes lose the race it exists to win) and in the budget-expiry branch, and the supervisor consults it when it records the status — so `killed` now means *this run ended it*, on both platforms for the same reason. The budget-expiry branch was rewritten with it: it used to read `child.wait()`'s code, which was the number belonging to the shell it had just killed.
+
+**Measured.** `tools::tests` gained `a_job_a_person_stops_reads_as_stopped_and_says_what_the_model_would_be_told`, which starts a real background command, stops it, and asserts the sentence, the row's `status == "killed"` and `exit code -1` in its detail, **and** that the tool's answer is the terminal's answer to the byte (`via_tool.trim() == jobs_report(Some(pid)).trim()`). `tests/cli_output::a_person_can_read_the_run_s_jobs_and_stop_one` reads the two commands out of the opening `state` frame (so a command that stopped being page-reachable fails here rather than in a browser), reports `/jobs` and asserts the panel names the pid, then stops it and polls until the status is no longer `running`. `tests/web_view.rs` gained `the_page_stops_a_job_from_the_rows_it_is_already_showing`. The browser harness went from 53 claims to **56**: the stop row's candidates are the panel's own rows, pressing one leaves a row the page classifies as `killed` with `exit code -1`, and the transcript then says "killed it, and it is gone" — against a second background command the harness now starts (an endless `node -e`) so that the thing being stopped is not work any other claim is waiting on. Mutation-checked twice: the page's `command.from === "jobs"` branch changed to `"jobs-nope"` makes the harness time out waiting for the stop row, and `was_ended_here()` forced to `false` makes the lib test fail with `left: String("failed") right: "killed"`.
+
+**And one census assertion had to move, deliberately.** `a_destructive_row_says_where_its_argument_comes_from` counts the frame's `from` marks and asserted exactly three; `/jobs stop <pid>` is the fourth. It was changed to 4 with the reason written beside it rather than loosened to `>=`, so a fifth mark added without thinking still fails there.
 
 ### Still owed on the page
 

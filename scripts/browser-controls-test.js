@@ -398,13 +398,19 @@ async function main() {
   // Fifteen seconds, not three: two of the claims below are about a job that is still running when
   // they are made, and the preview claims in between take several seconds of their own. The log's
   // second line is what proves a row opens the *command's* output rather than an empty file.
+  //
+  // The second command is the other half of the panel: a job that is *stopped*, which needs one that
+  // will not end on its own -- sixty seconds, where the claims that wait for an ending have to say
+  // which of the two commands they are waiting for.
   const slow = `node -e "console.log('one'); setTimeout(() => console.log('two'), 15000)"`;
+  const endless = `node -e "console.log('alive'); setTimeout(() => console.log('never'), 60000)"`;
   const model = await stubModel([
     toolCall("write", { path: "notes.txt", content: "one\ntwo\nthree\n" }),
     toolCall("read", { path: "notes.txt" }),
     toolCall("read", { path: "gone.txt" }),
     toolCall("grep", { pattern: "two", path: "." }),
     toolCall("bash", { command: slow, background: true }),
+    toolCall("bash", { command: endless, background: true }),
     toolCall("task", { prompt: "say hi" }),
     prose("the child's answer"),
     prose("all done"),
@@ -1184,14 +1190,20 @@ async function main() {
         await page.click("summary#jobs-summary");
       }
     };
-    const pressRow = async (kind) => {
+    // `needle` is what tells two rows of the same kind apart, and this turn starts two commands on
+    // purpose: the one whose log is read below, and the one the stop at the end of this section ends.
+    const pressRow = async (kind, needle) => {
       await openList();
       const tagged = await page.js(
         `(() => { const old = document.getElementById("harness-job");
           if (old) old.removeAttribute("id");
           const row = Array.from(document.querySelectorAll("#job-list .row"))
-            .find((r) => (r.querySelector(".kind") || {}).textContent === ${JSON.stringify(kind)});
-          if (!row) return false; row.id = "harness-job"; return true; })()`
+            .find((r) => ((r.querySelector(".kind") || {}).textContent === ${JSON.stringify(kind)}) &&
+                         (!${JSON.stringify(needle || "")} ||
+                          ((r.querySelector("code.label") || {}).textContent || "")
+                            .includes(${JSON.stringify(needle || "")})));
+          if (!row) return false; row.id = "harness-job";
+          row.scrollIntoView({ block: "center" }); return true; })()`
       );
       if (tagged !== true) return false;
       await page.click("#harness-job");
@@ -1209,7 +1221,7 @@ async function main() {
     // The log of a command that is still running: the reader gets what it has printed *so far*, and
     // the second line is not there yet -- which is the honest answer, and the reason the reload
     // button exists. Read while it runs so the claim is about a live log rather than a finished one.
-    await pressRow("command");
+    await pressRow("command", "15000");
     const logShown = await page
       .waitFor(
         `document.getElementById("preview-text").textContent.includes("one")
@@ -1232,7 +1244,7 @@ async function main() {
 
     // Then the same row again once the command has ended: the whole of the log, both lines, through
     // the same press -- which is what "the path is where the output is" means for a finished job.
-    await pressRow("command");
+    await pressRow("command", "15000");
     const whole = await page
       .waitFor(
         `document.getElementById("preview-text").textContent.includes("two")
@@ -1267,6 +1279,74 @@ async function main() {
       !!childShown && /children/.test(childShown.path) && childShown.lines >= 2,
       `panel: ${JSON.stringify(childShown || (await readPanel()))}`
     );
+
+    // ---- stopping a job from the page --------------------------------------
+    // The panel above is a reading, and that is deliberate: a misclick in a panel is a misclick, and
+    // DSH's own jobs panel has no kill control either. What a person gets instead is a *command* --
+    // `/jobs stop <pid>` -- and the two-press shape every destructive row already has, with the pids
+    // the panel is showing as its candidates. So this is the whole path checked at once: the row
+    // offers only jobs that are still running, the line that goes out names the pid of the job that
+    // was still running, that job reads `killed` afterwards rather than `failed`, and the run says
+    // what it did -- which is the only witness that a real process ended rather than a row repainted.
+    if ((await page.js(`document.getElementById("commands").open`)) !== true) {
+      await page.click("#commands summary");
+    }
+    await page.waitFor(ROW("/jobs stop <pid>"), "the /jobs stop row");
+    await page.click("#harness-target");
+    const choice = await page
+      .waitFor(
+        `(() => { const rows = Array.from(document.querySelectorAll("#command-list button.row.danger"));
+           const row = rows.find((r) => /60000/.test((r.querySelector("span") || {}).textContent || ""));
+           if (!row) return null;
+           row.id = "harness-stop";
+           row.scrollIntoView({ block: "center" });
+           return row.querySelector("code").textContent; })()`,
+        "the running job's pid",
+        25
+      )
+      .catch(() => null);
+    check(
+      "the stop's candidates are the pids the jobs panel is showing",
+      typeof choice === "string" && /^\/jobs stop \d+$/.test(choice),
+      `choice: ${JSON.stringify(choice)}`
+    );
+    const beforeStop = before();
+    if (typeof choice === "string") await page.click("#harness-stop");
+    const stoppedRow = await page
+      .waitFor(
+        `(() => { const row = Array.from(document.querySelectorAll("#job-list .row")).find((r) =>
+             /(^| )killed( |$)/.test(String(r.className)));
+           if (!row) return null;
+           return { status: String(row.className).split(" ").pop(),
+                    detail: (row.querySelector(".detail") || {}).textContent,
+                    label: (row.querySelector("code.label") || {}).textContent }; })()`,
+        "the job to read as killed",
+        40
+      )
+      .catch(() => null);
+    check(
+      "pressing it twice ends that job, and the panel says killed rather than failed",
+      !!stoppedRow &&
+        stoppedRow.status === "killed" &&
+        /60000/.test(String(stoppedRow.label)) &&
+        /exit code -1/.test(String(stoppedRow.detail)),
+      `row: ${JSON.stringify(stoppedRow)}`
+    );
+    // The terminal is polled rather than read once: the row above is the frame arriving, and the
+    // run's own line is written by the REPL as it handles the message, which is a moment later.
+    let said = "";
+    for (let tries = 0; tries < 30 && !/killed it, and it is gone/.test(said); tries += 1) {
+      await sleep(100);
+      said = flint.text().slice(beforeStop);
+    }
+    check(
+      "and the run says what it did, in the terminal the page is a window on",
+      /killed it, and it is gone/.test(said),
+      `terminal gained: ${JSON.stringify(said)}`
+    );
+    // Closed again, because the claim below is about the *jobs* list's own Escape and the command
+    // panel is another open thing on the page.
+    await page.click("#commands summary");
 
     // Escape, the same key as the preview's: the list is in the header and the panel is beside the
     // reading, and one key puts away whichever is open.

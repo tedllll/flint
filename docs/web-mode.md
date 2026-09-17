@@ -1162,3 +1162,95 @@ to say *which* row it means, in both directions.
 - The panel is in the header, so it is bound by §11's rule: `max-height: 40vh` with the list scrolling
   inside itself, because a reference list must never be able to push the composer off the screen.
 
+### Stopping one, and the word a kill is reported under — measured, 2026-09-17
+
+The listing made the run's work visible; the same complaint had a second half, because seeing a job you
+no longer want is only useful if you can end it. Until this round the *only* door onto that was
+`job_op`'s `stop`, which is a tool: a person who started a ten-minute build by accident had to ask the
+model to stop it, or kill flint and take the child with it. So the round that added the panel and the
+listing added the door beside them, in the two places a person already is.
+
+**The terminal gets two commands, and they are the two halves of the record.** `/jobs` prints
+`tools::jobs_report` line by line; `/jobs stop <pid>` ends one. Both are the same functions `job_op`
+answers from -- `jobs_report(None)` is what `action: "status"` returns, and `stop_job(pid, None)` is
+what `action: "stop"` calls -- which is the property worth having rather than three sentences that agree
+today: a person and a model cannot come to disagree about what is running or about what happened when
+somebody stopped it. The one place the two doors deliberately differ is the argument. `job_op stop`
+with no pid acts on the only job in play, because a model that has just started one is unambiguous;
+`/jobs stop` with no pid is **refused**, with a sentence pointing at the listing, because a person
+typing a kill is naming what to kill and the wrong guess is irreversible. A pid that is not a number or
+a third word is refused the same way.
+
+**The page's door is the row that was already there.** `/jobs stop <pid>` is a `destroying` command, so
+it renders in the `danger` group and takes two presses -- and the second press offers *candidates*, which
+the page takes from `ArgFrom::Jobs` resolving to the jobs panel's own rows. That is the third candidate
+list (after the sidebar's session numbers and the state frame's provider names) and it is the one that
+shows the pattern was worth having: the pids a person is looking at *are* the values the command takes,
+so nothing new had to be sent and the panel did not need a second representation to be aimable. Two
+rules come with it, both asserted in `tests/web_view.rs`: only the **live** rows are offered, because a
+job that has ended cannot be stopped and a choice whose only outcome is the sentence saying so wastes a
+press; and each choice's label is `kind + " " + label` rather than a bare pid, because two numbers in a
+menu are a menu nobody can use.
+
+**A kill's exit status is the shell's, not the command's, and the panel was reporting it as a
+failure.** This is the part of the round worth reading, because the code that fixed it is three lines
+and the reasoning is the whole reason it is three lines. Windows `taskkill /PID … /T /F` leaves the
+`cmd.exe` it signalled reporting **1**, so a background command a person stopped deliberately was
+listed as `failed` -- the one word that sends somebody looking for a bug that is not there. On Unix the
+same stop reports `-1` (a signal) and read correctly, which is exactly the kind of difference a status
+word must not depend on. The first version of the e2e test failed on the *reason for the right* answer
+being absent: `{"detail":"exit code 1 (failed, cause not classified)","status":"failed"}` where the
+claim was `killed`.
+
+The fix records the decision where it is made rather than inferring it from a number afterwards: `Job`
+gained `ended_by_us`, set in `Job::kill()` **before** the signal goes out (the supervisor records the
+exit status as soon as it has one, so a flag set afterwards would sometimes lose the race it exists to
+win) and in the budget-expiry branch, and the supervisor consults it when it records the status. The
+budget ending a command is deliberately the same word: the fact a reader is looking for is "did it stop
+on its own, or was it stopped", and the note the budget leaves behind is what says why. So `killed` now
+means *this run ended it*, and it is true on both platforms for the same reason.
+
+**What was measured.**
+
+- `tools::tests` -- `a_job_a_person_stops_reads_as_stopped_and_says_what_the_model_would_be_told`
+  starts a real background command, stops it through `stop_job`, and asserts the sentence ("killed it,
+  and it is gone"), the row's `status == "killed"` with `exit code -1` in its detail, and that the text
+  the *tool* would have returned is the text `/jobs` prints (`via_tool.trim() ==
+  jobs_report(Some(pid)).trim()`), which is the "two doors, one answer" property held to the byte rather
+  than asserted in prose.
+- `tests/cli_output::a_person_can_read_the_run_s_jobs_and_stop_one` -- the real binary, a stub model
+  that starts a background command, and the page's own routes: it reads the opening `state` frame and
+  asserts `/jobs` and `/jobs stop` are on it with `panel` and `jobs` as their `from` (parsed out of the
+  frame, so a command that stopped being page-reachable fails here and not in a browser), reads
+  `GET /jobs` for the pid, reports `/jobs` and asserts the panel names that pid and says `running for`,
+  then stops it and polls until the status is no longer `running`.
+- `tests/web_view.rs` -- `the_page_stops_a_job_from_the_rows_it_is_already_showing` pins the four
+  load-bearing expressions of the candidate list (`command.from === "jobs"`, `listedJobs`,
+  `jobIsLive(job)`, `String(job.pid)` and the label) inside the `const choices` body.
+- `scripts/browser-controls-test.js` -- three more claims in a real browser against the scripted model,
+  which now starts a **second** background command (an endless `node -e` that prints one line and then
+  sleeps for a minute, so there is something to stop that no other claim is waiting on): the stop row's
+  candidate list is the panel's own rows (`/^\/jobs stop \d+$/`), pressing it leaves a row the page
+  classifies as `killed` with `exit code -1` in its detail, and the transcript then says "killed it, and
+  it is gone". **56/56 held** (53 before).
+- Mutation-checked, both directions. Changing the page's `command.from === "jobs"` branch makes the
+  harness fail with "timed out waiting for the /jobs stop row" -- the candidate list is load-bearing,
+  without it the row renders as an unpressable reference. Making `was_ended_here()` return false makes
+  the lib test fail with `left: String("failed") right: "killed"` -- the flag, not the exit code, is what
+  the status word is read from.
+
+**Restraint, and the honest limits.**
+
+- **The panel still has no kill control, on purpose.** The row is a door (it opens the log or the child's
+  conversation), and a second gesture on it would have to be a different gesture on the same target --
+  exactly the ambiguity that made a browser harness assert on the wrong row in the previous round. The
+  person's stop is a command, and the command is reachable from the page through the same command panel
+  as everything else.
+- `stopping` is still not a status, for §13's original reason. A stop is a write or a signal, and the
+  row says `running` until it is not -- which is now also why the *candidate* list is filtered to live
+  jobs rather than the row being rewritten.
+- **The 20-second window is flint's, and a job that outlasts it says so.** A child asked to stop may
+  finish the thought it was on; a command whose kill has not landed yet is reported as exactly that,
+  with the job's own budget named as what ends it either way. Nothing waits forever, and nothing claims
+  a job is gone because a signal was sent.
+

@@ -30,14 +30,14 @@ whoever is changing the code — a person or a model driving it.
 
 | Path | What lives there |
 |---|---|
-| `src/main.rs` | argument parsing, the REPL, slash commands, one-shot `exec`, and the input reader the key thread and the hangup watcher belong to |
+| `src/main.rs` | argument parsing, the REPL, slash commands (including `/jobs` and `/jobs stop <pid>`, a person's door onto the same record the page and `job_op` read), one-shot `exec`, and the input reader the key thread and the hangup watcher belong to |
 | `src/agent.rs` | the tool loop: build the prompt, call the model, run tools, persist events |
 | `src/event.rs` | the one enum a turn's events go through — provider deltas and agent activity alike — so the UI knows one vocabulary |
 | `src/sink.rs` | what a turn's events *become*: the transcript, the status line and the page's stream, shared by the REPL and `examples/live_turn.rs` rather than copied |
 | `src/attach.rs` | `@path` in a one-shot prompt: which names are files, the inline block the model reads, and the 256 KB cap |
 | `src/provider.rs` | the OpenAI-compatible client, streaming, retries, usage |
 | `src/engine.rs` | bringing a *local* model engine up and letting it go: a provider's `start`/`stop` commands, and the derived command for the three engines flint knows |
-| `src/tools.rs` | the tool set (`task`/`tasks` for children — a handle at once, `background: false` when the next step needs the answer — `bash`/`pwsh`/`exec` with `background: true` for a command nobody waits for, `job_op` for either kind of job, and the notice a job that ends leaves behind), and the read-before-mutate gate |
+| `src/tools.rs` | the tool set (`task`/`tasks` for children — a handle at once, `background: false` when the next step needs the answer — `bash`/`pwsh`/`exec` with `background: true` for a command nobody waits for, `job_op` for either kind of job, and the notice a job that ends leaves behind), `jobs_report`/`stop_job` (the same listing and the same stop for a person, a page and a model — one answer, three doors, with `ended_by_us` recording that *this* run ended a job so a kill never reads as a failure), and the read-before-mutate gate |
 | `src/patch.rs` | the `apply_patch` format, parsed and applied — pure functions |
 | `src/term.rs` | the inline viewport: scroll region, answer strip, status clock |
 | `src/display.rs` | how a tool call and its result read in the transcript |

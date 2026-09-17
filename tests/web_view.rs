@@ -184,6 +184,41 @@ fn the_jobs_panel_reads_the_route_and_a_row_stays_in_this_page() {
     );
 }
 
+/// The stop a person has on the page comes from the list the page is already showing.
+///
+/// A destructive row takes two presses, and the second one offers the *choices* -- which the page
+/// takes from a list it already holds rather than from the frame, because the frame is a menu of
+/// commands and a candidate is not a command. For `/jobs stop <pid>` that list is the jobs panel's
+/// own rows: the pids are already on screen, which is what makes the stop a thing a person can aim.
+/// Two rules come with it. Only the *live* jobs are offered -- a job that has ended cannot be
+/// stopped, and a choice whose only outcome is a sentence saying so is a choice that wastes a press.
+/// And the choice's label says *which* job, because two pids in a menu that are bare numbers are a
+/// menu nobody can use.
+#[test]
+fn the_page_stops_a_job_from_the_rows_it_is_already_showing() {
+    let body = from("const choices =", 22);
+    assert!(
+        body.contains("command.from === \"jobs\""),
+        "the third list of candidates is not resolved:\n{body}"
+    );
+    assert!(
+        body.contains("listedJobs"),
+        "the candidates are the jobs panel's rows, not a second list:\n{body}"
+    );
+    assert!(
+        body.contains("jobIsLive(job)"),
+        "a job that has already ended is not something to stop:\n{body}"
+    );
+    assert!(
+        body.contains("String(job.pid)"),
+        "the value sent is the pid, and it is the thing the command takes:\n{body}"
+    );
+    assert!(
+        body.contains("job.kind + \" \" + job.label"),
+        "and the choice says which job it is:\n{body}"
+    );
+}
+
 /// A file the page cannot show says why, in the route's own words.
 ///
 /// The alternative -- an empty panel, or a spinner that stops -- is the failure this project keeps

@@ -190,6 +190,8 @@ Inside the REPL:
 | `/hear-peers [on\|off]` | relay messages from `flint say` to the model (default off) |
 | `/say <text>` | leave a message for whoever else is working in this directory (`--to <pid>` first to address one) |
 | `/tools` | list tools |
+| `/jobs` | the background work this run started, with each job's pid and what it is doing |
+| `/jobs stop <pid>` | end one of them (a child is asked, a command is killed) |
 | `/skills [name]` | list skills, or print one the way the model would get it |
 | `/sessions` | list past sessions, numbered |
 | `/resume <n\|id>` | switch to one of them, without restarting |
@@ -691,6 +693,14 @@ above: a command's log, or a child's conversation. The list is `GET /jobs`, read
 `job_op` answers from; the page is told to re-read it on an `event: jobs` frame, checked when a job
 starts and when one ends — including a command that ends while the run is idle, which is what the
 four-second timer is for. `docs/web-mode.md` §13.
+
+**And stopping one is a command, not a button.** `/jobs` prints the same listing in the terminal, with
+each job's pid, and `/jobs stop <pid>` ends one: a child is *asked* to stop — `/stop` on its stdin, so it
+keeps the half of an answer it had drawn — while a command is killed, and the sentence you get back says
+which happened. The page's command panel offers the same line, and its candidates are the live rows of
+the jobs panel you are already looking at, which is why nothing had to be sent for it. A job this run
+ended reads as `killed`, never `failed`: a kill's exit status is the shell's, and on Windows a killed
+`cmd.exe` reports 1. `docs/web-mode.md` §13.
 
 **What that costs, stated plainly:** a caller who has the port and the token can run the agent,
 because that is what an input box is. What keeps it acceptable is §4 of `docs/web-mode.md` —

@@ -1321,10 +1321,14 @@ function showCommands(doc) {
       // A destructive row is the one class where a single press could destroy work, so it takes two
       // deliberate presses and the second one is a row that prints the line it will send. The first
       // press opens the choices, taken from the list the frame named -- which the page already
-      // holds: the sidebar's own numbers, or the provider names from the state frame -- and the
-      // second sends `send + " " + value`, the same composition as everywhere else. `doc.confirm`
-      // is that state, and it is only the row: nothing has been sent while it is open, so there is
-      // no countdown to get wrong and nothing to disarm on a timer.
+      // holds: the sidebar's own numbers, the provider names from the state frame, or the pids in
+      // the jobs panel it is looking at -- and the second sends `send + " " + value`, the same
+      // composition as everywhere else. `doc.confirm` is that state, and it is only the row: nothing
+      // has been sent while it is open, so there is no countdown to get wrong and nothing to disarm
+      // on a timer.
+      //
+      // A job's candidates are only the *live* ones: a job that has ended cannot be stopped, and
+      // offering it would be a choice whose only outcome is the sentence saying so.
       const choices =
         command.from === "sessions"
           ? sessions.map((s) => ({ value: String(s.n), label: s.label }))
@@ -1332,7 +1336,11 @@ function showCommands(doc) {
             ? ((doc.state && Array.isArray(doc.state.providers) ? doc.state.providers : [])
                 .filter((p) => p && typeof p.name === "string")
                 .map((p) => ({ value: p.name, label: p.name })))
-            : null;
+            : command.from === "jobs"
+              ? listedJobs
+                  .filter((job) => jobIsLive(job))
+                  .map((job) => ({ value: String(job.pid), label: job.kind + " " + job.label }))
+              : null;
       if (className === "danger" && choices) {
         if (doc.confirm && doc.confirm.send === send) {
           const back = el("button", "back", "\u2039 commands");

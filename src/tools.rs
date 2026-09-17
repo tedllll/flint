@@ -894,6 +894,15 @@ struct Job {
     /// `wait`, a `stop` and the report itself all set it, so a model that collected the answer is not
     /// told the job ended afterwards, and a model that was told is not told again on the next request.
     reported: std::sync::atomic::AtomicBool,
+    /// Whether *this run* is what ended it.
+    ///
+    /// A kill's exit status is the shell's, not the command's: on Windows a `taskkill /T /F` leaves
+    /// `cmd.exe` reporting 1, so a job a person stopped deliberately would be listed as `failed` --
+    /// the one word that sends somebody looking for a bug that is not there. Measured while building
+    /// `/jobs stop`: the same stop on Unix reports -1 (a signal) and read correctly, which is exactly
+    /// the kind of difference a status word has to be independent of. So the truth is recorded where
+    /// the decision is made rather than inferred from a number afterwards.
+    ended_by_us: std::sync::atomic::AtomicBool,
     /// The budget that is enforced on it whether or not anyone is waiting.
     timeout_secs: u64,
     /// The child's stdin, kept here rather than in the future that started it: `/stop` has to be
@@ -1161,6 +1170,19 @@ impl Job {
         self.reported.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// Note that this run is ending it, before the signal goes out.
+    ///
+    /// Before, not after: the supervisor records the exit status as soon as it has one, and a flag
+    /// set afterwards would sometimes lose the race it exists to win.
+    fn ended_here(&self) {
+        self.ended_by_us
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn was_ended_here(&self) -> bool {
+        self.ended_by_us.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Wait for the child to end, or give up after `limit`.
     ///
     /// The notify is registered before the value is read, so a child that ends between the two is
@@ -1244,6 +1266,9 @@ impl Job {
     /// `kill` command: no shell spells "the group" the same way twice, and the tool that started
     /// this is not going to hand a group id to a parser it does not control.
     fn kill(&self) {
+        // Before the signal, so the status word this ends up under is the one that is true: see
+        // `ended_by_us`.
+        self.ended_here();
         #[cfg(windows)]
         {
             let pid = self.pid.to_string();
@@ -2161,6 +2186,7 @@ async fn start_background_command(
         // Always background: this function exists for the calls that said so.
         background: true,
         reported: std::sync::atomic::AtomicBool::new(false),
+        ended_by_us: std::sync::atomic::AtomicBool::new(false),
         timeout_secs,
         // Nothing is ever written to a command's stdin after it starts: the payload, when there is
         // one, has already gone in through the detached writer above.
@@ -2192,7 +2218,14 @@ async fn start_background_command(
             Ok(status) => {
                 tree.defuse();
                 (
-                    status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1),
+                    // A job this run ended reads as killed whatever the shell said, for the reason
+                    // `ended_by_us` gives: the number belongs to the shell that was signalled, not to
+                    // the command somebody stopped.
+                    if supervisor.was_ended_here() {
+                        -1
+                    } else {
+                        status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1)
+                    },
                     String::new(),
                 )
             }
@@ -2200,15 +2233,16 @@ async fn start_background_command(
                 // Out of budget. The guard fires *here* rather than at the end, for the reason its
                 // own comment gives: `/T` walks the shell's children, and once the shell is gone
                 // they are reparented and cannot be found any more.
+                //
+                // The budget ending a command is this run ending it too -- the same word, because the
+                // fact a reader is looking for is "did it stop on its own or was it stopped", and the
+                // *note* below is what says why.
+                supervisor.ended_here();
                 drop(tree);
                 let _ = child.start_kill();
-                let code = child
-                    .wait()
-                    .await
-                    .map(|s| s.code().unwrap_or(-1))
-                    .unwrap_or(-1);
+                let _ = child.wait().await;
                 (
-                    code,
+                    -1,
                     format!("\nkilled after {timeout_secs}s: the command's budget ran out\n"),
                 )
             }
@@ -4646,8 +4680,17 @@ fn job_for(pid: Option<u32>, action: &str) -> Result<std::sync::Arc<Job>> {
     }
 }
 
-/// Every job this run started, in the words of the tool that has to answer for them.
-fn status_text(pid: Option<u32>) -> String {
+/// Every job this run started, in the words whoever is asking reads it in.
+///
+/// Three doors onto one answer: `job_op` with `action: "status"` is the model's, `/jobs` typed at the
+/// terminal is a person's, and the page's panel row is the same line sent as a report -- so the
+/// listing a person sees and the listing the model is given cannot come to disagree about what is
+/// running. One function rather than three, for the reason `docs/agents.md` gives about the handle
+/// itself: two readers of one record should not be two implementations of it.
+///
+/// The sentence is written for a reader who is thinking ("`wait` collects what it said") rather than
+/// for one who is scanning; the page's panel is where it is read as prose.
+pub fn jobs_report(pid: Option<u32>) -> String {
     match pid {
         Some(pid) => match job_by_pid(pid) {
             Some(job) => job.describe(),
@@ -4672,6 +4715,73 @@ fn status_text(pid: Option<u32>) -> String {
                     .join("\n")
             }
         }
+    }
+}
+
+/// End a job this run started, and say what happened.
+///
+/// Two doors onto one behaviour, for the reason `jobs_report` gives: `job_op` with
+/// `action: "stop"` is the model's, and `/jobs stop <pid>` typed at the terminal (or sent from the
+/// page's own destructive row) is a person's. The two ends of it are deliberately different and the
+/// difference is the point: a child is **asked** -- it is a run, and `/stop` lets it finish the
+/// thought it was on -- while a command is **killed**, because there is nothing to ask. A person
+/// stopping their own run's work cares about exactly that difference, so it is in the sentence they
+/// get back rather than in a comment here.
+///
+/// `timeout_secs` is how long it has to go; the caller's default (20 s) is `job_op`'s, and the
+/// terminal command passes none because a person is reading the answer rather than waiting on it --
+/// both land on the same number in `stop_job` for the same reason the timeout has to come due
+/// somewhere: the job's own budget is the last word either way.
+pub async fn stop_job(pid: Option<u32>, timeout_secs: Option<u64>) -> Result<String> {
+    let job = job_for(pid, "stop")?;
+    if job.has_finished() {
+        // Reading this line is reading the job: it has ended, so the report on the next request
+        // would be news this call has just delivered.
+        job.mark_reported();
+        return Ok(format!(
+            "it had already ended, so there was nothing to stop; `wait` collects what it {}.\n{}",
+            match job.kind {
+                JobKind::Child => "said",
+                JobKind::Command => "printed",
+            },
+            job.describe()
+        ));
+    }
+    let ended_how = match job.kind {
+        JobKind::Child => {
+            if !job.ask_to_stop().await {
+                return Ok(format!(
+                    "could not ask pid {} to stop: its stdin is closed, which means it has just \
+                     ended.\n{}",
+                    job.pid,
+                    job.describe()
+                ));
+            }
+            "asked to stop, and it did -- keeping the half of an answer it had drawn"
+        }
+        JobKind::Command => {
+            job.kill();
+            "killed it, and it is gone -- what it had already written is still in its log"
+        }
+    };
+    let limit = timeout_secs.unwrap_or(20);
+    match job.wait(Some(Duration::from_secs(limit))).await {
+        Some(finished) => Ok(format!("{ended_how}.\n{}", job.render(&finished))),
+        None => Ok(format!(
+            "{}; it is still going {}s later. Its own budget of {}s ends it either way.\n{}",
+            match job.kind {
+                // A child that ignores `/stop` is a run choosing to finish the thought it was on,
+                // and its own budget is what ends it.
+                JobKind::Child => format!("asked pid {} to stop", job.pid),
+                // A command that survives a `taskkill /T /F` is a kill that has not landed yet --
+                // there is nothing for it to be deliberating about.
+                JobKind::Command =>
+                    format!("killed pid {}, and the kill has not landed yet", job.pid),
+            },
+            limit,
+            job.timeout_secs,
+            job.describe()
+        )),
     }
 }
 
@@ -4724,7 +4834,7 @@ impl Tool for JobOpTool {
             .and_then(|value| value.as_u64())
             .filter(|secs| *secs > 0);
         match action.as_str() {
-            "status" => Ok(status_text(pid)),
+            "status" => Ok(jobs_report(pid)),
             // A window on a running command, not a collection of it: the answer to "is it still
             // getting anywhere?" arrives while the job is still going, which is the whole reason
             // there is a file to read. Reading it does not consume the job, so the notice at the end
@@ -4747,62 +4857,7 @@ impl Tool for JobOpTool {
                     )),
                 }
             }
-            "stop" => {
-                let job = job_for(pid, "stop")?;
-                if job.has_finished() {
-                    // Reading this line is reading the job: it has ended, so the report on the next
-                    // request would be news this call has just delivered.
-                    job.mark_reported();
-                    return Ok(format!(
-                        "it had already ended, so there was nothing to stop; `wait` collects what it \
-                         {}.\n{}",
-                        match job.kind {
-                            JobKind::Child => "said",
-                            JobKind::Command => "printed",
-                        },
-                        job.describe()
-                    ));
-                }
-                // Two ways to end a job, because they are two different things: a child is *asked*
-                // -- it is a run, and `/stop` lets it finish the thought it was on -- while a
-                // command is killed, because there is nothing to ask.
-                let ended_how = match job.kind {
-                    JobKind::Child => {
-                        if !job.ask_to_stop().await {
-                            return Ok(format!(
-                                "could not ask pid {} to stop: its stdin is closed, which means it has \
-                                 just ended.\n{}",
-                                job.pid,
-                                job.describe()
-                            ));
-                        }
-                        "asked to stop, and it did -- keeping the half of an answer it had drawn"
-                    }
-                    JobKind::Command => {
-                        job.kill();
-                        "killed it, and it is gone -- what it had already written is still in its log"
-                    }
-                };
-                let limit = seconds.unwrap_or(20);
-                match job.wait(Some(Duration::from_secs(limit))).await {
-                    Some(finished) => Ok(format!("{ended_how}.\n{}", job.render(&finished))),
-                    None => Ok(format!(
-                        "{}; it is still going {}s later. Its own budget of {}s ends it either way.\n{}",
-                        match job.kind {
-                            // A child that ignores `/stop` is a run choosing to finish the thought
-                            // it was on, and its own budget is what ends it.
-                            JobKind::Child => format!("asked pid {} to stop", job.pid),
-                            // A command that survives a `taskkill /T /F` is a kill that has not
-                            // landed yet -- there is nothing for it to be deliberating about.
-                            JobKind::Command =>
-                                format!("killed pid {}, and the kill has not landed yet", job.pid),
-                        },
-                        limit,
-                        job.timeout_secs,
-                        job.describe()
-                    )),
-                }
-            }
+            "stop" => stop_job(pid, seconds).await,
             other => Err(anyhow!(
                 "job_op takes action \"status\", \"output\", \"wait\" or \"stop\", not {other:?}"
             )),
@@ -5040,6 +5095,7 @@ fn start_child(child: Child) -> Result<std::sync::Arc<Job>> {
         readonly: child.readonly,
         background: child.background,
         reported: std::sync::atomic::AtomicBool::new(false),
+        ended_by_us: std::sync::atomic::AtomicBool::new(false),
         timeout_secs: child.timeout_secs,
         stdin: std::sync::Mutex::new(stdin),
         session: std::sync::Mutex::new(None),
@@ -6214,6 +6270,65 @@ mod background_command_tests {
         let _ = tools
             .invoke("job_op", &json!({ "action": "stop", "pid": pid }))
             .await;
+    }
+
+    /// A person's stop is the same stop the model gets, and a job that was stopped reads as stopped.
+    ///
+    /// The first half is the refactor this came with: `job_op stop` and `/jobs stop <pid>` are one
+    /// function, so the answer a person reads and the answer a model is given cannot drift. The
+    /// second half is a defect the e2e test found on Windows and this one holds where it can be seen
+    /// cheaply: a killed `cmd.exe` reports exit code 1, which the list would call `failed` -- the one
+    /// word that sends somebody looking for a bug that is not there. On Unix the signal already
+    /// reports -1, so this assertion is the Windows half of the fact; the flag it rests on is set
+    /// where the decision is made, which is what makes the answer independent of the platform.
+    #[tokio::test]
+    async fn a_job_a_person_stops_reads_as_stopped_and_says_what_the_model_would_be_told() {
+        // Longer than any test would wait: what is measured is that the stop arrives.
+        let long = if cfg!(windows) {
+            "ping -n 30 127.0.0.1 >NUL & echo never"
+        } else {
+            "sleep 30; echo never"
+        };
+        let dir = TempDir::new("jobs-stop-person");
+        let tools = toolbox(&dir, false);
+        let handle = tools
+            .invoke("bash", &json!({ "command": long, "background": true }))
+            .await
+            .expect("background bash");
+        let (pid, _log) = handle_of(&handle);
+
+        let said = stop_job(Some(pid), None).await.expect("a person's stop");
+        assert!(
+            said.contains("killed it, and it is gone"),
+            "a person stopping a command is told what happened to it: {said}"
+        );
+
+        let row = job_row(pid);
+        assert_eq!(
+            row["status"], "killed",
+            "a job somebody stopped is not a job that failed: {row}"
+        );
+        assert!(
+            row["detail"].as_str().unwrap_or_default().contains("exit code -1"),
+            "and the sentence beside it says which: {row}"
+        );
+
+        // The third door: the listing `/jobs` prints is the listing `job_op status` answers with, so
+        // a person and a model reading the same run at the same moment cannot be told two things.
+        let via_tool = tools
+            .invoke("job_op", &json!({ "action": "status", "pid": pid }))
+            .await
+            .expect("status");
+        assert_eq!(
+            via_tool.trim(),
+            jobs_report(Some(pid)).trim(),
+            "the terminal's listing and the model's are two answers now"
+        );
+        assert!(
+            jobs_report(None).contains(&format!("pid {pid}")),
+            "the whole-run listing has to name it: {}",
+            jobs_report(None)
+        );
     }
 
     /// The three words a row can carry, from the exit code alone. Pure, because the mapping is the

@@ -1263,11 +1263,39 @@ the measured record, including the two claims that were written wrong — one lo
 job when the child settles seconds before the command, and one reused a row's `id` and so pressed the
 wrong row the second time.
 
+**And the door beside it, in the same round: seeing a job you no longer want is only useful if you can
+end it — built, 2026-09-17.** Until then the only way to stop a child or a background command was
+`job_op`'s `stop`, which is a tool: a person who started a ten-minute build by accident had to ask the
+model to stop it, or kill flint and take the child with it. `/jobs` now prints the same listing the
+panel and `job_op status` read (`tools::jobs_report`, one function), and `/jobs stop <pid>` ends one
+through the same `tools::stop_job` the tool calls — so a person and a model cannot come to disagree
+about what is running or about what happened when somebody stopped it. The two doors differ in exactly
+one place on purpose: `job_op stop` with no pid acts on the only job in play, while `/jobs stop` with no
+pid is refused with a sentence pointing at the listing, because a person typing a kill is naming what to
+kill. The page reaches the same command through its `danger` group, and its candidates are the **live
+rows of the jobs panel**: the pids are already on screen, so nothing new had to be sent for it — the
+third `ArgFrom` (`jobs`), and the one that shows what the field was for.
+
+Two things came out of building it and are worth keeping. **A kill's exit status is the shell's, not the
+command's**: Windows `taskkill /T /F` leaves the `cmd.exe` it signalled reporting 1, so a job a person
+stopped deliberately was listed as `failed` — the one word that sends somebody looking for a bug that is
+not there (Unix reports -1 and read correctly, which is exactly the difference a status word must not
+depend on). `Job` gained `ended_by_us`, set in `kill()` *before* the signal and in the budget-expiry
+branch, so the status word is read from the decision rather than inferred from a number afterwards. And
+the budget ending a command is deliberately the same word, because the fact a reader wants is "did it
+stop on its own or was it stopped", with the note saying why. `docs/web-mode.md` §13 has the measured
+record — the lib test that holds "the tool's answer is the terminal's answer" to the byte, the e2e that
+reads the two commands out of the opening state frame, the browser claims (**56/56**, 53 before), and
+the two mutations.
+
 **Still open in this section:** the item §9 was written about is now built, and the next round is
 whatever using it turns up. Two limits are recorded rather than owed: a `stopping` state would need a
 flag on the `Job` that nothing sets today, and a job started by an *earlier* run of flint is not in the
 list at all — a handle is what this process started, and deriving a list from files is the thing this
-repository does not do.
+repository does not do. A third is now stated rather than implied: **the panel has no kill control**, and
+that is a decision, not a gap — a row is a door (it opens the log), and a second gesture on the same
+target is the ambiguity that made a browser harness press the wrong row in the round above, so the
+person's stop is a command reachable from the page's command panel.
 
 ### 10. flint as a function a program can call — **done: steps 1–7 landed (B7 included, and the duration half of B5)**
 

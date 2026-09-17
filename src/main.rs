@@ -2290,6 +2290,13 @@ enum ArgFrom {
     Sessions,
     /// The providers the state frame is already carrying, by name.
     Providers,
+    /// The jobs the page's own panel is already showing, by pid.
+    ///
+    /// The third list, and the one that made the pattern worth having: `/jobs stop <pid>` takes a
+    /// pid, and the pids a page holds *are* the rows of the jobs panel it is looking at. Nothing new
+    /// had to be sent for it -- the panel is drawn from `GET /jobs`, which is the same record this
+    /// command reads -- which is exactly the property the `from` field exists for.
+    Jobs,
 }
 
 impl ArgFrom {
@@ -2297,6 +2304,7 @@ impl ArgFrom {
         match self {
             ArgFrom::Sessions => "sessions",
             ArgFrom::Providers => "providers",
+            ArgFrom::Jobs => "jobs",
         }
     }
 }
@@ -2576,6 +2584,12 @@ const COMMANDS: &[CommandHelp] = &[
         &SAY_ARG,
     ),
     CommandHelp::row("/tools", "/tools", "list available tools", HelpSection::Commands, OnPage::Panel),
+    // The run's own background work, in the two halves a person needs of it: the listing the model
+    // gets from `job_op status`, and the stop. Both are reports of the same record the page's jobs
+    // panel is drawn from -- see `docs/web-mode.md` §13 -- so a person, a page and a model read one
+    // answer rather than three.
+    CommandHelp::row("/jobs", "/jobs", "the background work this run started", HelpSection::Commands, OnPage::Panel),
+    CommandHelp::destroying("/jobs stop <pid>", "/jobs stop", "end one of them", ArgFrom::Jobs),
     CommandHelp::row("/skills [name]", "/skills", "list skills, or print one as the model would see it", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/agents [name]", "/agents", "list agent profiles (.flint/agents/*.md), or print one", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/sessions", "/sessions", "list past sessions, numbered", HelpSection::Commands, OnPage::Panel),
@@ -3560,6 +3574,62 @@ async fn handle_command(
 
         "/tools" => {
             printer.term().line(format_args!("{dim}tools:{reset} {}", agent.tool_names().join(", ")));
+        }
+
+        // The run's background work, which until this had no door a person could use: a job's
+        // handle is `job_op`'s, and that is a tool, so the only way to stop a build you no longer
+        // wanted was to kill flint and take the child with it.
+        //
+        // The listing is `jobs_report`, which is also what `job_op status` answers and what the
+        // page's panel row is sent -- one sentence for three readers. The stop is the other half,
+        // and the pid it takes is the one the page's jobs panel is already showing.
+        "/jobs" => {
+            let mut words = arg.split_whitespace();
+            match words.next() {
+                None => {
+                    for line in tools::jobs_report(None).lines() {
+                        printer.term().line(format_args!("{line}"));
+                    }
+                }
+                Some("stop") => {
+                    let pid = match words.next() {
+                        Some(pid) => match pid.parse::<u32>() {
+                            Ok(pid) => Some(pid),
+                            Err(_) => {
+                                return Err(anyhow!(
+                                    "`{pid}` is not a pid. `/jobs` lists the jobs of this run with \
+                                     their pids."
+                                ))
+                            }
+                        },
+                        // The bare form exists and means something different from the tool's: with
+                        // no pid the tool acts on the only job in play, while a person typing a
+                        // kill is naming what to kill. Refusing is the honest answer, and the
+                        // listing is right there.
+                        None => {
+                            return Err(anyhow!(
+                                "`/jobs stop` needs the pid: `/jobs` lists the jobs of this run, and \
+                                 each line begins with one."
+                            ))
+                        }
+                    };
+                    if let Some(extra) = words.next() {
+                        return Err(anyhow!(
+                            "`/jobs stop <pid>` takes one pid, not `{extra}` as well."
+                        ));
+                    }
+                    let said = tools::stop_job(pid, None).await?;
+                    for line in said.lines() {
+                        printer.term().line(format_args!("{line}"));
+                    }
+                }
+                Some(other) => {
+                    return Err(anyhow!(
+                        "`/jobs` lists the background work this run started, and `/jobs stop <pid>` \
+                         ends one; `{other}` is neither."
+                    ))
+                }
+            }
         }
 
         "/skills" => {
