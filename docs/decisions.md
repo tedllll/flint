@@ -102,6 +102,41 @@ columns — where what wrapped was the count a reader is looking for. It is one 
 copy and both doors, so no two of them can drift into saying different things about the same file, and
 the startup line on stderr says the same sentence for the same reason even though nothing wraps there.
 
+## Turns, and the lines typed into them
+
+**A queued follow-up is the run's memory, not the file's.** `/queue <text>` holds a line until the turn
+that is running finishes; the alternative was an event (`queued`) in the session file, which is what the
+reading of Pi describes, and it is wrong here for the reason `--json` is a view and not the record: the
+file is what was **asked**. A line that has been typed and not sent has not been asked, so writing it
+down would put a message in a conversation that never sent it — and reading it back on `--resume` would
+hand a sentence somebody typed an hour ago to a model that has never heard of it, in a conversation that
+has moved on. What the file gets is the message, at the moment it is sent, which is also when it gains
+its place in the request. The cost is stated rather than hidden: a queue dies with the run (`/exit`,
+Ctrl-D, a kill), and the transcript's `queued for after this turn: …` line is the record that it was
+ever typed.
+
+**A stop ends the answer in flight, not what was typed behind it.** Pi's rule, and the one worth
+copying: aborting *continues* the messages still queued, so `/stop` in the middle of a turn leaves the
+follow-up queued for it to be sent next. The alternative — clearing the queue on a stop — makes the
+stop mean two things, and the second one is invisible: a person who types a correction and then stops
+has two intentions about two different turns, and only one of them was about the turn in flight.
+
+**There is no `clear_queue`, and dropping a queue is said out loud.** Pi's client discards queued
+messages by taking the text back into its own editor, so nothing is lost by the act. flint's prompt is a
+line from a terminal with nowhere to put the text back to, and the spellings that suggest themselves
+(`/queue clear`) collide with a message whose text *is* that word. So the discarding that does happen is
+not something a person asks for: it is what a chain of turns ending without sending the queue means, and
+there are exactly two such endings — a command typed mid-turn (which hands the line back to the REPL and
+ends the chain, because only one thing can be the next prompt) and a turn that ended with an error. Both
+print a sentence naming how many queued lines were dropped and why. A queue that vanished without one
+would be the failure this feature exists to remove, one step further on.
+
+**With nothing running, `/queue <text>` is this turn's message.** There is no turn to hold it for, and
+the alternative — refuse and make the person retype it — is a command with a rule about *when* it may be
+said, whose enforcement is a line of output that could have carried the sentence instead. The note under
+the echo says which of the two happened, because "queued" and "sent" look identical in a transcript
+otherwise.
+
 ## Context: instructions and skills
 
 **`instructions = "hint"` is the default.** flint names the instruction files it found and

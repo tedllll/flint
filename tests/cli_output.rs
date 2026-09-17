@@ -3286,16 +3286,20 @@ fn forking_at_startup_records_where_the_copy_came_from() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// The page is offered this conversation's questions to cut at, rather than a number to remember.
+/// The page is offered the arguments a command takes: a list to choose from, and a sentence to write.
 ///
-/// `/fork` is the fourth selector and the only one whose values are about *this conversation* rather
-/// than about the machine: the questions a person asked here, in order. The frame is rebuilt as the
-/// conversation moves, so a page open since the second question does not offer a third until it has been
-/// asked — which is the same property the sidebar's conversation list has, and the reason the values are
-/// computed rather than kept. The value is the **ordinal alone**: the page composes `/<name> <value>`,
-/// so a value carrying the question's own text would be sent as part of the command line.
+/// `/fork` is the one whose values are about *this conversation* rather than about the machine: the
+/// questions a person asked here, in order. The frame is rebuilt as the conversation moves, so a page
+/// open since the second question does not offer a third until it has been asked — which is the same
+/// property the sidebar's conversation list has, and the reason the values are computed rather than
+/// kept. The value is the **ordinal alone**: the page composes `/<name> <value>`, so a value carrying
+/// the question's own text would be sent as part of the command line.
+///
+/// `/queue` is the other shape, and it is in the same test because the two are one claim about one
+/// frame: what a command takes, the page is handed. A field is all a follow-up can be — the page's
+/// composer sends a line, and a line cannot say "not yet" unless a command does.
 #[tokio::test]
-async fn the_page_is_offered_the_questions_this_conversation_was_asked() {
+async fn the_page_is_offered_the_arguments_a_command_takes() {
     let server = MockServer::start().await;
     let home = test_home("fork-picker", &server.uri());
     let work = home.join("work");
@@ -3346,6 +3350,16 @@ async fn the_page_is_offered_the_questions_this_conversation_was_asked() {
     assert!(
         commands.contains("\"values\":[\"1\",\"2\"]"),
         "the row does not carry the questions this conversation was asked: {commands:?}"
+    );
+    // The other kind of argument a command takes: a sentence, which the page composes into
+    // `/queue <text>`. Without this row the page would have no way to send a follow-up at all -- a
+    // composer can send a line, and "after the turn, not now" is not something a line can say unless a
+    // command says it -- so the form is what makes the page's half of the feature exist.
+    assert!(
+        commands.contains("\"send\":\"/queue\"")
+            && commands.contains("\"class\":\"form\"")
+            && commands.contains("\"name\":\"text\",\"optional\":false"),
+        "the page cannot ask for a line to be sent after the turn: {commands:?}"
     );
 }
 
@@ -4291,24 +4305,46 @@ async fn a_command_typed_during_a_turn_is_run_and_not_sent_to_the_model() {
 /// looks like from the server's side, and what makes "the answer has been drawn" a fact the
 /// test waits for instead of a race it hopes to win. Every request body is kept, so the
 /// test can read what the model was actually sent.
+///
+/// The hold is either indefinite (`start`, for a turn that is waiting to be interrupted) or a
+/// delay after which the first answer *finishes* (`start_finishing`, for a turn that must be
+/// allowed to end on its own). The second mode carries the flag the queue test needs: whether
+/// the first response ever delivered its last frame, which is how "the follow-up did not
+/// interrupt the turn" becomes something the stub can witness rather than something the test
+/// infers from timing.
 struct HangingProvider {
     base_url: String,
     bodies: std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+    first_finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl HangingProvider {
+    /// Draw the answer and hold the connection open until the client gives up.
     fn start(drawn: &'static str) -> Self {
+        Self::with_finish(drawn, None)
+    }
+
+    /// Draw the answer, then finish it after `after` -- so a turn can run to completion while
+    /// something is typed into it.
+    fn start_finishing(drawn: &'static str, after: std::time::Duration) -> Self {
+        Self::with_finish(drawn, Some(after))
+    }
+
+    fn with_finish(drawn: &'static str, finish_after: Option<std::time::Duration>) -> Self {
         use std::io::Write;
 
         let listener =
             std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind a stub provider");
         let base_url = format!("http://{}", listener.local_addr().expect("addr"));
         let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let first_finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let seen = bodies.clone();
+        let finished = first_finished.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut sock) = stream else { continue };
                 let seen = seen.clone();
+                let finished = finished.clone();
                 // One thread per connection: the first one is held open on purpose, and a
                 // sequential loop would hold the second request behind it.
                 std::thread::spawn(move || {
@@ -4332,8 +4368,27 @@ impl HangingProvider {
                             .as_bytes(),
                         );
                         let _ = sock.flush();
-                        // Held open: the turn stays in flight until the client gives up.
-                        std::thread::sleep(std::time::Duration::from_secs(20));
+                        match finish_after {
+                            // Held open: the turn stays in flight until the client gives up.
+                            None => {
+                                std::thread::sleep(std::time::Duration::from_secs(20));
+                            }
+                            // Finished on its own, which is what a turn nobody interrupted does.
+                            // The flag is set *after* the frames are flushed, so a second request
+                            // that arrives while it is still false is a second request that the
+                            // client sent before this answer was over -- which is exactly what an
+                            // interrupted turn looks like from here.
+                            Some(after) => {
+                                std::thread::sleep(after);
+                                let _ = sock.write_all(concat!(
+                                    "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                                    "data: [DONE]\n\n"
+                                ).as_bytes());
+                                let _ = sock.flush();
+                                finished.store(true, std::sync::atomic::Ordering::SeqCst);
+                                std::thread::sleep(std::time::Duration::from_secs(20));
+                            }
+                        }
                     } else {
                         let _ = sock.write_all(concat!(
                             "data: {\"choices\":[{\"delta\":{\"content\":\"SECOND ANSWER\"}}]}\n\n",
@@ -4345,7 +4400,11 @@ impl HangingProvider {
                 });
             }
         });
-        HangingProvider { base_url, bodies }
+        HangingProvider {
+            base_url,
+            bodies,
+            first_finished,
+        }
     }
 
     fn bodies(&self) -> Vec<String> {
@@ -4355,6 +4414,11 @@ impl HangingProvider {
             .iter()
             .map(|b| String::from_utf8_lossy(b).to_string())
             .collect()
+    }
+
+    /// Whether the first response got as far as its last frame.
+    fn finished_first(&self) -> bool {
+        self.first_finished.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -4426,6 +4490,32 @@ fn mid_answer(home: &std::path::Path) -> (std::process::Child, std::process::Chi
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
     (child, stdin, out_path)
+}
+
+/// Every question the stub was asked, across all the requests it saw: what a failing assertion about
+/// a run's turns should print instead of two whole request bodies (a system prompt is most of one).
+fn questions_of(bodies: &[String]) -> String {
+    bodies
+        .iter()
+        .enumerate()
+        .map(|(i, body)| {
+            let asked = serde_json::from_str::<serde_json::Value>(body)
+                .ok()
+                .and_then(|b| {
+                    b["messages"].as_array().map(|messages| {
+                        messages
+                            .iter()
+                            .filter(|m| m["role"] == "user")
+                            .filter_map(|m| m["content"].as_str())
+                            .collect::<Vec<_>>()
+                            .join(" | ")
+                    })
+                })
+                .unwrap_or_default();
+            format!("#{}: {asked}", i + 1)
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// The messages of the `n`th request the stub was sent, as one string.
@@ -4526,6 +4616,146 @@ async fn a_steered_turn_keeps_the_answer_it_drew() {
     assert!(
         sent.contains("finish writing it"),
         "the steering line is missing: {sent}"
+    );
+}
+
+/// A follow-up waits for the turn it was queued in, and that turn is allowed to finish.
+///
+/// This is the whole of the difference from steering, and it is why the stub has to be able to *end*
+/// an answer: the claim is not "the line was taken" but "the answer it interrupted nothing of ran to
+/// its last frame, and then the line was sent". The stub records that last frame, so the test asserts
+/// the turn's completion from the server's side rather than inferring it from a stopwatch.
+#[tokio::test]
+async fn a_follow_up_waits_for_the_turn_it_was_queued_in() {
+    use std::io::Write;
+
+    // Draws at once and finishes a moment later: the window the test types into, and the turn the
+    // queue has to wait for.
+    let provider = HangingProvider::start_finishing(
+        "A HALF-WRITTEN ARTICLE\n",
+        std::time::Duration::from_millis(1500),
+    );
+    let home = test_home("queue-waits", &provider.base_url);
+    let (mut child, mut stdin, out_path) = mid_answer(&home);
+
+    // Not a correction: "also, when you are done, ...". The turn keeps running.
+    stdin
+        .write_all(b"/queue and then check the tests\n")
+        .expect("failed to write stdin");
+    // Closed here, so the run exits when the *queued* turn has answered: the first turn ends on its
+    // own, the queue is drained into a second turn, and stdin is already at EOF behind it.
+    drop(stdin);
+
+    let exited = wait_for_exit(&mut child, 30);
+    let bodies = provider.bodies();
+    let text = std::fs::read_to_string(&out_path).unwrap_or_default();
+    let finished_first = provider.finished_first();
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit: {text}");
+    assert!(
+        text.contains("queued for after this turn"),
+        "the line was not taken as a follow-up, so it either interrupted the turn or went to the \
+         model: {text}"
+    );
+    assert!(
+        finished_first,
+        "the turn was dropped before its answer ended, so the follow-up interrupted it: {text}"
+    );
+    assert!(
+        bodies.len() == 2,
+        "expected the turn and the follow-up it was queued for, got {} request(s): {}",
+        bodies.len(),
+        questions_of(&bodies)
+    );
+    let second = sent_to_the_model(&bodies, 1);
+    assert!(
+        second.contains("and then check the tests"),
+        "the follow-up never became the next question: {second}"
+    );
+    assert!(
+        second.contains("A HALF-WRITTEN ARTICLE"),
+        "the answer it waited for is missing from the follow-up's request: {second}"
+    );
+}
+
+/// A stop ends the answer in flight and not what somebody typed next.
+///
+/// Pi's rule, and the half of its queue worth copying (`docs/pi-agent-harness.md` §3.2): aborting
+/// *continues* the messages still queued, and discarding them is a separate act. flint has no separate
+/// act -- see `dropped_queue` -- so this is the property that keeps `/queue` from being a trap: the
+/// line is either sent or said to be dropped, never quietly gone.
+#[tokio::test]
+async fn a_stop_does_not_throw_away_a_queued_follow_up() {
+    use std::io::Write;
+
+    let provider = HangingProvider::start("A HALF-WRITTEN ARTICLE\n");
+    let home = test_home("queue-outlives-stop", &provider.base_url);
+    let (mut child, mut stdin, out_path) = mid_answer(&home);
+
+    // Both lines while the turn is in flight, in the order a person types them: the follow-up, and
+    // then the decision to stop the answer it was waiting for.
+    stdin
+        .write_all(b"/queue and then check the tests\n/stop\n")
+        .expect("failed to write stdin");
+    drop(stdin);
+
+    let exited = wait_for_exit(&mut child, 30);
+    let bodies = provider.bodies();
+    let text = std::fs::read_to_string(&out_path).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit: {text}");
+    assert!(
+        text.contains("queued for after this turn"),
+        "the line was not taken as a follow-up: {text}"
+    );
+    assert!(
+        bodies.len() == 2,
+        "the stop took the queued line with it, or nothing was queued: got {} request(s): {}",
+        bodies.len(),
+        questions_of(&bodies)
+    );
+    let second = sent_to_the_model(&bodies, 1);
+    assert!(
+        second.contains("and then check the tests"),
+        "the stop threw the queued line away: {second}"
+    );
+    assert!(
+        !text.contains("dropped"),
+        "the queue was reported as dropped, which a stop must not do: {text}"
+    );
+}
+
+/// The same command with nothing running: there is no turn to hold it for, so it is sent now.
+///
+/// The alternative -- refusing, and making the person retype it -- would be a command with a rule
+/// about *when* it may be said, and the check that told them would be a line of output they could
+/// have spent sending the sentence. So the note is the honest half: the transcript says the line went
+/// now rather than being held.
+#[tokio::test]
+async fn a_queue_with_nothing_running_is_this_run_s_message() {
+    let server = MockServer::start().await;
+    answer_once(&server).await;
+    let (stdout, sent) = typed_at_a_repl(
+        &server,
+        "queue-idle",
+        &[],
+        "/help\n/queue and then check the tests\n",
+    )
+    .await;
+
+    assert!(
+        sent.to_string().contains("and then check the tests"),
+        "the line was held for a turn that was never coming: {sent}"
+    );
+    assert!(
+        stdout.contains("nothing is running, so it is this turn's message"),
+        "the transcript does not say the line was sent rather than queued: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("/queue <text>"),
+        "the command is not in the help table, which is how anybody finds it: {stdout:?}"
     );
 }
 

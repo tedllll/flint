@@ -192,6 +192,39 @@ not interrupt -- a follow-up queue of one, drained at the start of the next turn
 composer offering the same choice, and with the queue belonging to the session so that stopping a
 turn does not silently throw away what somebody typed.
 
+**Built, 2026-09-17, as `/queue <text>`** — and what the sketch got wrong is worth as much as what it
+got right, because two of its three words mean something else in flint than they do in Pi.
+
+*The queue is not the session's.* Pi's queue can live in the session because its session is the
+process's own state and its client can be handed messages back. flint's session file is the record of
+what was **asked**, and a line that has been queued has not been asked yet: writing it down would put a
+message in the transcript of a conversation that never sent it, and reading it back on `--resume`
+would deliver a sentence somebody typed an hour ago to a model that has never heard of it. So the queue
+is the *run's* memory, it dies with the run, and what the file gets is the message, when it is sent --
+which is also why there is no new event type and nothing for `docs/session-format.md` to describe.
+
+*Nothing is discarded silently, but there is no `clear_queue`.* The rule the sketch wanted from Pi --
+"discarding is an explicit act rather than a side effect of stopping" -- is kept where it matters: a
+stop does **not** clear the queue (a stop is about the answer in flight, not about what somebody typed
+next), and the two ways a chain of turns can end without sending it (a command typed mid-turn, an error
+in the turn) print a sentence saying the queued lines were dropped. What flint does not have is the act
+itself, and the reason is mechanical rather than a preference: Pi's client discards by taking the text
+back into its own editor, where nothing is lost, and flint's prompt is a line from a terminal with
+nowhere to put it back to. The spellings that suggest themselves (`/queue clear`) collide with a message
+whose text is that word, and a queued line is short, visible in the transcript, and sent at the end of
+the turn it was queued for.
+
+*The boundary is a turn, not a tool call.* Pi's steering waits for the assistant turn to finish its tool
+calls; flint's steering cancels the request and flint's follow-up waits for the whole turn, which is the
+whole answer rather than one step of it. Nothing was taken from the difference: the two words flint has
+are "interrupt this" and "when you are done", and the middle case -- deliver between steps -- is not
+something a person can name from a prompt, because the steps are not on screen as boundaries.
+
+*The page's half is a form row, not a key.* Alt+Enter is not something a text box can carry, so the page
+is handed `/queue <text>` in its command panel (the same `Form` class `/say` and `/name` use) and the
+line it composes is the line the terminal would have received. `tests/cli_output.rs` holds both halves:
+the frame carries the row, and a real run's queue survives a stop and becomes the next question.
+
 ### 3.3 Choosing the tool set for one run
 
 Pi: `--tools read,grep,find,ls`, `--exclude-tools`, `--no-tools`, `--no-builtin-tools`. Flint has

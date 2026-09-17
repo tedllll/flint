@@ -19,6 +19,7 @@ use anyhow::{anyhow, Context, Result};
 use display::{Printer, BOLD, CHATTY, DIM, GREEN, NORMAL, QUIET, RED, RESET, YELLOW};
 #[allow(unused_imports)]
 use display::Palette;
+use std::collections::VecDeque;
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use term::Term;
@@ -2073,6 +2074,26 @@ fn for_the_repl(line: &str) -> bool {
     line.starts_with('/') || line.starts_with('!') || flag_at_the_prompt(line).is_some()
 }
 
+/// The line that is a **follow-up** rather than a message or an interruption: `/queue <text>`.
+///
+/// A plain line typed while the model is working *is* the interrupt -- that is the design, and it is
+/// what "type while it works to interrupt it" promises. This is the second way to send one, for the
+/// sentence that is not a correction: "also, when you are done, ...". The reading of Pi is where the
+/// distinction comes from (§3.2 of `docs/pi-agent-harness.md`): flint's steering cancels the request
+/// in flight, and Pi's follow-up waits for the work to finish. Both are wanted, so both are here.
+///
+/// Returns the text, which may be empty (the command with no argument is a usage line rather than a
+/// message, in both places it is read). `None` means this is not the command at all -- and the exact
+/// test is what makes `/queuex` a saved prompt or a message rather than a queue with the argument `x`,
+/// which is the same care `flag_at_the_prompt` takes with its own prefix.
+fn follow_up(line: &str) -> Option<&str> {
+    let rest = line.trim_start().strip_prefix("/queue")?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    Some(rest.trim())
+}
+
 /// The channel a browser message arrives on, adapted into the one the keyboard feeds.
 ///
 /// **This is the whole of what makes the page a composer.** A line typed into the browser
@@ -2771,6 +2792,14 @@ const CONFIG_SET_ARGS: [PageArg; 2] = [
 /// message that quietly went to whoever happened to be named in it is worse than one that reached
 /// everybody here. Addressing is a terminal move until the page can offer a picker of live runs.
 const SAY_ARG: [PageArg; 1] = [PageArg::required("text", Field::Text)];
+/// `/queue`'s one answer: the words to send once the turn that is running has finished.
+///
+/// A field rather than a picker, for `/say`'s reason: what it takes is a sentence, and the page
+/// composes `/<name> <value>` -- so a follow-up sent from the page is the same line the terminal
+/// would have received, and the queue is the process's rather than the page's. Without this row the
+/// page would have no way to say "after this turn", because a composer can send a line and nothing
+/// else; a modifier key is not something a text box can carry.
+const QUEUE_ARG: [PageArg; 1] = [PageArg::required("text", Field::Text)];
 
 const COMMANDS: &[CommandHelp] = &[
     CommandHelp::row("/help", "/help", "this message", HelpSection::Commands, OnPage::Panel),
@@ -2814,6 +2843,16 @@ const COMMANDS: &[CommandHelp] = &[
         HelpSection::Commands,
         OnPage::Form,
         &SAY_ARG,
+    ),
+    // The other half of "a line typed while it works": `/stop` ends the turn, and this one waits for
+    // it. Rows are how a person finds a command, so the help text is where the difference is said.
+    CommandHelp::field_row(
+        "/queue <text>",
+        "/queue",
+        "send this after the turn that is running, without interrupting it",
+        HelpSection::Commands,
+        OnPage::Form,
+        &QUEUE_ARG,
     ),
     CommandHelp::row("/tools", "/tools", "list available tools", HelpSection::Commands, OnPage::Panel),
     // The run's own background work, in the two halves a person needs of it: the listing the model
@@ -2892,6 +2931,34 @@ fn split_first(arg: &str) -> (&str, &str) {
     }
 }
 
+/// Say that follow-ups somebody queued are not coming after all, and why.
+///
+/// `dropped_queue` and its two callers exist because a queue is invisible state that a person has
+/// already been told about: the transcript printed "queued for after this turn" when the line was
+/// taken, so a chain of turns that ends without sending it owes the sentence that says so. Silence
+/// here would be the failure this whole feature is about, one step further on.
+///
+/// There is deliberately **no** command that clears the queue, which is the one place this differs
+/// from the reading (`docs/pi-agent-harness.md` §3.2 copies Pi's `clear_queue`). Pi's client can put
+/// the text back in its own editor, so discarding it costs a keystroke and loses nothing; flint's
+/// prompt has nowhere to put it back to, and the spellings that suggest themselves (`/queue clear`)
+/// collide with a message whose text is that word. A queued line is short, visible in the transcript,
+/// and sent at the end of the turn it was queued for -- so the act that discards it is stopping the
+/// run, and the queue dies with it rather than with a stop, which is Pi's rule and the one worth
+/// having: a stop is about the answer in flight, not about what somebody typed next.
+fn dropped_queue(printer: &Printer<'_>, queued: &VecDeque<String>, why: &str) {
+    if queued.is_empty() {
+        return;
+    }
+    printer.term().line(format_args!(
+        "{}",
+        printer.dim(&format!(
+            "  {} dropped: {why}",
+            counted(queued.len(), "queued line")
+        ))
+    ));
+}
+
 /// The line the transcript says under a line a command turned into a message.
 ///
 /// How much of the file was sent and which file it was, in one shape for all three sends (`/skill`,
@@ -2937,6 +3004,12 @@ fn print_help_table(printer: &Printer<'_>) {
     line(format_args!("{dim}while the model is working{reset}"));
     line(format_args!(
         "  Type and press Enter to interrupt it. Your line becomes the next input."
+    ));
+    // The other way to send one, and the sentence it exists for: not every line typed during a turn is
+    // a correction, and until this there was no way to say "also, when you are done, ..." except to
+    // wait for the turn to end and hope you remembered it.
+    line(format_args!(
+        "  /queue <text> says it after the turn instead of interrupting it."
     ));
     help_rows(printer, HelpSection::Working);
     line(format_args!("{dim}notes{reset}"));
@@ -3612,6 +3685,27 @@ async fn handle_command(
             let here = live::audience(&peers_here(agent.cwd()));
             for said in live::say_reply(text, &path, &to, &here).lines() {
                 printer.term().line(format_args!("{dim}{said}{reset}"));
+            }
+        }
+
+        // A follow-up with nothing to follow: `/queue <text>` typed at the prompt rather than
+        // mid-turn. There is no turn to hold it for, so it is this turn's message -- the same act, one
+        // turn earlier -- and the note says which of the two happened, because "queued" and "sent"
+        // look identical from the transcript otherwise. The mid-turn half is not here: it is read in
+        // `run_turn`'s own poll loop, which is the only place that can hold a line without ending the
+        // turn it interrupts (`follow_up`).
+        "/queue" => {
+            if arg.is_empty() {
+                printer.term().line(format_args!(
+                    "usage: /queue <text>  (sends it after the turn that is running, without \
+                     interrupting it)"
+                ));
+            } else {
+                let note = "  nothing is running, so it is this turn's message".to_string();
+                return Ok(Flow::Send {
+                    text: arg.to_string(),
+                    note,
+                });
             }
         }
 
@@ -5588,6 +5682,14 @@ async fn run_turn(
     // runs the loop again and has to carry them to the end either way.
     let mut reports: Vec<String> = Vec::new();
 
+    // The follow-ups somebody sent with `/queue` while a turn was running: lines that are *not* an
+    // interruption, so the turn keeps going and they are sent after it. Declared out here, beside the
+    // reports, for the same reason they are: the loop below runs again for every turn -- including the
+    // turn a steering line starts -- and a queue that reset with the turn would be a queue that holds
+    // nothing. A `VecDeque` rather than a `Vec` because this is a queue in the sense that matters: the
+    // order the person typed them in is the order they are asked in.
+    let mut queued: VecDeque<String> = VecDeque::new();
+
     // How the last turn ended, which is what a one-shot caller turns into an exit code: a steered
     // turn runs the loop again, and what the caller is holding at the end is the last turn's answer.
     // The loop is the expression, so there is no path that reaches the end without having decided.
@@ -5656,6 +5758,33 @@ async fn run_turn(
                         // say, which reads as the stop having failed.
                         if matches!(line.trim(), "/stop") {
                             interrupted = true;
+                        } else if let Some(text) = follow_up(&line) {
+                            // A follow-up: the one line that does *not* end the turn. It is read
+                            // before `for_the_repl` on purpose -- a command typed mid-turn is handed
+                            // back to the REPL, which means the turn is dropped, and that is exactly
+                            // what "without interrupting it" promises not to do. So this line is
+                            // taken here, kept, and the polling continues: the request in flight is
+                            // still the answer somebody is waiting for. The queue is drained below,
+                            // when the turn it was waiting for has finished.
+                            if text.is_empty() {
+                                printer.term().line(format_args!(
+                                    "usage: /queue <text>  (sends it after this turn, without \
+                                     interrupting it)"
+                                ));
+                            } else {
+                                queued.push_back(text.to_string());
+                                // Said out loud, and this is the line that makes a queued message
+                                // honest: the transcript shows the person's words and, under them,
+                                // that they are being held rather than sent. Nothing else records a
+                                // queued line -- the session file is the record of what was asked,
+                                // and this has not been asked yet.
+                                printer.term().line(format_args!(
+                                    "{}",
+                                    printer.dim(&format!("  queued for after this turn: {text}"))
+                                ));
+                            }
+                            // Not `break`: the turn stays in flight, which is the whole feature.
+                            continue;
                         } else if for_the_repl(&line) {
                             hand_back = Some(line);
                         } else {
@@ -5773,6 +5902,11 @@ async fn run_turn(
         // reason to keep paying for an answer nobody is waiting for any more.
         if let Some(line) = hand_back {
             turn_over(printer, live, agent, outcome, limit, &turn_began);
+            // A command typed mid-turn ends this chain of turns, so the follow-ups queued for it are
+            // dropped -- only one thing can be the next prompt, and this line is it. Said out loud
+            // rather than swallowed: the transcript showed the queued line being held, and a person
+            // who then typed a command is owed the sentence that says it is not coming.
+            dropped_queue(printer, &queued, "the command you typed ends this turn's chain");
             return Ok(Handover {
                 line: Some(line),
                 reports,
@@ -5792,10 +5926,36 @@ async fn run_turn(
                 if sink.streamed() {
                     printer.term().end_stream();
                 }
+                // An error ends the chain as surely as a command does: the run reports it and the
+                // REPL decides what comes next, so anything queued for the *next* turn is dropped,
+                // and said so rather than left to look like it is coming.
                 if let Some(r) = result {
+                    if r.is_err() {
+                        dropped_queue(printer, &queued, "this turn ended with an error");
+                    }
                     r?;
                 }
-                break (outcome, limit);
+                // The queue, drained here rather than when the next line is typed: a follow-up is a
+                // message, and the moment to send it is the moment the work it was waiting for is
+                // over. Nothing about it interrupts anything -- the turn above is finished, its
+                // answer is on screen and in the file -- and it is echoed here the way a steering
+                // line is, because from here on it *is* the question, and it is about to be the only
+                // thing on the next request.
+                //
+                // A stopped turn reaches this arm too, and that is the decision worth stating: a
+                // stop drops the answer in flight and not what somebody typed next (Pi's rule --
+                // aborting continues the queued messages, and discarding them is a separate act).
+                // There is no separate act here, and the reason is in `dropped_queue`'s note.
+                match queued.pop_front() {
+                    None => break (outcome, limit),
+                    Some(text) => {
+                        printer.term().line(format_args!("{bold}> {reset}{}", printer.dim(&text)));
+                        if let Some(live) = live {
+                            live.line(ndjson::turn_started(&text));
+                        }
+                        current = text;
+                    }
+                }
             }
             Some(text) => {
                 if text.trim().is_empty() {
@@ -6693,6 +6853,27 @@ async fn balance_and_stop(cfg: config::ProviderConfig, json: bool) -> Result<i32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `/queue` is the command, and nothing that merely starts like it is.
+    ///
+    /// The boundary is worth a test of its own because both halves of the feature read this function
+    /// and neither of them can see the other's mistakes: mid-turn a line it claims is *not* the
+    /// command becomes the prompt and drops the answer in flight, and at the prompt a line it claims
+    /// *is* the command is sent rather than looked up as somebody's saved prompt. `/queuex` is the
+    /// case that separates them -- a person's template called `queuex` must stay reachable -- and the
+    /// empty argument is the other: it is the usage line in both places, so `Some("")` rather than
+    /// `None` is the answer that keeps them from having to think about it separately.
+    #[test]
+    fn a_word_that_only_starts_like_queue_is_not_the_command() {
+        assert_eq!(follow_up("/queue"), Some(""));
+        assert_eq!(follow_up("/queue   "), Some(""));
+        assert_eq!(follow_up("/queue and then check the tests"), Some("and then check the tests"));
+        assert_eq!(follow_up("  /queue indented"), Some("indented"));
+        assert_eq!(follow_up("/queuex hi"), None);
+        assert_eq!(follow_up("queue hi"), None);
+        assert_eq!(follow_up("tell me about /queue"), None);
+        assert_eq!(follow_up("/queued"), None);
+    }
 
     /// `/config set` changes the settings the wizard changes, and refuses everything else by name.
     ///

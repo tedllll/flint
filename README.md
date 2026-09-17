@@ -214,6 +214,7 @@ Inside the REPL:
 | `/readonly [on\|off]` | toggle the write guard |
 | `/hear-peers [on\|off]` | relay messages from `flint say` to the model (default off) |
 | `/say <text>` | leave a message for whoever else is working in this directory (`--to <pid>` first to address one) |
+| `/queue <text>` | say this after the turn that is running, without interrupting it |
 | `/tools` | list tools |
 | `/jobs` | the background work this run started, with each job's pid and what it is doing |
 | `/jobs stop <pid>` | end one of them (a child is asked, a command is killed) |
@@ -236,6 +237,15 @@ Inside the REPL:
 Type while the model is working to interrupt it; your line becomes the next
 input. Ctrl-C clears a half-typed line, and quits when the line is already
 empty. Ctrl-D quits.
+
+`/queue <text>` is the other way to send a line mid-turn, for the sentence that is
+not a correction: it is held and sent when the turn that is running finishes,
+answer and all, and the transcript shows it as held (`queued for after this turn:
+…`) and then as the question it became. A stop ends the answer in flight and not
+what you queued behind it — the same rule Pi's queue follows — and a line queued
+when nothing is running is simply this turn's message, because there is no turn to
+hold it for. The page's command panel offers it as a form, which is the only shape
+a follow-up can take from a composer.
 
 Flags: `--provider`, `--model`, `--readonly`, `--no-session`, `--hear-peers`, `--cwd`, `--no-color`
 (or `NO_COLOR`), `--continue`, `--resume`, `--fork`, `--name`, `--archive`, `--delete`,

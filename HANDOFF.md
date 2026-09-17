@@ -6,6 +6,73 @@ of it.
 
 ## Where things stand
 
+**The seventh of the twelve items taken from the reading of Pi is built: a follow-up that does not
+interrupt the turn.** A plain line typed mid-turn *is* the interrupt — that is the design, and the help
+says so — which left no way to say the other thing people say at a running agent: "also, when you are
+done, …". `/queue <text>` is that line. It is read in `run_turn`'s own poll loop, **before** the
+classification that hands a command back to the REPL, and that ordering is the whole mechanism: every
+other line typed mid-turn ends the turn by being taken, and this one is taken and then keeps waiting.
+The text goes into a `VecDeque` declared beside `reports` (so it lives as long as the chain of turns,
+not as long as one turn), the transcript prints `queued for after this turn: …` when it is taken, and
+the one arm a turn can end in drains it — echo, `turn_started` on the `--json` stream, and it becomes
+the next prompt. A **stop** therefore ends the answer in flight and not what somebody queued behind it,
+which is Pi's rule and the one worth copying; with nothing running the same command is simply this
+turn's message and the note under the echo says so.
+
+**The queue is the run's memory, not the file's, and that is the decision that differs from the
+reading.** Pi's queue lives in its session because its client can be handed messages back; flint's
+session file is the record of what was **asked**, and a line that has been typed and not sent has not
+been asked. Writing it down would put a message in a conversation that never sent it, and reading it
+back on `--resume` would deliver a sentence typed an hour ago to a model that has never heard of it. So
+there is no new session event, nothing for `docs/session-format.md` to describe, and the file gets the
+message when it is sent — which is also when it gains its place in the request. The cost is stated
+rather than hidden: a queue dies with the run (`/exit`, Ctrl-D, a kill), and the transcript's
+`queued for after this turn:` line is the record that it was ever typed.
+
+**Dropping a queue is said out loud, and there is deliberately no `clear_queue`.** The rule the reading
+wanted from Pi — discarding is an explicit act rather than a side effect of stopping — is kept where it
+matters: a stop does not clear the queue, and the two ways a chain of turns can end without sending it
+print a sentence naming how many lines were dropped and why. Those two are a command typed mid-turn
+(which hands the line back to the REPL and ends the chain, because only one thing can be the next
+prompt) and a turn that ended with an error. What flint does not have is the act itself, and the reason
+is mechanical rather than a preference: Pi's client discards by taking the text back into its own
+editor, where nothing is lost, and flint's prompt is a line from a terminal with nowhere to put it back
+to — the spellings that suggest themselves (`/queue clear`) collide with a message whose text is that
+word. `dropped_queue` is the function, and both of its callers are the two endings above.
+
+**The page's half is a form row, not a key.** Alt+Enter is not something a text box can carry, so the
+command table hands the page `/queue <text>` as a `Form` (the class `/say`, `/name` and `/import` use)
+and the line the page composes is the line the terminal would have received. `/help` grew one line
+under "while the model is working" to name it, because the note there was already the place a person
+learns what typing mid-turn does.
+
+**Red first by mutation, six times.** The intercept disabled (`.filter(|_| false)`) → the follow-up was
+handed back as a command and the turn was dropped, failing "the line was not taken as a follow-up"; the
+`continue` after taking it turned into `break` → the same turn dropped, failing "the turn was dropped
+before its answer ended"; the drain's `pop_front` disabled → the queued line never became a request on
+both queue tests; `queued.clear()` added to the `/stop` arm → "the stop took the queued line with it";
+the idle arm's send removed → nothing reached the model at all; and `follow_up` loosened to accept
+`/queuex` → the boundary unit test. All six were reverted. The follow-up test is the one worth
+describing: its stub draws an answer, *finishes* it after a delay, and records that the last frame was
+delivered, so "the turn ran to completion" is measured on the server's side rather than inferred from a
+stopwatch — a steering line fails that assertion because the client abandons the socket.
+
+**Hand-checked on the real binary with a socket that accepts and never answers**: `> hello there`,
+`queued for after this turn: and then check the tests`, `flint: stopped -- the model is not running any
+more`, `> and then check the tests`, and both questions in the session file afterwards — which is the
+stop rule and the drain in one screen.
+
+**Gate and counts: `cargo test` 600 → 604 passing, 1 ignored** (343 lib, 5 → **6** in the binary's own
+tests — the `follow_up` boundary — 92 → **95** `cli_output`: the follow-up that waits, the stop that
+keeps the queue, and the idle send, plus the page-frame test from the fork round extended with the
+`/queue` form row and renamed `the_page_is_offered_the_arguments_a_command_takes`). `cargo clippy
+--all-targets -- -D warnings` is silent, `node scripts/term-layout-test.js` and `node
+scripts/web-view-test.js` pass, and `node scripts/browser-controls-test.js` is **56/56 by hand** — run
+even though this round adds a command row and no page code, because a new form is something the page's
+own JS renders and the harness is the only thing that presses it. It does not press `/queue`, so what it
+shows is that the new row broke nothing the page already did; the row itself is held in CI by the frame
+assertion in `cli_output`.
+
 **The sixth of the twelve items taken from the reading of Pi is built: a fork from a chosen point.**
 `--fork` copied a whole conversation and its tail came with it, so "that went wrong four messages ago,
 start again from there" could only be approximated by forking everything and deleting lines from the
@@ -455,8 +522,8 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 600 passing, 1 ignored on this machine
-(343 lib, 5 in the binary's own tests, 33 `agent_loop`, 92 `cli_output`, 36 `json_output` (7 structured
+As of the commit that carries this file, `cargo test` is 604 passing, 1 ignored on this machine
+(343 lib, 6 in the binary's own tests, 33 `agent_loop`, 95 `cli_output`, 36 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
 be able to read, 4 the answer written where the caller asked, 3 the file inlined into the prompt,
@@ -1006,7 +1073,7 @@ still building when the second landed.
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
 cargo build                                       # the Python and browser checks run this binary
-cargo test                                        # 600 passing, 1 ignored
+cargo test                                        # 604 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed

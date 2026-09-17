@@ -1827,8 +1827,22 @@ argument, the cost and what flint has today are in the document, §3.
   under `children/`: a branch is not somebody's child, and writing `parent` would have hidden it from
   `/sessions`, the sidebar and `--continue`. The original keeps every byte, the branch's `meta` belongs
   to this run, and where it came from is read back on the startup `resumed` line and under `/resume`.
-- **A follow-up message that does not interrupt the turn** — a plain line typed mid-turn is steering
-  and drops the in-flight request, by design; this is the second way to send one.
+- **A follow-up message that does not interrupt the turn — built, 2026-09-17.** A plain line typed
+  mid-turn is steering and drops the in-flight request, by design; this is the second way to send one.
+  `/queue <text>`, read in `run_turn`'s own poll loop *before* the classification that hands a command
+  back to the REPL — which is the whole mechanism, because every other line typed mid-turn ends the turn
+  by being taken, and this one is taken and then keeps waiting. The text is held in a queue that lives
+  as long as the chain of turns (`VecDeque`, drained in the one arm a turn can end in), echoed as
+  `queued for after this turn: …` when it is taken and as the question it became when it is sent; a
+  *stop* therefore ends the answer in flight and not what somebody queued behind it, which is Pi's rule
+  and the one worth copying (`docs/pi-agent-harness.md` §3.2). With nothing running the same command is
+  this turn's message, and says so, because there is no turn to hold it for. Three decisions are in
+  `docs/decisions.md`: the queue is the run's memory and not the file's (no new session event — a queued
+  line is written when it is *asked*, which is when it is sent), a chain of turns that ends without
+  sending the queue drops it **out loud** (a command typed mid-turn, or an error), and there is
+  deliberately no `clear_queue`: Pi's client can put the text back in its editor and flint's prompt has
+  nowhere to put it back to. The page is handed `/queue` as a form row, which is what "the composer
+  offers the same choice" means when all a composer can send is a line.
 - **`--no-session` — built, 2026-09-17.** A run that writes no conversation: no file, nothing in any
   list, nothing to continue from. It is a property of the whole run rather than of one command, which
   is why it refuses `--continue`, `--resume`, `--fork` and `--name` at the command line and `/new`,
