@@ -69,7 +69,14 @@ file's id. They are now a [`session::Copy`] value, which is six arguments, and t
 keeping together is kept together: `from` with `from_id` is the same fact read two ways — the path flint
 was pointed at and the id that file's own `meta` was created under — and a signature taking them side by
 side invites a call that passes one file's path with another's id. This is the second time a lint has
-paid for itself this round; the first is not a lint but the byte guard described above.
+paid for itself this round; the first is not a lint but the byte guard described above. One thing the
+refactor settled that the first commit left open: the `/fork` arm had created its writer, written the
+lineage and then the messages *by hand*, which is the three-call sequence `seed`'s own comment says must
+not be repeated at a second call site. `Copy` carries `kept` now — how much of the conversation came
+along is part of what the copy *is*, not of the call — so both doors write their copy through one
+function and the ordering is one function's business. A follow-up commit, because the first was already
+pushed, and the tests that hold the order are about behaviour rather than the call graph: the branch
+still carries `"kept":2` directly under `meta`.
 
 **Also in this round, and owed by the last one: the no-session door list was stale in three files.**
 `--no-session` refuses `/new`, `/resume`, `/import` and `/fork` inside a run, and `README.md`,

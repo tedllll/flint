@@ -1068,7 +1068,9 @@ them, and made resuming either half resume half a conversation. The fix is not a
 `{"type":"switch","provider":…,"model":…}` is appended to the file the conversation is already in, and
 `load` reports the last one, so `--resume` still believes the file. That is the argument `usage` has
 made for its own numbers since the format was written -- the file is append-only, so what changed is a
-line in it -- and it means `SessionWriter::seed` is now only for `--fork`, which really is a copy. Two
+line in it -- and it means `SessionWriter::seed` is for the two doors that really are a copy: `--fork`,
+which copies a whole conversation at startup, and `/fork <n>`, which copies a prefix of the one the run
+is in. Two
 tests, both watched red: a lib test that a switch is a line and the last one is believed, and an e2e
 test that a `/provider` on a served run leaves exactly one session file, appended to rather than
 rewritten.
