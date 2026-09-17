@@ -93,6 +93,20 @@ failed on the old code with `{1789642232, 1789642233}` before the fix. That also
 old comment made — "a stored second field would be the same fact recorded twice" — which is now recorded
 where it was wrong, in `docs/web-mode.md` §13.
 
+**One ubuntu failure could not be read, so the test that produced it now says what happened.**
+`the_view_follows_the_conversation_through_a_switch` failed on the ubuntu runner of that same fix commit
+with `connect to the view: Connection refused` — a test this round never touched, on a commit whose only
+change is in the jobs snapshot. It does not reproduce here: 15 single runs and 5 whole-suite runs of
+`cli_output` (475 tests) were green, and the Windows leg of the same commit passed. The reasoning that
+matters for next time is in the test now: the URL is printed *after* the socket is bound and the kernel
+takes connections into the backlog whether or not the accept task has been scheduled, so a refused
+connection can only mean the listener is gone — which means the run ended, and this test had been sending
+its stderr to `/dev/null`, so the reason went with it. It keeps the stderr now, and if the run is gone by
+the time the view is asked to answer, the panic names the exit status, the stderr and the transcript
+instead of the connection error. `http_get` also names the address and the route in its failure, which is
+the one failure a response cannot describe. Both were checked by killing the child on purpose and reading
+the message that came out. Counts unchanged: 605 passing, 1 ignored.
+
 **The sixth of the twelve items taken from the reading of Pi is built: a fork from a chosen point.**
 `--fork` copied a whole conversation and its tail came with it, so "that went wrong four messages ago,
 start again from there" could only be approximated by forking everything and deleting lines from the

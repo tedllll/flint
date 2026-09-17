@@ -5190,6 +5190,14 @@ async fn the_view_follows_the_conversation_through_a_switch() {
     // The transcript goes to a file rather than a pipe: the URL has to be read while the
     // process is still running, and this is where it is printed.
     let log = home.join("transcript.txt");
+    // ...and so does its stderr, which used to go to `/dev/null` here and nowhere else in this file.
+    // This test failed once on the ubuntu runner with "connect to the view: Connection refused", and
+    // the reason was unreadable: a refused connection means the listener is gone -- the URL is printed
+    // *after* the socket is bound, and the kernel takes connections into the backlog whether or not
+    // the accept task has been scheduled yet -- so the question was what ended the run, and the answer
+    // had been thrown away. Kept now, and named in the panic if the run is gone by the time the view
+    // is asked to answer.
+    let errors = home.join("stderr.txt");
     let mut child = binary()
         .arg("--web")
         .current_dir(&work)
@@ -5197,7 +5205,7 @@ async fn the_view_follows_the_conversation_through_a_switch() {
         .env_remove("NO_COLOR")
         .stdin(std::process::Stdio::piped())
         .stdout(std::fs::File::create(&log).expect("transcript file"))
-        .stderr(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&errors).expect("stderr file"))
         .spawn()
         .expect("failed to run flint");
 
@@ -5218,6 +5226,16 @@ async fn the_view_follows_the_conversation_through_a_switch() {
     // The second request means the turn after the switch is under way, so the switch itself has
     // happened and the new file has the line in it.
     wait_for_requests(&server, 2).await;
+
+    // A run that is gone cannot answer, and saying so is worth more than the connection error: this
+    // is where the one unreadable failure of this test would have been read.
+    if let Ok(Some(status)) = child.try_wait() {
+        panic!(
+            "the run ended ({status}) before its view could be read\n  stderr: {}\n  transcript: {}",
+            std::fs::read_to_string(&errors).unwrap_or_default().trim(),
+            std::fs::read_to_string(&log).unwrap_or_default().trim()
+        );
+    }
 
     let served = http_get(port, "/session", &token);
     drop(child.stdin.take());
@@ -5277,7 +5295,12 @@ fn port_and_token(url: &str) -> (u16, String) {
 fn http_get(port: u16, route: &str, token: &str) -> String {
     use std::io::{Read, Write};
 
-    let mut sock = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect to the view");
+    // The route and the port are in the message because a refused connection is the one failure here
+    // that cannot be read from the response: there is none. Every test in this file that opens a view
+    // reaches the same helper, so the address is worth naming once, here.
+    let mut sock = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap_or_else(|e| {
+        panic!("cannot connect to the view at 127.0.0.1:{port} for {route}: {e}")
+    });
     write!(
         sock,
         "GET {route} HTTP/1.1\r\nhost: 127.0.0.1:{port}\r\nX-Flint-Token: {token}\r\n\
