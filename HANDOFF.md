@@ -622,13 +622,24 @@ last item. What remains is written down where it belongs: `/config edit` as a pa
 `/config set <key> <value>` the terminal does not have, the panel's groups are still §8's classes
 rather than a task, and the mid-turn report wait is unasserted (`docs/web-mode.md` §11).
 
-**The installed binary is older than the tree, and that matters for looking at the page.** `flint` on
-this machine's PATH resolves to `C:\Users\zhangzhuo\bin\flint.exe`, which is a copy of
-`target\release\flint.exe` as it was on 2026-09-14 16:08 — before the panel, the selectors, the forms,
-the destructive controls and the sidebar menu. The page is `include_str!`-embedded, so a page change
-does not reach an existing binary: `cargo build --release` and copy it over, and the `commands` panel
-appears in the header (a `<details>`, opened by clicking the word). A running `flint` holds that file
-open, so the copy needs every flint window closed first — measured twice.
+**The installed binary matches the tree as of 2026-09-17 15:24, and updating it while flint is running
+needs one extra step.** `flint` on this machine's PATH resolves to `C:\Users\zhangzhuo\bin\flint.exe`,
+which is a copy of `target\release\flint.exe`; the page is `include_str!`-embedded, so a page change does
+not reach an existing binary and the copy is what makes a rebuild visible. `Copy-Item -Force` over a
+*binary that is running* is refused by Windows ("being used by another process"), which the last sessions
+recorded as "close every flint window first". It does not have to be: Windows refuses to **overwrite** a
+mapped image but allows it to be **renamed**, so the update is `Rename-Item flint.exe
+flint.exe.bak-<stamp>` and then copy the new file into the freed name — done that way this round, with
+two flint processes running (`2668` and `37632`, both started from this path). Those two keep executing
+the old bytes out of `flint.exe.bak-20260917-152423` until they exit, so that file cannot be deleted
+before then; the build before it (`flint.exe.bak-20260917-143312`) is still there as the older copy.
+
+**One CI run was red, and it is worth reading because the guard was right.** `a4071ca` — the jobs commit
+itself — failed `ci` on both platforms with nothing but the mojibake whitelist:
+`docs/web-mode.md:1067` quoted the request that §13 was built from, and a file that was never declared to
+hold CJK is reported rather than assumed. The fix is one line in `CJK_FILES` (`682314f`, pushed
+immediately after), which is why the pair is in the log in that order; `release` on the first commit was
+still building when the second landed.
 
 **What the other machine needs.**
 
