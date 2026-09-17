@@ -1768,6 +1768,14 @@ set and does not need to be (Rust writes to a console as UTF-16), and
 `DISABLE_NEWLINE_AUTO_RETURN` is clear with a linefeed at the last column still advancing one
 row, so nothing there was broken.
 
+Two more left it in the round that finally measured the page: driving §8's controls in a real browser
+(`scripts/browser-controls-test.js`, written up in §11 of `docs/web-mode.md`) found that a fresh
+`--web` run answered **500** on `/session` — the run names its session when it starts while the file is
+created by the first thing said in it — so a first run's page drew no controls at all, and that with
+the `commands` panel open the `send` button could not be clicked, because the panel is the one thing in
+the header that grows without bound and the reading painted over the composer. Both are fixed, both
+were invisible in the source, and both are held by the harness that found them.
+
 ## Not doing, and why
 
 - **A permission layer** — no approval prompts, no allow-list, no sandbox. An approval dialog

@@ -97,18 +97,56 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 535 passing, 1 ignored on this machine
-(318 lib, 3 in the binary's own tests, 33 `agent_loop`, 67 `cli_output`, 35 `json_output` (7 structured
+As of the commit that carries this file, `cargo test` is 544 passing, 1 ignored on this machine
+(321 lib, 4 in the binary's own tests, 33 `agent_loop`, 68 `cli_output`, 35 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
 be able to read, 4 the answer written where the caller asked, 3 the file inlined into the prompt,
 1 the stream checked on its bytes, 1 how long a turn took),
-7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 23 `web_view`, 7 `who`, 15 `task`, 3 `say`),
-and one more on Unix, `tty_hangup`, which is `#![cfg(unix)]` and needs a real pty. `cargo clippy
+7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 23 `web_view`,
+10 `who`, 15 `task`, 4 `say`),
+and one more on Unix, `tty_hangup`, which is `#![cfg(unix)]` and needs a real pty — as is the Unix
+half of the process-group kill, `a_killed_command_takes_its_children_with_it_on_unix`. `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
-pass, and `python examples/python/test_call.py` is 118 checks, all passing (one of them waits
-out the fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from),
-and `python examples/mcp/test_mcp.py` passes its own 23.
+pass, and `node scripts/browser-controls-test.js` is **20 of 20** — the browser harness, run by hand
+because CI has no browser, and the only place the two defects in the page's later controls were ever
+visible. `python examples/python/test_call.py` is 118 checks, all passing (one of them waits out the
+fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from), and
+`python examples/mcp/test_mcp.py` passes its own 23.
+
+**The round in front of that one is closed, item by item, and every item ended with a test that was
+watched fail first** — the five the person asked for, in the order they were asked for:
+
+1. **The mojibake guard is a whitelist.** The scan that looks for damage in the documents used to
+   *skip* a line that carried a marker it knew (`中文`, a listed repo path) and so was blind to real
+   damage sitting beside one. Now a line must *match* a known shape to be exempt, and anything else is
+   reported. `3ec8aff`.
+2. **A project that keeps a `.flint/` can be seen across two `FLINT_HOME`s.** Presence and the mailbox
+   get a second, project-local copy where a person has already put the marker — and flint still never
+   creates it. `b4b5e9e`. That one then caught a bug of its own, on the Windows runner rather than on
+   this machine: `%TEMP%` there is the 8.3 short name while `home_dir()` is `C:\Users\runneradmin`, so
+   the walk that stops at the home directory compared two spellings of one place, went past the stop,
+   and accepted the home's own `~/.flint` as a project marker — which moved the mailbox path *mid-run*
+   and failed a test about what arrives. The fix is `same_place` (canonicalise both sides, and fold
+   case and separators on Windows), with the red-first proof run locally in both spellings. `f2ab33e`.
+3. **A Unix command's children die with it.** The Windows kill was `taskkill /T`; on Unix the shell was
+   killed and its background work was not. `KillTree::detach` puts the child in its own process group
+   and the kill signals the group. Committed as a test that CI watched fail on ubuntu first
+   (`the command's child outlived the kill and wrote …child-survived.txt`), then green. `43297ae`,
+   `eb22cb8`.
+4. **`/config set <key> <value>`**, and the page form it unlocks. Building it found a lie in the wizard
+   it copies: `/config edit` saved the file and left the running tools on the old settings, because
+   every tool holds a *copy* of the config and `max_steps` went into the agent. Both paths now end in
+   the same rebuild `/reload` uses, and the message says `in force now` because it is. `bb9e07c`.
+5. **The page's later controls, measured in a real browser** — `0b15390` for the harness, `97229fc`
+   for what it found. See "A browser" under "Still owed on the page" below; the short form is that a
+   fresh `--web` run's page drew no controls at all, and that the `commands` panel could cover the
+   `send` button.
+
+So §8 is not only built but *driven*, and what a browser has still not touched is a named list at the
+end of `docs/web-mode.md` §11 rather than a section: a native `<select>`'s open dropdown, the sidebar's
+own `⋯` menu, and the drag grips.
+
 
 **A `task` child is started in the background by default now, and a job that ends says so — the default
 was the bug.** Reported directly ("my subagent cannot run in the background; the main session calls it
@@ -556,10 +594,12 @@ open, so the copy needs every flint window closed first — measured twice.
 
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
-cargo test                                        # 499 passing, 1 ignored
+cargo build                                       # the Python and browser checks run this binary
+cargo test                                        # 544 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed
+node scripts/browser-controls-test.js             # 20/20 -- needs a browser, so it is not in CI
 cargo test --test term_capture -- --ignored --nocapture measured_cost_of_streaming   # the cost number
 ```
 
