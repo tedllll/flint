@@ -33,6 +33,14 @@ file is also what claims the name (`create_new`): a name that turns out to be ta
 writer to the next millisecond rather than appending to somebody else's conversation, and the
 `id` it writes moves with it, because the id in the file has to be the id *of* the file.
 
+**A run can be told to write none of this.** `--no-session` means exactly that: no file is created, so
+there is no `meta`, no id, and nothing for a listing to find — and no way to continue from it later,
+which is the point. What such a run still writes is the state it needs to work: spilled tool output and
+a background command's log, under `~/.flint/spill/unattached-<pid>/` rather than under a session's name,
+because there is no session name to use and two of these runs would otherwise share one directory and
+overwrite each other's `1.txt`. The flag travels to a `task` child as well, which is the one
+conversation such a run could otherwise create by itself.
+
 ## One event per line
 
 Every line is a JSON object with a `type`. This build understands six:

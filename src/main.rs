@@ -82,6 +82,14 @@ struct Args {
     /// one step, because the thing it is protecting the caller from is a process that is *still
     /// going*: a step limit cannot cut a request that never comes back.
     max_seconds: Option<u64>,
+    /// Whether this run writes no conversation at all (`--no-session`).
+    ///
+    /// For a question that should leave nothing behind: a one-off against a big model, a look at a
+    /// machine somebody else owns, or a script that asks one thing and wants no trace in a listing.
+    /// It is a property of the *run* and not a habit of one command, so the commands that would open
+    /// a conversation (`/new`, `/resume`) refuse rather than quietly start the file this flag promised
+    /// not to write, and a provider switch cannot sneak one in through `continue_conversation`.
+    no_session: bool,
     list_sessions: bool,
     /// Ask the provider whether it can be used, and what is left in the account, then stop.
     ///
@@ -504,6 +512,31 @@ async fn real_main(args: Args) -> Result<i32> {
         );
     }
 
+    // ---- a run that writes nothing has nothing to open ----
+    //
+    // `--continue`, `--resume` and `--fork` each name a conversation this run would append to, and
+    // `--name` names the one it starts. With `--no-session` every one of them would be a flag that
+    // silently does nothing -- and the quiet version of that is the one that hurts: a caller that
+    // believes it continued a conversation while nothing was written, or that believes it wrote
+    // nothing while a file grew. Refused in one sentence rather than flag by flag, because the
+    // answer is the same for all four.
+    //
+    // Checked here, with the other command-line refusals, and not after the config is loaded: this is
+    // about the words on the command line, and a caller that typo'd its way into a contradiction
+    // should not have a config file created on the way to being told so.
+    if args.no_session
+        && (args.continue_last
+            || args.resume.is_some()
+            || args.fork.is_some()
+            || args.name.is_some())
+    {
+        return usage(
+            "--no-session writes no conversation, and --continue, --resume, --fork and --name all \
+             open or name one: give one or the other. A run that keeps nothing cannot continue, copy \
+             or name anything.",
+        );
+    }
+
     // The directory this run works in, resolved once and absolutely.
     //
     // Three things have to agree on it: the tools run in it, the session's `meta` line records it,
@@ -792,24 +825,30 @@ async fn real_main(args: Args) -> Result<i32> {
     // whose context held the conversation but whose session did not is the `/model` bug again --
     // a transcript on screen that no file contains, and a page tailing a session that starts
     // mid-sentence.
-    let mut writer = match (&resumed, &forked) {
-        (Some(path), _) => Some(session::SessionWriter::resume(path)?),
-        (None, Some((messages, title))) => Some(session::SessionWriter::seed(
-            &config::sessions_dir(),
-            &cwd,
-            &provider_cfg.name,
-            &provider_cfg.model,
-            messages,
-            title.as_deref(),
-            parent_session().as_deref(),
-        )?),
-        (None, None) => Some(session::SessionWriter::create(
-            &config::sessions_dir(),
-            &cwd,
-            &provider_cfg.name,
-            &provider_cfg.model,
-            parent_session().as_deref(),
-        )?),
+    let mut writer = if args.no_session {
+        // Nothing to create, seed or resume: the flag's whole meaning. The three doors this replaces
+        // are refused at the command line above, so `resumed` and `forked` are both empty here.
+        None
+    } else {
+        match (&resumed, &forked) {
+            (Some(path), _) => Some(session::SessionWriter::resume(path)?),
+            (None, Some((messages, title))) => Some(session::SessionWriter::seed(
+                &config::sessions_dir(),
+                &cwd,
+                &provider_cfg.name,
+                &provider_cfg.model,
+                messages,
+                title.as_deref(),
+                parent_session().as_deref(),
+            )?),
+            (None, None) => Some(session::SessionWriter::create(
+                &config::sessions_dir(),
+                &cwd,
+                &provider_cfg.name,
+                &provider_cfg.model,
+                parent_session().as_deref(),
+            )?),
+        }
     };
     // Which conversation this run is holding, said in the record rather than worked out by a reader.
     // The writer is the authority on it and is created here; a reader that instead guessed "the newest
@@ -846,6 +885,11 @@ async fn real_main(args: Args) -> Result<i32> {
     }
 
     let mut agent = agent::Agent::new(&cfg, provider, readonly, cwd.clone(), writer);
+    // The flag is a property of the run rather than of this one object: everything that rebuilds the
+    // agent mid-run (`/model`, `/provider`, `/reload`, the page's switch rows) goes through
+    // `continue_conversation`, and that path creates a session when the old one has no file. Said
+    // once, here, where the command line is still in scope; carried from there by `no_session()`.
+    agent.set_no_session(args.no_session);
     // Off unless `--hear-peers` said otherwise, and set here rather than in `Agent::new` because the
     // decision belongs to the run and not to the machinery: a resumed conversation inherits no such
     // decision (the file has no field for it), and `/hear-peers` is the only thing that changes it
@@ -2144,25 +2188,38 @@ fn continue_conversation(
     old: &agent::Agent,
 ) -> Result<agent::Agent> {
     let cwd = old.cwd().clone();
-    let mut writer = match old.session_path().filter(|path| path.exists()) {
-        Some(path) => session::SessionWriter::resume(&path)?,
-        // A session that has said nothing yet has no file -- sessions are created by their first
-        // event -- so continuing is starting: the same conversation, still with nothing in it.
-        None => session::SessionWriter::create(
-            &config::sessions_dir(),
-            &cwd,
-            &target.name,
-            &target.model,
-            parent_session().as_deref(),
-        )?,
+    // A run told to write no conversation keeps that promise across a switch as well, and this is the
+    // one funnel every switch comes through. The branch below *creates* a session when the old one has
+    // no file, which is exactly the file `--no-session` promised not to leave behind -- so the flag is
+    // read off the old agent and carried onto the new one rather than re-derived here.
+    let no_session = old.no_session();
+    let mut writer = if no_session {
+        None
+    } else {
+        Some(match old.session_path().filter(|path| path.exists()) {
+            Some(path) => session::SessionWriter::resume(&path)?,
+            // A session that has said nothing yet has no file -- sessions are created by their first
+            // event -- so continuing is starting: the same conversation, still with nothing in it.
+            None => session::SessionWriter::create(
+                &config::sessions_dir(),
+                &cwd,
+                &target.name,
+                &target.model,
+                parent_session().as_deref(),
+            )?,
+        })
     };
     // The move is recorded either way, and on a session with no file yet this is the write that
     // makes the file. It has to be: leaving it out of one branch is how a switch came to write
     // nothing at all, with the page told the provider had changed and no file to prove it. That it
     // repeats what `meta` already says on a brand-new session is the price of one code path, and
-    // `load` believes the last line either way.
-    writer.switched(&target.name, &target.model)?;
-    let mut next = agent::Agent::new(cfg, provider, old.readonly(), cwd.clone(), Some(writer));
+    // `load` believes the last line either way. A run with no conversation has nowhere to record it,
+    // which is the same flag's answer one door along.
+    if let Some(writer) = writer.as_mut() {
+        writer.switched(&target.name, &target.model)?;
+    }
+    let mut next = agent::Agent::new(cfg, provider, old.readonly(), cwd.clone(), writer);
+    next.set_no_session(no_session);
     next.splice_loaded_history(cfg, &cwd, old.history().to_vec());
     Ok(next)
 }
@@ -2901,6 +2958,22 @@ fn set_config_key(cfg: &mut config::Config, key: &str, value: &str) -> Result<St
                 .join(", ")
         )),
     }
+}
+
+/// The one answer a run started with `--no-session` gives to a command that would open a conversation.
+///
+/// One sentence in one place because the doors are more than the two match arms that call it: the
+/// page's sidebar rows go through this same dispatcher, so a press and a typed line are answered with
+/// the same words, and a third door added later inherits them. The command is named, because a person
+/// who typed `/resume 3` and is told about "a conversation" wants to know which of their words was
+/// refused.
+fn keeps_no_conversation(cmd: &str, printer: &Printer<'_>) -> Flow {
+    let said = format!(
+        "this run keeps no conversation (--no-session), so {cmd} has nothing to open. Start flint \
+         without the flag to keep one."
+    );
+    printer.term().line(format_args!("{}", printer.dim(&said)));
+    Flow::Continue
 }
 
 /// Re-read the config file and build this run's next agent around it.
@@ -3742,6 +3815,13 @@ async fn handle_command(
             // may be the only thing still working on the machine, and losing it to change
             // which conversation is on screen would be a poor trade. `/new` already
             // rebuilds the agent, so this only changes which file it appends to.
+            //
+            // Refused outright in a run that was told to write no conversation: this opens one, and
+            // the current conversation -- which was never written anywhere -- is what the person would
+            // be trading away for it.
+            if agent.no_session() {
+                return Ok(keeps_no_conversation(cmd, printer));
+            }
             if arg.is_empty() {
                 printer
                     .term()
@@ -3886,6 +3966,10 @@ async fn handle_command(
         }
 
         "/new" => {
+            // Same refusal, same reason: `/new` starts the file this run was told not to write.
+            if agent.no_session() {
+                return Ok(keeps_no_conversation(cmd, printer));
+            }
             let provider = provider::Provider::new(provider_cfg.clone())?;
             let writer = Some(session::SessionWriter::create(
                 &config::sessions_dir(),
@@ -5344,6 +5428,7 @@ fn parse_args(argv: Vec<String>, stream_seen: &mut bool) -> Result<Args> {
                 )
             }
             "--readonly" | "--no-edit" => args.readonly = true,
+            "--no-session" => args.no_session = true,
             "--hear-peers" => args.hear_peers = true,
             "--all" => args.all = true,
             "--no-color" => args.no_color = true,
@@ -5555,6 +5640,11 @@ flint who [--all] [--json]       who else is working in this directory (flint on
                       the answer text, or the validated object when --schema was given.
                       The file is emptied when the run starts, so it never holds an
                       earlier run's answer; empty means this run answered nothing
+  --no-session        write no conversation for this run: nothing to continue from later, nothing
+                      in the list, and no file left on disk. Refuses --continue, --resume, --fork
+                      and --name, and /new and /resume inside the run, because those open one.
+                      The run still writes what it needs to work: spilled tool output and a
+                      background command's log, under a name of its own in <FLINT_HOME>/spill/
   --no-color          disable ANSI colour (also honours NO_COLOR)
   -h, --help          this message
 

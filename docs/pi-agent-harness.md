@@ -181,6 +181,18 @@ no-file case is incidental -- a session file is created by the first event in it
 nothing leaves nothing. A flag that promises "this run leaves nothing behind" is small, and it is the
 honest way to run flint over something that should not end up in your history.
 
+**`--no-session` is built, 2026-09-17.** The halfway version above turned out to be the whole argument
+for building it: a promise that depends on saying nothing is not a promise, and the flag's real content
+turned out to be the *doors* rather than the file. It is a property of the run, so the command-line
+doors that would open or name a conversation (`--continue`, `--resume`, `--fork`, `--name`) are
+refused, `/new` and `/resume` are refused inside the run, and the funnel every mid-run switch goes
+through (which normally creates the session when the old one has no file) cannot create one either.
+What it still writes is what it needs to work -- spilled tool output and a background command's log --
+under `spill/unattached-<pid>/`, and a `task` child inherits the flag, because a session-less parent
+has no id to file a child's conversation under `children/` and it would otherwise land in the person's
+own list. `--session-dir` is *not* built, and is not obviously wanted: `FLINT_HOME` is that knob
+already, and a second way to say where sessions go is a second thing to keep in step.
+
 ### 3.5 Reading a finished conversation outside a live run
 
 Pi exports a session to HTML or JSONL, imports one back, and can share one as a static page. Flint's

@@ -220,6 +220,98 @@ fn sessions_named(text: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Every conversation file under a home, at any depth.
+///
+/// The mailbox is not one: it is the same `.jsonl` idea under `mailbox/`, and it is not a
+/// conversation. So the walk starts at `sessions/`, which is the directory every door a run can open
+/// writes into -- including `children/`, one level down, which is the level a listing does not read
+/// and therefore the one a test about "no files at all" has to look at.
+fn session_files(home: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                out.push(path);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&home.join("sessions"), &mut out);
+    out.sort();
+    out
+}
+
+/// A run that keeps no conversation starts children that keep none either.
+///
+/// The child is the one door such a run opens by itself, and the file it would leave is worse than
+/// untidy: a parent with no session has no id to hand down as `FLINT_PARENT`, so the child's
+/// conversation is not filed under `children/` -- it lands in the person's own list, a conversation
+/// they never had, written by a run that promised to write none. The child really runs here (its
+/// answer is in the parent's transcript), because a home with no files proves nothing if the child
+/// never started.
+#[tokio::test]
+async fn a_run_that_keeps_no_conversation_starts_children_that_keep_none() {
+    let step = Arc::new(AtomicUsize::new(0));
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(Scripted {
+            step: step.clone(),
+            bodies: vec![
+                // The parent waits: this test is about what the child leaves behind, and it has to
+                // have run to completion for "nothing was written" to be an answer rather than a
+                // race. `background: false` is explicit because the default is the handle.
+                tool_call(
+                    "task",
+                    r#"{"prompt":"what is in the box?","background":false}"#,
+                ),
+                prose("CHILD FOUND THE ANSWER"),
+                prose("PARENT DONE"),
+            ],
+        })
+        .mount(&server)
+        .await;
+
+    let home = scratch("keeps-nothing", &server.uri());
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("work dir");
+    let (code, stdout, stderr) = run_flint(&home, &work, &["--no-session"]);
+    assert_eq!(code, 0, "flint failed: {stderr}");
+    assert!(
+        stdout.contains("CHILD FOUND THE ANSWER"),
+        "the child never ran, so an empty home would prove nothing: {stdout}"
+    );
+
+    // The parent says so itself, rather than leaving the `session` field out for a caller to read as
+    // "not yet".
+    let started = stdout
+        .lines()
+        .find(|line| line.contains(r#""type":"session.started""#))
+        .unwrap_or_else(|| panic!("no session.started frame: {stdout}"));
+    assert!(
+        started.contains(r#""session":null"#),
+        "the parent named a conversation it was told not to keep: {started}"
+    );
+    // And the child's answer comes back saying the same thing, because the result is where a caller
+    // looks to carry on inside the child's conversation.
+    assert!(
+        stdout.contains("session: none (--no-session)"),
+        "the child's result is silent about the conversation it does not have: {stdout}"
+    );
+
+    let files = session_files(&home);
+    assert!(
+        files.is_empty(),
+        "a conversation was written by a run that keeps none: {files:?}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 #[tokio::test]
 async fn a_child_run_is_a_real_run_and_its_answer_comes_back_with_its_provenance() {
     let step = Arc::new(AtomicUsize::new(0));
@@ -1497,6 +1589,66 @@ async fn a_handle_says_where_a_child_is_and_then_collects_its_answer() {
     assert!(
         text.contains("exit code: 0 (finished)"),
         "the wait gave back an answer with no exit code: {text}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A background child of a run that keeps nothing says so in every place that would otherwise
+/// promise a file: the handle, the status line, and the answer a `wait` hands over.
+///
+/// The words are the point here rather than the mechanism. "its session is not named yet" is an
+/// answer a caller keeps asking about -- a status line that stays wrong forever, and a `job_op` call
+/// per turn to learn nothing -- so each of the three has to tell "not yet" from "started with
+/// `--no-session`, so there is none coming".
+#[tokio::test]
+async fn a_background_child_of_a_run_that_keeps_nothing_says_so_everywhere() {
+    let _solo = alone().await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(Scripts::new(vec![
+            (
+                "ask the child",
+                vec![
+                    Step::Call("task", r#"{"prompt":"SLOW JOB"}"#),
+                    Step::Call("job_op", r#"{"action":"status"}"#),
+                    Step::Call("job_op", r#"{"action":"wait","pid":{pid}}"#),
+                    Step::Say("PARENT DONE"),
+                ],
+                std::time::Duration::ZERO,
+            ),
+            (
+                "SLOW JOB",
+                vec![Step::Say("THE SLOW ANSWER")],
+                std::time::Duration::from_secs(3),
+            ),
+        ]))
+        .mount(&server)
+        .await;
+
+    let home = scratch("keeps-nothing-background", &server.uri());
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("work dir");
+    let (code, stdout, stderr) = run_flint(&home, &work, &["--no-session"]);
+    assert_eq!(code, 0, "flint failed: {stderr}\n{stdout}");
+
+    assert!(
+        stdout.contains("session: none -- it was started with --no-session"),
+        "the handle does not say the child keeps nothing: {stdout}"
+    );
+    assert!(
+        stdout.contains("it keeps no conversation (--no-session)"),
+        "the status line reads as though a session were still coming: {stdout}"
+    );
+    assert!(
+        stdout.contains("THE SLOW ANSWER")
+            && stdout.contains("session: none (--no-session)"),
+        "the answer a wait hands over does not say the same: {stdout}"
+    );
+    let files = session_files(&home);
+    assert!(
+        files.is_empty(),
+        "a background child wrote a conversation its parent was told not to keep: {files:?}"
     );
     let _ = std::fs::remove_dir_all(&home);
 }

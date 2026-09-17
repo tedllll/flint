@@ -54,6 +54,22 @@ model; the top-level one is exported to the commands the `bash` tool runs. They 
 different routes, and on a machine where one works and the other does not, conflating them
 takes away the ability to fix either.
 
+**`--no-session` is a property of the run, so the doors are what it has to close.** The file was
+never the hard part — a session is created by its first event, so a run that says nothing writes
+nothing — and the decision that made the flag real is that a promise about what is written is only as
+good as the ways to write it. So `--continue`, `--resume`, `--fork` and `--name` refuse it on the
+command line, `/new` and `/resume` refuse it inside the run (through one function, so the page's
+sidebar rows and a typed line answer the same), and the funnel every mid-run switch goes through —
+which *creates* the session when the old conversation has not said anything yet — is told once and
+carries the flag. The obvious shortcut is wrong for a reason worth keeping: the flag cannot be derived
+from "there is no writer", because a writer that has not appended yet and a run that will never write
+look identical from the outside. What such a run still writes is what it needs to work — spilled tool
+output, a background command's log — under `spill/unattached-<pid>/`, one directory per process rather
+than one shared `unattached/`, because two of these runs both number their spill files from `1.txt`.
+And the flag reaches a `task` child, which is the part that is not obvious until you look at what
+excludes a child's conversation from the person's list: that is `FLINT_PARENT`, the parent's session id,
+which a run with no conversation does not have.
+
 ## Context: instructions and skills
 
 **`instructions = "hint"` is the default.** flint names the instruction files it found and

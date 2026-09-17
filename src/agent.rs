@@ -222,6 +222,16 @@ pub struct Agent {
     /// written says. Drained by [`Agent::with_peers`] into the request *view* -- never into `history`,
     /// which is what makes the relay a decision and not a permanent change to the conversation.
     peer_inbox: Vec<(String, String)>,
+    /// `--no-session`: this run writes no conversation, whichever door would open one.
+    ///
+    /// Not derivable from `writer`, which is `None` for one more reason -- a conversation that has
+    /// said nothing yet has no file -- and `writer` changes while a run is open, because `/new` and
+    /// `/resume` build one. This is the flag's promise rather than the state of a file, and it is a
+    /// field on the run for the same reason the writer is: `/model`, `/provider`, `/reload` and the
+    /// page's switch rows all rebuild the agent through `continue_conversation`, which *creates* a
+    /// session when the old one has no file. Without this, one `/reload` would leave exactly the file
+    /// the flag promised not to leave.
+    no_session: bool,
 }
 
 impl Agent {
@@ -242,20 +252,31 @@ impl Agent {
         writer: Option<SessionWriter>,
     ) -> Self {
         // Spill files belong to one conversation, so that a person reading them later
-        // knows which run produced them. One-shot mode has no session to belong to.
-        let tag = writer
+        // knows which run produced them. A run with no conversation of its own still needs a
+        // directory that is its own: `unattached` alone is one directory for every session-less run
+        // on the machine and the files in it are numbered from 1, so two `--no-session` runs at once
+        // would write over each other's `1.txt`, and the second one's bytes are what the first one's
+        // request would be told to read. See `tools::unattached_spill_dir`.
+        let session_tag = writer
             .as_ref()
             .and_then(|w| w.path().file_stem())
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "unattached".to_string());
+            .map(|s| s.to_string_lossy().to_string());
+        let spill_dir = match &session_tag {
+            Some(tag) => crate::config::spill_dir().join(tag),
+            None => crate::tools::unattached_spill_dir(),
+        };
         // The same id is what a child is told started it, so the child's own session can say where it
-        // came from and stay out of the person's list. `unattached` is not a session and is not passed
-        // on: with no conversation of its own, this run has nothing true to be the parent of.
-        let parent = (tag != "unattached").then(|| tag.clone());
+        // came from and stay out of the person's list. A run with no conversation is not a session and
+        // its name is not passed on: with nothing of its own, it has nothing true to be the parent of.
+        let parent = session_tag.clone();
         let tools = ToolBox::new(config, readonly, cwd.clone())
-            .with_spill_dir(crate::config::spill_dir().join(tag))
+            .with_spill_dir(spill_dir)
             .with_task_endpoint(provider.name(), provider.model())
             .with_task_parent(parent)
+            // And the flag itself, one step out: a child is a conversation this run asked for, so a
+            // run that keeps none has to say so to its children or `--no-session` would leave a file
+            // behind through the one door it opened itself.
+            .with_task_no_session(session_tag.is_none())
             // And what a *command* is told about the run it is in, as opposed to what a child run
             // is told (`FLINT_PARENT`, above): a `bash` script that wants to find the transcript,
             // or to ask the same endpoint a second question, has no other way to know.
@@ -288,7 +309,21 @@ impl Agent {
             // Off until somebody says otherwise: `--hear-peers`, or `/hear-peers on` at the prompt.
             hears_peers: false,
             peer_inbox: Vec::new(),
+            // Off until the command line says otherwise: `Agent::new` is also how the tests, the
+            // examples and every rebuilt agent in a run are made, and a default of "write nothing"
+            // would be a surprise in all of them.
+            no_session: false,
         }
+    }
+
+    /// Whether this run was told to write no conversation (`--no-session`).
+    pub fn no_session(&self) -> bool {
+        self.no_session
+    }
+
+    /// Say that it was, which the startup path does once and `continue_conversation` carries on.
+    pub fn set_no_session(&mut self, yes: bool) {
+        self.no_session = yes;
     }
 
     /// Whether a peer's message is relayed to the model. Off unless a person asked.

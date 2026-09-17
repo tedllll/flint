@@ -112,6 +112,7 @@ flint why is my dsh broken       # same thing
 flint -p "apply @rules.csv"      # @file is replaced by that file's contents (for anything too
                                  # big to fit on a command line)
 flint -p "why?" --max-seconds 30 # bound the whole run; over budget it ends `incomplete` (exit 65)
+flint -p "what is in /etc/hosts" --no-session   # answer without writing a conversation anywhere
 flint --continue                 # resume the last session here
 flint --resume 3                 # resume a particular one (see the list)
 flint --resume 1789116592        # ...by id prefix, or by path to the .jsonl
@@ -145,6 +146,18 @@ which they did not before: a child is newer than the parent that started it, and
 `--continue` would happily resume the child's conversation instead of yours. The child's file
 is a session like any other — same format, readable, `--resume <path>` opens it — and its
 `meta` line names the conversation that asked for it. `mv` it up a level to adopt it.
+
+**A run can keep nothing at all.** `--no-session` writes no conversation: nothing to continue
+from later, nothing in any list, no file on disk. It is a property of the whole *run* rather than
+of one command, so it refuses `--continue`, `--resume`, `--fork` and `--name` on the command line,
+and `/new` and `/resume` typed inside the run, because each of those opens or names the file the
+flag promised not to write; a provider switch, which normally creates the file if the conversation
+has not said anything yet, cannot sneak one in either. What the run still writes is what it needs
+to work — spilled tool output, and a background command's log — under
+`~/.flint/spill/unattached-<pid>/`, a directory of its own so two such runs cannot overwrite each
+other's `1.txt`. A `task` child is started with the same flag: a child is a conversation *this* run
+asked for, and a parent with no conversation has no id to file it under `children/`, so the child's
+file would have landed in your own list.
 
 `flint balance` is the preflight, and it never sends a completion. It asks the provider
 `GET /user/balance` — DeepSeek publishes one, with `is_available` (its docs: "whether the user's
@@ -217,8 +230,8 @@ Type while the model is working to interrupt it; your line becomes the next
 input. Ctrl-C clears a half-typed line, and quits when the line is already
 empty. Ctrl-D quits.
 
-Flags: `--provider`, `--model`, `--readonly`, `--hear-peers`, `--cwd`, `--no-color` (or
-`NO_COLOR`), `--continue`, `--resume`, `--fork`, `--name`, `--archive`, `--delete`,
+Flags: `--provider`, `--model`, `--readonly`, `--no-session`, `--hear-peers`, `--cwd`, `--no-color`
+(or `NO_COLOR`), `--continue`, `--resume`, `--fork`, `--name`, `--archive`, `--delete`,
 `--json`, `--schema`, `--result-file`, `--list-sessions`, `--max-seconds`.
 
 ### Reading a run from a program

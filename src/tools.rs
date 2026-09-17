@@ -142,7 +142,7 @@ impl ToolBox {
         // The session's own directory, until `with_spill_dir` names the real one. A tool
         // that writes a file of its own is built with it now rather than told later, so
         // that a `ToolBox` used without `with_spill_dir` still writes somewhere sane.
-        let spill_dir = crate::config::spill_dir().join("unattached");
+        let spill_dir = unattached_spill_dir();
         // One record for the whole tool set: it is the run's memory of what it has looked
         // at, so every tool that reads has to write into the same one that the writers
         // consult.
@@ -197,6 +197,7 @@ impl ToolBox {
                     model: String::new(),
                     agents: skill_dirs.agents.clone(),
                     parent: None,
+                    no_session: false,
                 },
             }),
             // The fan-out, offered under the same conditions and with the same configuration: it is
@@ -211,6 +212,7 @@ impl ToolBox {
                     model: String::new(),
                     agents: skill_dirs.agents.clone(),
                     parent: None,
+                    no_session: false,
                 },
             }),
             // The handle for a child nobody waited for. It starts nothing and costs nothing to offer:
@@ -323,12 +325,27 @@ impl ToolBox {
     /// Separate from the endpoint because it is a different fact: the endpoint is *how* a child talks,
     /// and this is *where it came from*. It reaches the child as `FLINT_PARENT`, which `main` reads to
     /// name the parent in the child's `meta` line and to file the child's session under `children/`,
-    /// out of the person's list of their own conversations. `None` for a run with no session -- a
-    /// one-shot `--json` run has no conversation of its own to be the parent of.
+    /// out of the person's list of their own conversations. `None` for a run that keeps no
+    /// conversation (`--no-session`), which has nothing true to be the parent of -- and which is why
+    /// that run also hands its children `--no-session`, below.
     pub fn with_task_parent(mut self, parent: Option<String>) -> Self {
         for tool in &mut self.tools {
             if let Some(config) = tool.task_config() {
                 config.parent = parent.clone();
+            }
+        }
+        self
+    }
+
+    /// Tell the `task` tool that this run keeps no conversation, so its children keep none either.
+    ///
+    /// A child is a conversation the *parent* asked for, so leaving it behind would mean `--no-session`
+    /// writes nothing except through the one door it opened itself. The child is a whole flint started
+    /// from `task_argv`, so the promise travels the same way the endpoint and the parent's name do.
+    pub fn with_task_no_session(mut self, no_session: bool) -> Self {
+        for tool in &mut self.tools {
+            if let Some(config) = tool.task_config() {
+                config.no_session = no_session;
             }
         }
         self
@@ -399,6 +416,21 @@ impl ToolBox {
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+/// The spill directory of a run that has no conversation of its own: one per process.
+///
+/// `spill/unattached/` was one directory for every session-less run on the machine, and the files in
+/// it are numbered from 1 (`Tool::spill`), so two runs told to write no conversation wrote over each
+/// other's `1.txt` -- and the second run's bytes are what the first one's request was told to read.
+/// The pid is the smallest true name for "this process", and a name that says only which process it
+/// was is honest about being disposable: nothing reads these directories back by name.
+///
+/// Used in two places that must agree: `ToolBox::new`'s fallback (a tool set that was never told
+/// where to spill) and `Agent::new`, which decides the same thing from the other end -- whether there
+/// is a conversation to name the directory after.
+pub fn unattached_spill_dir() -> PathBuf {
+    crate::config::spill_dir().join(format!("unattached-{}", std::process::id()))
+}
 
 fn resolve_path(cwd: &Path, raw: &str) -> PathBuf {
     let p = Path::new(raw);
@@ -1007,6 +1039,10 @@ struct Job {
     /// its own: a job somebody is waiting for hands its answer over in the tool result, and a line
     /// about it as well would be the same news twice.
     background: bool,
+    /// Whether this job was asked to keep no conversation, so that "its session is not named yet" is
+    /// never said about a child that will never name one. Always `false` for a command: a command has
+    /// no conversation at all, and its line already says what it produced instead.
+    no_session: bool,
     /// Whether what it produced has been read or handed over already.
     ///
     /// The one piece of bookkeeping DSH's job runtime has and this did not: an exit is news once. A
@@ -1238,9 +1274,12 @@ impl Job {
         // Where to go for what it produced: a child's answer is a conversation, a command's is a
         // file. Everything else about the line is the same question asked of either.
         let produced = match self.kind {
-            JobKind::Child => match self.session() {
-                Some(path) => format!("session {path}"),
-                None => "its session is not named yet".to_string(),
+            JobKind::Child => match (self.session(), self.no_session) {
+                (Some(path), _) => format!("session {path}"),
+                // A child that will never name one is not "not yet anything": it was started with
+                // `--no-session`, so the file is not late, it is not coming.
+                (None, true) => "it keeps no conversation (--no-session)".to_string(),
+                (None, false) => "its session is not named yet".to_string(),
             },
             JobKind::Command => match &self.log {
                 Some(path) => format!("output in {}", path.display()),
@@ -1488,8 +1527,13 @@ impl Job {
             self.readonly,
             self.started.elapsed().as_secs_f64()
         ));
-        if let Some(session) = collected.session.clone().or_else(|| self.session()) {
-            text.push_str(&format!("\nsession: {session}"));
+        match collected.session.clone().or_else(|| self.session()) {
+            Some(session) => text.push_str(&format!("\nsession: {session}")),
+            // Said rather than left out. A caller's habit is to follow up inside the child's
+            // conversation, so a result with no `session:` line reads as one that has not been named
+            // *yet* -- and this one never will be, because it was started with `--no-session`.
+            None if self.no_session => text.push_str("\nsession: none (--no-session)"),
+            None => {}
         }
         text
     }
@@ -2318,6 +2362,8 @@ async fn start_background_command(
         readonly: false,
         // Always background: this function exists for the calls that said so.
         background: true,
+        // A command has no conversation to keep or to name, whatever the run around it was told.
+        no_session: false,
         reported: std::sync::atomic::AtomicBool::new(false),
         ended_by_us: std::sync::atomic::AtomicBool::new(false),
         timeout_secs,
@@ -4345,9 +4391,16 @@ pub struct TaskConfig {
     agents: Vec<context::AgentProfile>,
     /// The session this run is having, which is what its children are told started them.
     ///
-    /// `None` only for a run with no session to hand down, which is the one-shot `--json` run: it
-    /// still writes a session file of its own, so this is empty only where there is nothing true to say.
+    /// `None` for a run that keeps no conversation of its own (`--no-session`): a child told it came
+    /// from nothing would be filed as though nobody had asked for it, so `no_session` says the same
+    /// thing the other way round -- there is no parent to name, and no file to leave.
     parent: Option<String>,
+    /// Whether this run keeps no conversation, which decides the same for the children it starts.
+    ///
+    /// Not a default and not a guess: a child is a conversation this run asked for, so a flag about
+    /// what this run leaves on disk has to reach it, or `--no-session` would write nothing except
+    /// through the one door it opened itself.
+    no_session: bool,
 }
 
 /// A child that is ready to start.
@@ -4369,6 +4422,10 @@ struct Child {
     /// Whether this run started it without waiting. Carried on the child's own job record, because the
     /// decision outlives the call that made it: the notice at the end depends on it.
     background: bool,
+    /// Whether the child was told to keep no conversation, which is what its own stream will say
+    /// instead of naming a file. Carried so that a status line can say "none, and none was asked for"
+    /// rather than "not named yet" -- the one answer that would stay wrong forever.
+    no_session: bool,
     /// The profile that shaped it, if one did.
     agent: Option<String>,
     /// Where its job sits in a fan-out, for the header of its block.
@@ -4435,7 +4492,15 @@ pub fn task_depth() -> u32 {
 ///
 /// The endpoint is always passed explicitly. Left out, the child would resolve its own default --
 /// which is right until this run was started with `--provider` or `--model`, at which point "another
-/// flint like this one" would quietly mean a different model.
+/// flint like this one" would quietly mean a different model. `no_session` is passed for the same
+/// reason one step further out: "another flint like this one" includes what this one keeps, and a
+/// `--no-session` run whose child wrote a conversation left exactly one file behind.
+//
+// Eight arguments, and the lint is not wrong: each one is a fact the child has to be *told* rather
+// than left to resolve for itself. A struct would exist only to satisfy the lint -- the same call
+// `main.rs` makes for the REPL's own signature -- and the test that holds this shape still asserts a
+// *list* of argv, so it would be flattened straight back out there.
+#[allow(clippy::too_many_arguments)]
 pub fn task_argv(
     exe: &Path,
     prompt: &str,
@@ -4444,6 +4509,7 @@ pub fn task_argv(
     provider: &str,
     model: &str,
     schema: Option<&Path>,
+    no_session: bool,
 ) -> Vec<String> {
     let mut argv = vec![
         exe.display().to_string(),
@@ -4455,6 +4521,9 @@ pub fn task_argv(
     ];
     if readonly {
         argv.push("--readonly".to_string());
+    }
+    if no_session {
+        argv.push("--no-session".to_string());
     }
     if !provider.is_empty() {
         argv.push("--provider".to_string());
@@ -4614,6 +4683,7 @@ fn prepare_child(config: &TaskConfig, args: &Value, prompt: &str, index: usize) 
         &provider,
         &model,
         schema_file.as_deref(),
+        config.no_session,
     );
     Ok(Child {
         argv,
@@ -4622,6 +4692,7 @@ fn prepare_child(config: &TaskConfig, args: &Value, prompt: &str, index: usize) 
         parent: config.parent.clone(),
         timeout_secs,
         readonly,
+        no_session: config.no_session,
         // A fan-out collects every answer in one result, so its children are children somebody is
         // waiting for. `task` decides its own, from the call.
         background: false,
@@ -5260,6 +5331,7 @@ fn start_child(child: Child) -> Result<std::sync::Arc<Job>> {
         depth: child.depth,
         readonly: child.readonly,
         background: child.background,
+        no_session: child.no_session,
         reported: std::sync::atomic::AtomicBool::new(false),
         ended_by_us: std::sync::atomic::AtomicBool::new(false),
         timeout_secs: child.timeout_secs,
@@ -5430,9 +5502,12 @@ async fn background_handle(job: std::sync::Arc<Job>) -> String {
         job.pid,
         label = job.label
     );
-    match &session {
-        Some(path) => text.push_str(&format!("session: {path}\n")),
-        None => {
+    match (&session, job.no_session) {
+        (Some(path), _) => text.push_str(&format!("session: {path}\n")),
+        // The same distinction a status line makes: a child told to keep nothing has no session
+        // *coming*, and "not named yet" would send its caller back to ask again forever.
+        (None, true) => text.push_str("session: none -- it was started with --no-session\n"),
+        (None, false) => {
             text.push_str("session: not named yet -- ask `job_op` with action \"status\" for it\n")
         }
     }
@@ -5607,7 +5682,16 @@ mod task_tests {
     fn the_child_command_line_says_exactly_what_the_child_should_be() {
         let exe = Path::new("/usr/local/bin/flint");
         let cwd = Path::new("/work");
-        let plain = task_argv(exe, "look around", cwd, false, "deepseek", "deepseek-chat", None);
+        let plain = task_argv(
+            exe,
+            "look around",
+            cwd,
+            false,
+            "deepseek",
+            "deepseek-chat",
+            None,
+            false,
+        );
         assert_eq!(
             plain,
             vec![
@@ -5635,16 +5719,23 @@ mod task_tests {
             "p",
             "m",
             Some(Path::new("/tmp/s.json")),
+            false,
         );
         assert!(guarded.contains(&"--readonly".to_string()));
         assert_eq!(guarded.last().unwrap(), "/tmp/s.json");
 
         // An endpoint flint does not know is left unspoken rather than passed as an empty string,
         // which the child would take as a provider named "".
-        let bare = task_argv(exe, "p", cwd, false, "", "", None);
+        let bare = task_argv(exe, "p", cwd, false, "", "", None, false);
         assert!(!bare.iter().any(|a| a == "--provider"));
         assert!(!bare.iter().any(|a| a == "--model"));
         assert!(!bare.iter().any(|a| a == "--readonly"));
+        assert!(!bare.iter().any(|a| a == "--no-session"));
+
+        // A run that keeps no conversation says so to the child it starts: the child is a
+        // conversation this run asked for, so it is the one file `--no-session` could still leave.
+        let keeping_nothing = task_argv(exe, "p", cwd, false, "p", "m", None, true);
+        assert!(keeping_nothing.contains(&"--no-session".to_string()));
     }
 
     #[test]
@@ -6467,6 +6558,31 @@ mod spill_tests {
         assert!(
             !dir.path().join("spill").exists(),
             "a spill directory was made for output that fit"
+        );
+    }
+
+    /// A run with no conversation still spills into a directory that is its own.
+    ///
+    /// The name is the whole content of the claim, so the test asserts the name rather than the
+    /// existence: `unattached` alone is shared by every session-less run on the machine, and these
+    /// files are numbered from 1, so two `--no-session` runs at once would write over each other's
+    /// `1.txt` -- the second one's bytes read out by the first one's model, which is a wrong answer
+    /// nothing in the transcript would explain. The pid is what makes them two directories.
+    #[test]
+    fn a_run_with_no_conversation_spills_into_a_directory_of_its_own() {
+        let expected = format!("unattached-{}", std::process::id());
+        let dir = unattached_spill_dir();
+        assert_eq!(
+            dir.file_name().and_then(|name| name.to_str()),
+            Some(expected.as_str()),
+            "the spill directory of a session-less run does not name the process: {}",
+            dir.display()
+        );
+        assert_eq!(
+            dir,
+            crate::config::spill_dir().join(&expected),
+            "the spill directory is not under this home's spill root: {}",
+            dir.display()
         );
     }
 }

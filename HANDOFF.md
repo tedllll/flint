@@ -6,6 +6,35 @@ of it.
 
 ## Where things stand
 
+**The second of the twelve items taken from the Pi reading is built and pushed: `--no-session`, a run
+that writes no conversation.** A one-off question asked against a big model, a look at a machine
+somebody else owns, a script that wants no trace in the list. The file is the small half; the *doors*
+are the whole of it, and that is the sentence to remember: a flag whose promise is "nothing is written"
+is only true if the ways to write something are closed, so `--continue`, `--resume`, `--fork` and
+`--name` are refused on the command line, `/new` and `/resume` are refused inside the run, and the one
+funnel every mid-run switch goes through — which creates the session file when the old conversation has
+not said anything yet, so a `/model` would have quietly created the file this flag promised not to
+write — cannot create one either. What the run still writes is what it needs to work, under a name of
+its own: spilled tool output and a background command's log go to `spill/unattached-<pid>/`, because
+two such runs would otherwise share `spill/unattached/` and overwrite each other's `1.txt`. And the
+flag travels to a `task` child, which is the half worth reading twice: a child is a conversation *this*
+run asked for, it is started by `task_argv` like any other child, and because a session-less parent has
+no conversation id to set `FLINT_PARENT` to, that child's file would not have been filed under
+`children/` at all — it would have appeared in the person's own list. The three places that name a
+child's conversation now tell "none, and none was asked for" from "not named yet": the handle, the
+status line, and the answer a `wait` hands over.
+
+**Also in this round, and not part of the twelve: the `aarch64-unknown-linux-musl` job went red on
+`bacae13` and it was not the code.** It never reached cargo — the "Install zig" step of a workflow
+matrix built for static musl failed after *one second*, while the x86_64 musl job on the same commit
+downloaded the same tarball for sixteen minutes and then built and passed. `goto-bus-stop/setup-zig@v2`
+is unmaintained, now force-run on Node 24, hits ziglang.org from every job and caches nothing; the step
+is `mlugg/setup-zig@v2` in its own commit (`adcde74`), which rotates the community mirror list, checks
+the tarball's signature and keeps the download and the Zig cache between runs. Nothing about the Rust
+build changed. **Measured on the run that carried the fix: the step went from 981 seconds to 10 (arm64)
+and 45 (x86_64), and all four targets are green** — so the sixteen minutes per musl job were never the
+download's size, they were one mirror being hammered twice a push.
+
 **The first of the twelve items taken from the Pi reading is built and pushed: a command knows what run
 it is in.** `FLINT_SESSION` (the conversation's file, absolute), `FLINT_PROVIDER` and `FLINT_MODEL` are
 set on every command a run starts — the model's `bash`, `pwsh` and `exec`, and a person's own `!cmd`,
@@ -178,14 +207,14 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 569 passing, 1 ignored on this machine
-(334 lib, 5 in the binary's own tests, 33 `agent_loop`, 73 `cli_output`, 35 `json_output` (7 structured
+As of the commit that carries this file, `cargo test` is 575 passing, 1 ignored on this machine
+(335 lib, 5 in the binary's own tests, 33 `agent_loop`, 76 `cli_output`, 35 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
 be able to read, 4 the answer written where the caller asked, 3 the file inlined into the prompt,
 1 the stream checked on its bytes, 1 how long a turn took),
 7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 27 `web_view`,
-10 `who`, 15 `task`, 6 `say`),
+10 `who`, 17 `task`, 6 `say`),
 and one more on Unix, `tty_hangup`, which is `#![cfg(unix)]` and needs a real pty — as is the Unix
 half of the process-group kill, `a_killed_command_takes_its_children_with_it_on_unix`. `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
@@ -777,13 +806,32 @@ the block is drawn — then open the `commands` panel and read it against `/help
 
 ## What was just done
 
-**An interrupt no longer throws away the answer it was drawing, the commands that rebuild the agent
+**`--no-session`: a run that keeps no conversation, and the door it would have left open.** The second
+of the twelve items taken from the Pi reading, its own commit, and the shape of it is the doors rather
+than the file — `--continue`/`--resume`/`--fork`/`--name` refused at the command line before the config
+is even loaded, `/new` and `/resume` refused inside the run through one function so the page's sidebar
+rows get the same sentence a typed line does, and the switch path (which creates the session when the
+old one has no file) told once and carried on the agent. The children inherit it through `task_argv`,
+which matters more than it sounds: with no conversation id to hand down, a child's session would have
+been written *outside* `children/` and shown to the person as one of their own. Four tests in
+`tests/cli_output.rs` and `src/tools.rs`, two more in `tests/task.rs`; three mutation checks, each
+watched failing with the branch disabled and restored byte-for-byte. The section is below.
+
+**And the failure that was not a compile error.** The release matrix's `aarch64-unknown-linux-musl` job
+went red on the previous commit and never ran cargo: its zig install step died after one second while
+the sibling x86_64 job spent sixteen minutes downloading the same version successfully. Read off the
+step timings through the actions API rather than guessed at, fixed by moving the step to the maintained
+action — which also means the next builds will not spend sixteen minutes per musl job fetching the same
+tarball. `## Pushing from this machine` now records how to read a red job without a log.
+
+**The round before this one, recorded here so it is not re-done: an interrupt no longer throws away the
+answer it was drawing, the commands that rebuild the agent
 no longer throw the conversation away, a stopped turn now ends on the page as well as in the
 terminal, `/readonly` sets the guard it says it sets, `/verbose off` outlives the run, the page
 can change the model or the provider from its own header, a command typed into the page's composer
 answers there — because a command that failed no longer ends the run — the page is told what
 commands the run has, from the same table `/help` prints, and the one class of those commands that
-takes no argument is a button in the header.** That is this round and the four before it: ten items
+takes no argument is a button in the header.** That was that round and the four before it: ten items
 in one family — what the user has already read must not go missing, a surface must not go on saying
 a turn is running after it has stopped, a switch must not report a state it did not set, a setting
 must not be forgotten by the file that is supposed to hold it, a page must have a *read channel* and
@@ -1671,6 +1719,81 @@ removed, three of them fail with `"%FLINT_SESSION%\r\n%FLINT_PROVIDER%\r\n%FLINT
 values should be, and separately with the `Agent::new` call removed the e2e fails the same way — so the
 wiring is covered and not just the object.
 
+### `--no-session`: a run that keeps no conversation
+
+The second of the twelve items taken from the Pi reading, and its own commit. The sentence that opened
+it is in `ROADMAP.md` and in `docs/pi-agent-harness.md` §3.4: Pi has `--no-session` (ephemeral: never
+save), flint's only no-file case was incidental — a session file is created by the first event in it, so
+a run that says nothing leaves nothing — and a flag whose promise depends on saying nothing is not a
+promise.
+
+**The file is the small half. The doors are the whole of it.** Every way a conversation can be opened or
+named had to be closed, and each one is a different mechanism, which is why the round is 150 lines of
+`src/main.rs` for four lines of "write nothing":
+
+- **The command line refuses the contradiction before anything else happens.** `--continue`, `--resume`,
+  `--fork` and `--name` each say "the conversation this run is in", and `--no-session` says there is
+  none: one sentence, one `usage()`, exit 2. It is checked with the other command-line refusals and
+  *before* the config is loaded, so a caller that typo'd its way into a contradiction does not get a
+  config file created on the way to being told so.
+- **`/new` and `/resume` refuse from inside the run**, both through one `keeps_no_conversation(cmd,
+  printer)` so the page's sidebar rows — which go through the same dispatcher as a typed line — get the
+  same sentence, and so a third door added later inherits it. `/reload` is deliberately *allowed*: it
+  re-reads config and rebuilds the agent, which is not opening a conversation, and the test holds that
+  distinction as a count (two refusals, not three) plus the file count staying at one.
+- **The switch path is the one nobody would have thought of.** `continue_conversation` is the single
+  funnel `/model`, `/provider`, `/reload` and the page's switch rows all go through, and it *creates* a
+  session when the old one has no file. So a `--no-session` run that switched provider would have
+  written the file the flag exists to prevent. The flag is read off the old agent (`Agent::no_session`)
+  and set on the new one rather than re-derived — deriving it from `writer.is_none()` is what looks
+  right and is wrong, because `SessionWriter::create` only *proposes* a path and the file appears on the
+  first append, so "no writer" and "no file yet" are different states.
+
+**What the run still writes, and why it has a name of its own.** Spilled tool output and a background
+command's log are not the conversation; they are how a run works at all. They go under
+`spill/unattached-<pid>/` — `tools::unattached_spill_dir()` — and the bug that named it came from two
+`--no-session` runs sharing `spill/unattached/`: both number their spill files from `1.txt`, so the
+second run's first spill overwrote the first run's.
+
+**The part worth reading twice: a `task` child inherits the flag.** A child is a conversation *this* run
+asked for, so a parent that promised to write nothing would leave a file behind through the one door it
+opened itself. It is worse than untidy, because the exclusion that keeps a child's conversation out of
+the person's list is `FLINT_PARENT` — the parent's id, which a session-less parent does not have — so
+the child's file would have been written at the top level of `sessions/<dir>/` and listed as one of the
+person's own. `TaskConfig.no_session` → `Child.no_session` → `Job.no_session`, and `task_argv` pushes
+`--no-session` onto the child's command line beside the endpoint. That last field is also what the three
+renderings needed: "its session is not named yet" is an answer that stays wrong forever about a child
+that will never name one, so the handle, the `job_op status` line and the result a `wait` hands over all
+say "none" and say why.
+
+**Measured, six tests, and the interesting ones are end to end.** `src/tools.rs`:
+`a_run_with_no_conversation_spills_into_a_directory_of_its_own` (the directory is named from the pid and
+lives under `spill/`), and `the_child_command_line_says_exactly_what_the_child_should_be` gained the
+`--no-session` argument and the assertion that a bare child does *not* get it. `tests/cli_output.rs`: a
+`-p --json --no-session` run asserting exit 0, `"nothing kept"`, `frame["session"].is_null()` and **no
+`.jsonl` anywhere under the home**; the same run refusing all five flags with exit 2 and a message that
+names the flag; and — `#[cfg(debug_assertions)]`, through a real REPL at `80x24` — `/reload` allowed,
+`/new` and `/resume` refused in the same words, counted as exactly two. `tests/task.rs`:
+`a_run_that_keeps_no_conversation_starts_children_that_keep_none` (a waiting `task`; the child's answer
+really arrives, so an empty home means something, and the child's result says
+`session: none (--no-session)`) and `a_background_child_of_a_run_that_keeps_nothing_says_so_everywhere`
+(the handle, the status line and the collected answer, plus an empty home).
+
+**Three mutation checks, each restored byte-for-byte afterwards.** The writer branch made
+`if false && no_session` → the file count test sees two files instead of one (a
+`sessions/<dir>/<stamp>.jsonl` appears beside the switch line's). `next.set_no_session(no_session)`
+removed from `continue_conversation` → the REPL test counts zero refusals instead of two. The `/new`
+refusal removed → zero instead of two. And on the child side, `with_task_no_session(false)` in
+`Agent::new` → the task e2e fails on the handle text, and the status line's branch reverted to "not named
+yet" → the background test fails on the status line. A seventh check is the reason the REPL test counts
+*two*: its first version expected `/reload` to refuse and was wrong, and the fix was the test, not the
+code — re-reading config is not opening a conversation.
+
+**Known and deliberate: `flint who` shows such a run with no `session=`.** The presence record gains no
+new field for this. Omitting a field is not the claim "not yet" — which is exactly the claim that had to
+be fixed in the three child renderings — and a peer's line says the truth by saying nothing. If a second
+door onto that distinction appears, the record is where it would go.
+
 ### Still owed on the page
 
 **§8 is built, so this list is now the residues rather than a class.** The command list, its panel, the
@@ -2465,3 +2588,26 @@ git config core.sshCommand   # ssh -i C:/Users/<you>/.ssh/flint_github -o Identi
 Note the forward slashes: `core.sshCommand` is parsed by git, which eats the backslashes
 in a Windows path and then reports an identity file that does not exist. The Mac checkout
 has no `core.sshCommand` set at all, so a push there uses the default key.
+
+### Reading a red job without a log
+
+GitHub will not hand a job's log to an unauthenticated reader — `GET
+/repos/tedllll/flint/actions/jobs/<id>/logs` answers 403 "Must have admin rights to Repository" — and
+the web UI's log pane is not fetchable either. What *is* readable is the structure, and a failing step's
+name plus its duration is usually the whole diagnosis:
+
+```bash
+curl.exe -s "https://api.github.com/repos/tedllll/flint/actions/runs?per_page=4"   # runs, with conclusions
+curl.exe -s "<the run's jobs_url>"                                                 # the four targets
+curl.exe -s "https://api.github.com/repos/tedllll/flint/actions/jobs/<job id>"     # steps, conclusions, timestamps
+```
+
+Two facts worth keeping: `ci` is `cargo test` and `clippy` on Linux and Windows, and `release` is the
+four binaries (two static musl, macOS, Windows). So **a red `release` job with a green `ci` is almost
+never a compile error** — read the step names before reading the diff. The case that proved it
+(2026-09-17) was `aarch64-unknown-linux-musl` failing on `bacae13` inside "Install zig (for static musl
+builds)" after **one second**, while the x86_64 musl job spent **981 seconds** on the same step for the
+same version, downloaded it, and passed. The action was the fault, not the code: the fix was
+`mlugg/setup-zig@v2` (community mirrors, signature check, cached tarball) in its own commit, and the
+next run confirmed it — the same step took **10 seconds** for arm64 and **45** for x86_64, four green
+targets, and the `release` workflow has been quiet since.

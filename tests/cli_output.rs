@@ -1872,6 +1872,168 @@ fn exec_does_not_pass_on_a_session_name_it_inherited() {
     );
 }
 
+/// A run told to write no conversation writes none, and tells a program so on its stream.
+///
+/// Two claims and one run, because they are one promise seen by two readers: a `--json` caller is
+/// told the session is `null` rather than handed a path to a file that does not exist, and the
+/// directory a person would look in holds nothing. The turn really happens -- the mock answers it and
+/// the answer is asserted -- because a run that failed before saying anything would leave no file
+/// either, and the test would then pass for the reason it is not about.
+#[tokio::test]
+async fn a_run_that_writes_no_conversation_writes_none() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(&[
+                    r#"data: {"choices":[{"delta":{"content":"nothing kept"}}]}"#,
+                    r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+                    "data: [DONE]",
+                ])),
+        )
+        .mount(&server)
+        .await;
+
+    let home = test_home("no-session", &server.uri());
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("work directory");
+    let out = binary()
+        .args(["-p", "say something", "--json", "--no-session", "--cwd"])
+        .arg(&work)
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("failed to run flint");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the run failed: {text}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        text.contains("nothing kept"),
+        "the turn did not happen, so an empty directory would prove nothing: {text}"
+    );
+
+    let started = text
+        .lines()
+        .find(|line| line.contains("\"session.started\""))
+        .unwrap_or_else(|| panic!("no session.started frame: {text}"));
+    let frame: serde_json::Value = serde_json::from_str(started).expect("the frame is one object");
+    assert!(
+        frame["session"].is_null(),
+        "the stream named a session for a run that was told to write none: {frame}"
+    );
+
+    let written = jsonl_files(&home.join("sessions"));
+    assert!(
+        written.is_empty(),
+        "a conversation was written anyway: {written:?}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A run that may not write a conversation refuses every flag that would open or name one.
+///
+/// Refused rather than ignored, because both quiet outcomes are bad in the same way: `--no-session
+/// --continue` that resumed anyway is a person who believes nothing was written while a file grows,
+/// and one that started a fresh conversation anyway is a person who believes they went back. The
+/// doors are tried in one test because the claim is "all of them", so a fifth added later lands here.
+#[test]
+fn a_run_that_writes_no_conversation_refuses_to_open_one() {
+    for flag in [
+        &["--continue"][..],
+        &["--resume"][..],
+        &["--resume", "3"][..],
+        &["--fork"][..],
+        &["--name", "something"][..],
+    ] {
+        let mut args = vec!["-p", "hello", "--no-session"];
+        args.extend_from_slice(flag);
+        let (code, out) = run(&args);
+        let text = String::from_utf8_lossy(&out);
+        assert_eq!(code, 2, "{flag:?} was not refused: {text}");
+        assert!(
+            text.contains("--no-session") && text.contains(flag[0]),
+            "the refusal for {flag:?} does not name what it refuses: {text}"
+        );
+    }
+}
+
+/// The words every refusal in a `--no-session` run has to carry. One sentence for the doors that
+/// refuse, so a test can count them rather than guess at three phrasings.
+#[cfg(debug_assertions)]
+const KEEPS_NO_CONVERSATION: &str = "this run keeps no conversation (--no-session)";
+
+/// The promise holds for the whole run, not only for the command line that started it.
+///
+/// `/reload` is why this is more than a refusal message, and it is deliberately *not* one of the two
+/// that refuse: re-reading the config is a thing a person must be able to do in any run. What it
+/// must not do is leave a file, and it would: it rebuilds the agent through `continue_conversation`,
+/// which *creates* a session when the old one has no file. So the file count below is what fails if
+/// the flag is dropped when the agent is rebuilt, and `/new` typed after `/reload` is the other half
+/// of the same fact -- a refusal that is still there after the rebuild, rather than one that was only
+/// in the startup path. `/resume` is the third door, and a session is written first so its refusal is
+/// about the flag rather than about there being nothing to resume.
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn a_run_that_writes_no_conversation_refuses_to_start_one_mid_run() {
+    let home = test_home("no-session-repl", "http://127.0.0.1:1/v1");
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("work directory");
+    write_session(
+        &home.join("sessions"),
+        "20260101000000-1-999.jsonl",
+        &[&meta_line("20260101000000-1-999")],
+        0,
+    );
+
+    let mut child = binary()
+        .args(["--no-session", "--cwd"])
+        .arg(&work)
+        .env("FLINT_HOME", &home)
+        .env("FLINT_TERM_CAPTURE", "1")
+        .env("FLINT_TERM_SIZE", "80x24")
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to run flint");
+    {
+        use std::io::Write;
+        child
+            .stdin
+            .as_mut()
+            .expect("no stdin handle")
+            .write_all(b"/reload\n/new\n/resume 1\n/exit\n")
+            .expect("failed to write stdin");
+    }
+    let out = child.wait_with_output().expect("flint did not finish");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+
+    assert!(
+        text.contains("reloaded"),
+        "a --no-session run refused to re-read its config, which is not a conversation: {text:?}"
+    );
+    assert_eq!(
+        text.matches(KEEPS_NO_CONVERSATION).count(),
+        2,
+        "/new and /resume are the two doors that must refuse, and /new refusing after /reload is how \
+         the flag surviving a rebuild is shown: {text:?}"
+    );
+    let written = jsonl_files(&home.join("sessions"));
+    assert_eq!(
+        written.len(),
+        1,
+        "the run wrote a conversation it was told not to write: {written:?}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 /// `flint debug prompt-input` prints the request it would send, and sends nothing.
 ///
 /// The second half is the one worth asserting. A diagnostic that quietly created a session

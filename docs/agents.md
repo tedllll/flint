@@ -356,6 +356,14 @@ worth reading:
 - **The endpoint is passed explicitly**, from the parent's resolved provider and model, because
   `--provider`/`--model` on the parent's command line appear nowhere in the config — a child resolving
   its own default would quietly be a different model.
+- **A run that keeps no conversation starts children that keep none.** `--no-session` travels the same
+  way the endpoint does, and for the same reason one step out: a child is a conversation *this* run
+  asked for, so a parent that promised to write nothing would leave a file behind through the one door
+  it opened itself. It is worse than untidy here, because a parent with no conversation has no id to
+  set `FLINT_PARENT` to — so the child's file would not be filed under `children/` at all, it would
+  appear in the person's own list, a conversation they never had. The three places that name a child's
+  conversation therefore distinguish "none, and none was asked for" from "not named yet": the handle a
+  background `task` returns, the `job_op status` line, and the answer a `wait` hands over.
 - **The refusal at the depth limit is a tool *result*, not an error.** "not started: this is already a
   flint run at depth 2…" reads as an answer the model can act on, which is what it is; an error would
   invite a retry that cannot succeed.

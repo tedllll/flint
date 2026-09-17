@@ -1817,7 +1817,16 @@ argument, the cost and what flint has today are in the document, §3.
   Pi's `/fork` cuts at a user message and its file records the lineage it came from.
 - **A follow-up message that does not interrupt the turn** — a plain line typed mid-turn is steering
   and drops the in-flight request, by design; this is the second way to send one.
-- **`--no-session`** — a run that writes no conversation, for a one-off question.
+- **`--no-session` — built, 2026-09-17.** A run that writes no conversation: no file, nothing in any
+  list, nothing to continue from. It is a property of the whole run rather than of one command, which
+  is why it refuses `--continue`, `--resume`, `--fork` and `--name` at the command line and `/new` and
+  `/resume` inside the run — each of those opens or names the file the flag promised not to write — and
+  why the one path every mid-run switch goes through cannot create one either. What the run still
+  writes is what it needs to work: spilled tool output and a background command's log, under
+  `spill/unattached-<pid>/`, a directory of its own so two such runs cannot overwrite each other. A
+  `task` child is started with the same flag, and that is the part worth keeping: a child is a
+  conversation *this* run asked for, and a parent with no conversation has no id to file it under
+  `children/`, so its file would have landed in the person's own list.
 - **`/import <file>`** — bring a session file in, the mirror of the export.
 - **A static export of a finished conversation** — one HTML file, no process behind it.
 - **An entry id the page can resume from after a restart** — the reconnection cursor today is a
