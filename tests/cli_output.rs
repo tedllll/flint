@@ -317,6 +317,7 @@ const CJK_FILES: &[(&str, &str)] = &[
     ("docs/deepseek-search.md", "quotes DeepSeek's own description of the search endpoint"),
     ("docs/python.md", "a Python call written the way its author would write it"),
     ("docs/sandbox.md", "two characters quoted for how they feel, not for what they say"),
+    ("docs/web-mode.md", "§13 quotes the complaint it was built from, in the words it arrived in"),
     ("docs/windows.md", "the console title Windows prints, in Chinese"),
     ("docs/windows-tooling.md", "the `你好` whose mangling *is* the measurement"),
     ("examples/channels.rs", "the Chinese prompt the example defaults to"),
