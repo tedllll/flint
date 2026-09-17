@@ -749,6 +749,27 @@ mod tests {
         assert!(serde_json::from_str::<Presence>("{\"pid\": 1}").is_err());
     }
 
+    /// Wait a bounded moment for what the test just wrote to be readable again.
+    ///
+    /// A fresh read immediately after a write and a close is not guaranteed to see the bytes on
+    /// every machine. Measured on a Windows CI runner: of two appends to one file, the second was
+    /// not visible to the very next read, so the cursor below reported nothing new and the test
+    /// accused it of a bug in the file system. Twenty-six runs on the machine this was written on
+    /// never reproduced it, which is the definition of a race. That claim was never flint's to
+    /// make -- this test is about what the *cursor* does with a half-written line -- so the file is
+    /// given a moment instead, and what was seen is handed back to go into the failure message.
+    fn visible(path: &Path, ready: impl Fn(&str) -> bool) -> String {
+        let mut text = String::new();
+        for _ in 0..100 {
+            text = std::fs::read_to_string(path).unwrap_or_default();
+            if ready(&text) {
+                return text;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        text
+    }
+
     #[test]
     fn a_mailbox_shows_what_arrives_after_it_started_and_only_what_is_for_this_run() {
         // A directory of its own for the mailbox, and a *project* directory of its own to key it by.
@@ -770,8 +791,13 @@ mod tests {
         say(&cwd, "peer 2", "", "said to whoever is here").expect("write");
         say(&cwd, "peer 3", "1", "said to me").expect("write");
         say(&cwd, "peer 4", "999", "said to somebody else").expect("write");
+        let landed = visible(&path, |text| text.contains("said to somebody else"));
         let mine = mailbox.new_messages("1");
-        assert_eq!(mine.len(), 2, "expected the broadcast and the one to me: {mine:?}");
+        assert_eq!(
+            mine.len(),
+            2,
+            "expected the broadcast and the one to me: {mine:?} in {landed:?}"
+        );
         assert_eq!(mine[0].from, "peer 2");
         assert_eq!(mine[1].text, "said to me");
         // Read once, not twice: the cursor is the whole reason a run does not repeat itself.
@@ -788,7 +814,11 @@ mod tests {
             file.write_all(br#"{"from":"peer 5","text":"not finishe"#)
                 .expect("partial write");
         }
-        assert!(mailbox.new_messages("1").is_empty());
+        let half = visible(&path, |text| text.ends_with("not finishe"));
+        assert!(
+            mailbox.new_messages("1").is_empty(),
+            "half a line was read as a message: {half:?}"
+        );
         {
             use std::io::Write;
             let mut file = std::fs::OpenOptions::new()
@@ -797,8 +827,13 @@ mod tests {
                 .expect("open");
             file.write_all(b"d yet\"}\n").expect("finish the line");
         }
+        let finished_line = visible(&path, |text| text.ends_with("not finished yet\"}\n"));
         let finished = mailbox.new_messages("1");
-        assert_eq!(finished.len(), 1);
+        assert_eq!(
+            finished.len(),
+            1,
+            "the completed line was not read: {finished:?} in {finished_line:?}"
+        );
         assert_eq!(finished[0].text, "not finished yet");
 
         // A line somebody broke by hand is reported as a peer message that says so: two agents failing
@@ -811,6 +846,7 @@ mod tests {
                 .expect("open");
             file.write_all(b"not json at all\n").expect("bad line");
         }
+        visible(&path, |text| text.ends_with("not json at all\n"));
         let damaged = mailbox.new_messages("1");
         assert_eq!(damaged.len(), 1);
         assert!(damaged[0].from.contains("unreadable"), "{damaged:?}");
