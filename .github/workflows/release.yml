@@ -48,10 +48,19 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # Not `goto-bus-stop/setup-zig@v2`, which this used until it failed a build for a reason
+      # that had nothing to do with the code: on 2026-09-17 the aarch64 job's install step died
+      # after *one second*, while the x86_64 job on the same commit fetched the same tarball for
+      # sixteen minutes and carried on. Sixteen minutes is the normal case for the old action,
+      # because it goes to ziglang.org from every job and caches nothing. This one is maintained,
+      # rotates through the community mirror list (the official site is the last resort), checks
+      # the tarball's minisign signature, and keeps the download and the Zig cache between runs.
       - name: Install zig (for static musl builds)
         if: matrix.use_zigbuild
-        uses: goto-bus-stop/setup-zig@v2
+        uses: mlugg/setup-zig@v2
         with:
+          # A release rather than a nightly: mirrors may purge nightly builds, and a tarball
+          # that is no longer there would read as a broken program.
           version: 0.13.0
 
       - name: Install cargo-zigbuild
