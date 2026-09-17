@@ -397,6 +397,28 @@ fn parent_session() -> Option<String> {
 /// conversation it is -- the last few exchanges do that, and scrolling a hundred
 /// messages of old transcript is worse than useless when the session file is right
 /// there.
+/// The file name at the end of a path, whoever wrote the path.
+///
+/// Used for the provenance of an imported conversation, where the path is a string that came out of
+/// somebody else's file: it may separate its parts with a slash, a backslash, or both, and it is not
+/// this machine's business to resolve it -- the fact is what was given, and the reader wants the name.
+fn file_name_of(path: &str) -> String {
+    path.rsplit(['/', '\\']).next().unwrap_or(path).to_string()
+}
+
+/// "…, imported from <file>" for a line that names a conversation, or nothing.
+///
+/// Two doors name a conversation to a person -- the startup `resumed` line and `/resume` -- and a
+/// conversation that was copied in from somebody else's file looks exactly like one that began here.
+/// One wording in one place, so the two lines cannot drift into telling a person different things
+/// about the same file.
+fn imported_note(loaded: &session::LoadedSession) -> String {
+    match &loaded.imported {
+        Some(imported) => format!(", imported from {}", file_name_of(&imported.from)),
+        None => String::new(),
+    }
+}
+
 fn print_transcript(history: &[event::Message], printer: &Printer<'_>) {
     const TAIL: usize = 12;
     let shown: Vec<&event::Message> = history
@@ -763,12 +785,13 @@ async fn real_main(args: Args) -> Result<i32> {
                 }
                 let copied = args.fork.is_some();
                 eprintln!(
-                    "flint: {} {} ({} messages){}",
+                    "flint: {} {} ({} messages{}){}",
                     if copied { "forking" } else { "resumed" },
                     path.file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_default(),
                     history.len(),
+                    imported_note(&loaded),
                     match loaded.title.as_deref() {
                         Some(name) => format!(" — {name}"),
                         None => String::new(),
@@ -2614,6 +2637,11 @@ impl CommandHelp {
 /// A `&[PageArg]` built inside a `const fn` is a temporary that borrows from the frame, which the
 /// compiler refuses; naming them here is what makes the table one list instead of three.
 const NAME_ARG: [PageArg; 1] = [PageArg::required("text", Field::Text)];
+/// `/import`'s one answer: the file.
+///
+/// Free text rather than a selector, and that is the command rather than a limitation of the row: what
+/// it takes is a path somebody handed you, which no list of this run's own conversations can offer.
+const IMPORT_ARG: [PageArg; 1] = [PageArg::required("file", Field::Text)];
 const KEY_ARG: [PageArg; 1] = [PageArg::required("key", Field::Password)];
 /// `/provider add`'s three: everything a provider needs that is not a secret.
 ///
@@ -2705,6 +2733,7 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp::row("/agents [name]", "/agents", "list agent profiles (.flint/agents/*.md), or print one", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/sessions", "/sessions", "list past sessions, numbered", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/resume <n|id>", "/resume", "switch to one of them", HelpSection::Commands, OnPage::Selector),
+    CommandHelp::field_row("/import <file>", "/import", "copy a conversation in from a session file", HelpSection::Commands, OnPage::Form, &IMPORT_ARG),
     CommandHelp::field_row("/name [text]", "/name", "name this conversation", HelpSection::Commands, OnPage::Form, &NAME_ARG),
     CommandHelp::destroying("/archive <n|id>", "/archive", "file one away, out of the list", ArgFrom::Sessions),
     CommandHelp::destroying("/delete <n|id>", "/delete", "delete one", ArgFrom::Sessions),
@@ -4033,12 +4062,13 @@ async fn handle_command(
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
             printer.term().line(format_args!(
-                "{green}resumed:{reset} {name} ({count} messages){}",
+                "{green}resumed:{reset} {name} ({count} messages{}){}",
                 if loaded.model.is_empty() {
                     String::new()
                 } else {
                     format!(", model {}", provider_cfg.model)
-                }
+                },
+                imported_note(&loaded)
             ));
             // Draw it, and not merely load it: the reading the startup path already gives the same
             // thing. One line naming a file, on a screen that still holds the conversation just
@@ -4046,6 +4076,97 @@ async fn handle_command(
             // conversation got to is the whole reason for going back to it. The page has always
             // drawn it (`Viewer::follow` makes a browser re-read the file the run moved to); this
             // is the terminal catching up with its own startup path.
+            print_transcript(&loaded.messages, printer);
+            new_agent.set_last_usage(loaded.last_usage);
+            new_agent.splice_loaded_history(cfg, &cwd, loaded.messages);
+            return Ok(Flow::NewAgent(new_agent, provider_cfg.clone()));
+        }
+
+        "/import" => {
+            // Bring a conversation in from a file, as a conversation of this run's own.
+            //
+            // The difference from `--resume <path>` is *ownership*, and it is the reason this exists:
+            // resuming carries on inside the file it was handed, which is the wrong thing to do to a
+            // file somebody gave you -- it grows, it gains this machine's usage lines, and its `meta`
+            // still names their working directory. This copies instead, and the source is not written
+            // to at all: the same act `--fork` performs for a conversation this run is already in, for
+            // a file it never started from. The copy says where it came from (`SessionEvent::Import`),
+            // so a reader who finds it later is not looking at a conversation that began from nothing.
+            if agent.no_session() {
+                return Ok(keeps_no_conversation(cmd, printer));
+            }
+            if arg.is_empty() {
+                printer
+                    .term()
+                    .line(format_args!("usage: /import <file>  (a session file, by path)"));
+                return Ok(Flow::Continue);
+            }
+            let path = resolve_session(arg)?;
+            // Importing the file this run is writing would copy a growing conversation into itself,
+            // one line behind where it had got to. Canonicalised, because the same file reached by
+            // another spelling is the same file; a run whose conversation has not been written yet
+            // has no path to compare against and cannot be in this position.
+            if let Some(mine) = agent.session_path() {
+                if let (Ok(mine), Ok(theirs)) = (mine.canonicalize(), path.canonicalize()) {
+                    if mine == theirs {
+                        printer.term().line(format_args!(
+                            "{yellow}that is the conversation this run is writing{reset} — importing \
+                             it would copy it into itself. `--fork` at startup copies a conversation \
+                             you are already in."
+                        ));
+                        return Ok(Flow::Continue);
+                    }
+                }
+            }
+            let loaded = session::load(&path)?;
+            let count = loaded.messages.len();
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if count == 0 {
+                // Refused rather than imported as nothing: a conversation of no messages is a
+                // session in the list that nobody could tell from a real one, and opening one for a
+                // file that holds none would answer "imported" with a transcript of nothing.
+                printer.term().line(format_args!(
+                    "{yellow}nothing to import:{reset} {name} holds no conversation (0 messages)"
+                ));
+                return Ok(Flow::Continue);
+            }
+            if !loaded.model.is_empty() {
+                provider_cfg.model = loaded.model.clone();
+            }
+            let provider = provider::Provider::new(provider_cfg.clone())?;
+            let cwd = agent.cwd().clone();
+            // The copy is this run's: a fresh file in this run's own sessions, which is also what
+            // makes `parent_session` right here rather than the source's provenance -- a child run
+            // that imports is still a child, and its conversation still belongs under `children/`.
+            let mut writer = session::SessionWriter::create(
+                &config::sessions_dir(),
+                &cwd,
+                &provider_cfg.name,
+                &provider_cfg.model,
+                parent_session().as_deref(),
+            )?;
+            writer.imported_from(&path, Some(&loaded.id), count)?;
+            writer.write_messages(&loaded.messages, loaded.title.as_deref())?;
+            let copied = writer
+                .path()
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let mut new_agent =
+                agent::Agent::new(cfg, provider, agent.readonly(), cwd.clone(), Some(writer));
+            printer.term().line(format_args!(
+                "{green}imported:{reset} {name} ({count} messages) into {bold}{copied}{reset}{}",
+                if loaded.model.is_empty() {
+                    String::new()
+                } else {
+                    format!(", model {}", provider_cfg.model)
+                }
+            ));
+            // Drawn for the same reason `/resume` draws: a conversation that was loaded and not drawn
+            // cannot be told apart from an empty one, and this one is *new* to the person reading it.
             print_transcript(&loaded.messages, printer);
             new_agent.set_last_usage(loaded.last_usage);
             new_agent.splice_loaded_history(cfg, &cwd, loaded.messages);

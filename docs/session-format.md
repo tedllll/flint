@@ -43,16 +43,24 @@ conversation such a run could otherwise create by itself.
 
 ## One event per line
 
-Every line is a JSON object with a `type`. This build understands six:
+Every line is a JSON object with a `type`. This build understands eight:
 
 | `type` | Written when | Fields |
 |---|---|---|
 | `meta` | once, as the first line | `v`, `id`, `created`, `cwd`, `provider`, `model`, `parent` (only when another run started this one) |
 | `chat` | a message is added to the conversation | `message` |
+| `import` | a conversation is copied in from a file (`/import`) | `from`, `from_id`, `messages` |
+| `peer` | a peer left a message while this conversation was open | `from`, `text`, `at`, `heard` |
 | `usage` | the provider reports token counts | `usage` (`prompt_tokens`, `completion_tokens`, and `cache_hit_tokens` when the endpoint reported a cache split) |
 | `title` | the conversation is named | `name` |
 | `switch` | the provider or model in force changes | `provider`, `model` |
 | `schema` | the answer shape in force changes | `schema` (absent or `null` when cleared) |
+
+Two of the eight are not conversation and never become history: `peer` (a peer's words are shown to the
+person and kept out of `messages` on purpose — see its section) and `import` (provenance, read into
+`LoadedSession::imported` and read by the lines that name a conversation). An **unknown** `type` is
+skipped in silence, which is what lets a hand-edited file, or one written by a newer flint, still load;
+a line that names one of these eight and cannot be parsed is reported as damage instead.
 
 A whole conversation, then — a real one is longer, this is the shape:
 
@@ -120,6 +128,36 @@ path in `parent` the other way round:
 ```
 flint --resume "$FLINT_HOME/sessions/<dir>/children/1789540741-220.jsonl"
 ```
+
+### `import`
+
+```json
+{"type":"import","from":"/home/you/Downloads/given-to-me.jsonl","from_id":"1789512345-88-4412","messages":12}
+```
+
+Written by `/import` when a conversation is **copied in** from a file rather than started here, and
+written **above the conversation it describes** — so a file read top to bottom answers "where did this
+come from" before it answers "what was said in it". It is its own event rather than a field on `meta`
+for the reason `title` and `switch` are events: the file is append-only, and a fact that arrives at a
+moment is a line. Importing a conversation that was itself imported therefore records the file it was
+copied *from*, and a chain of copies reads as a chain of files rather than as one original.
+
+- `from` is the path **as it was given**. A fact of the moment, not a pointer: the file it names may
+  have moved since, may live on a machine this one cannot reach, or may never have been on this
+  machine at all, and a copy that could not be read without it would not be a copy.
+- `from_id` is the source's id as flint read it — its `meta` id, or its file name when the file had no
+  `meta` at all (the hand-written case). Absent when the source's id could not be established at all.
+- `messages` is how many messages were copied. Stored rather than counted later because the copy
+  *grows*: this is the size of the import, not the size of the conversation.
+
+Everything else in the copy is ordinary: the same `chat` lines, the same `title` if the source had one,
+and a `meta` line that belongs to this run (this machine's working directory, the provider and model
+in force here) rather than to the file it came from. The source is not written to at all, which is the
+difference from `--resume <path>`: that continues *inside* the file it was handed.
+
+The record is read back: a conversation that came in this way says so wherever a conversation is named
+to a person — the startup `resumed` line and `/resume` both carry `, imported from <file>` — because a
+record nothing reads cannot be told apart from one that was never written.
 
 ### `chat`
 

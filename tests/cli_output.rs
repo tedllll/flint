@@ -1977,7 +1977,9 @@ const KEEPS_NO_CONVERSATION: &str = "this run keeps no conversation (--no-sessio
 /// the flag is dropped when the agent is rebuilt, and `/new` typed after `/reload` is the other half
 /// of the same fact -- a refusal that is still there after the rebuild, rather than one that was only
 /// in the startup path. `/resume` is the third door, and a session is written first so its refusal is
-/// about the flag rather than about there being nothing to resume.
+/// about the flag rather than about there being nothing to resume. `/import` is the fourth and it is
+/// the one that needs the refusal most: it would *create* a conversation out of a file the run was
+/// pointed at, which is the flag's whole promise undone by one command.
 #[cfg(debug_assertions)]
 #[tokio::test]
 async fn a_run_that_writes_no_conversation_refuses_to_start_one_mid_run() {
@@ -1990,6 +1992,16 @@ async fn a_run_that_writes_no_conversation_refuses_to_start_one_mid_run() {
         &[&meta_line("20260101000000-1-999")],
         0,
     );
+    // A file that *would* import: the refusal has to be about the flag and not about the file.
+    let given = home.join("given.jsonl");
+    std::fs::write(
+        &given,
+        format!(
+            "{}\n",
+            r#"{"type":"chat","message":{"role":"user","content":"a conversation to bring in"}}"#
+        ),
+    )
+    .expect("write the given file");
 
     let mut child = binary()
         .args(["--no-session", "--cwd"])
@@ -2009,7 +2021,7 @@ async fn a_run_that_writes_no_conversation_refuses_to_start_one_mid_run() {
             .stdin
             .as_mut()
             .expect("no stdin handle")
-            .write_all(b"/reload\n/new\n/resume 1\n/exit\n")
+            .write_all(format!("/reload\n/new\n/resume 1\n/import {}\n/exit\n", given.display()).as_bytes())
             .expect("failed to write stdin");
     }
     let out = child.wait_with_output().expect("flint did not finish");
@@ -2021,9 +2033,9 @@ async fn a_run_that_writes_no_conversation_refuses_to_start_one_mid_run() {
     );
     assert_eq!(
         text.matches(KEEPS_NO_CONVERSATION).count(),
-        2,
-        "/new and /resume are the two doors that must refuse, and /new refusing after /reload is how \
-         the flag surviving a rebuild is shown: {text:?}"
+        3,
+        "/new, /resume and /import are the doors that must refuse, and /new refusing after /reload is \
+         how the flag surviving a rebuild is shown: {text:?}"
     );
     let written = jsonl_files(&home.join("sessions"));
     assert_eq!(
@@ -2820,6 +2832,188 @@ async fn a_resumed_conversation_is_drawn_and_not_only_loaded() {
         stdout.contains("the socket answer from yesterday"),
         "/resume drew what the person asked and not what was answered: {stdout:?}"
     );
+}
+
+/// A conversation somebody handed you becomes one of yours, and their file is left alone.
+///
+/// `/import` is `--fork`'s act for a file this run did not start from: the conversation is *copied*
+/// into this run's own sessions and the source is not written to at all. That is the difference from
+/// `--resume <path>`, where the run carries on inside the file it was handed -- which is the wrong
+/// thing to do to a file somebody gave you, and the reason the door exists rather than a note in the
+/// documentation telling people to `cp` first. The fixture is the *hand-written* case twice over: it
+/// has no `meta` line at all, and the file lives outside the sessions directory where no listing
+/// would ever find it.
+#[test]
+fn an_imported_conversation_is_copied_in_and_its_source_is_left_alone() {
+    let home = test_home("import-copies", "http://127.0.0.1:1/v1");
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("working directory");
+    let given = home.join("given-to-me.jsonl");
+    let lines = [
+        r#"{"type":"chat","message":{"role":"user","content":"why does the socket close early"}}"#,
+        r#"{"type":"chat","message":{"role":"assistant","content":"because the peer half-closes"}}"#,
+    ];
+    std::fs::write(&given, format!("{}\n", lines.join("\n"))).expect("write the given file");
+    let before = std::fs::read(&given).expect("read the given file");
+
+    let text = repl_of(&home, &work, &[&format!("/import {}", given.display()), "/exit"]);
+
+    assert!(
+        text.contains("imported"),
+        "/import said nothing about what it did: {text:?}"
+    );
+    assert!(
+        text.contains("given-to-me.jsonl"),
+        "/import did not name the file the conversation came from: {text:?}"
+    );
+    assert!(
+        text.contains("why does the socket close early"),
+        "/import copied the conversation and drew none of it: {text:?}"
+    );
+    assert_eq!(
+        std::fs::read(&given).expect("read the given file again"),
+        before,
+        "/import wrote to the file it was handed; that is what --resume is for"
+    );
+
+    // The copy is a conversation of this run's own: in this home's sessions, with the messages in
+    // it and a line saying where they came from, so the provenance survives the import.
+    let written = jsonl_files(&home.join("sessions"));
+    assert_eq!(
+        written.len(),
+        1,
+        "/import did not leave exactly one conversation of its own: {written:?}"
+    );
+    let copy = std::fs::read_to_string(&written[0]).expect("read the copy");
+    assert!(
+        copy.contains("why does the socket close early"),
+        "the copy does not hold the imported conversation: {copy:?}"
+    );
+    assert!(
+        copy.contains(r#""type":"import""#) && copy.contains("given-to-me.jsonl"),
+        "the copy does not say where it came from: {copy:?}"
+    );
+    // ...above the conversation it describes, so a person reading the file top to bottom is told
+    // where it came from before being told what was said in it.
+    let lines: Vec<&str> = copy.lines().collect();
+    let provenance = lines
+        .iter()
+        .position(|l| l.contains(r#""type":"import""#))
+        .expect("the import line");
+    let conversation = lines
+        .iter()
+        .position(|l| l.contains(r#""type":"chat""#))
+        .expect("the first imported message");
+    assert!(
+        provenance < conversation,
+        "the copy records where it came from below the conversation: {copy:?}"
+    );
+    assert!(
+        copy.contains(r#""type":"meta""#),
+        "the copy is a conversation with no meta line: {copy:?}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A file with no conversation in it is refused, and nothing is created for it.
+///
+/// The hand-edited case has a second half worth holding: a file may parse perfectly and still hold
+/// nothing to bring in -- an empty file, or one whose lines are all events and no messages. Opening a
+/// conversation for it would answer "imported" with a transcript of nothing, and leave a session in
+/// the list that nobody can tell from a real one.
+#[test]
+fn importing_a_file_with_no_conversation_says_so_and_creates_nothing() {
+    let home = test_home("import-empty", "http://127.0.0.1:1/v1");
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("working directory");
+    let given = home.join("no-conversation.jsonl");
+    std::fs::write(&given, format!("{}\n", meta_line("999-1"))).expect("write the given file");
+
+    let text = repl_of(&home, &work, &[&format!("/import {}", given.display()), "/exit"]);
+
+    assert!(
+        text.contains("no conversation") || text.contains("nothing to import"),
+        "/import did not say the file held nothing to import: {text:?}"
+    );
+    assert!(
+        !text.contains("imported:"),
+        "/import claimed to have imported an empty file: {text:?}"
+    );
+    assert_eq!(
+        jsonl_files(&home.join("sessions")).len(),
+        0,
+        "/import created a conversation for a file that held none"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A conversation that was copied in from a file says so when it is named later.
+///
+/// The record is only worth writing if something reads it: a person who resumes an imported
+/// conversation and one who resumes a conversation that began here see the same line, and the line is
+/// the only place that answers "whose file was this". Both doors that name a conversation carry it,
+/// and they share one wording.
+#[test]
+fn a_resumed_import_says_where_it_came_from() {
+    let home = test_home("import-resumed", "http://127.0.0.1:1/v1");
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("working directory");
+    write_session(
+        &home.join("sessions"),
+        "20260101000000-1-777.jsonl",
+        &[
+            &meta_line("20260101000000-1-777"),
+            r#"{"type":"import","from":"/tmp/somebody-elses/given-to-me.jsonl","from_id":"given","messages":2}"#,
+            r#"{"type":"chat","message":{"role":"user","content":"the imported question"}}"#,
+            r#"{"type":"chat","message":{"role":"assistant","content":"the imported answer"}}"#,
+        ],
+        0,
+    );
+
+    let text = repl_of(
+        &home,
+        &work,
+        &["/resume 20260101000000-1-777", "/exit"],
+    );
+
+    assert!(
+        text.contains("resumed:"),
+        "resuming an imported conversation said nothing: {text:?}"
+    );
+    assert!(
+        text.contains("imported from given-to-me.jsonl"),
+        "the resumed line does not say where the conversation was copied from: {text:?}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Drive the REPL from a working directory of its own, with no model behind it.
+///
+/// `repl` runs the child in the test process's working directory, which is this checkout -- a run
+/// started there reads *this* repository's `AGENTS.md` and belongs to this directory's sessions, and
+/// a test that means to hold one line of output does not want either. No request is made here: every
+/// line handed to it is a command, and the provider in the config is a port that refuses.
+fn repl_of(home: &std::path::Path, cwd: &std::path::Path, lines: &[&str]) -> String {
+    use std::io::Write;
+    let mut child = binary()
+        .current_dir(cwd)
+        .env("FLINT_HOME", home)
+        .env("FLINT_TERM_CAPTURE", "1")
+        .env("FLINT_TERM_SIZE", "100x24")
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to run flint");
+    {
+        let stdin = child.stdin.as_mut().expect("no stdin handle");
+        stdin
+            .write_all(format!("{}\n", lines.join("\n")).as_bytes())
+            .expect("failed to write stdin");
+    }
+    let out = child.wait_with_output().expect("flint did not finish");
+    String::from_utf8_lossy(&out.stdout).to_string()
 }
 
 /// Drive a real REPL with one line typed into it: what it drew, and what the model was sent.

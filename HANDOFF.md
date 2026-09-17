@@ -82,6 +82,67 @@ switch invalidates the cache wherever it lives anyway).
 the ignored cost measurement, 27 `web_view`, 10 `who`, 17 `task`, 6 `say`), clippy silent, both Node
 checks passing.
 
+**The fifth of the twelve items taken from the reading of Pi is built: `/import <file>`, a
+conversation copied in from a file this run did not start from.** Pi exports a session, imports one
+back and shares one as a static page; flint already opens any session file by path (`--resume
+<path>`), which is why the interesting part of this item was never the loading. It was deciding what
+the command must *not* do. `--resume` continues **inside** the file it is handed — that file grows,
+gains this machine's `usage` lines, and keeps somebody else's `cwd` in its `meta` — and that is the
+wrong thing to do to a file somebody gave you or you hand-edited. So `/import` copies, and the source
+is not written to at all. It is `--fork`'s act for a file this run never started from, and it is what
+makes a hand-written file a first-class way to work rather than something only `--continue`'s
+directory scan can find.
+
+**The copy says where it came from, on its own line above the conversation.** A new session event,
+`{"type":"import","from":…,"from_id":…,"messages":…}`, and an event rather than a field on `meta` for
+the reason `title` and `switch` are events: the file is append-only and a fact that arrives at a
+moment is a line — which also makes a copy of a copy read as a chain of files rather than as one
+original. It is written before the messages it names, so a reader going down the file is told where it
+came from before being told what was said, and `session::load` reads it into `LoadedSession::imported`,
+which **the two doors that name a conversation** then print — the startup
+`resumed` line and `/resume`, through one function so the wording cannot drift. That read-back is not
+decoration: this repository treats a field that is written and never read as damage, and the previous
+round fixed exactly that fault in `last_usage`. `from` is the path as it was given, a fact of the
+moment rather than a pointer to follow — the file may have moved since, or never have been on this
+machine at all, and a copy that could not be read without it would not be a copy. `from_id` is the
+source's id as flint read it (its `meta` id, or its file name when the file had no `meta` at all).
+
+**Three refusals, and each is a decision rather than an error path.** A file with **no conversation in
+it** is refused instead of imported as nothing: an empty import would answer "imported" with a
+transcript of nothing and leave a session in the list that nobody could tell from a real one. The file
+**this run is currently writing** is refused — `/import` would otherwise copy a growing conversation
+into itself, one line behind where it had got to — and the sentence names `--fork` at startup, which
+is that act. And `--no-session` refuses `/import` like every other door that would create a
+conversation, which is the flag's whole promise; its test deliberately hands it a file that *would*
+have imported, so the refusal is about the flag and not about the file.
+
+**Red first, four times, and four mutations.** The command did not exist, so the first run of the new
+test failed with `unknown command '/import'`. The copy test then failed on the provenance with
+`writer.imported_from` commented out (the file held `meta` and two `chat` lines and nothing else), the
+empty-file test failed on `if false && count == 0` (it asserted the missing "nothing to import"
+sentence), and the source-untouched assertion failed when the writer was mutated to
+`SessionWriter::resume(&path)` — the exact mistake the command exists to prevent. The ordering claim
+was watched red by writing the messages before the import line, which the *unit* test could not catch
+(it builds the writer itself) and the command's own file could: the assertion compares the line
+positions, and the failure printed `meta, chat, chat, import`. All four mutations were reverted.
+
+**A test-helper note worth keeping.** The three new tests drive the REPL in a **working directory of
+their own** (`repl_of`), which is not fussiness: `repl` runs the child in the test process's
+directory, so a run started there reads *this* repository's `AGENTS.md` and belongs to this
+checkout's sessions. None of these lines reach a model — every one of them is a command, and the
+provider in the config is a port that refuses — so the whole test costs a process spawn.
+
+**Also in this round, and not part of the twelve: the agent's own working file was damaged and
+rebuilt.** While mutating the ordering claim, a `Get-Content -Raw` / `Set-Content -Encoding utf8`
+round trip on `src/main.rs` read UTF-8 as the system code page: the file came back with a BOM and
+`—` as `鈥?` in every comment. It was caught immediately (the byte check plus the `no_mojibake` test
+this repository already has), the pristine file was restored from the last commit, and the round's
+edits were re-applied from the record and then compared line by line against the damaged copy with
+non-ASCII stripped — 6690 lines each, two intended differences, nothing lost. The lesson is the one
+`docs/AGENTS.md` already carries and this session earned twice: **never round-trip source through
+PowerShell's text cmdlets**; use the file tools, or `[System.IO.File]::WriteAllText` with an explicit
+UTF-8-without-BOM encoding.
+
 **A conversation you switch to inside a run is drawn, and not only loaded — reported against the
 terminal, and the page had already been doing it.** Starting with `--continue`, `--resume` or
 `--fork` has printed the tail of the conversation since sessions became reachable, but `/resume
@@ -293,8 +354,8 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 589 passing, 1 ignored on this machine
-(341 lib, 5 in the binary's own tests, 33 `agent_loop`, 83 `cli_output`, 36 `json_output` (7 structured
+As of the commit that carries this file, `cargo test` is 593 passing, 1 ignored on this machine
+(342 lib, 5 in the binary's own tests, 33 `agent_loop`, 86 `cli_output`, 36 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
 be able to read, 4 the answer written where the caller asked, 3 the file inlined into the prompt,
@@ -844,7 +905,7 @@ still building when the second landed.
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
 cargo build                                       # the Python and browser checks run this binary
-cargo test                                        # 589 passing, 1 ignored
+cargo test                                        # 593 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed
@@ -1994,6 +2055,41 @@ three` and `/nope` shows the four answers in the order the design wants, and the
 what changed."}}` — the expansion, not the line. See the note under *Traps* about `$home` in
 PowerShell: running that check cost two minutes of cleanup because `$home` is read-only and the scratch
 `FLINT_HOME` silently became the real one.
+
+### Bringing a conversation in: `/import`, a copy and not a resume
+
+**The command is one act with three refusals, and the refusals are the design.** `/import <file>` reads
+a session file — by path, or by the id `resolve_session` accepts, which is the same resolver `/resume`
+uses — and copies its conversation into a conversation of this run's own, in this run's sessions
+directory, with this run's `meta`. The source is never opened for writing, which is what the test
+asserts on bytes: the given file is read before the run and compared after. A file that holds no
+messages is refused (`nothing to import: <file> holds no conversation`), the file this run is currently
+writing is refused (canonicalised on both sides, because the same file reached by another spelling is
+the same file — a run whose conversation has not been written yet has no path to compare against and
+cannot be in that position), and `--no-session` refuses it with the same sentence every other
+conversation-opening door gets.
+
+**The provenance line, and why it is an event.** `SessionWriter::imported_from` writes
+`SessionEvent::Import { from, from_id, messages }` between creating the writer and writing the messages,
+so it lands directly under the `meta` line. `SessionWriter::seed` was split into `create` +
+`write_messages` to make that ordering possible without duplicating the loop — the loop's one rule being
+that a system prompt is not part of a conversation, since it is rebuilt per run from the machine flint
+is on. `write_messages` is also what `--fork` uses now, so a copy made by a fork and a copy made by an
+import cannot drift apart on that rule. `from` is the path as given (a fact of the moment: the file may
+have moved, or never have been on this machine, and a copy that could not be read without it would not
+be a copy), `from_id` is the source's id as flint read it (its `meta` id, or its file name when it had
+no `meta` — the hand-written case), and `messages` is the size of the *import*, stored rather than
+counted later because the copy grows. It is read back by `session::load` into
+`LoadedSession::imported`, and printed by `imported_note` in the two lines that name a conversation to a
+person: the startup `flint: resumed … (12 messages, imported from given.jsonl)` and `/resume`'s own
+line. `KNOWN_TYPES` went from seven to eight, which is what keeps a *damaged* import line reported as
+damage rather than skipped as somebody else's event.
+
+**What was deliberately not built.** `--import` on the command line: `/resume <path>` already starts a
+run from a file, and the only thing that needed adding was the door that does not write into it — which
+inside a run is one line typed. And no `SessionSummary` field: the listing does not need provenance to
+answer "which conversation is which", and a field carried by four readers is four places to keep in
+step with the two that actually print it.
 
 ### The cache split, and the counts that were written and never read
 

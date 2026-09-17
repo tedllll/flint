@@ -230,6 +230,36 @@ and a number nobody sees while working is a number nobody notices. The file's `u
 the `--json` frames carry the raw `cache_hit_tokens` and never the rate, so a program can
 compute a rate over its own window instead of over one request.
 
+**A conversation you were given is copied, never continued in place.** `/import <file>` exists because
+`--resume <path>` is the wrong thing to do to a file somebody handed you: resuming writes into it, so
+it grows, it gains this machine's `usage` lines, and its `meta` still names their working directory —
+the file you were given stops being the file you were given. So the act is a *copy* into this run's own
+sessions (the same act `--fork` performs for a conversation this run is already in) and the source is
+not written to at all. That is also what makes hand-editing a first-class way to work: a file written
+in an editor, with no `meta` line at all, is a conversation this run can pick up, and the copy is the
+thing that keeps going.
+
+**An imported conversation says where it came from, on a line of its own.** The record is a session
+*event* rather than a field on `meta`, for the reason `title` and `switch` are events: the file is
+append-only, and a fact that arrives at a moment is a line — and a copy of a copy then reads as a chain
+of files rather than as one original. It is written **above** the conversation it describes, so a file
+read top to bottom answers "where did this come from" before "what was said". `from` is the path as it
+was given and not a pointer to follow: the file may have moved, or never have been on this machine, and
+a copy that could not be read without it would not be a copy. The record is *read back* — the startup
+`resumed` line and `/resume` both append `, imported from <file>` through one function, so two doors
+cannot drift into saying different things about the same file — because a line nothing consumes is the
+fault this repository calls damage: `Loaded::last_usage` sat unread in exactly that way until this
+round's other half fixed it.
+
+**A file with no conversation in it is refused, not imported as nothing.** An empty file, or one whose
+lines are all events and no messages, would otherwise answer "imported" with a transcript of nothing
+and leave a session in the list that nobody could tell from a real one — the same failure the
+`children/` directory exists to prevent, arriving by a different road. The two other refusals are the
+same shape of decision: importing the file this run is currently writing would copy a growing
+conversation into itself (`--fork` at startup is that act), and `--no-session` refuses `/import` like
+every other door that would create a conversation, because creating one is exactly what the flag
+promised not to do.
+
 **A number that is in the file is read back out of the file.** The counts a resumed
 conversation reported were parsed into `Loaded::last_usage` and then dropped on the floor: the
 field had no reader, so `/usage` on a conversation somebody came back to answered "no usage

@@ -65,6 +65,27 @@ pub enum SessionEvent {
     Chat {
         message: Message,
     },
+    /// Where a conversation was copied from, when it was copied rather than started here.
+    ///
+    /// `/import` is the door: a session file somebody handed you, or one you hand-edited, becomes a
+    /// conversation of this run's own instead of a file this run carries on writing inside. Written
+    /// **before** the messages it names, which is the order the thing happened and the order a reader
+    /// wants, and its own event rather than a field on `Meta` for the reason `title` and `switch` are:
+    /// the file is append-only, and a fact that arrives at a moment is a line.
+    ///
+    /// `from` is the path **as it was given**, which is a fact of the moment and not a pointer: the
+    /// file it names may have moved since, it may live on a machine this one cannot reach, and a copy
+    /// that could not be read without it would not be a copy. `from_id` is the source's own id as
+    /// flint read it (its `meta` id, or its file name when it had no `meta` at all -- the hand-written
+    /// case), because an id is what a person can search another sessions directory for. `messages` is
+    /// how many messages were copied, stored rather than counted later because the copy grows: this is
+    /// the size of the import, not the size of the conversation.
+    Import {
+        from: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_id: Option<String>,
+        messages: usize,
+    },
     /// A peer left a message while this conversation was open.
     ///
     /// Its own event, and deliberately **not** a `Chat`: a peer's words are shown to the person and
@@ -128,7 +149,9 @@ pub enum SessionEvent {
 ///
 /// Used for one decision only: a line that failed to parse but names a type in here is
 /// damage, and a line that names anything else is somebody else's event.
-const KNOWN_TYPES: [&str; 7] = ["meta", "chat", "usage", "title", "switch", "schema", "peer"];
+const KNOWN_TYPES: [&str; 8] = [
+    "meta", "chat", "import", "usage", "title", "switch", "schema", "peer",
+];
 
 /// Whether a line names an event type this build knows.
 fn names_a_known_event(line: &str) -> bool {
@@ -229,21 +252,52 @@ impl SessionWriter {
         parent: Option<&str>,
     ) -> Result<Self> {
         let mut writer = Self::create(dir, cwd, provider, model, parent)?;
+        writer.write_messages(messages, title)?;
+        Ok(writer)
+    }
+
+    /// Write a conversation that already exists into this file.
+    ///
+    /// The half of `seed` a caller can want on its own: `/import` creates a writer, records where the
+    /// conversation came from (`imported_from`), and then writes the copy -- and the copy has to be the
+    /// same act as a fork's, or the two would drift apart on the one rule in here.
+    ///
+    /// That rule is the reason this is a function rather than a loop at the call sites: the system
+    /// prompt is not part of the conversation. It is rebuilt for every run from the machine flint is
+    /// on, so a copy written here would come back through `/resume` as a message -- a stale one, from
+    /// another directory or another build.
+    pub fn write_messages(&mut self, messages: &[Message], title: Option<&str>) -> Result<()> {
         for message in messages {
-            // The system prompt is not part of the conversation: it is rebuilt for every run
-            // from the machine flint is on, so a copy written here would come back through
-            // `/resume` as a message -- a stale one, from another directory or another build.
             if matches!(message, Message::System { .. }) {
                 continue;
             }
-            writer.append(&SessionEvent::Chat {
+            self.append(&SessionEvent::Chat {
                 message: message.clone(),
             })?;
         }
         if let Some(name) = title {
-            writer.title(name)?;
+            self.title(name)?;
         }
-        Ok(writer)
+        Ok(())
+    }
+
+    /// Say that this conversation is a copy of one that came from elsewhere.
+    ///
+    /// Called by `/import` between creating the writer and writing the messages, which is the whole
+    /// ordering requirement: like every other append this creates the file, so the `meta` line goes in
+    /// first (this writer proposed it, and provenance is part of what the conversation is) and this
+    /// line lands directly under it, ahead of the conversation it describes.
+    pub fn imported_from(
+        &mut self,
+        from: &Path,
+        from_id: Option<&str>,
+        messages: usize,
+    ) -> Result<()> {
+        self.append(&SessionEvent::Import {
+            from: from.display().to_string(),
+            from_id: from_id.map(str::to_string),
+            messages,
+        })
     }
 
     /// Reopen an existing session file so the conversation keeps being saved.
@@ -433,6 +487,24 @@ pub struct LoadedSession {
     /// the conversation to the same contract it was held to when it was written -- the file says
     /// what that was, and nothing outside the file has to be passed again to continue it.
     pub output_schema: Option<serde_json::Value>,
+    /// Where this conversation was copied from, when it was copied in rather than started here.
+    ///
+    /// Read so that the two places a conversation is named to a person can say it: a conversation
+    /// that came from somebody else's file and one that was started here look identical on screen,
+    /// and a reader who has just resumed the wrong one has no other way to tell. `None` for every
+    /// conversation that was not imported.
+    pub imported: Option<Imported>,
+}
+
+/// Where a conversation came from, as the file that holds it records it.
+///
+/// The fields are `SessionEvent::Import`'s, and the doc there is where the reasoning is: the path is a
+/// fact of the moment rather than a pointer to follow, and the id is what a person can search for.
+#[derive(Debug, Clone)]
+pub struct Imported {
+    pub from: String,
+    pub from_id: Option<String>,
+    pub messages: usize,
 }
 
 /// Read a session file, tolerating (and reporting) damaged lines.
@@ -460,6 +532,7 @@ pub fn load(path: &Path) -> Result<LoadedSession> {
         messages: Vec::new(),
         last_usage: None,
         output_schema: None,
+        imported: None,
     };
 
     let mut damaged = 0usize;
@@ -483,6 +556,21 @@ pub fn load(path: &Path) -> Result<LoadedSession> {
                 loaded.model = model;
             }
             Ok(SessionEvent::Chat { message }) => loaded.messages.push(message),
+            // Read, and *not* put in `messages`: this line is provenance, and the conversation it
+            // describes is the `chat` lines that follow it. The last one wins, as the last `title`
+            // does -- importing a copy records the file it was copied *from*, so a chain of copies
+            // reads as a chain of files rather than as one original.
+            Ok(SessionEvent::Import {
+                from,
+                from_id,
+                messages,
+            }) => {
+                loaded.imported = Some(Imported {
+                    from,
+                    from_id,
+                    messages,
+                })
+            }
             Ok(SessionEvent::Usage { usage }) => loaded.last_usage = Some(usage),
             Ok(SessionEvent::Title { name }) => loaded.title = Some(name),
             // Read in order, so the last one wins: a conversation that moved twice is held with the
@@ -1114,6 +1202,84 @@ mod tests {
         assert_ne!(key, dir_key(&two), "two projects, one key: {key}");
         // A directory with nothing usable in its name still gets one.
         assert!(dir_key(&root.0).contains('-'), "no hash in the key");
+    }
+
+    /// An imported conversation says where it came from, on its own line, above the conversation.
+    ///
+    /// Three things are being held here and each of them is a decision rather than a detail. The
+    /// record is an *event* and not a field on `Meta` -- so a file that was copied twice reads as a
+    /// chain of files, and an older flint reading the line skips it the way it skips any type it does
+    /// not know. It is written **before** the messages it names, because a file read top to bottom
+    /// should answer "where did this come from" before it answers "what was said". And the event is
+    /// read back into `LoadedSession::imported`, which is what stops it from being a line nothing
+    /// consumes -- the fault the counts in `last_usage` had.
+    #[test]
+    fn an_imported_session_says_where_it_came_from_above_the_conversation() {
+        let root = TempDir::new("session-import");
+        let project = TempDir::new("session-import-project");
+        let source = root.0.join("given-to-me.jsonl");
+        std::fs::write(
+            &source,
+            format!(
+                "{}\n{}\n",
+                meta("given-to-me", Some(2)),
+                r#"{"type":"chat","message":{"role":"user","content":"the question they asked"}}"#
+            ),
+        )
+        .expect("write the source");
+
+        let mut writer = SessionWriter::create(&root.0, &project.0, "p", "m", None).expect("create");
+        writer
+            .imported_from(&source, Some("given-to-me"), 1)
+            .expect("imported_from");
+        writer
+            .write_messages(
+                &[Message::user("the question they asked")],
+                Some("their conversation"),
+            )
+            .expect("write_messages");
+
+        let text = std::fs::read_to_string(writer.path()).expect("read the copy");
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(
+            lines[0].contains(r#""type":"meta""#),
+            "the copy does not begin with its own meta line: {text}"
+        );
+        assert!(
+            lines[1].contains(r#""type":"import""#) && lines[1].contains("given-to-me.jsonl"),
+            "the import line is not directly under the meta line: {text}"
+        );
+        assert!(
+            lines[2].contains(r#""type":"chat""#),
+            "the conversation does not follow the line that recorded where it came from: {text}"
+        );
+
+        let loaded = load(writer.path()).expect("load the copy");
+        let imported = loaded.imported.expect("the import was not read back");
+        assert_eq!(imported.from, source.display().to_string());
+        assert_eq!(imported.from_id.as_deref(), Some("given-to-me"));
+        assert_eq!(imported.messages, 1);
+        assert_eq!(
+            loaded.title.as_deref(),
+            Some("their conversation"),
+            "the name travelled with neither the copy nor the load"
+        );
+
+        // ...and an ordinary conversation has no such line at all, so nothing about the first line of
+        // a session changed for every file that was not imported.
+        let mut plain = SessionWriter::create(&root.0, &project.0, "p", "m", None).expect("create");
+        plain
+            .write_messages(&[Message::user("mine")], None)
+            .expect("write_messages");
+        let plain_text = std::fs::read_to_string(plain.path()).expect("read");
+        assert!(
+            !plain_text.contains(r#""type":"import""#),
+            "a conversation that was not imported claims to have been: {plain_text}"
+        );
+        assert!(
+            load(plain.path()).expect("load").imported.is_none(),
+            "a conversation that was not imported loaded as one that was"
+        );
     }
 
     /// A child's conversation is a session file like any other, and it is not one of yours.

@@ -1827,7 +1827,24 @@ argument, the cost and what flint has today are in the document, §3.
   `task` child is started with the same flag, and that is the part worth keeping: a child is a
   conversation *this* run asked for, and a parent with no conversation has no id to file it under
   `children/`, so its file would have landed in the person's own list.
-- **`/import <file>`** — bring a session file in, the mirror of the export.
+- **`/import <file>` — built, 2026-09-17.** A conversation somebody handed you -- or one you
+  hand-edited -- becomes a conversation of this run's own. The difference from `--resume <path>` is
+  *ownership*, and it is the whole reason the door exists rather than a note in the docs telling people
+  to copy the file first: resuming carries on **inside** the file it was handed, so it grows, it gains
+  this machine's `usage` lines, and its `meta` still names somebody else's working directory. `/import`
+  copies instead and does not write to the source at all -- the same act `--fork` performs for a
+  conversation this run is already in, for a file it never started from, and the door that makes
+  hand-editing a file a first-class way to work rather than something only `--continue`'s directory
+  scan can find. The copy records where it came from, on its own line above the conversation
+  (`{"type":"import","from":…,"from_id":…,"messages":…}`), which is a session *event* rather than a
+  field on `meta` for the reason `title` and `switch` are events: a fact that arrives at a moment is a
+  line, and a copy of a copy reads as a chain of files. It is read back -- the startup `resumed` line
+  and `/resume` both say "imported from \<file\>" -- because a record nothing reads is the fault the
+  counts in `last_usage` had. Three refusals are the design rather than the plumbing: an **empty** file
+  is refused instead of imported as nothing (a conversation of no messages would sit in the list,
+  indistinguishable from a real one), importing the file this run is currently writing is refused (it
+  would copy a growing conversation into itself, and `--fork` is that act), and a run started with
+  `--no-session` refuses it like every other door that would create a conversation.
 - **A static export of a finished conversation** — one HTML file, no process behind it.
 - **An entry id the page can resume from after a restart** — the reconnection cursor today is a
   per-process ring, so a reload after a restart re-reads from nothing.

@@ -221,6 +221,7 @@ Inside the REPL:
 | `/prompt <name> [args]` | send a saved prompt (typing `/<name>` is the same thing) |
 | `/sessions` | list past sessions, numbered |
 | `/resume <n\|id>` | switch to one of them, without restarting — it prints the conversation it moved to, as `--resume` does |
+| `/import <file>` | copy a conversation in from a session file you were given or hand-edited; the file you name is not written to |
 | `/name [text]` | show or set a name for this conversation |
 | `/archive <n\|id>` | move a session into `sessions/archive/` |
 | `/delete <n\|id>` | delete a session file |
@@ -1137,6 +1138,39 @@ schema, unlike the skill catalog. The transcript shows the line you typed and a 
 under it naming the file it came from, so which of two files by the same name won is
 answerable at a glance; the session file keeps the expanded text, because that is what was
 actually sent.
+
+### Bringing a conversation in from a file
+
+A session file is plain JSONL and hand-editable, so one can arrive from anywhere: written in an editor,
+produced by a script, or handed over by somebody else. `/import <file>` starts from such a file:
+
+```text
+/import ~/Downloads/the-socket-question.jsonl
+```
+
+It **copies** the conversation into a conversation of this run's own — a fresh file in your
+`FLINT_HOME`, with `meta` naming *this* machine and *this* run's provider and model, and the source is
+not written to at all. That is the difference from `--resume <path>`, which continues *inside* the file
+it is given: a file somebody handed you would grow, gain your `usage` lines, and keep their `cwd`. It is
+the same act as `--fork`, for a file this run never started from.
+
+The copy says where it came from, on a line above the conversation:
+
+```json
+{"type":"import","from":"/home/you/Downloads/the-socket-question.jsonl","from_id":"1789512345-88-4412","messages":12}
+```
+
+`from` is the path as you gave it — a fact of the moment, not a pointer to follow, since the file may
+have moved since or never have been on this machine. `from_id` is the source's own id (or its file name
+when it had no `meta` line at all), which is what you would search another sessions directory for.
+`imported from <file>` is appended wherever a conversation is named later — `/resume`, and the line a
+startup resume prints — so a copy can never be mistaken for a conversation that began here.
+
+Three things are refused rather than half-done: a file with **no conversation in it** (importing
+nothing would leave a session in the list that looks real), the file **this run is currently writing**
+(that would copy a growing conversation into itself; `--fork` at startup is that act), and a run
+started with `--no-session`, which refuses `/import` like every other door that would create a
+conversation.
 
 ## Build from source
 

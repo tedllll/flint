@@ -198,15 +198,28 @@ already, and a second way to say where sessions go is a second thing to keep in 
 Pi exports a session to HTML or JSONL, imports one back, and can share one as a static page. Flint's
 page is a window onto a *running* process: `GET /session` serves the file exactly as it is on disk,
 but nothing renders a finished session, and `--json` is a stream rather than an artifact. Two
-different things are missing and they are worth separating:
+different things are missing and they are worth separating, and **one of them is now built**:
 
-- **`/import <file>`**: start from a session file you hand-edited or were given. Nearly free, and the
-  most flint-shaped item in this document: it makes hand-editing a first-class way to work rather
-  than something only `--continue`'s directory scan can find.
+- **`/import <file>` — built, 2026-09-17**: start from a session file you hand-edited or were given.
+  It was the most flint-shaped item in this document and building it confirmed why: the work was
+  almost entirely deciding what it must *not* do. `--resume <path>` already opens any file, so the
+  command would have been a synonym unless it differed in ownership -- and it does: resuming carries
+  on inside the file it was handed, which is the wrong thing to do to somebody else's file (it grows,
+  it gains this machine's `usage` lines, its `meta` still names their directory), so `/import` copies
+  and does not write to the source at all. It is `--fork`'s act for a file this run never started
+  from, and it is what makes hand-editing a first-class way to work rather than something only
+  `--continue`'s directory scan can find. Three refusals carry the rest of the design: a file with no
+  conversation in it (importing nothing would leave a session in the list that nobody could tell from
+  a real one), the file this run is currently writing (a growing conversation copied into itself;
+  `--fork` is that act), and `--no-session`, which refuses it like every other door that would create
+  a conversation. The copy carries its provenance on a line of its own above the conversation
+  (`{"type":"import","from":…,"from_id":…,"messages":…}`), and that line is read back by the two doors
+  that name a conversation -- the same rule as everywhere else in this repository: a record nothing
+  reads is not a record.
 - **An HTML export**: the same reading the page already draws, written to one file with no process
   behind it. This is the bigger half, and it is only worth doing if the page's renderer can be driven
   from a static frame -- which, since the page's model half is pure and runs under Node in
-  `scripts/web-view-test.js`, is a question with a cheap answer.
+  `scripts/web-view-test.js`, is a question with a cheap answer. Still owed.
 
 There is a third thing in the same area, and it is the smallest of the three: Pi records every entry
 with a stable id, which makes an id a **durable cursor** -- a client asks for everything after the
