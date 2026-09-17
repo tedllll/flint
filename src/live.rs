@@ -751,13 +751,14 @@ mod tests {
 
     /// Wait a bounded moment for what the test just wrote to be readable again.
     ///
-    /// A fresh read immediately after a write and a close is not guaranteed to see the bytes on
-    /// every machine. Measured on a Windows CI runner: of two appends to one file, the second was
-    /// not visible to the very next read, so the cursor below reported nothing new and the test
-    /// accused it of a bug in the file system. Twenty-six runs on the machine this was written on
-    /// never reproduced it, which is the definition of a race. That claim was never flint's to
-    /// make -- this test is about what the *cursor* does with a half-written line -- so the file is
-    /// given a moment instead, and what was seen is handed back to go into the failure message.
+    /// Added for a race that turned out not to exist: the failure it was written for was
+    /// `project_dir_until` resolving one directory two ways, so that `say` wrote to one mailbox and
+    /// the reader followed another (that function's comment has the mechanism, and the commit after
+    /// the one that added this says so). It is kept for two reasons. It costs a read and a compare on
+    /// any machine that behaves, and it buys a failure message that carries the whole file rather
+    /// than one line of an assertion -- which is what turned that wrong diagnosis into the right one
+    /// in a single CI run. And the claim it removes was never this test's to make anyway: a fresh
+    /// read immediately after a write and a close is not something a file system guarantees.
     fn visible(path: &Path, ready: impl Fn(&str) -> bool) -> String {
         let mut text = String::new();
         for _ in 0..100 {
@@ -786,6 +787,17 @@ mod tests {
         // full mailbox and replayed it would report yesterday's conversation as happening now.
         say(&cwd, "old", "", "said before this run").expect("write");
         let mut mailbox = Mailbox::following(&cwd);
+        // The same directory asked twice is the same mailbox -- not a tautology, and not a test of
+        // the marker: a path that moves partway through a process is a message written to one file
+        // and read from another. It did move, once, on a Windows CI runner, and this is the line
+        // that would have said so in one run instead of two (`project_dir_until`'s comment has the
+        // mechanism, which is about how that machine spells its own home directory).
+        assert_eq!(mailbox.path, path, "the reader follows a different mailbox");
+        assert_eq!(
+            mailbox_path(&cwd),
+            path,
+            "the mailbox for this directory moved after the first write"
+        );
         assert!(mailbox.new_messages("1").is_empty());
 
         say(&cwd, "peer 2", "", "said to whoever is here").expect("write");

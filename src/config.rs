@@ -530,19 +530,53 @@ pub fn project_dir(cwd: &std::path::Path) -> Option<PathBuf> {
 
 /// The walk above, with its stopping point passed in so that a test can put one somewhere it can
 /// create -- a test cannot move the real home directory.
+///
+/// Both comparisons are by *place* rather than by string, and that is not tidiness: `%TEMP%` on a
+/// Windows CI runner is the short name (`C:\Users\RUNNER~1\…`) while the home directory is the long
+/// one, so `~/.flint` and a candidate built from the same directory did not compare equal -- and a
+/// run's own home, created by the first `flint say`, then looked like a project marker. That is a
+/// path that changes partway through a process, which is how a message gets written to one mailbox
+/// and read from another; `a_stopping_point_is_recognised_however_it_is_spelled` is the test.
 fn project_dir_until(cwd: &std::path::Path, stop: &std::path::Path) -> Option<PathBuf> {
     let mut dir = Some(cwd);
     while let Some(d) = dir {
-        if d == stop {
+        if same_place(d, stop) {
             return None;
         }
         let candidate = d.join(".flint");
-        if candidate != config_dir() && candidate.is_dir() {
+        if !same_place(&candidate, &config_dir()) && candidate.is_dir() {
             return Some(candidate);
         }
         dir = d.parent();
     }
     None
+}
+
+/// Whether two paths name the same directory.
+///
+/// Compared as canonical paths, for the reason `session::same_dir` records about a session's
+/// recorded `cwd`: one directory arrives spelled differently depending on who asked, and Windows
+/// distinguishes neither case nor separator nor the 8.3 short name. When either side cannot be
+/// canonicalised -- the normal state of a config directory that has never been created -- the paths
+/// are compared as written with case and separators folded on Windows, because those never
+/// distinguish two places there, and compared exactly elsewhere, because on Unix they do.
+fn same_place(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => {
+            #[cfg(windows)]
+            {
+                let fold = |p: &std::path::Path| {
+                    p.to_string_lossy().replace('/', "\\").to_lowercase()
+                };
+                fold(a) == fold(b)
+            }
+            #[cfg(not(windows))]
+            {
+                a == b
+            }
+        }
+    }
 }
 
 /// Where one directory's peers leave each other messages.
@@ -767,6 +801,80 @@ mod tests {
         assert_eq!(
             project_dir_until(&nested, &root),
             Some(root.join("project/.flint"))
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The walk, and the two directories it refuses, whatever they are spelled like.
+    ///
+    /// This is the defect the Windows CI found. On a GitHub runner `%TEMP%` is the *short* name
+    /// (`C:\Users\RUNNER~1\AppData\Local\Temp`) while the home directory is the long one, so the
+    /// home's `~/.flint` did not compare equal to the candidate the walk had just built out of the
+    /// same directory -- and the moment a run created its own home (which is the first thing `flint
+    /// say` does), the home's `FLINT_HOME` started looking like a project marker. A path that
+    /// changes partway through a process is how one mailbox gets written and another read, which is
+    /// the failure the run after this one reported. Case is the same shape of difference on this
+    /// platform and the one below holds it: it never distinguishes two places, so a walk that
+    /// compares strings gets it wrong the same way.
+    #[cfg(windows)]
+    #[test]
+    fn a_stopping_point_is_recognised_however_it_is_spelled() {
+        let root =
+            std::env::temp_dir().join(format!("flint-project-spelling-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = root.join("home");
+        let nested = home.join("work/deep");
+        std::fs::create_dir_all(&nested).expect("directories");
+        // The home's own `.flint`, which is `FLINT_HOME` and never a project's marker.
+        std::fs::create_dir_all(home.join(".flint")).expect("home marker");
+
+        // The same tree, spelled the way a short name or a differently cased path arrives.
+        let spelled = std::path::PathBuf::from(root.to_string_lossy().to_uppercase());
+        assert_eq!(
+            project_dir_until(&spelled.join("home/work/deep"), &home),
+            None,
+            "a differently spelled home directory was not recognised as the stopping point, so its \
+             own .flint was taken for a project's"
+        );
+
+        // ...and a marker below the stopping point is still found, so this is not "refuse everything".
+        std::fs::create_dir_all(home.join("work/.flint")).expect("project marker");
+        assert_eq!(
+            project_dir_until(&spelled.join("home/work/deep"), &home),
+            Some(spelled.join("home/work/.flint")),
+            "the marker below the stopping point was not found"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The same fact on the platform without 8.3 names and without case folding: one directory,
+    /// two names, and the walk has to recognise the stopping point either way.
+    #[cfg(unix)]
+    #[test]
+    fn a_stopping_point_is_recognised_however_it_is_spelled() {
+        let root = std::env::temp_dir().join(format!("flint-project-alias-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = root.join("home");
+        let nested = home.join("work/deep");
+        std::fs::create_dir_all(&nested).expect("directories");
+        std::fs::create_dir_all(home.join(".flint")).expect("home marker");
+        let alias = root.join("alias");
+        std::os::unix::fs::symlink(&home, &alias).expect("symlink");
+
+        assert_eq!(
+            project_dir_until(&alias.join("work/deep"), &home),
+            None,
+            "a home directory reached through another name was not recognised as the stopping \
+             point, so its own .flint was taken for a project's"
+        );
+
+        std::fs::create_dir_all(home.join("work/.flint")).expect("project marker");
+        assert_eq!(
+            project_dir_until(&alias.join("work/deep"), &home),
+            Some(alias.join("work/.flint")),
+            "the marker below the stopping point was not found"
         );
 
         let _ = std::fs::remove_dir_all(&root);
