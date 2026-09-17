@@ -1391,10 +1391,20 @@ press is that there is nothing to press that sends.
 buttons, the reports, the selectors, the forms and the destructive controls are all in. What is left,
 each with the reason it is left:
 
-1. **`/config edit` as a page form** — deliberately not built: its keys are enumerable and its values
-   are free-form, so a page form would send several settings at once while the terminal prompts for
-   them one at a time, and it would need a `/config set <key> <value>` the terminal does not have.
-   Inventing a command for the page's benefit is what §8's design exists to prevent.
+1. **`/config edit` as a page form** — **closed 2026-09-17, the other way round from how it was
+   written here.** The line above said the page would need a `/config set <key> <value>` the terminal
+   did not have, and that inventing a command for the page's benefit is what §8's design exists to
+   prevent — both true, and the answer was to give the *terminal* the command it should have had
+   anyway: `/config set <key> <value>` is the wizard's four questions asked and answered in one line,
+   the keys are the four the wizard edits, and the terminal keeps the wizard for whoever wants to be
+   asked. With the command in the terminal, the page is handed the row the ordinary way (`fields`:
+   the key, and the value marked optional, because a blank value is how a proxy is cleared) and writes
+   the config file through `/message` like every other row action. `/config edit` itself stays a row of
+   reference on the page, which is the rule rather than a residue: a wizard is not a form. Building it
+   also fixed a lie in the wizard that predates the page — it saved the file and left the running tools
+   on the old settings (`ToolBox::new` clones the config into each tool, and `max_steps` goes into the
+   agent), so `/config` printed a value that was not the one in force. Both paths now end in the same
+   rebuild `/reload` uses, and the command says `in force now` because that is true.
 2. **The mid-turn wait for a report** — ~~asserted nowhere~~ **asserted since, 2026-09-16**, and this
    line was stale: `a_report_asked_for_mid_turn_waits_for_the_turn` in `tests/cli_output.rs` drives a
    real `--web` process against a stub that draws a delta and holds the socket open, accepts a report
@@ -2065,11 +2075,14 @@ section into it, so the two do not drift. The shape of it now:
 3. **Web mode** — `--web` as a window onto the running process rather than a mode, and it is
    **built**: the three levels, §7's server question (settled without `hyper` — `src/web.rs` is a
    hand-rolled loopback listener), and §8's five classes of control — the buttons, the panels that
-   read, the selectors, the forms and the destructive ones. What is left is the two residues listed
-   under "Still owed on the page" above: `/config edit` as a page form, which would need a
-   `/config set` the terminal does not have, and the later controls, which are asserted as bytes and
-   have not been driven as clicks in a real browser. `config.toml` writes are allowed because the
-   per-run loopback token already covers them, and `/exit` stays off the page.
+   read, the selectors, the forms and the destructive ones. What was left was the two residues listed
+   under "Still owed on the page" above, and both have moved: `/config edit` as a page form is
+   **closed** — the terminal got the `/config set <key> <value>` it was missing, so the page writes the
+   config file through a two-field form like any other row, and the wizard stays in the terminal where
+   a person can answer it (see that entry for the lie in the wizard this also fixed). The later
+   controls are the one thing still asserted as bytes rather than driven as clicks, and §11 names them.
+   `config.toml` writes are allowed because the per-run loopback token already covers them, and
+   `/exit` stays off the page.
 
 Both of the last two are platform-independent and can be done on either machine.
 

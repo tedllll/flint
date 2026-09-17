@@ -785,7 +785,8 @@ sitting at. That is a hang, not a wrong answer, which is why it is asserted rath
 
 | Claim | How | Result |
 |---|---|---|
-| The frame says which rows take answers, of which kinds, and which are optional | a real `--web` process, the connect-time state frame | `/name [text]` arrives with `"fields":[{"field":"text","name":"text","optional":false}]`, `/provider key <key>` with the same shape carrying `"password"`, and `/provider add <name> <base_url> [model]` with three entries whose last is `"optional":true`; `/config edit` and both wizards carry no `fields` at all |
+| The frame says which rows take answers, of which kinds, and which are optional | a real `--web` process, the connect-time state frame | `/name [text]` arrives with `"fields":[{"field":"text","name":"text","optional":false}]`, `/provider key <key>` with the same shape carrying `"password"`, `/provider add <name> <base_url> [model]` with three entries whose last is `"optional":true`, and `/config set <key> <value>` with two whose value is optional; `/config edit` and `/provider edit` -- the wizards -- carry no `fields` at all |
+| The config file is writable from the page, one setting per line | a real `--web` process, the frame, then `/config set max_steps 7` on `POST /message` | the frame carries the row with both answers as `fields` (the key required, the value optional, because a blank value is how a proxy is cleared); the line the page composes changes the file, and the conversation survives it -- which is the rebuild, since a setting assigned into the running config is one the tools never see |
 | Adding a provider from the page writes one | a real `--web` process, the line the page composes on `POST /message` | the config file gains `name = "claw"` with the wizard's default model, the run switches to it (the frame's `provider` becomes `claw`), and the conversation file gains `"type":"switch","provider":"claw"` rather than a second file |
 | Adding a name that exists is refused, not overwritten | the same run, the line posted twice | `provider 'claw' already exists — \`/provider edit claw\` changes one`, and the file holds one `name = "claw"` |
 | A key typed into a field does not come back | the same run, `/provider key sk-not-a-real-key-0000` on `POST /message`, then the feed and the transcript | the answer says `key saved`, the `command` frame's `input` is `/provider key` and never the line, and the key is nowhere in the transcript — while `config.toml` *does* contain it, which is what stops the other three from passing on a command that never ran. Mutation-checked: echoing the raw line fails this, with the key visible in the frame |
@@ -849,11 +850,15 @@ adds a second thing to watch there: whether the field keeps the focus it was giv
 re-reads itself (a `sessions` frame arrives the moment a rename is sent), and whether Enter in it is
 the submit a person expects rather than the row's own click.
 
-**Deliberately not built**: `/config edit` on the page. Its keys are enumerable and its values are
-free-form, so a page form would send several settings at once while the terminal prompts for them one
-at a time; it would need a `/config set <key> <value>` the terminal does not have, and a command
-invented for the page's benefit is what §8's design exists to prevent. The page writes nothing into the
-config file in this round.
+**`/config edit` is still the terminal's, and that is now a choice rather than a gap.** It is a wizard:
+it asks four questions and waits for each answer, and a page cannot hold a conversation with a run
+whose only reader is a browser. What it was *waiting* for was a one-line form of the same edit, because
+"the config file cannot be changed from the page" is a different claim from "/config edit is not a
+form". The terminal has that command now — `/config set <key> <value>`, whose keys are the four the
+wizard edits and whose values are the only free-form part — so the page draws a field for the key and
+one for the value, and the config file is writable from the browser by the same route as everything
+else: `/message`, the line a person would have typed. Both front doors are one feature; the page is
+still not handed the wizard, on the rule §8 is built on.
 
 ### The destructive class, and the two presses — measured, 2026-09-15
 

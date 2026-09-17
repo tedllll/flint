@@ -2967,13 +2967,17 @@ fn wait_for_exit(child: &mut std::process::Child, secs: u64) -> bool {
 /// for a stopwatch -- the stub's own record of what it received says when that happened, and a
 /// sleep would be a guess about a machine this test does not control.
 ///
-/// Returns the terminal text, the session files as (name, contents), and every request body.
+/// Returns the terminal text, the session files as (name, contents), every request body, and the
+/// config file as the run left it. The config is here because one of the commands that rebuilds the
+/// agent *writes* it (`/config set`), and this helper removes the home directory before it returns --
+/// so a caller that read the file afterwards would be reading a path that is already gone, which is a
+/// failure that looks exactly like the command not having written anything.
 async fn through_a_switch(
     server: &MockServer,
     tag: &str,
     config: &str,
     command: &str,
-) -> (String, Vec<(String, String)>, Vec<String>) {
+) -> (String, Vec<(String, String)>, Vec<String>, String) {
     use std::io::Write;
 
     let home = test_home(tag, &server.uri());
@@ -3040,8 +3044,11 @@ async fn through_a_switch(
             )
         })
         .collect();
+    // Read before the home goes: this is the file `/config set` writes, and the only evidence that
+    // the change reached the disk rather than the transcript.
+    let written = std::fs::read_to_string(home.join("config.toml")).unwrap_or_default();
     let _ = std::fs::remove_dir_all(&home);
-    (text, files, bodies)
+    (text, files, bodies, written)
 }
 
 /// The `.jsonl` files under a sessions directory, sorted by name so a comparison is about the files
@@ -3212,7 +3219,7 @@ async fn a_model_switch_keeps_the_conversation() {
         server.uri()
     );
 
-    let (text, files, bodies) =
+    let (text, files, bodies, _) =
         through_a_switch(&server, "model-switch-keeps", &config, "/model stub-other").await;
     let named = files
         .iter()
@@ -3258,7 +3265,7 @@ async fn a_provider_switch_keeps_the_conversation() {
         uri = server.uri()
     );
 
-    let (text, files, bodies) =
+    let (text, files, bodies, _) =
         through_a_switch(&server, "provider-switch-keeps", &config, "/provider other").await;
 
     the_switch_kept_the_conversation(&text, "switched to other", "/provider other", &files, &bodies);
@@ -3267,6 +3274,46 @@ async fn a_provider_switch_keeps_the_conversation() {
             .iter()
             .any(|(_, text)| text.contains(r#""provider":"other""#)),
         "the conversation was carried into a file that names a different provider: {files:?}"
+    );
+}
+
+/// `/config set` is the wizard's one-line form, and what it changes is true of *this* run.
+///
+/// This is the command the page's form needed and the terminal did not have (`/config set <key>
+/// <value>`), and it is the wizard's four questions asked and answered in one line -- so the page can
+/// offer a field per setting instead of a row that hands the run to four questions nobody is there to
+/// answer.
+///
+/// The rebuild is why this is an integration test rather than a unit test beside `set_config_key`: a
+/// setting assigned into the config is a setting the running run never sees, because every tool holds
+/// a *copy* taken when the agent was built, and `max_steps` went into the agent itself. "Saved" without
+/// a rebuild is the wizard's old lie -- it printed the new value while the tools used the old one --
+/// and what the conversation surviving proves here is that the rebuild happened and produced a working
+/// agent. `reload_agent` is the same function `/reload` uses, and `a_reload_keeps_the_conversation`
+/// asserts the same thing about that path.
+#[tokio::test]
+async fn a_setting_changed_by_command_is_in_force_in_this_run() {
+    let server = MockServer::start().await;
+    answer_once(&server).await;
+    let config = stub_config(&server.uri());
+
+    let (text, files, bodies, written) = through_a_switch(
+        &server,
+        "config-set-in-force",
+        &config,
+        "/config set max_steps 7",
+    )
+    .await;
+
+    the_switch_kept_the_conversation(&text, "max_steps = 7", "/config set", &files, &bodies);
+    assert!(
+        written.contains("max_steps = 7"),
+        "/config set reported a change it did not write: {written:?}"
+    );
+    assert!(
+        text.contains("in force now"),
+        "the change was made without the run being rebuilt around it, which is the half that makes \
+         the sentence true: {text:?}"
     );
 }
 
@@ -3281,7 +3328,7 @@ async fn a_reload_keeps_the_conversation() {
     answer_once(&server).await;
     let config = stub_config(&server.uri());
 
-    let (text, files, bodies) =
+    let (text, files, bodies, _) =
         through_a_switch(&server, "reload-keeps", &config, "/reload").await;
 
     the_switch_kept_the_conversation(&text, "reloaded", "/reload", &files, &bodies);
@@ -4195,6 +4242,27 @@ async fn the_page_is_told_which_commands_it_may_offer() {
             && class == "form"),
         "a command that is a form is not carried as one, so a page could only guess at the \
          argument it needs: {commands:?}"
+    );
+    // `/config set` is the row that closes the last gap in this list. It was a line to type -- "typed
+    // in the terminal" -- because the terminal had no way to change one setting from one line, and the
+    // wizard behind `/config edit` cannot be answered from a browser. It has one now, so the page is
+    // handed the two answers rather than pointed at the terminal, and the value is the *optional* one:
+    // a blank value is how a proxy is cleared, and a required field can never be sent empty.
+    assert!(
+        commands.iter().any(|(label, send, _, class)| label == "/config set <key> <value>"
+            && send == "/config set"
+            && class == "form"),
+        "the one-line setting command is not carried as a form: {commands:?}"
+    );
+    assert!(
+        opening.contains(
+            "\"class\":\"form\",\"fields\":[{\"field\":\"text\",\"name\":\"key\",\
+             \"optional\":false},{\"field\":\"text\",\"name\":\"value\",\"optional\":true}],\
+             \"help\":\"change one setting, and use it now\",\
+             \"label\":\"/config set <key> <value>\",\"send\":\"/config set\""
+        ),
+        "the page is not told what `/config set` takes, so it can only offer it as a line to type: \
+         {opening:?}"
     );
     assert!(
         commands.iter().any(|(_, _, _, class)| class == "danger"),

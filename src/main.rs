@@ -2301,12 +2301,14 @@ impl ArgFrom {
 /// The kind of value a row's argument is, when the page draws a field for it.
 ///
 /// A row with no arguments at all gets no field, which is how `/provider edit` and `/config edit`
-/// stay where they are: a page drawing a field for them would be guessing at the rest.
-/// `/provider add` used to be in that list and is not any more -- it takes its answers as the words
-/// of one line now, so a page can ask for each of them -- and `/config edit` is the one still worth
-/// revisiting: its keys are enumerable and only its values are free-form, and a page form for it
-/// would need a `/config set <key> <value>` the terminal does not have, which is a command invented
-/// for the page's benefit rather than one it was taught.
+/// stay where they are: a page drawing a field for them would be guessing at the rest. Both are
+/// wizards -- they ask one question at a time and wait for the answer -- and a page cannot hold a
+/// conversation, so it is handed them as lines to type in the terminal, where somebody is.
+/// `/provider add` used to be in that list and is not any more -- it takes its answers as the words of
+/// one line now, so a page can ask for each of them. `/config set` is the same move, one command
+/// later: the config's keys are enumerable and only its values are free-form, so a command that takes
+/// one key and one value turns the wizard into a row with two fields, and the terminal keeps the
+/// wizard for the person who wants to be asked.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Field {
     /// One line of text, shown as it is typed.
@@ -2508,6 +2510,17 @@ const ADD_ARGS: [PageArg; 3] = [
     PageArg::required("base_url", Field::Text),
     PageArg::optional("model", Field::Text),
 ];
+/// `/config set`'s two answers: which setting, and what to make it.
+///
+/// The value is marked optional, and that is not a loosening: a *blank* value is how a setting with a
+/// "none" is cleared (`/config set proxy`), which the page would otherwise have no way to ask for --
+/// a required empty field cannot be sent. Which blanks mean something is the process's business
+/// rather than the page's, so a blank one the key has no use for is refused where the key is read,
+/// with a sentence, exactly as it is in the terminal.
+const CONFIG_SET_ARGS: [PageArg; 2] = [
+    PageArg::required("key", Field::Text),
+    PageArg::optional("value", Field::Text),
+];
 
 const COMMANDS: &[CommandHelp] = &[
     CommandHelp::row("/help", "/help", "this message", HelpSection::Commands, OnPage::Panel),
@@ -2525,6 +2538,12 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp::destroying("/provider rm <name>", "/provider rm", "delete one", ArgFrom::Providers),
     CommandHelp::row("/config", "/config", "show shell, steps, proxy", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/config edit", "/config edit", "change shell, steps, proxy", HelpSection::Commands, OnPage::Form),
+    CommandHelp::form_row(
+        "/config set <key> <value>",
+        "/config set",
+        "change one setting, and use it now",
+        &CONFIG_SET_ARGS,
+    ),
     CommandHelp::row("/model", "/model", "show the model in force", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/model <name>", "/model", "switch to one", HelpSection::Commands, OnPage::Selector),
     CommandHelp::row("/usage", "/usage", "context and token accounting", HelpSection::Commands, OnPage::Panel),
@@ -2730,6 +2749,109 @@ fn report_refused(asked: &str, printer: &Printer<'_>, viewer: &Option<web::Viewe
     if let Some(live) = viewer.as_ref().map(web::Viewer::live) {
         live.report(shown, &[said]);
     }
+}
+
+/// The settings `/config set` takes, as `(key, what it is)`.
+///
+/// One list with three readers: the refusal that has to name the keys it does take, the listing a bare
+/// `/config set` prints, and the page's own form, which is handed the same two words the terminal is.
+/// A key that is not here is refused by name rather than written into the file, because the file is
+/// hand-editable and survives a round trip: a typo that landed in it would look like a setting that
+/// had done something.
+///
+/// These are the settings the wizard edits, which is the point of the command rather than an accident
+/// -- `/config set` is `/config edit` without the four questions, and the pair is one feature with two
+/// front doors: a person at a prompt, and a page that cannot hold a conversation.
+const CONFIG_KEYS: &[(&str, &str)] = &[
+    ("shell", "the program commands are run with"),
+    ("shell_args", "the arguments that make it run a command string, space separated"),
+    ("max_steps", "the runaway guard: whole model calls per turn"),
+    ("proxy", "exported to commands as HTTP(S)_PROXY; empty clears it"),
+];
+
+/// Change one setting, or say why not.
+///
+/// The answer is a `Result` of two *sentences* rather than an error, because the caller shows it to a
+/// person: a key that is not a key and a `max_steps` that is not a number are the same kind of event
+/// as a successful change -- something to read -- and only one of them has to stop the run from
+/// writing the file.
+///
+/// What is *not* here is the counting half: the caller writes the file and then rebuilds the run
+/// around it (`reload_agent`). Keeping the edit pure is what lets the refusals be tested without a
+/// config file, a home directory or a terminal.
+fn set_config_key(cfg: &mut config::Config, key: &str, value: &str) -> Result<String, String> {
+    match key {
+        "shell" => {
+            if value.trim().is_empty() {
+                return Err("shell cannot be empty — it is the program commands are run with".into());
+            }
+            cfg.shell = value.trim().to_string();
+            Ok(format!("shell = {}", cfg.shell))
+        }
+        "shell_args" => {
+            // Split as the wizard splits it, because it is the same field: `["-c"]` for the shell that
+            // takes one, `["/S", "/C"]` for the one that takes two.
+            cfg.shell_args = value.split_whitespace().map(str::to_string).collect();
+            Ok(format!("shell_args = {:?}", cfg.shell_args))
+        }
+        "max_steps" => {
+            let steps: usize = value
+                .trim()
+                .parse()
+                .map_err(|_| format!("max_steps takes a whole number, not {value:?}"))?;
+            // Zero is refused rather than read as "no limit". `max_steps` is not a ration, it is the
+            // guard against a loop that never ends, and the way to want it off is to have misread it.
+            if steps == 0 {
+                return Err("max_steps cannot be 0 — it is the guard against a loop that never ends".into());
+            }
+            cfg.max_steps = steps;
+            Ok(format!("max_steps = {steps}"))
+        }
+        "proxy" => {
+            let value = value.trim();
+            cfg.proxy = if value.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            };
+            Ok(format!(
+                "proxy = {}",
+                cfg.proxy.as_deref().unwrap_or("(none)")
+            ))
+        }
+        other => Err(format!(
+            "no setting called {other:?} — /config set takes {}",
+            CONFIG_KEYS
+                .iter()
+                .map(|(key, _)| *key)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+/// Re-read the config file and build this run's next agent around it.
+///
+/// The whole of `/reload`, as a function because `/config set` needs the same thing for a stronger
+/// reason than `/reload` does: it has just changed a setting, and a setting assigned into `cfg` is a
+/// setting the running run never sees. `ToolBox::new` puts a *copy* of the config into every tool
+/// (`shell`, `shell_args` and `proxy` are read from those copies), and `max_steps` went into the agent
+/// itself when it was built. Handing back a rebuilt agent is therefore the only honest way to say
+/// "changed" rather than "written down" -- and it is what the wizard has always been missing: it wrote
+/// the file and left the running tools on the old shell, so `/config` printed a value that was not the
+/// one in force.
+fn reload_agent(
+    cfg: &mut config::Config,
+    agent: &mut agent::Agent,
+    provider_cfg: &mut config::ProviderConfig,
+) -> Result<Flow> {
+    let fresh = config::Config::load()?;
+    let target = fresh.active_provider(None)?.clone();
+    *cfg = fresh;
+    let provider = provider::Provider::new(target.clone())?;
+    *provider_cfg = target.clone();
+    let new_agent = continue_conversation(cfg, provider, &target, agent)?;
+    Ok(Flow::NewAgent(new_agent, target))
 }
 
 async fn handle_command(
@@ -3301,12 +3423,50 @@ async fn handle_command(
                 };
                 cfg.save()?;
                 printer.term().line(format_args!(
-                    "{} saved to {}",
+                    "{} saved to {} {dim}(in force now){reset}",
                     printer.style(GREEN, "ok"),
                     config::config_path().display()
                 ));
+                // The wizard used to stop at the file, which made it the one command that reported a
+                // setting it had not made true: the tools hold copies taken when the agent was built.
+                // `/config set` is the same edit with the rebuild attached, so the wizard gets it too
+                // rather than the pair disagreeing about what "saved" means.
+                return reload_agent(cfg, agent, provider_cfg);
+            } else if arg == "set" || arg.starts_with("set ") {
+                // `/config set <key> <value>`: one setting, in one line, for a person who knows which
+                // one they want -- and the terminal half of the page's form, which can send a line but
+                // cannot answer four questions one at a time.
+                let rest = arg["set".len()..].trim();
+                let (key, value) = match rest.split_once(char::is_whitespace) {
+                    Some((key, value)) => (key, value.trim()),
+                    // No value at all, which is how a setting that *has* a "none" is cleared --
+                    // `/config set proxy`. A key whose blank means nothing says so below.
+                    None => (rest, ""),
+                };
+                if key.is_empty() {
+                    printer.term().line(format_args!("{dim}/config set <key> <value>{reset}"));
+                    for (key, help) in CONFIG_KEYS {
+                        printer
+                            .term()
+                            .line(format_args!("  {bold}{key:<10}{reset} {dim}{help}{reset}"));
+                    }
+                    return Ok(Flow::Continue);
+                }
+                match set_config_key(cfg, key, value) {
+                    Err(why) => printer.term().line(format_args!("{red}{why}{reset}")),
+                    Ok(what) => {
+                        cfg.save()?;
+                        printer.term().line(format_args!(
+                            "{} {what} {dim}(saved to {}, in force now){reset}",
+                            printer.style(GREEN, "ok"),
+                            config::config_path().display()
+                        ));
+                        return reload_agent(cfg, agent, provider_cfg);
+                    }
+                }
             } else {
                 printer.term().line(format_args!("{dim}  /config edit   change shell, steps, proxy{reset}"));
+                printer.term().line(format_args!("{dim}  /config set <key> <value>   one of them, in one line{reset}"));
                 printer.term().line(format_args!("{dim}  (provider settings: /provider){reset}"));
             }
         }
@@ -3477,27 +3637,26 @@ async fn handle_command(
             // tools: without this, a change it just made would not take effect
             // until the process restarted, which is exactly the "leave the tool
             // to fix the tool" problem this is meant to avoid.
-            let fresh = config::Config::load()?;
-            let target = fresh.active_provider(None)?.clone();
-            *cfg = fresh;
-            let provider = provider::Provider::new(target.clone())?;
-            *provider_cfg = target.clone();
-            let new_agent = continue_conversation(cfg, provider, &target, agent)?;
-            let state = if target.resolved_key().trim().is_empty()
-                && !is_local_endpoint(&target.base_url)
-            {
-                printer.style(YELLOW, " (still no key)")
-            } else {
-                String::new()
-            };
-            printer.term().line(format_args!(
-                "{} reloaded {} — provider {bold}{}{reset} model {bold}{}{reset}{state}",
-                printer.style(GREEN, "ok"),
-                config::config_path().display(),
-                target.name,
-                target.model
-            ));
-            return Ok(Flow::NewAgent(new_agent, target));
+            let flow = reload_agent(cfg, agent, provider_cfg)?;
+            // The target comes back inside the flow rather than being returned twice; the sentence is
+            // the only part of this that `/config set`, which does the same rebuild, does not want.
+            if let Flow::NewAgent(_, target) = &flow {
+                let state = if target.resolved_key().trim().is_empty()
+                    && !is_local_endpoint(&target.base_url)
+                {
+                    printer.style(YELLOW, " (still no key)")
+                } else {
+                    String::new()
+                };
+                printer.term().line(format_args!(
+                    "{} reloaded {} — provider {bold}{}{reset} model {bold}{}{reset}{state}",
+                    printer.style(GREEN, "ok"),
+                    config::config_path().display(),
+                    target.name,
+                    target.model
+                ));
+            }
+            return Ok(flow);
         }
 
         "/name" => {
@@ -5681,6 +5840,69 @@ async fn balance_and_stop(cfg: config::ProviderConfig, json: bool) -> Result<i32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `/config set` changes the settings the wizard changes, and refuses everything else by name.
+    ///
+    /// The refusals are the half worth holding, and they are held as *values* rather than as sentences:
+    /// a refusal that had already written the setting would read the same at a prompt and be a bug, so
+    /// every one of them is followed by the value it did not change. What is deliberately not here is
+    /// the write and the rebuild -- the arm saves the file and hands back a new agent, and
+    /// `a_setting_changed_by_command_is_in_force_in_this_run` in `tests/cli_output.rs` drives that
+    /// through a real run, where the file and the conversation are both visible.
+    #[test]
+    fn config_set_takes_the_wizard_settings_and_refuses_the_rest() {
+        let mut cfg = config::Config::default();
+
+        assert_eq!(
+            set_config_key(&mut cfg, "shell", "bash").expect("shell"),
+            "shell = bash"
+        );
+        assert_eq!(cfg.shell, "bash");
+
+        // Split the way the wizard splits it, so `/config set shell_args " -S /C "` and the third
+        // question of `/config edit` cannot mean two different things.
+        assert_eq!(
+            set_config_key(&mut cfg, "shell_args", " -S /C ").expect("shell_args"),
+            "shell_args = [\"-S\", \"/C\"]"
+        );
+        assert_eq!(cfg.shell_args, vec!["-S".to_string(), "/C".to_string()]);
+
+        assert_eq!(
+            set_config_key(&mut cfg, "max_steps", "7").expect("max_steps"),
+            "max_steps = 7"
+        );
+        assert_eq!(cfg.max_steps, 7);
+
+        assert_eq!(
+            set_config_key(&mut cfg, "proxy", "socks5h://127.0.0.1:10808").expect("proxy"),
+            "proxy = socks5h://127.0.0.1:10808"
+        );
+        // The blank value is the one that means something: it is how the page -- which cannot send an
+        // empty required field -- clears a proxy.
+        assert_eq!(
+            set_config_key(&mut cfg, "proxy", "").expect("proxy off"),
+            "proxy = (none)"
+        );
+        assert_eq!(cfg.proxy, None, "a blank proxy did not clear it");
+
+        // A key nobody has is named in the refusal, and the keys that exist are named with it: the
+        // answer to "that is not a setting" is the list of the ones that are.
+        let why = set_config_key(&mut cfg, "shells", "bash").expect_err("a typo is not a setting");
+        assert!(why.contains("\"shells\""), "{why}");
+        for (key, _) in CONFIG_KEYS {
+            assert!(why.contains(key), "{why}");
+        }
+
+        // And the two values that look like settings and are not: an empty program, a budget of zero.
+        for (key, value) in [("shell", "   "), ("max_steps", "0"), ("max_steps", "many")] {
+            assert!(
+                set_config_key(&mut cfg, key, value).is_err(),
+                "/config set {key} {value:?} was accepted"
+            );
+        }
+        assert_eq!(cfg.shell, "bash", "a refused value wrote the setting anyway");
+        assert_eq!(cfg.max_steps, 7, "a refused value wrote the setting anyway");
+    }
 
     /// The browser line is a command *line*, so the URL is quoted inside it and handed over
     /// verbatim rather than passed as an ordinary argument.
