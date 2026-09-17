@@ -4,7 +4,8 @@
 a presence record and `flint who` reads it (`src/live.rs`,
 `tests/who.rs`), a running flint can start another flint with its `task` tool and start several at once
 with `tasks` (`src/tools.rs`, `tests/task.rs`), a profile in `.flint/agents/` says how a child should
-start (`src/context.rs`), a peer can leave it a message with `flint say` that is shown to the person
+start (`src/context.rs`), a peer can leave it a message with `flint say` — or `/say` from its own prompt,
+which is the same write without a second terminal — that is shown to the person
 and sent to a model only when that run asks to hear peers (`tests/say.rs`), so *being called*, *seeing
 each other*, *spawning*, *talking*, *naming a way to work* and *handling a run nobody waited for* all
 work today. The `.flint/` marker that lets two `FLINT_HOME`s see each other is built as well (see
@@ -435,15 +436,29 @@ rather than a detail:
 - **Nothing arrives mid-loop.** The mailbox is read between turns, so a peer's words cannot change a
   request that is already being written; `--hear-peers` affects the future and never the present.
 
-What is *not* built: a `/say` inside the prompt, so that a person or a model can leave a message without
-a second terminal. The `.flint/` marker this stage used to owe is built (above and decision 5).
-`flint say`
-from another terminal is the primitive, which is the case two agents in one directory actually have.
+**The `/say` this stage owed is built**, and it is the same write through the same function as the CLI:
+`/say <text>` from the prompt (or from the page's form, which sends the terminal's own line) appends the
+line to this directory's mailbox, and `/say --to <pid>` addresses one run. Two things it adds that a
+second terminal cannot. It **names who is here** — the reply is asked of the presence records, filtered
+to the runs that share this mailbox (`live::peers_here`), and says either which pids will read it or,
+plainly, that nobody else is working here and the message waits in the file for the next run; with one
+more consequence worth stating, that "nobody" is not a failure, which is why the CLI exits 0 either way.
+And it **does not read its own words back**: the writer hands the reader the exact line it appended
+(`Mailbox::note_own`), because a run following the mailbox it writes to would otherwise show itself
+"peer pid 12345 says: …" on the next turn boundary, and neither the person nor a run asked to hear peers
+could tell whose words those were. Recognising the line by its `from` field was rejected on purpose:
+that field is a claim, and anything that can write the file can write it, so the worst a forged
+duplicate buys is hiding the forger's own message. The `.flint/` marker this stage used to owe is built
+too (above and decision 5), and the primitive is still `flint say` from another terminal — which is also
+how a *model* leaves a message, since a model can run the command through its shell tool; there is
+deliberately no `say` tool, because every tool schema is re-sent with every request of every
+conversation and a model can already reach this one.
 `tests/say.rs` holds both halves to the bytes: with the default, a peer speaks *during* a turn through
 the real command and the test asserts the person saw it, the session file kept it, and **every request
 body the provider received is free of it**; with `--hear-peers`, the second turn's request carries it,
 the transcript says so, the file says `"heard":true`, and the history loaded back from that file does
-not.
+not. Two more hold the new door: a run that says something is shown its peer's message and not its own,
+and the peer is shown the words.
 
 **Stage 4 — profiles and fan-out.** `.flint/agents/*.md`: a name, a description, a model, `readonly`,
 and a prompt, so "the explorer" is a thing a person and a model can both refer to; and one call that

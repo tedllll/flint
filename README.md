@@ -188,6 +188,7 @@ Inside the REPL:
 | `/detail [on\|off]` | print tool output (default off: one line per result) |
 | `/readonly [on\|off]` | toggle the write guard |
 | `/hear-peers [on\|off]` | relay messages from `flint say` to the model (default off) |
+| `/say <text>` | leave a message for whoever else is working in this directory (`--to <pid>` first to address one) |
 | `/tools` | list tools |
 | `/skills [name]` | list skills, or print one the way the model would get it |
 | `/sessions` | list past sessions, numbered |
@@ -586,10 +587,16 @@ And they can say something to each other:
 
 ```console
 $ flint say "please do not commit docs/sandbox.md, I am still writing it"
-said to whoever is working in C:\work\flint (pid 41288)
-  -> C:\Users\you\.flint\mailbox\flint-9c1f0a3d.jsonl
-     shown to the person reading that run; never sent to a model
+said: please do not commit docs/sandbox.md, I am still writing it
+  in: C:\Users\you\.flint\mailbox\flint-9c1f0a3d.jsonl
+  here: pid 41288 is working here; it shows what arrives between turns
+  (a run working here shows it to its person; a run started with --hear-peers also passes it to its model)
 ```
+
+From inside a run it is `/say <text>`, which writes the same line through the same function, so a
+message no longer needs a second terminal: the reply names the runs that share this mailbox — or says
+plainly that nobody is here and the message is waiting in the file — and the run that wrote it never
+reads its own words back as a peer's. `/say --to <pid>` addresses one run.
 
 The sentence appears in a running flint's transcript, prefixed with who said it. By default that is all
 it does: it is written to the session file as its own `peer` event, never as a chat message, so it
@@ -599,7 +606,7 @@ of a process that has no permission layer. `--to <pid>` addresses one run instea
 Feeding a peer's words to the model is a decision a *person* makes, and there is a switch for it:
 
 ```console
-$ flint --hear-peers              # this run relays what `flint say` leaves here
+$ flint --hear-peers              # this run relays what `flint say` or a peer's `/say` leaves here
 > /hear-peers off                 # or back off, mid-session
 peer messages OFF — shown to you, never sent to the model
 ```

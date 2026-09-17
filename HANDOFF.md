@@ -97,14 +97,14 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 544 passing, 1 ignored on this machine
-(321 lib, 4 in the binary's own tests, 33 `agent_loop`, 68 `cli_output`, 35 `json_output` (7 structured
+As of the commit that carries this file, `cargo test` is 549 passing, 1 ignored on this machine
+(323 lib, 5 in the binary's own tests, 33 `agent_loop`, 68 `cli_output`, 35 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
 be able to read, 4 the answer written where the caller asked, 3 the file inlined into the prompt,
 1 the stream checked on its bytes, 1 how long a turn took),
 7 `balance`, 4 `search_tool`, 20 `term_capture` plus the ignored cost measurement, 23 `web_view`,
-10 `who`, 15 `task`, 4 `say`),
+10 `who`, 15 `task`, 6 `say`),
 and one more on Unix, `tty_hangup`, which is `#![cfg(unix)]` and needs a real pty — as is the Unix
 half of the process-group kill, `a_killed_command_takes_its_children_with_it_on_unix`. `cargo clippy
 --all-targets` is silent, both `node scripts/term-layout-test.js` and `node scripts/web-view-test.js`
@@ -113,6 +113,28 @@ because CI has no browser, and the only place the two defects in the page's late
 visible. `python examples/python/test_call.py` is 118 checks, all passing (one of them waits out the
 fifteen-second retry ladder on a dead endpoint, deliberately: that is where `75` comes from), and
 `python examples/mcp/test_mcp.py` passes its own 23.
+
+**`/say` is built, so leaving a peer a message no longer needs a second terminal, and the run that
+writes one is not shown it back as a peer's.** It is the same write as `flint say` through the same
+function (`live::say_line`), and the first thing building it corrected was a sentence that had become
+false: the reply said "never sent to a model", which was true until `--hear-peers` existed and untrue
+after it. It now says what happens — a run working here shows it to its person, and a run started with
+`--hear-peers` also passes it to its model — and the test that held the old wording was rewritten with
+the reason instead of deleted. Two things the round added on top of the shared write. The reply **names
+who is here**: the presence records filtered to the runs that share this mailbox (`live::peers_here`),
+so it says which pids will read it, or plainly that nobody else is working here and the message waits
+in the file for the next run — "nobody" is not a failure, which is why the CLI still exits 0 either
+way. And **the writer is not shown its own line**: a run follows the mailbox it writes to, so without a
+fix the next turn boundary printed `peer pid 12345 says: …` about itself. The fix is exact bytes and
+not the `from` field — `Mailbox::note_own` keeps the line the append returned, the reader consumes one
+match per note — because `from` is a claim that anything able to write the file can forge, and matching
+it would let a forger hide its own message instead. `flint say` and `/say` share `live::say_reply`, so
+the two doors cannot drift apart in what they promise. The mutation check is the honest one for this
+kind of filter: commenting out `note_own` makes the new test fail with "the run showed its own message
+as a peer's". `tests/say.rs` is 6 tests now (2 of them new), the lib is 323 (2 new unit tests over pure
+helpers — the audience sentence in its three shapes, and the own-line filter, which was extracted as
+`live::peer_messages` so it can be held with no home directory in the way), and the binary's own tests
+are 5 (`/say`'s flag split, including that `--to4242` is prose).
 
 **The round in front of that one is closed, item by item, and every item ended with a test that was
 watched fail first** — the five the person asked for, in the order they were asked for:
@@ -446,8 +468,10 @@ real command and then asserts the person saw it, the session file kept it, and *
 provider received is free of it**. **Built since**: the opt-in that feeds a peer's words to a model
 (`--hear-peers`, or `/hear-peers on` while a run is open) and the `.flint/` presence marker in the
 project, both bound the way `docs/agents.md` decisions 3 and 5 say — the relay lands in the request
-view and never in `history`, and the marker is only ever looked for, never created. Still not built,
-and deliberately: a `/say` inside the prompt, so leaving a peer a message takes a second terminal.
+view and never in `history`, and the marker is only ever looked for, never created. **The `/say` this
+paragraph called not built is built** — `/say <text>` from the prompt (or the page's form, which sends
+the terminal's own line) and `/say --to <pid>` for one run; see the top of this file for the two things
+it added beyond the shared write (it names who is here, and the writer is not shown its own line).
 One bug worth
 remembering: `flint say` takes everything after it as prose, so `--cwd` and `--json` have to be pulled
 out before the rest is joined — the first version put `--cwd` *inside* the message and sent it to the

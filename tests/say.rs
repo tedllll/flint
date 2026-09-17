@@ -387,13 +387,210 @@ async fn saying_something_needs_no_key_and_says_where_it_went() {
     assert_eq!(out.status.code(), Some(0));
     let human = String::from_utf8_lossy(&out.stdout);
     assert!(
-        human.contains("never sent to a model"),
+        human.contains("shows it to its person"),
         "the human output does not say what happens to the message: {human}"
+    );
+    // The sentence it used to carry -- "it is never sent to a model" -- was true until `--hear-peers`
+    // was built and false afterwards: a listener that asked to hear peers passes what it hears to its
+    // own model. The sender cannot know which listeners asked, so the claim has to name the case.
+    assert!(
+        human.contains("--hear-peers also passes it to its model"),
+        "the human output still promises no model will ever see it: {human}"
     );
     let written = std::fs::read_to_string(&mailbox).expect("reading the mailbox");
     assert_eq!(written.lines().count(), 2, "{written}");
 
     let _ = std::fs::remove_dir_all(&home);
+}
+
+/// An interactive run in `work`, with its stdin and stdout piped: the shape both tests below need,
+/// because a mailbox is read *between* turns, so a test has to know when a run is back at its prompt
+/// rather than only that it exited.
+fn interactive(home: &Path, work: &Path) -> std::process::Child {
+    std::process::Command::new(env!("CARGO_BIN_EXE_flint"))
+        .args(["--cwd", &work.display().to_string()])
+        .env("FLINT_HOME", home)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to run flint")
+}
+
+/// Type one line at a run.
+fn type_line(child: &mut std::process::Child, line: &str) {
+    use std::io::Write;
+    let stdin = child.stdin.as_mut().expect("stdin");
+    stdin.write_all(line.as_bytes()).expect("write");
+    stdin.write_all(b"\n").expect("write");
+    stdin.flush().expect("flush");
+}
+
+/// A run's stdout as it arrives, so a test can wait for a sentence instead of for a process.
+fn watch(child: &mut std::process::Child) -> Arc<Mutex<String>> {
+    let sink = Arc::new(Mutex::new(String::new()));
+    let mut out = child.stdout.take().expect("stdout");
+    let theirs = sink.clone();
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = out.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            theirs
+                .lock()
+                .expect("transcript lock")
+                .push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+    });
+    sink
+}
+
+/// Wait for a sentence to appear, and say what was on screen if it never does.
+fn wait_for(transcript: &Arc<Mutex<String>>, needle: &str, what: &str) -> String {
+    let began = std::time::Instant::now();
+    loop {
+        let seen = transcript.lock().expect("transcript lock").clone();
+        if seen.contains(needle) {
+            return seen;
+        }
+        assert!(
+            began.elapsed() < std::time::Duration::from_secs(30),
+            "{what}: waited for {needle:?}, saw: {seen}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// `/say` from the prompt: the message reaches the mailbox and a peer, and the run that wrote it does
+/// not read its own words back as somebody else's.
+///
+/// The failure this is written against is the obvious first version: the writer follows the same
+/// mailbox it writes to, so the next time round the loop it would show itself "peer pid 12345 says:
+/// …". That is not a cosmetic bug -- a person reading it has no way to tell their own words from a
+/// peer's, and neither has a run that was asked to hear peers.
+#[tokio::test]
+async fn a_run_that_says_something_does_not_hear_its_own_words_and_a_peer_does() {
+    let server = MockServer::start().await;
+    let (home, work) = scratch("slash-say", &server.uri());
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(prose("ANSWER")))
+        .mount(&server)
+        .await;
+
+    let mailbox = mailbox_of(&home, &work);
+    let message = "please do not commit docs/sandbox.md; I am still writing it";
+
+    // The peer first, and it has to be *between turns* before the message is written: a mailbox is
+    // followed from wherever it is when the run starts, so a run that started afterwards would be
+    // reading from past the line -- which is the design, and would make this test measure nothing.
+    let mut peer = interactive(&home, &work);
+    let peer_out = watch(&mut peer);
+    type_line(&mut peer, "hello there");
+    wait_for(&peer_out, "ANSWER", "the peer never finished its first turn");
+
+    // Now the run that speaks, in the same directory and the same home.
+    let mut speaker = interactive(&home, &work);
+    let speaker_pid = speaker.id();
+    type_line(&mut speaker, &format!("/say {message}"));
+    type_line(&mut speaker, "carry on");
+    speaker.stdin.take();
+    let said = speaker.wait_with_output().expect("the speaker did not finish");
+    let speaker_stdout = String::from_utf8_lossy(&said.stdout).to_string();
+    let speaker_stderr = String::from_utf8_lossy(&said.stderr).to_string();
+    assert!(said.status.success(), "the run failed: {speaker_stderr}");
+
+    // 1. It was written down, by the run that said it, addressed to nobody in particular.
+    let written = std::fs::read_to_string(&mailbox)
+        .unwrap_or_else(|e| panic!("no mailbox at {}: {e}", mailbox.display()));
+    let line = written.lines().next().expect("a mailbox line");
+    let parsed: serde_json::Value = serde_json::from_str(line).expect("the line is JSON");
+    assert_eq!(parsed["text"], message);
+    assert_eq!(parsed["from"], format!("pid {speaker_pid}"));
+    assert_eq!(parsed["to"], "", "an unaddressed message is addressed to nobody: {line}");
+
+    // 2. The speaker does not hear itself -- and does name the run that will hear it, which is the
+    //    sentence a person needs to know the message is not being shouted into an empty room.
+    assert!(
+        speaker_stdout.contains(&format!("said: {message}")),
+        "the command did not report what it wrote: {speaker_stdout}"
+    );
+    assert!(
+        !speaker_stdout.contains("says:"),
+        "the run showed its own message as a peer's: {speaker_stdout}"
+    );
+    assert!(
+        speaker_stdout.contains(&format!("pid {} is working here", peer.id())),
+        "the reply does not name the run that will see it: {speaker_stdout}"
+    );
+
+    // 3. The peer hears it, on the turn boundary, and is told the model was not given it.
+    type_line(&mut peer, "and now revise the plan");
+    let peer_seen = wait_for(&peer_out, "says:", "the peer never heard the message");
+    assert!(
+        peer_seen.contains(message),
+        "the peer was told somebody spoke but not what they said: {peer_seen}"
+    );
+    assert!(
+        peer_seen.contains("not sent to the model"),
+        "the peer's transcript does not say the model was left out of it: {peer_seen}"
+    );
+    peer.stdin.take();
+    let _ = peer.wait_with_output().expect("the peer did not finish");
+
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_file(&mailbox);
+}
+
+/// `/say` with nothing to say writes no line, and `--to` picks the run it is for.
+///
+/// Both halves are about the same trap: a message is prose, so anything that is not prose has to be
+/// taken out of it first. `flint say` learned this the expensive way -- `--cwd` left inside the text
+/// sent a message to the wrong directory's mailbox -- and a slash command that read `--to 4242` as
+/// part of the sentence would be the same bug through a different door.
+#[tokio::test]
+async fn saying_nothing_leaves_no_line_and_a_pid_can_be_addressed() {
+    let (home, work) = scratch("slash-say-flags", "http://127.0.0.1:9/v1");
+    let mailbox = mailbox_of(&home, &work);
+
+    let mut run = interactive(&home, &work);
+    type_line(&mut run, "/say");
+    type_line(&mut run, "/say --to 4242 hello there");
+    run.stdin.take();
+    let out = run.wait_with_output().expect("the run did not finish");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "the run failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    assert!(
+        stdout.contains("nothing to say"),
+        "an empty /say was not refused with a sentence: {stdout}"
+    );
+    let written = std::fs::read_to_string(&mailbox)
+        .unwrap_or_else(|e| panic!("no mailbox at {}: {e}", mailbox.display()));
+    assert_eq!(
+        written.lines().count(),
+        1,
+        "the empty /say wrote a line anyway: {written}"
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_str(written.lines().next().expect("a line")).expect("json");
+    assert_eq!(parsed["text"], "hello there", "the flag was left in the message");
+    assert_eq!(parsed["to"], "4242", "{written}");
+    assert!(
+        stdout.contains("to: 4242"),
+        "the reply does not say who it was addressed to: {stdout}"
+    );
+    assert!(
+        stdout.contains("nobody else is working here"),
+        "with no peer alive the reply must not imply one heard it: {stdout}"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_file(&mailbox);
 }
 
 /// A project that keeps a `.flint/` directory has one mailbox for the whole project, and that is the

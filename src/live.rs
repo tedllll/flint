@@ -534,6 +534,17 @@ pub fn mailbox_path(cwd: &Path) -> PathBuf {
 /// it. Written with one `write` call: a mailbox line is small enough that an append is atomic in
 /// practice, and a torn line is reported as unreadable rather than skipped when it is read back.
 pub fn say(cwd: &Path, from: &str, to: &str, text: &str) -> anyhow::Result<PathBuf> {
+    Ok(say_line(cwd, from, to, text)?.0)
+}
+
+/// The same, handing back the exact line that was appended.
+///
+/// A run that says something from its own prompt writes into the mailbox it is following, and has to
+/// be able to tell its own line from a peer's when it reads the file back. It cannot recognise it by
+/// the `from` field -- that field is a claim, and anything that can write the file can write it -- so
+/// the writer is handed the bytes and the reader is handed them back. Splitting this out rather than
+/// rebuilding the line at the call site keeps the two from drifting when a field is added.
+pub fn say_line(cwd: &Path, from: &str, to: &str, text: &str) -> anyhow::Result<(PathBuf, String)> {
     use anyhow::Context;
     let path = mailbox_path(cwd);
     if let Some(dir) = path.parent() {
@@ -556,7 +567,50 @@ pub fn say(cwd: &Path, from: &str, to: &str, text: &str) -> anyhow::Result<PathB
     use std::io::Write;
     file.write_all(line.as_bytes())
         .with_context(|| format!("writing {}", path.display()))?;
-    Ok(path)
+    Ok((path, line))
+}
+
+/// Who will see a message left in this directory, as one sentence.
+///
+/// A pure function because the honesty is in the wording, and the wrong wording is the easy one: a
+/// mailbox is a *file*, so "nobody is here" is not a failure and must not read like one, and a list of
+/// pids must not be dressed up as a promise that they are watching. It is also the sentence that says
+/// whether anybody is listening at all, which is what a person leaving a note actually wants to know.
+pub fn audience(others: &[Presence]) -> String {
+    match others {
+        [] => "nobody else is working here right now — it waits in the file for the next run".to_string(),
+        [one] => format!(
+            "pid {} is working here; it shows what arrives between turns",
+            one.pid
+        ),
+        many => {
+            let pids: Vec<String> = many.iter().map(|p| p.pid.to_string()).collect();
+            format!(
+                "{} runs are working here (pid {}); each shows it between turns",
+                many.len(),
+                pids.join(", ")
+            )
+        }
+    }
+}
+
+/// What a person is told after leaving a message, for both doors (`flint say` and `/say`).
+///
+/// Shared rather than written twice, and the sentence about the model is why: it used to read "it is
+/// never sent to a model", which stopped being true when `--hear-peers` was built -- a listener that
+/// asked to hear peers passes what it hears to its own model. The sender cannot know which listeners
+/// asked, so the honest sentence names the possibility instead of denying it.
+pub fn say_reply(text: &str, path: &Path, to: &str, here: &str) -> String {
+    let mut out = format!("said: {text}\n  in: {}\n", path.display());
+    if !to.is_empty() {
+        out.push_str(&format!("  to: {to}\n"));
+    }
+    out.push_str(&format!("  here: {here}\n"));
+    out.push_str(
+        "  (a run working here shows it to its person; a run started with --hear-peers also passes \
+         it to its model)",
+    );
+    out
 }
 
 /// A reader that follows one directory's mailbox, showing what arrives *after* it started.
@@ -573,6 +627,14 @@ pub struct Mailbox {
     /// skipped: reading from beyond the end would silently lose every message after it.
     cursor: u64,
     len: u64,
+    /// Lines this run wrote itself, waiting to be skipped when the reader reaches them.
+    ///
+    /// Without this a run that leaves a message from its own prompt reads it back as a peer's on the
+    /// next turn boundary, and neither the person nor a run asked to hear peers can tell whose words
+    /// they are. Matching the *exact bytes* the writer appended is deliberate: recognising them by the
+    /// `from` field would be trusting a claim (anything that can write the file can write `pid 12345`),
+    /// and the worst a forged duplicate buys is hiding the forger's own message.
+    own: Vec<String>,
 }
 
 impl Mailbox {
@@ -584,7 +646,14 @@ impl Mailbox {
             path,
             cursor: len,
             len,
+            own: Vec::new(),
         }
+    }
+
+    /// Remember a line this run wrote, so that reading the mailbox back does not hand it to the person
+    /// as somebody else's words. Takes the bytes `live::say_line` returned rather than rebuilding them.
+    pub fn note_own(&mut self, line: String) {
+        self.own.push(line);
     }
 
     /// Messages addressed to `me` (a pid or a session id) or to nobody in particular.
@@ -612,11 +681,28 @@ impl Mailbox {
             return Vec::new();
         }
         self.cursor += consumed as u64;
-        fresh[..consumed]
-            .lines()
-            .filter_map(|line| parse_peer(line, me))
-            .collect()
+        peer_messages(&fresh[..consumed], me, &mut self.own)
     }
+}
+
+/// The complete lines of one mailbox read, as the messages this run should be shown.
+///
+/// Split out of `Mailbox::new_messages` so the filter that matters -- a run must not be shown its own
+/// words as a peer's -- is a pure function a test can hold, with no home directory and no environment
+/// variable in the way. `own` holds the lines this run wrote (see `Mailbox::note_own`); a match is
+/// consumed, so two runs saying the same sentence do not cancel each other out.
+fn peer_messages(fresh: &str, me: &str, own: &mut Vec<String>) -> Vec<PeerMessage> {
+    let mut out = Vec::new();
+    for line in fresh.lines() {
+        if let Some(mine) = own.iter().position(|written| written.trim_end() == line) {
+            own.remove(mine);
+            continue;
+        }
+        if let Some(message) = parse_peer(line, me) {
+            out.push(message);
+        }
+    }
+    out
 }
 
 /// One mailbox line as a message, or `None` when it is not for this run.
@@ -695,6 +781,59 @@ pub fn changed_line(git_paths: usize, shown: usize, window_minutes: u64) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn who_will_hear_it_is_said_three_ways_and_none_of_them_promises_a_listener() {
+        let record = |pid: u32| Presence {
+            pid,
+            cwd: PathBuf::from("/tmp"),
+            provider: "p".into(),
+            model: "m".into(),
+            readonly: false,
+            started: now_secs(),
+            last_seen: now_secs(),
+            session: String::new(),
+            nonce: format!("n{pid}"),
+        };
+        // Nobody: not a failure, and it must not read like one -- a mailbox is a file, and the message
+        // is waiting in it for the next run rather than lost.
+        let none = audience(&[]);
+        assert!(none.contains("nobody else is working here"), "{none}");
+        assert!(none.contains("waits in the file"), "{none}");
+        // One: named by pid, because that is what `--to` takes.
+        let one = audience(&[record(4242)]);
+        assert!(one.contains("pid 4242"), "{one}");
+        // Several: counted, and all of them named rather than summarised away.
+        let many = audience(&[record(11), record(22)]);
+        assert!(many.starts_with("2 runs are working here"), "{many}");
+        assert!(many.contains("11, 22"), "{many}");
+    }
+
+    #[test]
+    fn a_mailbox_line_this_run_wrote_is_not_a_peers_word() {
+        // The reader is handed back exactly what the writer appended, and drops one match per note --
+        // so a peer's identical sentence is still shown rather than swallowed along with it.
+        let mine = "{\"from\":\"pid 1\",\"to\":\"\",\"at\":1,\"text\":\"I am editing src/provider.rs\"}";
+        let theirs = "{\"from\":\"pid 2\",\"to\":\"\",\"at\":2,\"text\":\"the tree is yours\"}";
+        let mut own = vec![format!("{mine}\n")];
+        let read = |own: &mut Vec<String>, lines: &str| -> Vec<String> {
+            peer_messages(lines, "1", own)
+                .into_iter()
+                .map(|message| message.text)
+                .collect()
+        };
+        assert_eq!(
+            read(&mut own, &format!("{mine}\n{theirs}\n")),
+            vec!["the tree is yours".to_string()],
+            "the run was shown its own words, or lost the peer's"
+        );
+        // The note is spent by the read. The same sentence arriving again is somebody else's message,
+        // which is the case that would be lost if the writer were recognised by its `from` field.
+        assert_eq!(
+            read(&mut own, &format!("{mine}\n")),
+            vec!["I am editing src/provider.rs".to_string()]
+        );
+    }
 
     #[test]
     fn what_changed_is_never_confused_with_whether_anything_was_looked_at() {

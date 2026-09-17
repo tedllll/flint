@@ -1509,7 +1509,7 @@ async fn interactive(
         // never reaches the model, and the only reason it is in this loop at all is that a command
         // has to run where the configuration and the agent are.
         for asked in std::mem::take(&mut pending.reports) {
-            run_report(&asked, cfg, agent, provider_cfg, printer, reader, viewer).await;
+            run_report(&asked, cfg, agent, provider_cfg, printer, reader, viewer, &mut mailbox).await;
         }
 
         // A line the turn could not use -- a command typed or clicked while the model was
@@ -1533,7 +1533,7 @@ async fn interactive(
                     // flush above, and `continue` rather than falling through: there is no prompt
                     // here for the model, and an empty string would `continue` anyway.
                     InputMsg::Report(asked) => {
-                        run_report(&asked, cfg, agent, provider_cfg, printer, reader, viewer).await;
+                        run_report(&asked, cfg, agent, provider_cfg, printer, reader, viewer, &mut mailbox).await;
                         continue;
                     }
                 }
@@ -1578,7 +1578,7 @@ async fn interactive(
             if viewer.is_some() {
                 printer.term().answer_start();
             }
-            let flow = match handle_command(&input, cfg, agent, provider_cfg, printer, reader, viewer).await {
+            let flow = match handle_command(&input, cfg, agent, provider_cfg, printer, reader, viewer, &mut mailbox).await {
                 Ok(flow) => flow,
                 // A command that fails is an answer, not the end of the session.
                 //
@@ -2521,6 +2521,13 @@ const CONFIG_SET_ARGS: [PageArg; 2] = [
     PageArg::required("key", Field::Text),
     PageArg::optional("value", Field::Text),
 ];
+/// `/say`'s one answer: the words.
+///
+/// One field and no `--to` on the page, deliberately. The field is free text and the page sends what
+/// the terminal would have received, so an addressee typed into the field would be *prose* -- and a
+/// message that quietly went to whoever happened to be named in it is worse than one that reached
+/// everybody here. Addressing is a terminal move until the page can offer a picker of live runs.
+const SAY_ARG: [PageArg; 1] = [PageArg::required("text", Field::Text)];
 
 const COMMANDS: &[CommandHelp] = &[
     CommandHelp::row("/help", "/help", "this message", HelpSection::Commands, OnPage::Panel),
@@ -2557,6 +2564,14 @@ const COMMANDS: &[CommandHelp] = &[
         HelpSection::Commands,
         OnPage::Toggles,
     ),
+    CommandHelp::field_row(
+        "/say <text>",
+        "/say",
+        "leave a message for whoever else is working in this directory",
+        HelpSection::Commands,
+        OnPage::Form,
+        &SAY_ARG,
+    ),
     CommandHelp::row("/tools", "/tools", "list available tools", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/skills [name]", "/skills", "list skills, or print one as the model would see it", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/agents [name]", "/agents", "list agent profiles (.flint/agents/*.md), or print one", HelpSection::Commands, OnPage::Panel),
@@ -2585,6 +2600,41 @@ const HELP_LABEL: usize = HELP_COLUMN - 3;
 /// The width the hand-written help was wrapped to, kept so that moving the rows into a table does
 /// not silently re-flow every one of them.
 const HELP_ROOM: usize = 80 - HELP_COLUMN;
+
+/// `/say`'s arguments split into an addressee and the words.
+///
+/// `--to` is taken out before the rest is read as prose, which is the trap `flint say` already paid
+/// for: taking everything after the word as the message put its own flags *inside* a message and sent
+/// it to the wrong directory's mailbox. Only a leading `--to` counts, so a message that begins with
+/// the word "say --to" is still a message, and a `--to` with no words after it is an empty message --
+/// refused by the caller rather than sent as an addressee with nothing to say.
+fn split_to(arg: &str) -> (String, &str) {
+    let rest = arg.trim_start();
+    let Some(rest) = rest.strip_prefix("--to ") else {
+        return (String::new(), rest);
+    };
+    let rest = rest.trim_start();
+    match rest.find(char::is_whitespace) {
+        Some(end) => (rest[..end].to_string(), rest[end..].trim_start()),
+        None => (rest.to_string(), ""),
+    }
+}
+
+/// The other runs that share this run's mailbox, which is who a message left here will reach.
+///
+/// Sharing the *mailbox* is the test rather than sharing the directory, because those are not the same
+/// question: a project that keeps a `.flint/` has one mailbox for the whole project, so a run in `src/`
+/// and a run at the root do reach each other, while two unrelated directories do not -- and the
+/// question a person asking `/say` has is exactly "who will read this".
+fn peers_here(cwd: &std::path::Path) -> Vec<live::Presence> {
+    let mine = live::mailbox_path(cwd);
+    let me = std::process::id();
+    live::scan_in(cwd)
+        .alive
+        .into_iter()
+        .filter(|other| other.pid != me && live::mailbox_path(&other.cwd) == mine)
+        .collect()
+}
 
 /// `/help`: the table, printed in the two blocks it has always been printed in.
 ///
@@ -2673,6 +2723,10 @@ fn wrap(text: &str, room: usize) -> Vec<String> {
 /// than a whitelist in the one file that is proudest of not having one. It is also the safety half.
 /// The page has no confirmation step yet, so a report route that ran whatever it was handed would be
 /// a way to delete a conversation with one click that never happened.
+/// Eight arguments for `handle_command`'s reason: it dispatches a line the page asked for through the
+/// same match, so it carries the same collaborators -- including the mailbox, which a `/say` typed
+/// into the page's composer reaches through this door.
+#[allow(clippy::too_many_arguments)]
 async fn run_report(
     asked: &str,
     cfg: &mut config::Config,
@@ -2681,6 +2735,7 @@ async fn run_report(
     printer: &Printer<'_>,
     reader: &InputReader,
     viewer: &mut Option<web::Viewer>,
+    mailbox: &mut live::Mailbox,
 ) {
     let asked = asked.trim();
     // What the page may read: a line its own menu offers as a report. The bare `send` of a panel row
@@ -2704,7 +2759,7 @@ async fn run_report(
     }
 
     printer.term().quiet_start();
-    let flow = handle_command(asked, cfg, agent, provider_cfg, printer, reader, viewer).await;
+    let flow = handle_command(asked, cfg, agent, provider_cfg, printer, reader, viewer, mailbox).await;
     let mut said = printer.term().quiet_take();
 
     match flow {
@@ -2854,6 +2909,11 @@ fn reload_agent(
     Ok(Flow::NewAgent(new_agent, target))
 }
 
+/// Eight arguments, and the same reason `interactive` has eight: these are the run's collaborators,
+/// and a struct holding them would exist only to satisfy the lint. The mailbox is the newest of them
+/// and the one that could not be avoided -- `/say` must tell the reader about the line it just wrote
+/// (`Mailbox::note_own`), and the reader is the one the REPL loop owns, so the command has to reach it.
+#[allow(clippy::too_many_arguments)]
 async fn handle_command(
     input: &str,
     cfg: &mut config::Config,
@@ -2862,6 +2922,7 @@ async fn handle_command(
     printer: &Printer<'_>,
     reader: &InputReader,
     viewer: &mut Option<web::Viewer>,
+    mailbox: &mut live::Mailbox,
 ) -> Result<Flow> {
 
     // Colour codes as this terminal should show them: the names below shadow the
@@ -3206,6 +3267,29 @@ async fn handle_command(
                     "{dim}anything that arrived while it was on stays in the transcript and the file; \
                      nothing queued is still waiting{reset}"
                 ));
+            }
+        }
+
+        // Leave a message for whoever else is working here, without a second terminal.
+        //
+        // The primitive is `flint say`, and this is the same write through the same function: the
+        // mailbox is a file, and two ways of writing one would eventually be two formats. What it adds
+        // is the part a second terminal cannot give -- the sentence about who is here is asked of the
+        // presence records, and the run is told what it wrote so it does not read its own words back
+        // as a peer's on the next turn boundary (see `Mailbox::note_own`).
+        "/say" => {
+            let (to, text) = split_to(arg);
+            if text.trim().is_empty() {
+                return Err(anyhow!(
+                    "nothing to say — /say <text>, and --to <pid> first to address one run"
+                ));
+            }
+            let from = format!("pid {}", std::process::id());
+            let (path, line) = live::say_line(agent.cwd(), &from, &to, text)?;
+            mailbox.note_own(line);
+            let here = live::audience(&peers_here(agent.cwd()));
+            for said in live::say_reply(text, &path, &to, &here).lines() {
+                printer.term().line(format_args!("{dim}{said}{reset}"));
             }
         }
 
@@ -5538,7 +5622,10 @@ fn split_say(words: &[String]) -> SayWords {
 /// Printing the path is not decoration: the file is the record, a person may want to read it with
 /// `type`, and a message that silently went somewhere else is worse than one that failed. It exits 0
 /// even when nobody is listening, because "nobody is here right now" is a fact about a mailbox rather
-/// than a failure of the command -- the message is on disk and the next run here will see it.
+/// than a failure of the command -- the message is on disk and the next run here will see it. The
+/// sentences come from `live::say_reply`, which `/say` uses too, so the two doors cannot drift -- and
+/// that is how the one about the model stopped claiming a listener can never pass it on, which stopped
+/// being true when `--hear-peers` was built.
 fn say_and_stop(cwd: std::path::PathBuf, to: String, text: String, json: bool) -> Result<i32> {
     let from = format!("pid {}", std::process::id());
     let path = live::say(&cwd, &from, &to, &text)?;
@@ -5553,12 +5640,8 @@ fn say_and_stop(cwd: std::path::PathBuf, to: String, text: String, json: bool) -
             })
         );
     } else {
-        println!("said: {text}");
-        println!("  in: {}", path.display());
-        if !to.is_empty() {
-            println!("  to: {to}");
-        }
-        println!("  (a run working here shows it to its person; it is never sent to a model)");
+        let here = live::audience(&peers_here(&cwd));
+        println!("{}", live::say_reply(&text, &path, &to, &here));
     }
     Ok(EXIT_OK)
 }
@@ -5938,6 +6021,32 @@ mod tests {
             }
             assert_eq!(run.args, vec![url.to_string()]);
         }
+    }
+
+    /// `/say`'s flags come out of the sentence before it is read as prose.
+    ///
+    /// The trap is the one `flint say` paid for: read everything after the word as the message and its
+    /// own flags end up *inside* it. Only a leading `--to` counts, so a message that happens to start
+    /// with those four characters is still a message -- and an addressee with nothing after it is an
+    /// empty message, which the caller refuses rather than sending.
+    #[test]
+    fn says_flags_are_split_off_before_the_words_are() {
+        assert_eq!(split_to("hello there"), (String::new(), "hello there"));
+        assert_eq!(
+            split_to("--to 4242 hello there"),
+            ("4242".to_string(), "hello there")
+        );
+        assert_eq!(split_to("--to 4242"), ("4242".to_string(), ""));
+        // No space, no flag: this is a sentence about a flag, and it is delivered as one.
+        assert_eq!(
+            split_to("--to4242 hello"),
+            (String::new(), "--to4242 hello")
+        );
+        // The word is not special in the middle, and neither is whitespace at the front.
+        assert_eq!(
+            split_to("  take --to 9 seriously"),
+            (String::new(), "take --to 9 seriously")
+        );
     }
 
     /// The code a caller branches on comes from the cause, not from the fact that something failed.

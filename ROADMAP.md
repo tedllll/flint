@@ -1821,7 +1821,11 @@ were invisible in the source, and both are held by the harness that found them.
   history the file is rebuilt from (so a resumed run inherits nothing), and the session records
   `"heard":true` on the message that was passed on. What the bullet protects is *automatic* second
   authorship, and there is none: without that flag, not one byte of a peer's message can reach a
-  request, and that is what `tests/say.rs` asserts against the bytes a provider received. **Stage 4 is adopted
+  request, and that is what `tests/say.rs` asserts against the bytes a provider received. **A message
+  can also be left from inside a run** — `/say <text>`, and `/say --to <pid>` to address one — which is
+  the same write through the same function rather than a second path, so what this bullet allows by
+  default is unchanged: a message written from a prompt is still a `peer` event, still shown to the
+  person, and still outside every request unless that run asked to hear peers. **Stage 4 is adopted
   too, and the line is drawn inside it rather than around it**: a profile
   (`<project>/.flint/agents/<name>.md` — instructions, model, `readonly`) is a way to write down what
   "the explorer" means, and `tasks` runs several children **at the same time** when the model asks for
