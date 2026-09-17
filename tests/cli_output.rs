@@ -1686,6 +1686,192 @@ async fn a_tool_round_leaves_the_clock_running_for_the_model_call_after_it() {
     );
 }
 
+/// A command one of flint's own tools runs is told which run it is in.
+///
+/// Driven through the binary rather than the library, because the tool set is filled in inside
+/// `Agent::new`: a test that built its own `ToolBox` and called `with_run_env` on it would pass even
+/// if that wiring were missing. The command writes what it was told into a file, so the assertion is
+/// on the values themselves and not on how a transcript happened to render them, and the session
+/// path it reports is compared against the session file the run actually created.
+#[tokio::test]
+async fn a_command_the_model_runs_is_told_which_run_it_is_in() {
+    let server = MockServer::start().await;
+
+    let call = serde_json::json!({
+        "choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_0",
+            "function": {"name": "bash",
+                         "arguments": serde_json::json!({"command": ask_run("tool-env.txt")}).to_string()}}]}}]
+    });
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream").set_body_string(sse(&[
+            &format!("data: {call}"),
+            r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+            "data: [DONE]",
+        ])))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(&[
+                    r#"data: {"choices":[{"delta":{"content":"ok"}}]}"#,
+                    r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+                    "data: [DONE]",
+                ])),
+        )
+        .mount(&server)
+        .await;
+
+    let home = test_home("run-env-model", &server.uri());
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("work directory");
+    let out = binary()
+        .args(["-p", "where am I", "--cwd"])
+        .arg(&work)
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("failed to run flint");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the run failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let session = jsonl_files(&home.join("sessions"))
+        .into_iter()
+        .next()
+        .expect("the run must have written a session file");
+    assert_told_which_run(&work.join("tool-env.txt"), &session);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// The person's own `!cmd`, inside a run, is told the same thing -- one answer for two doors.
+///
+/// A separate test from the model's, and one that needs no model at all: the escape is a person's
+/// command, and the run it belongs to must not describe itself differently depending on who asked.
+/// `/name` is typed first because it is what creates the session file, and this asserts against that
+/// file's path rather than against a string the test hoped for.
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn a_command_the_person_types_inside_a_run_is_told_the_same_run() {
+    let home = test_home("run-env-person", "http://127.0.0.1:1/v1");
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("work directory");
+
+    let mut child = binary()
+        .arg("--cwd")
+        .arg(&work)
+        .env("FLINT_HOME", &home)
+        // The interactive layout, since that is where a person's `!` line lives; the size is the
+        // one the other REPL tests use.
+        .env("FLINT_TERM_CAPTURE", "1")
+        .env("FLINT_TERM_SIZE", "80x24")
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to run flint");
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().expect("no stdin handle");
+        stdin
+            .write_all(
+                format!(
+                    "/name where am I\n!{}\n/exit\n",
+                    ask_run("person-env.txt")
+                )
+                .as_bytes(),
+            )
+            .expect("failed to write stdin");
+    }
+    let out = child.wait_with_output().expect("flint did not finish");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+
+    let session = jsonl_files(&home.join("sessions"))
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("no session file was written: {text:?}"));
+    assert_told_which_run(&work.join("person-env.txt"), &session);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// One command, writing the three variables in the order the assertions read them. No space around
+/// `&`, or `cmd`'s `echo` prints one.
+fn ask_run(file: &str) -> String {
+    if cfg!(windows) {
+        format!("(echo %FLINT_SESSION%& echo %FLINT_PROVIDER%& echo %FLINT_MODEL%) > {file}")
+    } else {
+        format!(
+            "printf '%s\\n%s\\n%s\\n' \"$FLINT_SESSION\" \"$FLINT_PROVIDER\" \"$FLINT_MODEL\" > {file}"
+        )
+    }
+}
+
+/// What a command wrote, against what the run says it is.
+fn assert_told_which_run(file: &std::path::Path, session: &std::path::Path) {
+    let written = std::fs::read_to_string(file)
+        .unwrap_or_else(|e| panic!("{} was not written: {e}", file.display()));
+    let lines: Vec<&str> = written.lines().map(str::trim).collect();
+    assert_eq!(
+        lines.first().copied(),
+        Some(session.display().to_string().as_str()),
+        "{} was not told which conversation it is in: {written:?}",
+        file.display()
+    );
+    assert_eq!(
+        lines.get(1).copied(),
+        Some("stub"),
+        "{} was not told which provider is paying: {written:?}",
+        file.display()
+    );
+    assert_eq!(
+        lines.get(2).copied(),
+        Some("stub-model"),
+        "{} was not told which model is paying: {written:?}",
+        file.display()
+    );
+}
+
+/// `flint exec` is not a conversation, so a command it runs is told *nothing* -- by removal, not by
+/// inheritance.
+///
+/// The variables are planted in flint's own environment, which is exactly the state of a `flint` that
+/// was started by a run's command: a model that runs `flint exec ...` through `bash` hands its own
+/// variables down. A child told the wrong transcript is worse off than one told none, so the test
+/// asserts the planted names do not arrive; without the removal they do, which is what makes this
+/// test able to fail.
+#[test]
+fn exec_does_not_pass_on_a_session_name_it_inherited() {
+    let command = if cfg!(windows) {
+        "echo [%FLINT_SESSION%] [%FLINT_PROVIDER%]"
+    } else {
+        "echo \"[$FLINT_SESSION] [$FLINT_PROVIDER]\""
+    };
+    let out = binary()
+        .args(["exec", command])
+        .env("FLINT_SESSION", "a-conversation-from-another-run.jsonl")
+        .env("FLINT_PROVIDER", "another-run")
+        .env_remove("NO_COLOR")
+        .output()
+        .expect("failed to run flint");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+
+    assert!(
+        !text.contains("a-conversation-from-another-run"),
+        "a name flint inherited reached a command it ran: {text:?}"
+    );
+    assert!(
+        !text.contains("another-run"),
+        "an endpoint flint inherited reached a command it ran: {text:?}"
+    );
+}
+
 /// `flint debug prompt-input` prints the request it would send, and sends nothing.
 ///
 /// The second half is the one worth asserting. A diagnostic that quietly created a session

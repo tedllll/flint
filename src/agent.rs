@@ -255,7 +255,15 @@ impl Agent {
         let tools = ToolBox::new(config, readonly, cwd.clone())
             .with_spill_dir(crate::config::spill_dir().join(tag))
             .with_task_endpoint(provider.name(), provider.model())
-            .with_task_parent(parent);
+            .with_task_parent(parent)
+            // And what a *command* is told about the run it is in, as opposed to what a child run
+            // is told (`FLINT_PARENT`, above): a `bash` script that wants to find the transcript,
+            // or to ask the same endpoint a second question, has no other way to know.
+            .with_run_env(
+                writer.as_ref().map(|w| w.path().to_path_buf()),
+                provider.name(),
+                provider.model(),
+            );
         // One walk, two answers: the prompt's note and the page's menu. See `Agent::skills`.
         let workspace = context::Workspace::discover(&cwd, &config.skill_dirs);
         let skills = workspace.skill_names();
@@ -391,6 +399,13 @@ impl Agent {
 
     pub fn tool_names(&self) -> Vec<String> {
         self.tools.names()
+    }
+
+    /// What a command started from this run is told about it, for the one caller outside the tool
+    /// set: the REPL's `!` escape, which runs a command through the same runner `bash` uses and
+    /// must not describe a different run to it.
+    pub fn run_env(&self) -> &crate::tools::RunEnv {
+        self.tools.run_env()
     }
 
     /// The request body that the next round-trip would send, without sending it.

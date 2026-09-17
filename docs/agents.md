@@ -63,6 +63,12 @@ What makes it a tool rather than "the model can already do this with `bash`":
 - **depth is bounded**: `FLINT_DEPTH`, maximum 2, set by the tool for its child and by nothing else. It
   was unbounded until this was built, and nothing stopped a flint from starting a flint that started a
   flint: the bill is real, and so is the wall clock;
+- **a command is told what it is inside of**: `FLINT_SESSION`, `FLINT_PROVIDER` and `FLINT_MODEL` on
+  every command a run starts — the model's `bash`/`pwsh`/`exec` and the person's own `!cmd` — because a
+  command is *not* a run (no session file, no presence record, no depth) and this is the only way a
+  script the model writes can name the conversation it belongs to. A run with none of its own takes the
+  names away rather than leaving what it inherited, which is the case that matters: a `flint` started by
+  another run's command has a stale set in its environment;
 - the child's session file is named in the result, so a value can be traced to the conversation that
   produced it and a human can read what actually happened.
 

@@ -1829,8 +1829,13 @@ argument, the cost and what flint has today are in the document, §3.
   is the one where Pi's design is ahead of flint's own request-side pruning.
 - **The cache hit rate next to the token counts** — the one number that says whether the prompt flint
   builds is stable.
-- **The session and provider in a command's environment** — a `task` child gets `FLINT_DEPTH` and
-  `FLINT_PARENT`; a `bash` command gets only the proxy variables.
+- **The session and provider in a command's environment — built, 2026-09-17.** Every command a run
+  starts (the model's `bash`, `pwsh` and `exec`, and a person's own `!cmd`) is handed `FLINT_SESSION`
+  (the conversation's file), `FLINT_PROVIDER` and `FLINT_MODEL`; a run with none of its own takes the
+  names *away* rather than leaving what it inherited, because a `flint` started by another run's
+  command has a stale set in its environment. Both spawn sites go through one `apply_child_env`. A
+  `task` child still gets `FLINT_DEPTH` and `FLINT_PARENT`, and a command gets neither: it is not a run
+  and does not claim to be one.
 - **A thinking level** — flint sends no reasoning parameter at all, and stores what a provider sends.
   The per-provider shape of that field is read first, and the document says why.
 - **Several tool calls of one assistant message, at once** — flint runs them in order, one at a time.

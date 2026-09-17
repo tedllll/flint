@@ -22,6 +22,15 @@ struct SseFixture {
     body: String,
 }
 
+/// What a command run by these tests is told about the run it is in -- nothing.
+///
+/// These call the shell runner directly, outside any `Agent`, to measure the runner itself (the
+/// proxy variables, the timeout, the quoting). A run that has no conversation and no endpoint names
+/// neither, which is the same answer `flint exec` gives.
+fn bare() -> flint::tools::RunEnv {
+    flint::tools::RunEnv::default()
+}
+
 impl Respond for SseFixture {
     fn respond(&self, _req: &Request) -> ResponseTemplate {
         ResponseTemplate::new(200)
@@ -232,7 +241,7 @@ async fn a_call_with_unparseable_arguments_still_reports_a_result() {
 async fn shell_execution_actually_runs_the_command() {
     let config = test_config("http://unused");
     let out =
-        flint::tools::run_command_raw(&config, "echo flint-probe-ok", &std::env::temp_dir(), 30)
+        flint::tools::run_command_raw(&config, &bare(), "echo flint-probe-ok", &std::env::temp_dir(), 30)
             .await
             .expect("run_command_raw should succeed");
 
@@ -260,7 +269,7 @@ async fn shell_execution_actually_runs_the_command() {
 async fn a_quoted_command_reaches_the_shell_verbatim() {
     let config = test_config("http://unused");
 
-    let out = flint::tools::run_command_raw(&config, "echo \"hello world\"", &std::env::temp_dir(), 30)
+    let out = flint::tools::run_command_raw(&config, &bare(), "echo \"hello world\"", &std::env::temp_dir(), 30)
         .await
         .expect("the command should run");
     assert!(
@@ -275,6 +284,7 @@ async fn a_quoted_command_reaches_the_shell_verbatim() {
     // The system directory is one whose path nobody controls, and it exists on every Windows.
     let out = flint::tools::run_command_raw(
         &config,
+        &bare(),
         "dir /b \"C:\\Windows\\System32\\drivers\\etc\"",
         &std::env::temp_dir(),
         30,
@@ -295,7 +305,7 @@ async fn a_quoted_command_reaches_the_shell_verbatim() {
         file.display(),
         file.display()
     );
-    let out = flint::tools::run_command_raw(&config, &command, &dir, 30)
+    let out = flint::tools::run_command_raw(&config, &bare(), &command, &dir, 30)
         .await
         .expect("the command should run");
     let _ = std::fs::remove_dir_all(&dir);
@@ -425,7 +435,7 @@ async fn code_page_output_reaches_the_model_as_text() {
     std::fs::write(&file, gbk).expect("the fixture");
     let command = format!("type {}", file.display());
 
-    let out = flint::tools::run_command_raw(&config, &command, &dir, 30)
+    let out = flint::tools::run_command_raw(&config, &bare(), &command, &dir, 30)
         .await
         .expect("the command should run");
 
@@ -476,7 +486,7 @@ async fn a_killed_command_takes_its_children_with_it() {
     // The control: uninterrupted, this command leaves the marker, so the assertion below is
     // about the kill and not about the command never having run.
     let _ = std::fs::remove_file(&marker);
-    let out = flint::tools::run_command_raw(&config, &command, &dir, 30)
+    let out = flint::tools::run_command_raw(&config, &bare(), &command, &dir, 30)
         .await
         .expect("the control run should finish");
     assert!(
@@ -486,7 +496,7 @@ async fn a_killed_command_takes_its_children_with_it() {
 
     // Now under a budget that runs out while the child is still sleeping.
     let _ = std::fs::remove_file(&marker);
-    let result = flint::tools::run_command_raw(&config, &command, &dir, 1).await;
+    let result = flint::tools::run_command_raw(&config, &bare(), &command, &dir, 1).await;
     assert!(result.is_err(), "a command over its budget must report an error");
 
     // Well past when the child would have written the marker on its own.
@@ -530,7 +540,7 @@ async fn a_killed_command_takes_its_children_with_it_on_unix() {
 
     // The control: uninterrupted, this command leaves the marker, so the assertion below is about
     // the kill and not about the command never having run.
-    let out = flint::tools::run_command_raw(&config, &command, &dir, 30)
+    let out = flint::tools::run_command_raw(&config, &bare(), &command, &dir, 30)
         .await
         .expect("the control run should finish");
     assert!(
@@ -540,7 +550,7 @@ async fn a_killed_command_takes_its_children_with_it_on_unix() {
 
     // Now under a budget that runs out while the subshell is still sleeping.
     let _ = std::fs::remove_file(&marker);
-    let result = flint::tools::run_command_raw(&config, &command, &dir, 1).await;
+    let result = flint::tools::run_command_raw(&config, &bare(), &command, &dir, 1).await;
     assert!(result.is_err(), "a command over its budget must report an error");
 
     // Well past when the subshell would have written the marker on its own.
@@ -581,7 +591,7 @@ async fn a_timed_out_command_is_killed_not_abandoned() {
     };
 
     let started = std::time::Instant::now();
-    let result = flint::tools::run_command_raw(&config, &command, &std::env::temp_dir(), 2).await;
+    let result = flint::tools::run_command_raw(&config, &bare(), &command, &std::env::temp_dir(), 2).await;
     let elapsed = started.elapsed();
     assert!(result.is_err(), "a command over its budget must report an error");
     let message = format!("{:#}", result.unwrap_err());
@@ -619,7 +629,7 @@ async fn a_timed_out_command_is_killed_not_abandoned() {
 #[tokio::test]
 async fn shell_execution_reports_failure() {
     let config = test_config("http://unused");
-    let out = flint::tools::run_command_raw(&config, "exit 7", &std::env::temp_dir(), 30)
+    let out = flint::tools::run_command_raw(&config, &bare(), "exit 7", &std::env::temp_dir(), 30)
         .await
         .expect("run_command_raw should succeed");
     assert!(
@@ -638,7 +648,7 @@ async fn shell_execution_reports_failure() {
 async fn run_command_detailed_surfaces_the_real_exit_code() {
     let config = test_config("http://unused");
 
-    let failed = flint::tools::run_command_detailed(&config, "exit 7", &std::env::temp_dir(), 30)
+    let failed = flint::tools::run_command_detailed(&config, &bare(), "exit 7", &std::env::temp_dir(), 30)
         .await
         .expect("should run");
     assert_eq!(
@@ -648,7 +658,7 @@ async fn run_command_detailed_surfaces_the_real_exit_code() {
     );
     assert!(!failed.success(), "exit 7 must not count as success");
 
-    let ok = flint::tools::run_command_detailed(&config, "exit 0", &std::env::temp_dir(), 30)
+    let ok = flint::tools::run_command_detailed(&config, &bare(), "exit 0", &std::env::temp_dir(), 30)
         .await
         .expect("should run");
     assert_eq!(ok.code, 0, "a clean command must report 0");
@@ -673,7 +683,7 @@ async fn configured_proxy_is_exported_to_the_child() {
         "echo proxy=$HTTPS_PROXY"
     };
 
-    let plain = flint::tools::run_command_detailed(&config, echo_proxy, &std::env::temp_dir(), 30)
+    let plain = flint::tools::run_command_detailed(&config, &bare(), echo_proxy, &std::env::temp_dir(), 30)
         .await
         .expect("should run");
     assert!(
@@ -684,7 +694,7 @@ async fn configured_proxy_is_exported_to_the_child() {
 
     config.proxy = Some("http://127.0.0.1:9".to_string());
     let proxied =
-        flint::tools::run_command_detailed(&config, echo_proxy, &std::env::temp_dir(), 30)
+        flint::tools::run_command_detailed(&config, &bare(), echo_proxy, &std::env::temp_dir(), 30)
             .await
             .expect("should run");
     assert!(

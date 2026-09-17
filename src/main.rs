@@ -1547,7 +1547,8 @@ async fn interactive(
         }
 
         if let Some(rest) = input.strip_prefix('!') {
-            run_shell_escape(cfg, rest, agent.cwd(), printer.term(), printer.pal).await;
+            run_shell_escape(cfg, agent.run_env(), rest, agent.cwd(), printer.term(), printer.pal)
+                .await;
             continue;
         }
 
@@ -5178,6 +5179,7 @@ struct Handover {
 /// `!cmd` escape inside the REPL and the `exec` subcommand.
 async fn run_shell_escape(
     cfg: &config::Config,
+    run_env: &tools::RunEnv,
     command: &str,
     cwd: &std::path::Path,
     term: &Term,
@@ -5189,7 +5191,7 @@ async fn run_shell_escape(
         term.line(format_args!("usage: !<command>"));
         return;
     }
-    match tools::run_command_raw(cfg, command, cwd, 600).await {
+    match tools::run_command_raw(cfg, run_env, command, cwd, 600).await {
         Ok(out) => term.text_ln(&out),
         Err(e) => term.line(format_args!("{red}error:{reset} {e:#}")),
     }
@@ -5203,7 +5205,12 @@ async fn exec_direct(
 ) -> Result<i32> {
     // A direct exec is meant for real work (installs, rebuilds), so it gets a
     // generous ceiling rather than the conversational default.
-    let outcome = tools::run_command_detailed(cfg, command, cwd, 1800).await?;
+    //
+    // No run environment: `flint exec` is not a conversation, so it has no session to name and no
+    // endpoint paying, and the variables are *removed* rather than inherited -- a stale
+    // `FLINT_SESSION` handed to a script that then reads the wrong transcript is worse than none.
+    let outcome =
+        tools::run_command_detailed(cfg, &tools::RunEnv::default(), command, cwd, 1800).await?;
     term.text_ln(&outcome.report);
     // Propagate the child's status. `flint exec` is meant to be usable from
     // scripts, so a failing command must make flint itself fail -- reporting

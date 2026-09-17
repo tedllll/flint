@@ -6,6 +6,36 @@ of it.
 
 ## Where things stand
 
+**The first of the twelve items taken from the Pi reading is built and pushed: a command knows what run
+it is in.** `FLINT_SESSION` (the conversation's file, absolute), `FLINT_PROVIDER` and `FLINT_MODEL` are
+set on every command a run starts — the model's `bash`, `pwsh` and `exec`, and a person's own `!cmd`,
+which goes through the same runner and must not be told a different run. The names follow Pi's
+(`PI_SESSION_FILE`, `PI_PROVIDER`, `PI_MODEL`); there is no `FLINT_SESSION_ID` because flint has no per-
+entry id to give, and the path is the name. `ROADMAP.md`'s bullet for it was edited in the same commit,
+as the repository's rule for adopting an item says.
+
+**The one decision worth remembering is that "no session" must mean *removed*, not merely unset.** A
+command inherits the environment of the process that spawned it, and that process may itself have been
+started by another run's command (a model running `flint -p ...` through `bash`, or `flint exec`). The
+first cut skipped an empty name instead of taking it away; the e2e test that plants a stale
+`FLINT_PROVIDER` in flint's own environment caught the stale value arriving at the command, which is a
+class of defect that reads identically from inside flint. So every name flint owns is either written or
+removed, and `flint exec` — not a conversation, so nothing true to say — removes all three. Both spawn
+sites now go through one function (`apply_child_env`), which is where the six-line proxy block had
+already been duplicated; a fact that reaches a foreground command but not a background one is a fact a
+script cannot rely on. A `task` child still gets `FLINT_DEPTH` and `FLINT_PARENT` and a command gets
+neither: a command is not a run and does not claim to be one.
+
+**The tests are the point of the round rather than the code.** Two in `src/tools.rs` (the env a command
+is handed, asserted on `Command::get_envs` so that "removed" and "never mentioned" are different
+answers; and the same through a real `bash` call) and three in `tests/cli_output.rs` (a `-p` run whose
+model calls `bash` to write the three variables into a file, compared against the session file the run
+actually wrote; the person's `!cmd` in a real REPL against the same file; and `flint exec` with the
+names planted in its own environment, which must not pass them on). The wiring was watched failing
+first in both halves — with `run_env.apply(cmd)` removed, and separately with the `Agent::new` call
+removed, each failing with `"%FLINT_SESSION%\r\n%FLINT_PROVIDER%\r\n%FLINT_MODEL%\r\n"` where the values
+should have been.
+
 **The two rounds after §10 were §9's page work, both asked for in the same breath on 2026-09-17, and
 both are built and pushed.** A file path in the transcript is a button that opens the file beside the
 conversation (`GET /file`, `docs/web-mode.md` §12); and the run's own background work — a `task` child,
@@ -148,8 +178,8 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 564 passing, 1 ignored on this machine
-(332 lib, 5 in the binary's own tests, 33 `agent_loop`, 70 `cli_output`, 35 `json_output` (7 structured
+As of the commit that carries this file, `cargo test` is 569 passing, 1 ignored on this machine
+(334 lib, 5 in the binary's own tests, 33 `agent_loop`, 73 `cli_output`, 35 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
 be able to read, 4 the answer written where the caller asked, 3 the file inlined into the prompt,
@@ -699,11 +729,11 @@ still building when the second landed.
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
 cargo build                                       # the Python and browser checks run this binary
-cargo test                                        # 564 passing, 1 ignored
+cargo test                                        # 569 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed
-node scripts/browser-controls-test.js             # 53/53 -- needs a browser, so it is not in CI
+node scripts/browser-controls-test.js             # 56/56 -- needs a browser, so it is not in CI
 cargo test --test term_capture -- --ignored --nocapture measured_cost_of_streaming   # the cost number
 ```
 
@@ -1585,6 +1615,61 @@ The second half of the same complaint, and its own commit: `feat: a person can s
 **Measured.** `tools::tests` gained `a_job_a_person_stops_reads_as_stopped_and_says_what_the_model_would_be_told`, which starts a real background command, stops it, and asserts the sentence, the row's `status == "killed"` and `exit code -1` in its detail, **and** that the tool's answer is the terminal's answer to the byte (`via_tool.trim() == jobs_report(Some(pid)).trim()`). `tests/cli_output::a_person_can_read_the_run_s_jobs_and_stop_one` reads the two commands out of the opening `state` frame (so a command that stopped being page-reachable fails here rather than in a browser), reports `/jobs` and asserts the panel names the pid, then stops it and polls until the status is no longer `running`. `tests/web_view.rs` gained `the_page_stops_a_job_from_the_rows_it_is_already_showing`. The browser harness went from 53 claims to **56**: the stop row's candidates are the panel's own rows, pressing one leaves a row the page classifies as `killed` with `exit code -1`, and the transcript then says "killed it, and it is gone" — against a second background command the harness now starts (an endless `node -e`) so that the thing being stopped is not work any other claim is waiting on. Mutation-checked twice: the page's `command.from === "jobs"` branch changed to `"jobs-nope"` makes the harness time out waiting for the stop row, and `was_ended_here()` forced to `false` makes the lib test fail with `left: String("failed") right: "killed"`.
 
 **And one census assertion had to move, deliberately.** `a_destructive_row_says_where_its_argument_comes_from` counts the frame's `from` marks and asserted exactly three; `/jobs stop <pid>` is the fourth. It was changed to 4 with the reason written beside it rather than loosened to `>=`, so a fifth mark added without thinking still fails there.
+
+### A command knows what run it is in
+
+The first of the twelve items taken from the Pi reading, and its own commit: `feat: a command knows what
+run it is in`. The sentence that opened it is in `ROADMAP.md` and in `docs/pi-agent-harness.md` §3.9: a
+`task` child is told `FLINT_DEPTH` and `FLINT_PARENT`, and a `bash` command was told the proxy variables
+and nothing else — so a script the model writes could not name the conversation it belonged to, read the
+log of a job that run had started, or ask the same endpoint a second question. Pi's `bash` tool hands
+over `PI_SESSION_ID`, `PI_SESSION_FILE`, `PI_PROVIDER` and `PI_MODEL` for exactly this reason.
+
+**The names, and the one flint does not have.** `FLINT_SESSION` (the conversation's file, absolute — it
+is enough to find everything else a run keeps, since the spill files and a job's log are named from it),
+`FLINT_PROVIDER` and `FLINT_MODEL`. There is no `FLINT_SESSION_ID`: flint's sessions have no per-entry
+ids, so the path *is* the name, and inventing an id here would have been a second name for the same
+thing. A `task` child still gets `FLINT_DEPTH` and `FLINT_PARENT`; a command gets neither, because a
+command is not a run and `docs/agents.md` says so.
+
+**Where it lives.** `RunEnv` (`src/tools.rs`) is what a command is told, filled in by
+`ToolBox::with_run_env` from `Agent::new` — the same order and the same reason as `with_task_endpoint`:
+the tool set is built before the run's provider is resolved, and the conversation's path is known to
+`Agent::new` and not to `ToolBox::new`. `ToolBox` keeps its own copy as well as pushing it into the
+tools, because the REPL's `!cmd` runs through `run_command_raw` rather than through a tool, and a person
+typing a command into a conversation must not be told a different run than the model's `bash` is. Both
+spawn sites (`run_program_streaming` and `start_background_command`) now call one `apply_child_env`,
+which is where the six-line proxy block had already been copied — a fact that reaches a foreground
+command but not a background one is a fact a script cannot rely on. `start_background_command` is at
+eight arguments and carries an `#[allow(clippy::too_many_arguments)]` with the reason beside it, which is
+what `main.rs` does for the REPL for the same reason.
+
+**The decision the first version got wrong, and it is the one to remember: "no session" must mean
+*removed*, not merely unset.** A command inherits the environment of the process that spawned it, and
+that process may itself have been started by another run's command — a model running `flint -p ...`
+through `bash`, or `flint exec` — so an unset name and an inherited stale one are not the same answer
+from inside the command. The first cut skipped an empty name; the new e2e that plants a stale
+`FLINT_PROVIDER` in flint's own environment caught the stale value arriving (`[%FLINT_SESSION%]
+[another-run]`, with the session correctly removed and the provider not), and every name flint owns is
+now either written or taken away. `flint exec` is not a conversation, so it takes all three away.
+
+**Measured, five tests, and each is a different layer.** In `src/tools.rs`:
+`the_run_is_written_onto_the_command_and_a_missing_session_is_removed` asserts on
+`Command::get_envs`, with each name set to a stale value **first**, because "removed" and "never
+mentioned" read identically from outside a running child and only one of them is right; and
+`a_command_the_bash_tool_runs_can_read_the_run_it_is_in` runs a real shell through the `bash` tool and
+reads the three values back, which is the half the first test cannot see (that `with_run_env` reaches
+the tool and the tool reaches the spawn). In `tests/cli_output.rs`:
+`a_command_the_model_runs_is_told_which_run_it_is_in` drives the real binary with a stub model whose
+first response is a `bash` call that writes the three variables into a file, and compares them against
+the session file the run actually created; `a_command_the_person_types_inside_a_run_is_told_the_same_run`
+does the same for a `!cmd` typed into a real REPL (no model needed — the escape is the person's) and
+needs `/name` first only because that is what creates the session file; and
+`exec_does_not_pass_on_a_session_name_it_inherited` runs `flint exec` with the names planted in its
+environment, which is the removal rule. **Watched red in both halves**: with `run_env.apply(cmd)`
+removed, three of them fail with `"%FLINT_SESSION%\r\n%FLINT_PROVIDER%\r\n%FLINT_MODEL%\r\n"` where the
+values should be, and separately with the `Agent::new` call removed the e2e fails the same way — so the
+wiring is covered and not just the object.
 
 ### Still owed on the page
 

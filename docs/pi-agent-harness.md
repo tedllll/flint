@@ -97,7 +97,7 @@ evidence, so the convergences are worth writing down.
 | A cancelled request keeps its partial output, and cancellation is designed in | the stopped turn keeps the half of an answer it had drawn, and says so separately to the page |
 | Skills are disclosed progressively: a catalog line now, the body on demand | `instructions = "hint"`, the catalog capped at 100 characters a line and 1200 in total, and the `skill` tool that loads one |
 | `AGENTS.md` is the project instruction file, layered global to local | `src/context.rs`, and `AGENTS.md` is what you are reading |
-| A run's children can identify themselves to the processes they start | `FLINT_DEPTH` and `FLINT_PARENT` on a `task` child (`src/tools.rs`), set by the tool and by nothing else |
+| A run's children can identify themselves to the processes they start | `FLINT_DEPTH` and `FLINT_PARENT` on a `task` child, and since 3.9 landed `FLINT_SESSION`/`FLINT_PROVIDER`/`FLINT_MODEL` on every command a run starts (`src/tools.rs`), all set by flint and by nothing else |
 | Compaction is lossy and the file is the record | request-side `prune_tool_output` and `trim_old_turns` only; the session file keeps every byte, and the note in the request's place is a count |
 | A tool must truncate its output, and must say so and where the rest is | `max_tool_output` with a spill file, and a tool result that names it |
 | The loop has no step ration; it runs until the model stops asking for tools | `max_steps`, documented as "a runaway-loop guard, not a work ration" |
@@ -308,6 +308,24 @@ else -- so a script the model writes cannot tell that it is running inside a run
 belongs to, or which model is paying for it. Adding the session path and the provider to the command's
 environment is a few lines in the same builder that already sets `HTTP_PROXY`, and it costs nothing at
 all on the turns that do not look.
+
+**Built, 2026-09-17, and the argument above is the one that was acted on.** `FLINT_SESSION` (the
+conversation's file), `FLINT_PROVIDER` and `FLINT_MODEL` are set on every command a run starts: the
+model's `bash`, `pwsh` and `exec`, and a person's own `!cmd`, which goes through the same runner and
+must not be told a different run. Pi's `PI_SESSION_ID` has no counterpart because flint has no id to
+give: a session is its path, and there is no per-entry id yet (§3.5 is the candidate that would make
+one, and §3.7 is where Pi's own entry ids pay off).
+
+One decision was made that the paragraph above did not foresee, and it is the whole of what the first
+version got wrong: **"no session" has to mean *removed*, not merely unset.** A command inherits the
+environment of the process that spawned it, and this process may itself have been started by another
+run's command -- a model running `flint -p ...` through `bash` is exactly that, and `flint exec` is the
+door where it happens most. The first cut left an unknown name unset, which reads identically from
+outside the process, and the test that plants a stale `FLINT_PROVIDER` in flint's own environment caught
+the stale value arriving at the command. So every name flint owns is either written or taken away, and
+`flint exec` (not a run, so no conversation to name) takes all three away. Both spawn sites now go
+through one function, `apply_child_env`, which is where the proxy block had already been duplicated --
+a fact that reaches a foreground command but not a background one is a fact a script cannot rely on.
 
 ### 3.10 A thinking or reasoning level
 

@@ -591,6 +591,13 @@ Three things it is not, said here because each one is a reasonable expectation t
   grandchild), set by the tool for its child and by nothing else — a bound a model can edit out of its
   own command line is not a bound.
 
+A command any of them runs is told which run it is in: the model's `bash`, `pwsh` and `exec` — and your
+own `!cmd` — see `FLINT_SESSION` (the conversation's file), `FLINT_PROVIDER` and `FLINT_MODEL`. So a
+script can name the conversation it belongs to, read the log of a job that run started, or ask the same
+endpoint a second question. It is Pi's idea under flint's names (`PI_SESSION_FILE`, `PI_PROVIDER`,
+`PI_MODEL`), and `flint exec` — which is not a conversation — has all three taken away rather than left
+to inheritance, because a `flint` started by another run's command inherits a stale set.
+
 Two runs working in one directory can see each other: `flint who` prints the live runs flint knows
 about, and, separately, what changed recently — a line that names no author, because a changed file is
 not evidence of who changed it. `flint who --all` lists runs in other directories too.

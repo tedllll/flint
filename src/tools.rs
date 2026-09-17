@@ -15,6 +15,74 @@ use crate::context;
 use crate::patch;
 use crate::util;
 
+/// What a command this run starts is told about the run it is in.
+///
+/// A command is not a run (`docs/agents.md`): it has no session file, no presence record and no
+/// depth, so `flint who` does not name it and no listing of conversations holds it. What it *is* is
+/// inside one, and until this existed the only way a script could tell was to notice the proxy
+/// variables it had been handed. The reader this is for is the script the model writes: a build that
+/// wants to leave a note for the run that started it, a test that wants the transcript's path, a
+/// command that wants to ask the model a second question on the same endpoint.
+///
+/// The names follow Pi's convention (`PI_SESSION_FILE`, `PI_PROVIDER`, `PI_MODEL`) rather than
+/// inventing a shape: a script's author who has met the idea elsewhere should not have to learn a
+/// second vocabulary for it, and the prefix is what makes them unmistakably flint's.
+///
+/// **Set explicitly on every command, never left to inheritance.** This process may itself have been
+/// started *by* a run's command -- a model running `flint -p ...` through `bash` is exactly that --
+/// in which case the inherited values describe the run one level up. A fact that is sometimes the
+/// parent's is worse than no fact, so `session: None` removes the name rather than leaving whatever
+/// arrived.
+#[derive(Clone, Default)]
+pub struct RunEnv {
+    /// The conversation this run is writing, absolute, or `None` for a run with none of its own.
+    ///
+    /// Enough to find everything else a run keeps: the transcript, the spill files and the logs of
+    /// the jobs it started are all named from it (`<session>/`, `background-*.log`).
+    pub session: Option<PathBuf>,
+    /// The endpoint paying for this run, by the name `--provider` and `/provider` use.
+    pub provider: String,
+    /// The model in force, as the request body names it.
+    pub model: String,
+}
+
+impl RunEnv {
+    /// Write these facts onto a command that is about to be spawned.
+    ///
+    /// Private to this module: the two places that spawn a command for a model to reason about are
+    /// `run_program_streaming` and `start_background_command`, and they both go through
+    /// [`apply_child_env`] so that a fact added here reaches a foreground command and a background
+    /// one alike. Two spawn sites that each grew their own copy is how the proxy variables came to
+    /// be duplicated in the first place.
+    fn apply(&self, cmd: &mut tokio::process::Command) {
+        match &self.session {
+            Some(path) => {
+                cmd.env("FLINT_SESSION", path);
+            }
+            // Removed rather than skipped: an unset variable and an inherited stale one are not the
+            // same answer to "which conversation am I in".
+            None => {
+                cmd.env_remove("FLINT_SESSION");
+            }
+        }
+        // Empty means "this run has no endpoint of its own to name", which today is `flint exec` and
+        // nothing else -- and it means *removed* for the same reason the session does. The first
+        // version left an empty name unset, and a test that planted a stale `FLINT_PROVIDER` in
+        // flint's own environment caught it arriving at the command: "not mentioned" and "taken
+        // away" are not the same answer, and only one of them is true.
+        if self.provider.is_empty() {
+            cmd.env_remove("FLINT_PROVIDER");
+        } else {
+            cmd.env("FLINT_PROVIDER", &self.provider);
+        }
+        if self.model.is_empty() {
+            cmd.env_remove("FLINT_MODEL");
+        } else {
+            cmd.env("FLINT_MODEL", &self.model);
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
@@ -39,6 +107,16 @@ pub trait Tool: Send + Sync {
     fn task_config(&mut self) -> Option<&mut TaskConfig> {
         None
     }
+
+    /// What a command this tool runs is told about the run it is in. `None` for every tool that
+    /// runs no command, for [`Tool::task_config`]'s reason: the caller stays a two-line loop.
+    ///
+    /// Filled in after the tool is built, because the conversation's own path and the endpoint in
+    /// force are known to `Agent::new` and not to `ToolBox::new` -- the same order
+    /// [`ToolBox::with_task_endpoint`] explains.
+    fn run_env(&mut self) -> Option<&mut RunEnv> {
+        None
+    }
 }
 
 pub struct ToolBox {
@@ -49,6 +127,11 @@ pub struct ToolBox {
     /// Where that file goes, and how many have been written this session.
     spill_dir: PathBuf,
     spilled: std::sync::atomic::AtomicUsize,
+    /// What this run tells the commands it starts, kept here as well as pushed into the tools so
+    /// that a caller outside the tool set (the REPL's `!` escape) can hand it to a command it runs
+    /// itself. One fact in one place: the escape and the `bash` tool must not describe different
+    /// runs to the same script.
+    run_env: RunEnv,
 }
 
 impl ToolBox {
@@ -71,6 +154,7 @@ impl ToolBox {
                 cwd: cwd.clone(),
                 spill_dir: spill_dir.clone(),
                 logs: std::sync::atomic::AtomicUsize::new(0),
+                env: RunEnv::default(),
             }),
             Box::new(ExecTool {
                 config: config.clone(),
@@ -78,6 +162,7 @@ impl ToolBox {
                 cwd: cwd.clone(),
                 spill_dir: spill_dir.clone(),
                 logs: std::sync::atomic::AtomicUsize::new(0),
+                env: RunEnv::default(),
             }),
             Box::new(ReadTool {
                 cwd: cwd.clone(),
@@ -171,7 +256,38 @@ impl ToolBox {
             max_output: config.max_tool_output,
             spill_dir,
             spilled: std::sync::atomic::AtomicUsize::new(0),
+            run_env: RunEnv::default(),
         }
+    }
+
+    /// Tell the commands this run starts which run they are in.
+    ///
+    /// Kept here as well as pushed into the tools, because the REPL's `!` escape runs a command
+    /// through `run_command_raw` rather than through a tool, and a person typing a command into a
+    /// conversation must not be told a different run than the model's `bash` is.
+    pub fn with_run_env(
+        mut self,
+        session: Option<PathBuf>,
+        provider: &str,
+        model: &str,
+    ) -> Self {
+        let env = RunEnv {
+            session,
+            provider: provider.to_string(),
+            model: model.to_string(),
+        };
+        for tool in &mut self.tools {
+            if let Some(slot) = tool.run_env() {
+                *slot = env.clone();
+            }
+        }
+        self.run_env = env;
+        self
+    }
+
+    /// What this run tells a command it starts.
+    pub fn run_env(&self) -> &RunEnv {
+        &self.run_env
     }
 
     /// File this session's spill files under a name of their own.
@@ -588,6 +704,9 @@ pub struct BashTool {
     /// session's files belong together, where a person reading the transcript can find them.
     spill_dir: PathBuf,
     logs: std::sync::atomic::AtomicUsize,
+    /// What this command is told about the run that asked for it, filled in by
+    /// [`ToolBox::with_run_env`].
+    env: RunEnv,
 }
 
 /// Resolve which shell program and arguments to actually use.
@@ -1671,11 +1790,12 @@ fn elapsed_label(d: std::time::Duration) -> String {
 /// [`run_command_detailed`] instead.
 pub async fn run_command_raw(
     config: &Config,
+    run_env: &RunEnv,
     command: &str,
     cwd: &Path,
     timeout_secs: u64,
 ) -> Result<String> {
-    Ok(run_command_detailed(config, command, cwd, timeout_secs)
+    Ok(run_command_detailed(config, run_env, command, cwd, timeout_secs)
         .await?
         .report)
 }
@@ -1683,11 +1803,12 @@ pub async fn run_command_raw(
 /// Run a shell command, returning both the combined output and the exit code.
 pub async fn run_command_detailed(
     config: &Config,
+    run_env: &RunEnv,
     command: &str,
     cwd: &Path,
     timeout_secs: u64,
 ) -> Result<CommandOutcome> {
-    run_command_streaming(config, command, cwd, timeout_secs, false).await
+    run_command_streaming(config, run_env, command, cwd, timeout_secs, false).await
 }
 
 /// Run a shell command, reporting its output as it arrives.
@@ -1704,6 +1825,7 @@ pub async fn run_command_detailed(
 /// express, since it kills the slow and tolerates the dead.
 pub async fn run_command_streaming(
     config: &Config,
+    run_env: &RunEnv,
     command: &str,
     cwd: &Path,
     timeout_secs: u64,
@@ -1713,7 +1835,7 @@ pub async fn run_command_streaming(
     // No context is wrapped around the result: `killed after 120s` does not need to be
     // prefixed with the shell that was running it, and a spawn that fails already names
     // the program it could not start.
-    run_program_streaming(config, &run, None, cwd, timeout_secs, idle_kill).await
+    run_program_streaming(config, run_env, &run, None, cwd, timeout_secs, idle_kill).await
 }
 
 /// What a person would call this command: the program, then its arguments.
@@ -1732,6 +1854,25 @@ fn label_of(program: &str, argv: &[String]) -> String {
         .chain(argv.iter().map(String::as_str))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Everything a command flint starts is handed about the run that started it.
+///
+/// One function for both spawn sites (the foreground runner and the background one), because the
+/// two had already grown the same six-line proxy block and a fact that reaches one but not the
+/// other is a fact a script cannot rely on. The proxy is first and unchanged: it is what makes a
+/// command able to download on a network where direct access is blocked, and it was the only thing
+/// a command was told before this.
+fn apply_child_env(cmd: &mut tokio::process::Command, config: &Config, run_env: &RunEnv) {
+    if let Some(proxy) = config.proxy.as_deref().filter(|p| !p.trim().is_empty()) {
+        cmd.env("HTTP_PROXY", proxy);
+        cmd.env("HTTPS_PROXY", proxy);
+        cmd.env("http_proxy", proxy);
+        cmd.env("https_proxy", proxy);
+        cmd.env("ALL_PROXY", proxy);
+        cmd.env("all_proxy", proxy);
+    }
+    run_env.apply(cmd);
 }
 
 /// Run one program, with its arguments already separate, and report its output as it
@@ -1754,6 +1895,7 @@ fn label_of(program: &str, argv: &[String]) -> String {
 /// from [`shell_invocation`], which is where the argument for it lives.
 pub async fn run_program_streaming(
     config: &Config,
+    run_env: &RunEnv,
     run: &Invocation,
     stdin: Option<&str>,
     cwd: &Path,
@@ -1781,14 +1923,7 @@ pub async fn run_program_streaming(
     // Let a configured proxy reach commands flint runs for us. Without this the
     // tool cannot repair anything that needs to download, on a network where
     // direct access is blocked but a local proxy works.
-    if let Some(proxy) = config.proxy.as_deref().filter(|p| !p.trim().is_empty()) {
-        cmd.env("HTTP_PROXY", proxy);
-        cmd.env("HTTPS_PROXY", proxy);
-        cmd.env("http_proxy", proxy);
-        cmd.env("https_proxy", proxy);
-        cmd.env("ALL_PROXY", proxy);
-        cmd.env("all_proxy", proxy);
-    }
+    apply_child_env(&mut cmd, config, run_env);
 
     // `kill_on_drop` as well as the explicit kill below. The explicit one is what
     // actually reaps the process; this is the backstop for every *other* way the future
@@ -2113,8 +2248,13 @@ impl Drop for KillTree {
 ///   way out of the process fires the guard below, which ends the tree -- `taskkill /T` on Windows
 ///   and the process group on Unix, in both cases including what the shell started rather than only
 ///   the shell.
+// Eight arguments, and the lint is not wrong -- they are this job's own bookkeeping (its stdin, its
+// log file, the label a person reads) plus the run's environment, and a struct holding them would
+// exist only to satisfy the lint. Same call as the REPL's own signature in `main.rs`.
+#[allow(clippy::too_many_arguments)]
 async fn start_background_command(
     config: &Config,
+    run_env: &RunEnv,
     run: &Invocation,
     stdin: Option<&str>,
     cwd: &Path,
@@ -2144,14 +2284,7 @@ async fn start_background_command(
             .with_context(|| format!("cannot write {}", log.display()))?,
     ));
     cmd.stderr(Stdio::from(file));
-    if let Some(proxy) = config.proxy.as_deref().filter(|p| !p.trim().is_empty()) {
-        cmd.env("HTTP_PROXY", proxy);
-        cmd.env("HTTPS_PROXY", proxy);
-        cmd.env("http_proxy", proxy);
-        cmd.env("https_proxy", proxy);
-        cmd.env("ALL_PROXY", proxy);
-        cmd.env("all_proxy", proxy);
-    }
+    apply_child_env(&mut cmd, config, run_env);
 
     KillTree::detach(cmd.as_std_mut());
     let mut child = cmd
@@ -2449,6 +2582,10 @@ impl Tool for BashTool {
         self.spill_dir = dir.to_path_buf();
     }
 
+    fn run_env(&mut self) -> Option<&mut RunEnv> {
+        Some(&mut self.env)
+    }
+
     fn description(&self) -> &str {
         "Run a shell command on the local machine and return its combined output. \
          This is the primary way to inspect and repair the system (package \
@@ -2542,6 +2679,7 @@ impl Tool for BashTool {
             let run = shell_invocation(&self.config, command);
             let job = start_background_command(
                 &self.config,
+                &self.env,
                 &run,
                 None,
                 &self.cwd,
@@ -2554,7 +2692,8 @@ impl Tool for BashTool {
         }
 
         let outcome =
-            run_command_streaming(&self.config, command, &self.cwd, timeout, download).await?;
+            run_command_streaming(&self.config, &self.env, command, &self.cwd, timeout, download)
+                .await?;
         Ok(util::truncate(&outcome.report, self.config.max_tool_output))
     }
 }
@@ -2689,6 +2828,9 @@ pub struct PwshTool {
     script_dir: PathBuf,
     /// How many scripts this session has written, so each one gets its own name.
     scripts: std::sync::atomic::AtomicUsize,
+    /// What this command is told about the run that asked for it, filled in by
+    /// [`ToolBox::with_run_env`].
+    env: RunEnv,
 }
 
 #[cfg(windows)]
@@ -2700,6 +2842,7 @@ impl PwshTool {
             cwd,
             script_dir,
             scripts: std::sync::atomic::AtomicUsize::new(0),
+            env: RunEnv::default(),
         }
     }
 
@@ -2744,6 +2887,10 @@ impl Tool for PwshTool {
     /// scripts it ran next to the output they produced.
     fn use_spill_dir(&mut self, dir: &Path) {
         self.script_dir = dir.to_path_buf();
+    }
+
+    fn run_env(&mut self) -> Option<&mut RunEnv> {
+        Some(&mut self.env)
     }
 
     fn description(&self) -> &str {
@@ -2854,14 +3001,23 @@ impl Tool for PwshTool {
                 self.scripts.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1,
             );
             let label = format!("pwsh {}", util::preview(script, 100));
-            let job =
-                start_background_command(&self.config, &run, stdin, &self.cwd, timeout, log, label)
-                    .await?;
+            let job = start_background_command(
+                &self.config,
+                &self.env,
+                &run,
+                stdin,
+                &self.cwd,
+                timeout,
+                log,
+                label,
+            )
+            .await?;
             return Ok(command_handle(&job));
         }
 
         let outcome =
-            run_program_streaming(&self.config, &run, stdin, &self.cwd, timeout, false).await?;
+            run_program_streaming(&self.config, &self.env, &run, stdin, &self.cwd, timeout, false)
+                .await?;
 
         // The version and the path first, so that a reader knows which PowerShell produced
         // this and where the script it ran still is. Both are needed to make sense of output
@@ -2898,6 +3054,9 @@ pub struct ExecTool {
     /// Where a background command's log goes, and how many this session has started.
     spill_dir: PathBuf,
     logs: std::sync::atomic::AtomicUsize,
+    /// What this command is told about the run that asked for it, filled in by
+    /// [`ToolBox::with_run_env`].
+    env: RunEnv,
 }
 
 #[async_trait::async_trait]
@@ -2912,6 +3071,10 @@ impl Tool for ExecTool {
     /// handle's path is inside this session's directory, not by reading the code.
     fn use_spill_dir(&mut self, dir: &Path) {
         self.spill_dir = dir.to_path_buf();
+    }
+
+    fn run_env(&mut self) -> Option<&mut RunEnv> {
+        Some(&mut self.env)
     }
 
     fn description(&self) -> &str {
@@ -3008,6 +3171,7 @@ impl Tool for ExecTool {
             );
             let job = start_background_command(
                 &self.config,
+                &self.env,
                 &run,
                 stdin,
                 &self.cwd,
@@ -3019,8 +3183,9 @@ impl Tool for ExecTool {
             return Ok(command_handle(&job));
         }
 
-        let outcome = run_program_streaming(&self.config, &run, stdin, &self.cwd, timeout, download)
-            .await?;
+        let outcome =
+            run_program_streaming(&self.config, &self.env, &run, stdin, &self.cwd, timeout, download)
+                .await?;
         Ok(util::truncate(&outcome.report, self.config.max_tool_output))
     }
 }
@@ -3765,6 +3930,7 @@ mod tests {
             cwd: PathBuf::from("."),
             spill_dir: std::env::temp_dir(),
             logs: std::sync::atomic::AtomicUsize::new(0),
+            env: RunEnv::default(),
         };
         let args = json!({ "command": "rm -rf /tmp/definitely-not-real" });
         let result = tool.call(&args).await;
@@ -6068,6 +6234,127 @@ mod name_tests {
             !error.to_string().contains("CRLF"),
             "an LF file must not be blamed for line endings: {error}"
         );
+    }
+}
+
+/// What a command is told about the run that started it.
+///
+/// A `RunEnv` is not interesting in itself; what has to hold is that it reaches a command a model
+/// asked for *and* that a run with nothing to say says nothing -- the second half being the one a
+/// process started by another run's command would otherwise get wrong, since a child inherits its
+/// parent's environment whether or not anybody meant it to.
+#[cfg(test)]
+mod run_env_tests {
+    use super::test_support::TempDir;
+    use super::*;
+    use crate::config::Config;
+    use serde_json::json;
+
+    fn toolbox(dir: &TempDir) -> ToolBox {
+        ToolBox::new(&Config::default(), false, dir.path().to_path_buf())
+            .with_spill_dir(dir.path().join("spill"))
+    }
+
+    /// The three names, and the one case that must be a *removal*.
+    ///
+    /// Asserted on the command's own environment rather than through a shell: what is being decided
+    /// here is what flint hands over, and a test that ran a program to find out would be measuring
+    /// the shell as much as the decision. Each name is set to a stale value *first*, because
+    /// "removed" and "never mentioned" read the same from the outside once the child is running --
+    /// the command inherits this process's environment either way -- and only one of them is right.
+    #[test]
+    fn the_run_is_written_onto_the_command_and_a_missing_session_is_removed() {
+        let mut cmd = tokio::process::Command::new("unused");
+        for name in ["FLINT_SESSION", "FLINT_PROVIDER", "FLINT_MODEL"] {
+            cmd.env(name, "stale");
+        }
+        let session = PathBuf::from("a-conversation.jsonl");
+        RunEnv {
+            session: Some(session.clone()),
+            provider: "deepseek".to_string(),
+            model: "deepseek-chat".to_string(),
+        }
+        .apply(&mut cmd);
+        assert_eq!(
+            value_in(&cmd, "FLINT_SESSION"),
+            Some(session.display().to_string()),
+            "the command was not told which conversation it is in"
+        );
+        assert_eq!(value_in(&cmd, "FLINT_PROVIDER").as_deref(), Some("deepseek"));
+        assert_eq!(
+            value_in(&cmd, "FLINT_MODEL").as_deref(),
+            Some("deepseek-chat")
+        );
+
+        // A run with no conversation of its own, and no endpoint of its own to name: every name is
+        // taken away rather than left as it arrived.
+        let mut cmd = tokio::process::Command::new("unused");
+        for name in ["FLINT_SESSION", "FLINT_PROVIDER", "FLINT_MODEL"] {
+            cmd.env(name, "stale");
+        }
+        RunEnv::default().apply(&mut cmd);
+        for name in ["FLINT_SESSION", "FLINT_PROVIDER", "FLINT_MODEL"] {
+            assert_eq!(value_in(&cmd, name), None, "{name} arrived from somewhere else");
+            assert!(
+                mentions(&cmd, name),
+                "{name} must be removed rather than simply not added"
+            );
+        }
+    }
+
+    /// `None` for removed, `Some("")` for set-but-empty; the removal is what is being read for.
+    fn value_in(cmd: &tokio::process::Command, name: &str) -> Option<String> {
+        cmd.as_std()
+            .get_envs()
+            .find(|(key, _)| *key == name)
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_string_lossy().to_string())
+    }
+
+    /// Whether the command says anything about this name at all -- which a removal does, and an
+    /// untouched inheritance does not.
+    fn mentions(cmd: &tokio::process::Command, name: &str) -> bool {
+        cmd.as_std().get_envs().any(|(key, _)| key == name)
+    }
+
+    /// The wiring, through the tool a model actually calls: a real shell, and the values it reads.
+    ///
+    /// This is the half the unit test above cannot see -- that `with_run_env` reaches the tool, and
+    /// that the tool reaches the spawn.
+    #[tokio::test]
+    async fn a_command_the_bash_tool_runs_can_read_the_run_it_is_in() {
+        let dir = TempDir::new("run-env");
+        let session = dir.path().join("a-conversation.jsonl");
+        let tools = toolbox(&dir).with_run_env(Some(session.clone()), "stub", "stub-model");
+
+        let command = if cfg!(windows) {
+            "echo %FLINT_SESSION%& echo %FLINT_PROVIDER%& echo %FLINT_MODEL%"
+        } else {
+            "echo \"$FLINT_SESSION\"; echo \"$FLINT_PROVIDER\"; echo \"$FLINT_MODEL\""
+        };
+        let out = tools
+            .invoke("bash", &json!({ "command": command }))
+            .await
+            .expect("bash");
+
+        assert!(
+            out.contains(&session.display().to_string()),
+            "the command was not told which conversation it is in: {out}"
+        );
+        assert!(
+            out.contains("stub-model"),
+            "the command was not told which model is paying: {out}"
+        );
+        // The provider name, checked on a whole line because it is a prefix of the model name.
+        assert!(
+            out.lines().any(|line| line.trim() == "stub"),
+            "the command was not told which provider is paying: {out}"
+        );
+
+        // And the record kept for the caller outside the tool set -- the REPL's `!` escape -- is the
+        // same one the tools were given, rather than a second copy that could drift.
+        assert_eq!(tools.run_env().session.as_deref(), Some(session.as_path()));
+        assert_eq!(tools.run_env().provider, "stub");
     }
 }
 
