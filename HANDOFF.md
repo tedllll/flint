@@ -30,6 +30,33 @@ a number afterwards (the budget ending a command counts as this run ending it to
 why). `docs/web-mode.md` §13 has the measured record; the browser harness is **56 of 56** now, up from
 53.
 
+**And a reading of Pi (pi.dev) landed as a document, not as code** — `docs/pi-agent-harness.md`, with
+`AGENTS.md` and `ROADMAP.md` pointing at it. It is the minimal TypeScript agent harness, built on the
+opposite bet, and the reading found more agreement than either side would probably expect (no
+permission layer, plans and to-dos as files, append-only JSONL sessions, writing to scrollback rather
+than taking over the terminal, progressive disclosure, a small prompt, no MCP). Everything in it is
+sourced from a page that was loaded, and the pages that were not are named. Twelve of its candidates
+were then **taken** and one declined — the run-level tool allowlist — so they are in `ROADMAP.md` under
+"Taken from a reading of Pi" rather than in the candidate list, and `docs/decisions.md` gained a
+section ("Why this program, next to Pi") answering the question the reading raises: the overlap is the
+commodity layer, and the three things flint has that Pi refuses on purpose are the reason this program
+exists. One consequence is written down there rather than left to be discovered: **flint will never
+match Pi on provider breadth.**
+
+**A note for the next session, because it cost time here: pushing fails on the network this machine is
+on.** `origin`'s push URL is `git@github.com` over port 22 and the connection is reset mid-transfer
+("Connection reset by peer", several attempts in a row, after a successful handshake). The push goes
+through over GitHub's port-443 endpoint, which is the same key and the same repository:
+
+```
+GIT_SSH_COMMAND="ssh -i C:/Users/zhangzhuo/.ssh/flint_github -o IdentitiesOnly=yes -p 443" \
+  git push ssh://git@ssh.github.com:443/tedllll/flint.git main:main
+```
+
+The deploy key authenticates fine on port 22 (`ssh -T` answers "Hi tedllll!"), so this is transport
+rather than credentials, and it is the same flakiness that makes some `web_fetch` calls fail. The
+remote was deliberately left as it is; use the line above when a push hangs or resets.
+
 **Before those, the round that was open was §10 of `ROADMAP.md`: "flint as a function a program can call" — the
 agents work landed in front of it, and §10 itself is now done, steps 1–7.** The section is an audit in
 three buckets (what cannot be done at all, what cannot be told apart, what is a hole), the reference

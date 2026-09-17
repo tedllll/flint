@@ -201,6 +201,60 @@ front matter this reasoning is modelled on, and this is the one place in flint t
 on a socket. If a route ever needs framing this file does not have, the answer is `hyper` and
 not a hand-rolled chunked decoder.
 
+## Why this program, next to Pi
+
+On 2026-09-17 another agent harness was read from end to end: **Pi** (pi.dev,
+`github.com/Earendil-Works/pi`), the minimal TypeScript harness by Mario Zechner. It is the
+same kind of program built on the opposite bet — one agent loop, a handful of tools, sessions
+on disk, a terminal UI — and [`pi-agent-harness.md`](pi-agent-harness.md) is the record, with
+every claim sourced from a page that was loaded. It is kept because "why is this not just
+somebody else's program" is a question worth answering in writing, and because a second
+reading of the same problem is the cheapest test this design will ever get.
+
+**It agrees with flint on more than either program would probably guess.** No permission
+layer; plans and to-dos as files; append-only JSONL sessions a person can read; writing to
+the scrollback instead of taking over the terminal; progressive disclosure for skills; a
+system prompt measured in hundreds of tokens; no MCP; tool output that must truncate and say
+where the rest is. Ten years of convergent evolution in two programs written by two people who
+have not met is evidence about the *problem*, not about either program: an agent harness wants
+plain files and small prompts, and the field will keep proving it.
+
+**The overlap is the commodity layer, and the difference is the part that cannot be
+imported.** Pi refuses, in writing and on purpose: background work (its answer is tmux),
+sub-agents ("a black box within a black box"), a permission layer, a plan mode, built-in
+to-dos, and MCP. Three of those refusals are things flint has and uses: **jobs**, with one
+record, a listing, an exit code, a panel and a stop; a **`task` child whose conversation is a
+file** a person can read, resume and move up a level; and **doors**, so that a page, a
+`--json` caller, an MCP client and Python all drive the same run. A loop and a session format
+are a weekend's work in any language; those three are the reason this one exists, and they
+are exactly what is argued against there.
+
+**What the reading changed here, and what it did not.** It added `ROADMAP.md`'s "Taken from a
+reading of Pi" — twelve agreed items, none of them a new bet, all of them cheap — and it
+declined one, a run-level tool allowlist. It changed none of the rules below. Two of them are
+worth restating with Pi as the test:
+
+- **Nothing is derived, and the state is hand-editable.** Pi arrived at the same rule
+  independently: a JSONL tree, entries appended rather than rewritten, even modal state
+  (which model, which thinking level) written as entries so the setting in force at any point
+  is recoverable from the path. That is a good sign for the rule, and the only place the two
+  part company is how much is written back: flint's request-side pruning leaves the file
+  untouched and says so with a count.
+- **Dependencies are the enemy.** Here the programs genuinely diverge. Pi is a TypeScript
+  monorepo on Node, with npm-installed extensions, a generated model registry and a
+  per-vendor compatibility table for four wire protocols. Flint is one static binary and ten
+  crates. That is the bet this file is about, and it has one consequence that is written down
+  rather than discovered later: **flint will never match Pi on breadth of providers, and if
+  breadth is what somebody needs, Pi is the better program.** Flint is for the machine the
+  person is actually on, for seeing and stopping the work a run actually started, and for
+  files that can be repaired with a text editor.
+
+**What would make this the wrong bet.** If the machine stops mattering (every host with Node
+and tmux on it), if the doors go unused, or if the work a run starts is genuinely better
+observed by an external multiplexer than by the program that started it. None of those is true
+here today, and the way to find out is the list in `ROADMAP.md` rather than an argument in
+this file.
+
 ## Not doing
 
 Subagents, a permission layer, `flint doctor`, MCP (deferred rather than refused), indexes,

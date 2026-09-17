@@ -26,6 +26,16 @@ Those constraints drive every design decision:
   advice, and does not care whether an existing config can be parsed. When it is
   the last thing working, it must not depend on anything else working.
 
+**Pi** ([pi.dev](https://pi.dev)) is another harness built on the opposite bet, and it agrees with
+most of that list — no permission layer, plans and to-dos as files, append-only JSONL sessions, plain
+files, no MCP. That agreement is a good sign for the list rather than a reason to use theirs. Where
+flint differs is deliberate and narrow: the run's own background work is a record with a listing and a
+stop rather than a multiplexer outside the program, a child run is a conversation you can read and
+resume rather than a black box, and one run is drivable from a page, a `--json` caller, an MCP client
+and Python alike. Those are the parts that cannot be borrowed from anyone, and they are argued on
+purpose in [`docs/decisions.md`](docs/decisions.md#why-this-program-next-to-pi),
+against the reading in [`docs/pi-agent-harness.md`](docs/pi-agent-harness.md).
+
 The one affordance the interactive session does have is a **fixed input line**:
 the bottom row is reserved, so the model's output scrolls above it and your
 half-typed message never travels up the screen. Everything else is plain text.

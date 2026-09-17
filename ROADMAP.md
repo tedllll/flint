@@ -1805,25 +1805,48 @@ and C6 is the note that the documentation has to say so).
   the other hole in this test and is closed too: `web/view.html` is scanned, measured with a middle dot
   replaced by its artifact.
 
-## Candidates from a reading of Pi, not agreed
+## Taken from a reading of Pi
 
 [`docs/pi-agent-harness.md`](docs/pi-agent-harness.md) is a reading of Pi — the minimal TypeScript
-agent harness at pi.dev, the same kind of program built on the opposite bet — with every claim
-sourced from a page that was loaded. It is not a plan and nothing in it is scheduled; it is here so
-that a future reader knows the reading exists before adding to the queue. The candidates it raises,
-in its own order: a fork from a *chosen point* (`--fork` copies the whole conversation and its tail
-comes with it) plus the lineage the new file would carry; a follow-up message that does not interrupt
-the turn (a plain line typed mid-turn does, by design); a run-level tool allowlist as something
-narrower than `readonly`; `--no-session`; `/import <file>`; a static export of a finished
-conversation; an entry id the page can resume from after a restart; prompt templates, and a way for a
-*person* to invoke a skill (today only the model can); compaction written into the session file as an
-appended entry carrying the summary and the first entry it keeps; the cache hit rate next to the
-token counts; the session and provider in a command's environment; a thinking level, with the
-per-provider shape of that field read first; and running several tool calls of one assistant message
-at once. Two of flint's own decisions are argued *against* Pi in the same document, and both are
-already in the tree: jobs and a panel instead of tmux, and a `task` child whose conversation is a
-file instead of no sub-agent tool at all. Pi's numbers in that document are also the strongest
-argument for the MCP deferral recorded under "Not doing, and why".
+agent harness at pi.dev, the same kind of program built on the opposite bet — with every claim sourced
+from a page that was loaded. It was read on 2026-09-17, and **the list below was taken from it**: these
+are agreed, not scheduled, and each is one commit that edits its own line here when it lands. The
+argument, the cost and what flint has today are in the document, §3.
+
+- **A fork from a chosen point** — `--fork` copies the whole conversation and its tail comes with it;
+  Pi's `/fork` cuts at a user message and its file records the lineage it came from.
+- **A follow-up message that does not interrupt the turn** — a plain line typed mid-turn is steering
+  and drops the in-flight request, by design; this is the second way to send one.
+- **`--no-session`** — a run that writes no conversation, for a one-off question.
+- **`/import <file>`** — bring a session file in, the mirror of the export.
+- **A static export of a finished conversation** — one HTML file, no process behind it.
+- **An entry id the page can resume from after a restart** — the reconnection cursor today is a
+  per-process ring, so a reload after a restart re-reads from nothing.
+- **Prompt templates, and a way for a *person* to invoke a skill** — today the `skill` tool is the
+  model's door and `/skills <name>` only prints the body.
+- **Compaction written into the session file** — an appended entry carrying the summary and the first
+  entry it keeps (`firstKeptEntryId`), never cutting at a tool result. This one is the largest, and it
+  is the one where Pi's design is ahead of flint's own request-side pruning.
+- **The cache hit rate next to the token counts** — the one number that says whether the prompt flint
+  builds is stable.
+- **The session and provider in a command's environment** — a `task` child gets `FLINT_DEPTH` and
+  `FLINT_PARENT`; a `bash` command gets only the proxy variables.
+- **A thinking level** — flint sends no reasoning parameter at all, and stores what a provider sends.
+  The per-provider shape of that field is read first, and the document says why.
+- **Several tool calls of one assistant message, at once** — flint runs them in order, one at a time.
+
+**Read and not taken, recorded so the argument is not lost:** a **run-level tool allowlist** (Pi's
+`--tools`/`--exclude-tools`) as something narrower than `readonly`. It is the one candidate of the
+eleven that was declined, and the reason is a judgement about this program rather than about the
+argument: flint's tool set is the shape of the work it is for, and a per-run allowlist is a second way
+to say what `readonly` already says. §3.3 of the document keeps the case for it, including the
+experiment it would make possible (§5.3).
+
+Two of flint's own decisions are argued *against* Pi in the same document, and both are already in the
+tree: jobs and a panel instead of tmux, and a `task` child whose conversation is a readable file
+instead of no sub-agent tool at all. Pi's numbers in that document are also the strongest argument for
+the MCP deferral recorded under "Not doing, and why" — 21 tools and 13.7k tokens for one popular MCP
+server is the cost that entry predicted.
 
 ## Known unfinished
 
