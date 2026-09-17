@@ -1896,8 +1896,22 @@ argument, the cost and what flint has today are in the document, §3.
   Not built with it, and worth naming because it is the obvious next door: `/export` from inside a
   running conversation, which needs its own answer to where the page goes while the terminal owns
   stdout.
-- **An entry id the page can resume from after a restart** — the reconnection cursor today is a
-  per-process ring, so a reload after a restart re-reads from nothing.
+- **An entry id the page can resume from after a restart — built, 2026-09-17.** The cursor is no longer
+  this process's frame number, which starts at 1 in every process and meant nothing in the next one.
+  It is **a position in the session file** -- the file's length when the frame was pushed -- carried on
+  every frame's SSE `id:` line and reported by `GET /session` as `X-Flint-At`. The ring is still asked
+  first, because it is the only source with the deltas of an answer still streaming; when it cannot
+  place the cursor (a gap of more than 512 frames, or a process that has only just started) the file
+  answers instead, sending the entries after that position as `file` frames. `reset` is left for what
+  neither source can place. Two things came with it: the page no longer re-reads and rebuilds the whole
+  transcript on **every** reconnect -- a delta is applied to the document it already has, which is what
+  kept a two-second drop from throwing away the reader's place and the answer in flight -- and the
+  client now sends the conversation's id beside the cursor (`?session=`), because a position in a file
+  and a position in another file are the same number. What it does **not** do is reach a page across a
+  restart: a restarted flint listens on a new port with a new token, so the page cannot get back to it,
+  and the page persists no cursor of its own. The design is now ready for a client that can; the honest
+  next step, if one is ever wanted, is a page that remembers `(id, position)` and a run that will accept
+  one from a client it did not mint it for. §15 of `docs/web-mode.md` is the record.
 - **Prompt templates, and a way for a *person* to invoke a skill — built, 2026-09-17.** A prompt file is
   `<dir>/<name>.md`, in the same three places and the same priority order as a skill
   (`<project>/.flint/prompts/`, `<cwd>/.flint/prompts/`, `<FLINT_HOME>/prompts/`, first found wins on a

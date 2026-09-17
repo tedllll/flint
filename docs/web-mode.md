@@ -224,7 +224,7 @@ Eight routes. No cookies, no HTTP/2, no TLS, no keep-alive, no streaming request
 |---|---|
 | `GET /` | the embedded HTML. Requires the token. |
 | `GET /session` | the session so far, as the session file's own lines (`NDJSON`) |
-| `GET /events` | SSE: replays from `Last-Event-ID`, then live events |
+| `GET /events` | SSE: replays from the cursor (`Last-Event-ID`, or `?last=` with `?session=`), then live events |
 | `POST /message` | one message from the browser, into the steering channel |
 | `POST /report` | one command *read* from the browser: same channel, and its answer is captured with the terminal quiet (§11) |
 | `GET /sessions` | the conversations `/resume` can reach, numbered the way `/resume` numbers them |
@@ -262,8 +262,10 @@ refused by `Origin` before it arrives. The body is length-delimited, capped at a
 refused rather than half-read when it stops early.
 
 - **SSE framing is the existing format.** Each event goes out as `data: <one ndjson line>`
-  followed by a blank line, and each carries `id: <session line number>`. A reconnect sends
-  `Last-Event-ID` and the server replays from there, so reconnection needs no invented
+  followed by a blank line, and each carries `id: <cursor>` — **a position in the session file**,
+  the file's length when the frame was pushed, so that the id means the same thing to any process
+  serving that file (§15). A reconnect sends `Last-Event-ID`, or `?last=` with `?session=<id>`
+  beside it, and the server replays from there, so reconnection needs no invented
   protocol (`DOCUMENTED`:
   [SSE](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events)).
 - **A heartbeat comment** (`: ping`) every 20 seconds or so, because an idle connection is
@@ -348,13 +350,15 @@ In order, each one its own commit. Everything before step 4 is useful on its own
 5. **Live** — `GET /events`: the same `ndjson::Sink` output, framed as SSE, with `id:` and
    `Last-Event-ID`. The test asserts the frames parse as NDJSON and that the terminal still
    sees the same turn. — **done**, with four things that were not in the plan and are worth
-   knowing: `/session` had to report a **cursor** (`X-Flint-Event-Seq`) because the file and
-   the stream would otherwise double-count or lose a frame depending on timing; the stream is
-   opened *before* the file is read and the server subscribes before it sends headers, so
-   nothing slips between them; a reconnect is served from the last 512 frames and gets
-   `event: reset` when that is not enough; and the current status is sent once on connect as
-   a named event, because a page opened in the middle of a turn has missed every status frame
-   and there is no cursor for "now".
+   knowing: `/session` had to report a **cursor** because the file and the stream would otherwise
+   double-count or lose a frame depending on timing; the stream is opened *before* the file is read
+   and the server subscribes before it sends headers, so nothing slips between them; a reconnect is
+   served from the last 512 frames and gets `event: reset` when that is not enough; and the current
+   status is sent once on connect as a named event, because a page opened in the middle of a turn has
+   missed every status frame and there is no cursor for "now". **The cursor changed shape later, and
+   §15 is the record**: it is a position in the session file (`X-Flint-At`) rather than a count of
+   frames, which is what lets a process answer a cursor it did not mint — and a page that reconnects
+   is caught up instead of rebuilt.
 
    **This step and the `status` event are one commit, and the reason is worth knowing before
    starting.** The browser needs to be told what the turn is waiting for — without it, a
@@ -1343,3 +1347,61 @@ answer to where the page goes while the terminal owns stdout, and the run's file
 guess at half way through a turn. The door that exists is the one somebody with a finished conversation
 and a colleague needs.
 
+
+## 15. The cursor is a position in the session file
+
+**Built 2026-09-17.** §6 said a frame carries `id: <session line number>`; what it carried was this
+process's **frame count**, and the difference turned out to matter.
+
+The count is minted by `Live::next`, starts at 1 in every process, and means nothing in the next one.
+So a client whose cursor predated the ring — a gap of more than 512 frames, or a `--web` that had been
+restarted — could not be answered at all: `Catch::Reset`, and the page re-read the whole conversation
+from `/session` to find out what it had missed. That is what a reconnect was, and it was the *common*
+case, because the page called `readSession()` on every successful connection. A two-second network
+blip therefore threw away the reader's place in the transcript and any answer still streaming into it.
+
+What a frame carries now is the **length of the session file** at the moment it was pushed — a position
+in the one thing here that outlives a process. Three consequences, and each is a decision:
+
+- **The ring is still asked first.** It is the only source that has the *deltas* of an answer that is
+  streaming right now, because those are in no file yet. The ring answers whenever it still holds every
+  frame written at or after the cursor (its oldest frame is behind the cursor and its newest is ahead of
+  it), and it replays those frames. This is the case that matters most often and it is unchanged.
+- **The file answers when the ring cannot.** The entries after that position are sent as `event: file`
+  frames — the session's own lines, in order, and drawn as the file draws them rather than as the stream
+  does. A gap the ring dropped and a process that has only just started are the same request from the
+  client's side, and the file answers both.
+- **`reset` is left for what neither can place.** A cursor past the end of the file, a file that cannot
+  be read, or — the case worth naming — a client showing a different conversation. That last one is why
+  the page sends `?session=<id>` beside the cursor: a position in a file and a position in *another*
+  file are the same number, and `/resume` moves the run between files while a page may be disconnected
+  and therefore never see the `reset` frame that would have told it. Without the id it would be handed
+  lines from the middle of a conversation it is not reading.
+
+**Two page-side rules came with it, and both are guarded by tests in `scripts/web-view-test.js`.** The
+same moment reaches the page twice — once as the stream's event and once as the file's entry — and the
+two are drawn differently:
+
+- a question the stream already drew from `turn.started` is not drawn again from the file's `chat` line
+  (only when the line *is* the file's, and only when it is the last block: a person asking the same
+  question twice asked twice);
+- an answer the page built from deltas is **filled in** by the file's line rather than opened beside it,
+  which is the same principle `carryStreaming` already applied in the other direction.
+
+**What was measured.** `cargo test` went from 611 to 615 passing: four new lib tests over a real
+scratch session file — the file answering a cursor no ring could place, the ring being preferred when it
+can cover one, a cursor naming another conversation being refused, and a cursor past the end of the file
+being refused. The first was watched failing with "a restarted process must answer from the file, not
+reload" before `entries_after` was written, and the two page rules were watched failing ("a question the
+stream already drew is not drawn again from the file") with the `fromFile` distinction removed. The ring
+tests in `src/web.rs` still hold, unchanged in substance, because a run with no session file stamps its
+frames with their own count — a run that keeps no conversation has no file for a cursor to be durable
+*in*, and says so rather than pretending.
+
+**The honest limit, which is the reason this is not the whole of ROADMAP's item.** A page still cannot
+get back to a restarted flint: the new process listens on a new port with a new token, so the page's
+`EventSource` has nowhere to go, and the page persists no cursor of its own. The cursor is now the kind
+of thing that *could* be carried across — a client that remembered `(session id, position)` and came
+back to a run willing to accept a cursor it did not mint — and no such client exists. What was built is
+the server half of that, plus a page that no longer rebuilds itself for a dropped connection; the client
+half is named here as the next step rather than implied by the feature's name.

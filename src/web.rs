@@ -232,10 +232,25 @@ const RECENT_FRAMES: usize = 512;
 /// first, and a dropped stream looks exactly like a turn that has not started.
 const HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// One frame of the event stream: its sequence number and the line it carries.
+/// One frame of the event stream: where it sits, and the line it carries.
 #[derive(Clone)]
 struct Frame {
     seq: u64,
+    /// The cursor this frame answers to: the length of the session file at the moment it was
+    /// pushed, so that the number a client sends back names a position in the *file* rather
+    /// than a position in this process's memory.
+    ///
+    /// That is the whole difference from `seq`, and it is the difference that survives a
+    /// restart: `seq` starts at 1 in every process, so a cursor minted by one process means
+    /// nothing in the next one -- which is why every reconnect to a fresh `--web` used to be
+    /// answered with `reset`, and the page rebuilt the whole transcript from `/session` to
+    /// find out what it had missed. A file position means the same thing to any process
+    /// serving that file, and the file is the only thing here that outlives a process.
+    ///
+    /// A run that keeps **no** session file has no position to name, so its frames carry
+    /// `seq` here instead: a frame count, which is exactly as durable as the run it came
+    /// from -- and such a run has no file for a cursor to be durable *in*. See `Live::served`.
+    bytes: u64,
     /// The SSE event name, for a frame that is about this *stream* rather than about the run.
     ///
     /// Empty for a run event, which is nearly all of them, and those are rendered as a bare
@@ -248,13 +263,15 @@ struct Frame {
 
 impl Frame {
     fn render(&self) -> String {
-        // `id:` is what a reconnecting client sends back as `Last-Event-ID`.
+        // `id:` is what a reconnecting client sends back as `Last-Event-ID`, so it carries the
+        // cursor (`bytes`) and not the process's own numbering. `seq` still orders the ring and
+        // is what the server dedupes on; it never leaves the process.
         if self.name.is_empty() {
-            format!("id: {}\ndata: {}\n\n", self.seq, self.line)
+            format!("id: {}\ndata: {}\n\n", self.bytes, self.line)
         } else {
             format!(
                 "id: {}\nevent: {}\ndata: {}\n\n",
-                self.seq, self.name, self.line
+                self.bytes, self.name, self.line
             )
         }
     }
@@ -299,6 +316,15 @@ pub struct Live {
     /// `/resume` leave it alone: moving to another conversation changes nothing that is
     /// configured. See [`Live::state`] for why it is a rendered string rather than a struct.
     state: Mutex<String>,
+    /// The session file this stream is about, so that a cursor can be read back out of it.
+    ///
+    /// The one thing the ring cannot answer from memory: a client whose cursor is older than
+    /// everything in the ring -- after a gap of more than [`RECENT_FRAMES`] frames, or in a
+    /// process that has only just started -- is answered from the file instead, because the
+    /// file still has every entry the ring has dropped. Kept here rather than looked up per
+    /// frame because the answer must come from the *same* file the frames were stamped
+    /// against; `/new` and `/resume` change it in the same breath as they clear the ring.
+    session: Mutex<Option<std::path::PathBuf>>,
 }
 
 impl Live {
@@ -313,7 +339,39 @@ impl Live {
             sink: Mutex::new(crate::ndjson::Sink::new()),
             status: Mutex::new(String::new()),
             state: Mutex::new(String::new()),
+            session: Mutex::new(None),
         })
+    }
+
+    /// Which conversation this stream is about, for a cursor that has to be read out of it.
+    ///
+    /// Called wherever the run moves to another session file, and once at construction. An
+    /// empty `None` is a run that keeps no conversation -- `--no-session` -- and its frames
+    /// then carry their own count rather than a file position, because there is no file for a
+    /// position to be in.
+    pub fn serving(&self, session: Option<std::path::PathBuf>) {
+        *self.session.lock().unwrap_or_else(|e| e.into_inner()) = session;
+    }
+
+    /// The position to stamp the next frame with, when a conversation is being kept at all.
+    ///
+    /// A `stat`, not a read: this runs once per frame and a frame is a delta of an answer, so
+    /// a read here would be the whole conversation re-read hundreds of times per turn. The
+    /// file is append-only, so its length only ever moves forward within a conversation, which
+    /// is what makes it usable as an ordering at all. `None` is a run that keeps no file
+    /// (`--no-session`), which has no position to name and falls back to the frame number.
+    fn served(&self) -> Option<u64> {
+        let path = self
+            .session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()?;
+        // A *named* file that is not there yet is position zero rather than no position at all:
+        // the file is created by the first thing said in it, and a cursor minted before that has
+        // to compare with the ones minted after. Falling back to the frame count here would do
+        // the opposite -- a count is a larger number than a short file's length -- so the stamps
+        // would go *backwards* the moment the first entry landed.
+        Some(std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0))
     }
 
     /// One event of the run, to every reader of the stream.
@@ -405,14 +463,17 @@ impl Live {
         self.push(line);
     }
 
-    /// The sequence number of the last frame, `0` when there has not been one.
+    /// The numbering of the newest frame the ring still holds, `0` when it holds none.
     ///
-    /// A snapshot, not a promise: frames can be pushed a moment later, and a client that
-    /// treats this as a cursor is safe precisely because the direction of the error is
-    /// known -- anything above it is newer than the read, and anything at or below it is
-    /// dropped rather than applied twice.
-    fn current_seq(&self) -> u64 {
-        self.next.load(Ordering::Relaxed).saturating_sub(1)
+    /// Used for one thing: a subscriber that connected a moment before the ring was read can
+    /// be handed the same frame twice, and this says which frames were already in the ring.
+    fn newest_seq(&self) -> u64 {
+        self.recent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .back()
+            .map(|frame| frame.seq)
+            .unwrap_or(0)
     }
 
     fn push(&self, line: String) {
@@ -421,7 +482,20 @@ impl Live {
 
     fn push_named(&self, name: &'static str, line: String) {
         let seq = self.next.fetch_add(1, Ordering::Relaxed);
-        let frame = Frame { seq, name, line };
+        // The cursor: the file as it stands now. Almost every frame is pushed after the entry
+        // it is about has been appended, so the position it carries means "everything before
+        // here is in the file; ask the file for what comes next". The exceptions are frames
+        // about a moment rather than about an entry -- `turn.started` is pushed before the
+        // question it opens is written -- and they are harmless in the same direction: their
+        // position is a little behind, so a client that stops on one is sent the entries it
+        // already has from the file, rather than losing the ones it does not.
+        let bytes = self.served().unwrap_or(seq);
+        let frame = Frame {
+            seq,
+            bytes,
+            name,
+            line,
+        };
         {
             let mut recent = self.recent.lock().unwrap_or_else(|e| e.into_inner());
             recent.push_back(frame.clone());
@@ -525,31 +599,123 @@ impl Live {
             .clone()
     }
 
-    /// Everything a client that last saw `last` needs.
+    /// Everything a client that last saw the file at `at` needs.
     ///
     /// The subscription is taken **before** the recent frames are read, so a frame pushed
     /// in between is delivered by the channel rather than lost in the gap. Losing one there
     /// would be silent, which is the failure this route exists to prevent.
-    fn follow(&self, last: Option<u64>) -> (broadcast::Receiver<Frame>, Catch) {
+    ///
+    /// Two sources, and the order between them is the decision:
+    ///
+    /// * **The ring**, whenever it still holds the oldest frame at or after the client's
+    ///   position. It is the only source with the *deltas* -- the part of an answer streaming
+    ///   right now, which is in no file yet -- so a page that dropped for a second mid-answer
+    ///   picks up exactly where it was instead of being rebuilt.
+    /// * **The file**, whenever it does not. Its entries are sent as `file` frames, which is
+    ///   how the page knows these are the record rather than the stream; a gap of more than
+    ///   [`RECENT_FRAMES`] frames, and a process that has only just started with a ring of
+    ///   nothing, are both answered this way. This is the half that makes a cursor outlive
+    ///   the process that minted it.
+    ///
+    /// `None` -- neither source can prove it has what the client missed, or the client is
+    /// showing a different conversation -- is the `reset` it always was.
+    fn follow(
+        &self,
+        last: Option<u64>,
+        session: Option<&str>,
+    ) -> (broadcast::Receiver<Frame>, Catch) {
         let rx = self.subscribe();
         let recent = self.recent.lock().unwrap_or_else(|e| e.into_inner());
-        let catch = match last {
-            // No id: the client has just loaded, and `/session` is what it read.
-            None => Catch::Missed(Vec::new()),
-            Some(id) => {
-                let oldest = recent.front().map(|f| f.seq);
-                let newest = recent.back().map(|f| f.seq);
-                match (oldest, newest) {
-                    // It needs frames we have already dropped.
-                    (Some(oldest), _) if id + 1 < oldest => Catch::Reset,
-                    // Ahead of anything we have: a stale id, or a restarted process.
-                    (_, Some(newest)) if id > newest => Catch::Reset,
-                    (None, _) => Catch::Reset,
-                    _ => Catch::Missed(recent.iter().filter(|f| f.seq > id).cloned().collect()),
-                }
-            }
+        // No cursor: the client has just loaded, and `/session` is what it read.
+        let Some(at) = last else {
+            return (rx, Catch::Missed(Vec::new()));
         };
-        (rx, catch)
+        let covered = match (recent.front(), recent.back()) {
+            // The ring holds every frame written at or after the client's position exactly
+            // when its oldest frame is behind it and its newest is ahead of it: then nothing
+            // the client is missing has been dropped, and nothing it claims to have seen is
+            // beyond what we ever sent.
+            (Some(oldest), Some(newest)) => oldest.bytes <= at && at <= newest.bytes,
+            _ => false,
+        };
+        if covered {
+            let missed = recent.iter().filter(|f| f.bytes > at).cloned().collect();
+            return (rx, Catch::Missed(missed));
+        }
+        match self.entries_after(at, session) {
+            Some(missed) => (rx, Catch::Missed(missed)),
+            None => (rx, Catch::Reset),
+        }
+    }
+
+    /// The entries written after `at`, as frames the page applies like a line of the file.
+    ///
+    /// `None` when the file cannot be the answer: no conversation is being kept, the cursor is
+    /// past the end of the one being kept (a cursor from somewhere else, or a file rewritten
+    /// under it), the file cannot be read, or the client names a different conversation. That
+    /// last check is what the id is for: a position in a file and a position in another file
+    /// are the same number, and `/resume` is a run moving between them while a page may be
+    /// disconnected and therefore miss the `reset` that would have told it.
+    fn entries_after(&self, at: u64, session: Option<&str>) -> Option<Vec<Frame>> {
+        let path = self
+            .session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()?;
+        let body = std::fs::read(&path).ok()?;
+        if (body.len() as u64) < at || !names_the_same_conversation(&body, session) {
+            return None;
+        }
+        // A position can land inside a line -- a hand edit above the cursor moves every later
+        // byte -- so the answer starts at the next line boundary. Half a line is not an entry.
+        let mut start = at as usize;
+        while start > 0 && start < body.len() && body[start - 1] != b'\n' {
+            start += 1;
+        }
+        let bytes = body.len() as u64;
+        // Every frame carries the same cursor, the end of the file: a client that applies all
+        // of them has applied the file, and the next frame it is sent is about what comes
+        // after. `seq` is zero because these frames were never in the ring and nothing
+        // dedupes on them -- the drain in `stream_events` works on the ring's own numbering.
+        let missed = body[start..]
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| Frame {
+                seq: 0,
+                bytes,
+                name: FILE_FRAME,
+                line: String::from_utf8_lossy(line).into_owned(),
+            })
+            .collect();
+        Some(missed)
+    }
+}
+
+/// The event name a session file's own line is carried under, when the ring cannot answer.
+///
+/// Named, where every other line of a run is unnamed, because the page treats the two
+/// differently: a delta is added to what it has, and a line of the file *is* the record of
+/// something it may have drawn from deltas -- so an answer block is filled in from it rather
+/// than opened beside it. See `applyEvent`'s `chat` arm in `web/view.html`.
+const FILE_FRAME: &str = "file";
+
+/// Whether the bytes of a session file name the conversation the client says it is showing.
+///
+/// The id is in the `meta` line, which is the first line of every session file, so this reads
+/// no further than the first newline. A client that sends no id -- an older page, or a script
+/// driving the route by hand -- is not refused: the id is a guard against a *named* mismatch,
+/// not a credential.
+fn names_the_same_conversation(body: &[u8], session: Option<&str>) -> bool {
+    let Some(session) = session.filter(|id| !id.is_empty()) else {
+        return true;
+    };
+    let first = body.split(|byte| *byte == b'\n').next().unwrap_or_default();
+    let Ok(line) = serde_json::from_slice::<serde_json::Value>(first) else {
+        return true;
+    };
+    match line.get("id").and_then(|id| id.as_str()) {
+        Some(id) => id == session,
+        None => true,
     }
 }
 
@@ -735,7 +901,7 @@ pub struct Response {
 /// cannot be -- they were emitted after the read. Without it, a client that rendered the file
 /// and then connected would either double-count a frame or lose one, and which of the two
 /// depended on timing.
-const X_FLINT_EVENT_SEQ: &str = "X-Flint-Event-Seq";
+const X_FLINT_AT: &str = "X-Flint-At";
 
 impl Response {
     fn text(status: u16, reason: &'static str, body: impl Into<String>) -> Response {
@@ -809,7 +975,10 @@ pub enum Answer {
     /// One response, then close.
     Once(Response),
     /// The live feed, for a client that last saw `last`.
-    Events { last: Option<u64> },
+    Events {
+        last: Option<u64>,
+        session: Option<String>,
+    },
 }
 
 impl Answer {
@@ -882,6 +1051,7 @@ pub fn respond(request: &Request, body: &str, state: &State) -> Answer {
         // Everything since, and then everything as it happens.
         ("GET", "/events") => return Answer::Events {
             last: last_event_id(request),
+            session: session_of(request),
         },
         // A line typed into the browser, into the same channel the keyboard feeds.
         ("POST", "/message") => accept_line(body, state, true),
@@ -1080,6 +1250,15 @@ fn last_event_id(request: &Request) -> Option<u64> {
         .and_then(|value| value.trim().parse().ok())
 }
 
+/// The conversation the client believes it is showing, if it said.
+///
+/// Sent beside the cursor because a cursor is a position in a file and two files have the same
+/// positions: it is what lets the server refuse to answer a client that is showing one
+/// conversation with the entries of another. See [`Live::entries_after`].
+fn session_of(request: &Request) -> Option<String> {
+    request.query("session").map(str::to_string)
+}
+
 /// The session file, exactly as it is on disk.
 ///
 /// Read every time, synchronously, and the reasoning is worth stating because both halves
@@ -1111,10 +1290,10 @@ fn serve_session(state: &State) -> Response {
     };
     match std::fs::read_to_string(&path) {
         Ok(body) => {
-            // Read *after* the file, deliberately: a frame at or below this number may
-            // already be in the file and one above it cannot be, which is the direction
-            // that risks a duplicate rather than a hole -- and a duplicate delta shows up
-            // as doubled text, while a hole shows up as nothing at all.
+            // The cursor this body *is*: the position in the file the client has just read to
+            // its end. Read off the body rather than `stat`ed again, so the two cannot
+            // disagree by a byte appended in between -- the client would then apply a line it
+            // already has.
             let mut response = Response {
                 status: 200,
                 reason: "OK",
@@ -1122,8 +1301,9 @@ fn serve_session(state: &State) -> Response {
                 body,
                 extra: Vec::new(),
             };
-            if let Some(live) = &state.live {
-                response = response.with_header(X_FLINT_EVENT_SEQ, live.current_seq().to_string());
+            if state.live.is_some() {
+                let at = response.body.len().to_string();
+                response = response.with_header(X_FLINT_AT, at);
             }
             response
         }
@@ -1505,8 +1685,13 @@ impl Viewer {
         input: Option<tokio::sync::mpsc::UnboundedSender<FromPage>>,
         cwd: std::path::PathBuf,
     ) -> Viewer {
+        let live = Live::new();
+        // Told which conversation it is about before anything can ask: a cursor is answered
+        // out of that file, and a stream that does not know its own file can only ever answer
+        // from the ring.
+        live.serving(session.clone());
         Viewer {
-            live: Live::new(),
+            live,
             window: None,
             session: Arc::new(Mutex::new(session)),
             port,
@@ -1560,7 +1745,11 @@ impl Viewer {
         if *self.session.lock().unwrap_or_else(|e| e.into_inner()) == session {
             return;
         }
-        *self.session.lock().unwrap_or_else(|e| e.into_inner()) = session;
+        *self.session.lock().unwrap_or_else(|e| e.into_inner()) = session.clone();
+        // The file first, then the readers: `restart` clears the ring, and a cursor that
+        // arrives between the two must be read against the conversation the run is now
+        // writing rather than the one it just left.
+        self.live.serving(session);
         self.live.restart();
     }
 }
@@ -1632,8 +1821,8 @@ async fn serve(mut stream: TcpStream, state: &State) -> Result<()> {
         Answer::Once(response) => {
             stream.write_all(&response.render()).await?;
         }
-        Answer::Events { last } => {
-            stream_events(stream, state, last).await?;
+        Answer::Events { last, session } => {
+            stream_events(stream, state, last, session).await?;
             return Ok(());
         }
     }
@@ -1780,7 +1969,12 @@ async fn write_answer_snapshot(stream: &mut TcpStream, live: &Live) -> Result<()
 }
 
 /// Write what a client missed, then everything as it happens, until it goes away.
-async fn stream_events(mut stream: TcpStream, state: &State, last: Option<u64>) -> Result<()> {
+async fn stream_events(
+    mut stream: TcpStream,
+    state: &State,
+    last: Option<u64>,
+    session: Option<String>,
+) -> Result<()> {
     let Some(live) = &state.live else {
         let response = Response::text(404, "Not Found", "this run has no live feed\n");
         stream.write_all(&response.render()).await?;
@@ -1792,20 +1986,43 @@ async fn stream_events(mut stream: TcpStream, state: &State, last: Option<u64>) 
     // subscription and that read is buffered for it. Subscribing afterwards would open a
     // window -- small, and exactly the kind that is never noticed until it is -- in which a
     // frame belongs to neither the file nor the stream.
-    let (mut rx, catch) = live.follow(last);
+    let (mut rx, catch) = live.follow(last, session.as_deref());
 
     stream.write_all(SSE_HEADERS.as_bytes()).await?;
     match catch {
         Catch::Reset => {
-            // What it missed is gone, so it re-reads the session instead. The file is the
-            // truth and `GET /session` is already the route for it; keeping a durable log
-            // of the stream would be derived state, which is the one thing this repository
-            // does not keep.
+            // What it missed cannot be placed in the file it is showing either -- a cursor from
+            // another conversation, a file that was rewritten under it -- so it re-reads the
+            // session instead. The file is the truth and `GET /session` is the route for it;
+            // keeping a durable log of the *stream* would be derived state, which is the one
+            // thing this repository does not keep.
             stream.write_all(SSE_RESET.as_bytes()).await?;
         }
         Catch::Missed(frames) => {
+            // A replay taken from the ring can contain a frame that the subscription, taken a
+            // moment earlier, will also deliver: it was pushed in the gap between the two. The
+            // ring's own numbering says which those are, and they are dropped here rather than
+            // left for the page to recognise -- it applies what it is sent, because what it is
+            // sent is what it does not have, so a duplicate would be applied twice.
+            //
+            // A replay read out of the file cannot have that problem: those frames are the
+            // file's lines, which the channel never carries (`seq` zero is how a frame says it
+            // was never in the ring), so nothing is drained for them. Neither is anything
+            // drained for an empty replay: there was nothing to duplicate.
+            let from_ring = frames.first().map(|frame| frame.seq > 0).unwrap_or(false);
             for frame in frames {
                 stream.write_all(frame.render().as_bytes()).await?;
+            }
+            if from_ring {
+                let newest = live.newest_seq();
+                while let Ok(frame) = rx.try_recv() {
+                    if frame.seq > newest {
+                        // Pushed after the replay was taken, so it is not a duplicate: it goes
+                        // out now, in order, and the loop below carries on from there.
+                        stream.write_all(frame.render().as_bytes()).await?;
+                        break;
+                    }
+                }
             }
         }
     }
@@ -2965,9 +3182,9 @@ mod live_tests {
     fn a_change_of_conversation_is_a_named_reset_and_drops_the_old_frames() {
         let live = Live::new();
         live.event(&Event::Text("from the old conversation".to_string()));
-        let before = live.current_seq();
+        let before = live.newest_seq();
 
-        let (mut rx, _) = live.follow(Some(before));
+        let (mut rx, _) = live.follow(Some(before), None);
         live.restart();
 
         let frame = rx.try_recv().expect("the connected client must be told");
@@ -2981,25 +3198,24 @@ mod live_tests {
             "the reset must not carry the conversation it replaces: {rendered:?}"
         );
 
-        match live.follow(Some(before)).1 {
-            // A client that is one frame behind is handed the reset frame itself, which is
-            // the mechanism working: it re-reads `/session` and gets the new conversation.
-            // What it must never be handed is a frame of the old one.
-            Catch::Missed(frames) => {
-                assert_eq!(frames.len(), 1, "only the reset frame is left in the ring");
-                let only = frames[0].render();
-                assert!(only.contains("event: reset"), "{only:?}");
-                assert!(
-                    !only.contains("from the old conversation"),
-                    "the old conversation survived the restart: {only:?}"
-                );
-            }
-            Catch::Reset => panic!("a client one frame behind must be given the reset frame"),
+        // A client that reconnects *after* the switch is not handed a frame at all: the ring was
+        // emptied, so the cursor it holds cannot be placed in it, and that is a reload -- the
+        // same outcome by the same route, because `/session` now serves the new conversation and
+        // the page rebuilds from it. The distinction the frame numbering used to draw here (an
+        // id below the oldest, an id above the newest) is not one a *position* can draw: what a
+        // position can say is whether the ring still holds everything after it, and after a
+        // switch it does not claim to.
+        match live.follow(Some(before), None).1 {
+            Catch::Reset => {}
+            Catch::Missed(frames) => panic!(
+                "the ring was emptied of that cursor, but {} frame(s) were replayed",
+                frames.len()
+            ),
         }
 
         // Further back than the ring can serve -- which is now every cursor from before the
         // restart -- and the answer is to reload rather than to guess.
-        match live.follow(Some(before.saturating_sub(5))).1 {
+        match live.follow(Some(before.saturating_sub(5)), None).1 {
             Catch::Reset => {}
             Catch::Missed(frames) => panic!(
                 "a cursor the ring cannot serve was answered with {} frame(s)",
@@ -3047,7 +3263,7 @@ mod live_tests {
         // The feed exists anyway, which is the point of the split: a turn that starts while
         // the socket is still being bound does not lose its frames.
         viewer.live().event(&Event::Text("while binding".to_string()));
-        assert_eq!(viewer.live().current_seq(), 1);
+        assert_eq!(viewer.live().newest_seq(), 1);
     }
 
     #[test]
@@ -3056,7 +3272,7 @@ mod live_tests {
         live.event(&Event::Text("hello".to_string()));
         // `None` means "I have read /session and I am current", which is what the page
         // sends on its first connection.
-        let (_, catch) = live.follow(None);
+        let (_, catch) = live.follow(None, None);
         match catch {
             Catch::Missed(frames) => assert!(frames.is_empty(), "a fresh client is current"),
             Catch::Reset => panic!("a fresh client must not be reset"),
@@ -3068,7 +3284,7 @@ mod live_tests {
         let live = Live::new();
         live.event(&Event::Text("one".to_string()));
         live.event(&Event::Text("two".to_string()));
-        let (_, catch) = live.follow(Some(1));
+        let (_, catch) = live.follow(Some(1), None);
         match catch {
             Catch::Missed(frames) => {
                 assert_eq!(frames.len(), 1, "only the frame after the one it saw");
@@ -3089,14 +3305,14 @@ mod live_tests {
         for n in 0..(RECENT_FRAMES + 10) {
             live.event(&Event::Text(format!("line {n}")));
         }
-        match live.follow(Some(1)).1 {
+        match live.follow(Some(1), None).1 {
             Catch::Reset => {}
             Catch::Missed(frames) => panic!("frame 1 is long gone, but {} were replayed", frames.len()),
         }
         // And the id just before the oldest kept one still works: the boundary is off by
         // one in the direction that loses nothing.
         let oldest = live.recent.lock().unwrap().front().map(|f| f.seq).expect("frames");
-        match live.follow(Some(oldest)).1 {
+        match live.follow(Some(oldest), None).1 {
             Catch::Missed(frames) => assert_eq!(frames.len(), RECENT_FRAMES - 1),
             Catch::Reset => panic!("the oldest kept frame is still replayable"),
         }
@@ -3107,7 +3323,139 @@ mod live_tests {
     fn an_id_ahead_of_anything_we_sent_is_told_to_reload() {
         let live = Live::new();
         live.event(&Event::Text("one".to_string()));
-        assert!(matches!(live.follow(Some(9999)).1, Catch::Reset));
+        assert!(matches!(live.follow(Some(9999), None).1, Catch::Reset));
+    }
+
+    /// A session file under a scratch directory, and the cursor just past its first entry.
+    ///
+    /// The file is the fixture and the position is the question, in every test below: what a
+    /// cursor means is the whole of this feature.
+    fn a_session_of_two_entries(tag: &str) -> (std::path::PathBuf, std::path::PathBuf, u64) {
+        let dir = std::env::temp_dir().join(format!("flint-web-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch directory");
+        let path = dir.join("session.jsonl");
+        let meta = "{\"type\":\"meta\",\"id\":\"abc123\",\"version\":1,\"cwd\":\"/tmp\"}\n";
+        let asked =
+            "{\"type\":\"chat\",\"message\":{\"role\":\"user\",\"content\":\"the first question\"}}\n";
+        let answered = "{\"type\":\"chat\",\"message\":{\"role\":\"assistant\",\"content\":\"the first answer\"}}\n";
+        std::fs::write(&path, format!("{meta}{asked}{answered}")).expect("write the session");
+        let at = (meta.len() + asked.len()) as u64;
+        (dir, path, at)
+    }
+
+    /// The cursor is a position in the file, so a process that did not mint it can answer it.
+    ///
+    /// This is what "resume after a restart" means here. A frame's `id` is the length of the
+    /// session file when it was pushed, so a cursor names a position in a *file* rather than a
+    /// position in one process's memory. A ring of nothing -- a process that has only just
+    /// started -- cannot replay a single frame of what the client missed, and the file can:
+    /// every entry the client does not have is still there, in order, whatever happened to the
+    /// process in between. Before this, that request was answered with `reset`, and the page
+    /// re-read the whole conversation to find out what had changed.
+    #[test]
+    fn a_cursor_from_another_process_is_answered_out_of_the_file() {
+        let (dir, path, at) = a_session_of_two_entries("cursor");
+        let live = Live::new();
+        live.serving(Some(path.clone()));
+
+        match live.follow(Some(at), Some("abc123")).1 {
+            Catch::Missed(frames) => {
+                assert_eq!(frames.len(), 1, "one entry was written after the cursor");
+                let rendered = frames[0].render();
+                assert!(
+                    rendered.contains("event: file"),
+                    "the record, not a delta: {rendered:?}"
+                );
+                assert!(rendered.contains("the first answer"), "{rendered:?}");
+                assert!(
+                    !rendered.contains("the first question"),
+                    "and nothing the client already has: {rendered:?}"
+                );
+                assert!(
+                    rendered.contains(&format!(
+                        "id: {}",
+                        std::fs::read(&path).expect("read back").len()
+                    )),
+                    "the cursor advances to the end of the file: {rendered:?}"
+                );
+            }
+            Catch::Reset => panic!("a restarted process must answer from the file, not reload"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The ring is asked first, and it is the only source that has the deltas.
+    ///
+    /// A page that dropped for a second mid-answer must not be rebuilt: the part of the answer
+    /// so far is in no file yet, so the frames are replayed rather than the file re-read.
+    #[test]
+    fn a_cursor_the_ring_can_cover_is_answered_with_frames_and_not_file_lines() {
+        let (dir, path, at) = a_session_of_two_entries("ring-first");
+        // The file as the client read it: without the entry the frame below will be about, so
+        // that frame's own cursor *is* the client's. This is the ordinary case -- a page that
+        // loaded, then dropped while an answer was streaming -- and it is the case the ring
+        // exists for.
+        let mut body = std::fs::read(&path).expect("read the session");
+        body.truncate(at as usize);
+        std::fs::write(&path, &body).expect("write the prefix");
+        let live = Live::new();
+        live.serving(Some(path.clone()));
+        live.event(&Event::Text("a delta at the cursor".to_string()));
+        // Then an entry lands, so the next frame's cursor is past the client's.
+        let mut body = std::fs::read(&path).expect("read the session");
+        body.extend_from_slice(b"{\"type\":\"title\",\"name\":\"later\"}\n");
+        std::fs::write(&path, &body).expect("append");
+        live.event(&Event::Text("a delta after it".to_string()));
+
+        match live.follow(Some(at), Some("abc123")).1 {
+            Catch::Missed(frames) => {
+                assert_eq!(frames.len(), 1, "only the frame past the cursor");
+                let rendered = frames[0].render();
+                assert!(rendered.contains("a delta after it"), "{rendered:?}");
+                assert!(
+                    !rendered.contains("event: file"),
+                    "the ring has it, so the file is not consulted: {rendered:?}"
+                );
+            }
+            Catch::Reset => panic!("the ring holds the frame the client missed"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A cursor names a conversation as well as a position, and the id is the conversation.
+    ///
+    /// Two files have the same positions, so a position alone cannot say which conversation a
+    /// client is showing. The case is not hypothetical: `/resume` moves the run to another
+    /// file, and a page that is reconnecting at that moment never sees the `reset` frame that
+    /// would have told it -- it would be handed lines from the middle of a conversation it is
+    /// not reading.
+    #[test]
+    fn a_cursor_from_another_conversation_is_not_answered_from_this_file() {
+        let (dir, path, at) = a_session_of_two_entries("other-conversation");
+        let live = Live::new();
+        live.serving(Some(path.clone()));
+        assert!(
+            matches!(
+                live.follow(Some(at), Some("some-other-session")).1,
+                Catch::Reset
+            ),
+            "a different conversation is a reload, not somebody else's lines"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A cursor past the end of the file was not minted against this file.
+    #[test]
+    fn a_cursor_past_the_end_of_the_file_is_told_to_reload() {
+        let (dir, path, _) = a_session_of_two_entries("past-the-end");
+        let live = Live::new();
+        live.serving(Some(path.clone()));
+        let beyond = std::fs::read(&path).expect("read").len() as u64 + 1;
+        assert!(matches!(
+            live.follow(Some(beyond), Some("abc123")).1,
+            Catch::Reset
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Every frame carries the sequence number the client sends back.

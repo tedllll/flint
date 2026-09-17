@@ -6,6 +6,53 @@ of it.
 
 ## Where things stand
 
+**The ninth of the twelve items taken from the reading of Pi is built: the page's reconnection cursor is a
+position in the session file.** It used to be a **frame count**, minted by `Live::next`, starting at 1 in
+every process — so it meant nothing in the next one, the ring could only answer what it still held, and
+anything else was `event: reset`. The page made that worse than it sounds: `follow()` called
+`readSession()` on **every** successful connection, so it rebuilt the whole transcript whenever it
+reconnected, which is what a two-second network blip cost — the reader's place in the conversation and any
+answer still streaming into it. A frame's SSE `id:` is now the length of the session file at the moment it
+was pushed, and `GET /session` reports the same number as `X-Flint-At`.
+
+**Three decisions, and the third is where the work was.** (1) **The ring is still asked first**, because it
+is the only source that has the deltas of an answer being streamed right now — those are in no file yet —
+so a page that dropped for a second mid-answer is caught up frame by frame, exactly as before. (2) **The
+file answers when the ring cannot place the cursor**: a gap of more than 512 frames, or a process that has
+just started with a ring of nothing. The entries after that position go out as `event: file` frames — the
+session's own lines, in order — and the client applies them. `reset` is left for what neither source can
+place. (3) **The same moment reaches the page twice** — once as the stream's event and once as the file's
+entry — and the two are drawn differently, so the page learned two rules: a question it already drew from
+`turn.started` is not drawn again from the file's `chat` line, and an answer it built from deltas is
+**filled in** from the file's line rather than opened beside it. Both are held by checks in
+`scripts/web-view-test.js`, and both were watched failing with the `fromFile` distinction removed. The
+client also sends the conversation's id beside the cursor (`?last=<bytes>&session=<id>`), because a
+position in a file and a position in another file are the same number and `/resume` moves the run between
+files while a page may be disconnected and miss the `reset` that would have told it.
+
+**What it does not do, which is the part of the item that stays open.** A page still cannot get back to a
+**restarted** flint: the new process listens on a new port with a new token, so the page's stream has
+nowhere to go, and the page keeps no cursor of its own. What is built is the half that could be carried
+across — the server will answer a position it did not mint — and the honest next step, if a client is ever
+wanted for it, is a page that remembers `(session id, position)` and a run willing to accept one. The
+cursor also names a *conversation*, not a *file generation*: a hand edit above the cursor moves every later
+byte, and the answer then starts at the next line boundary rather than at a dangling pointer, which is the
+property the byte-position design was chosen for over a line number.
+
+**Red first, twice.** `a_cursor_from_another_process_is_answered_out_of_the_file` was written and watched
+failing with "a restarted process must answer from the file, not reload" while `entries_after` returned
+`None`; the two page rules were watched failing with the `fromFile` argument ignored. `cargo test` went
+from 611 to **615 passing, 1 ignored** (348 lib, and the four new ones are the file answering a cursor no
+ring could place, the ring being preferred when it can cover one, another conversation being refused, and a
+cursor past the end of the file being refused). `cargo clippy --all-targets` is silent,
+`node scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass, and by hand
+`node scripts/browser-controls-test.js` held **56/56** against a real browser — which is what says the page
+still draws, reloads and drives the run with the new cursor under it. The one existing lib test that
+changed expectation is `a_change_of_conversation_is_a_named_reset_and_drops_the_old_frames`: a client that
+reconnects *after* a `/new` is now told to reload (`reset`) rather than handed the reset frame, because a
+position cannot draw the old distinction between "below the oldest" and "above the newest" — and the
+outcome is the same one by the same route, since `/session` serves the new conversation.
+
 **The eighth of the twelve items taken from the reading of Pi is built: a finished conversation as one
 HTML file.** `flint export <n|id|path> [--out <file>]` writes what the page has always drawn — the
 question, the answers, every tool call and its result, the reasoning, the fold-out rows — into a single

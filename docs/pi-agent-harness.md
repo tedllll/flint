@@ -301,11 +301,29 @@ different things are missing and they are worth separating, and **one of them is
 There is a third thing in the same area, and it is the smallest of the three: Pi records every entry
 with a stable id, which makes an id a **durable cursor** -- a client asks for everything after the
 last id it saw and gets it, "even across client restarts", including history the compaction has since
-taken out of the live context. flint's page has a reconnection cursor (`last=`), but it is a
-per-process ring rather than a property of the file, so a page that reconnects after flint restarted
-re-reads from nothing. Naming the line a cursor points at is a session-format question, and the format
+taken out of the live context. flint's page had a reconnection cursor (`last=`), but it was a
+per-process ring rather than a property of the file, so a page that reconnected after flint restarted
+re-read from nothing. Naming the line a cursor points at is a session-format question, and the format
 is documented and hand-editable -- which is exactly why it is worth deciding deliberately rather than
 slipping in.
+
+**Built, 2026-09-17, and the format was not touched.** The sketch above assumed the answer would be a
+line id *in* the file, because that is the shape Pi chose; what was actually needed was a position the
+file already defines, and it is the file's **length in bytes** at the moment the frame was pushed. No
+new field, no writer change, nothing for a hand-editor to get wrong: a cursor is read back out of the
+file's own newlines, and a hand edit above the cursor degrades to "start at the next line boundary"
+instead of to a dangling reference. So the durable cursor turned out to be a *reading* decision rather
+than a format one, which is the opposite of what this section predicted.
+
+The other half of the sketch was also wrong in a way worth recording. flint's version keeps the ring and
+asks it first, because the ring is the only source that has the deltas of an answer still being
+streamed -- they are in no file yet. The file answers when the ring cannot place the cursor (a gap of
+more than 512 frames, or a process that has just started), and `reset` is left for what neither source
+can place. What the id buys on top of the position is the conversation: a position in a file and a
+position in another file are the same number, so the client sends the session id beside the cursor and
+a mismatch is a reload. And the honest limit is unchanged: a page still cannot reach a restarted flint,
+because the port and token are new, and the page keeps no cursor of its own. §15 of `docs/web-mode.md`
+is the record.
 
 ### 3.6 Prompt templates, and a skill the person can invoke
 

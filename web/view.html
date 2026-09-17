@@ -710,7 +710,7 @@ function text(value) {
 }
 
 /// One already-parsed event object. Returns nothing; the document is mutated.
-function applyEvent(doc, ev) {
+function applyEvent(doc, ev, fromFile) {
   switch (ev.type) {
     // ---- a session file -----------------------------------------------------
     case "meta":
@@ -730,9 +730,28 @@ function applyEvent(doc, ev) {
       if (m.role === "system") {
         push(doc, { kind: "system", text: text(m.content) });
       } else if (m.role === "user") {
+        // The stream draws a question from `turn.started`; the file draws it from its own
+        // `chat` line. A page that drew the first and is then sent the second -- which is what
+        // catching up out of the file does -- would show the same question twice, so the file's
+        // copy of a question already at the end of the document is not drawn again. Only the
+        // last one: a person asking the same thing twice is two questions, and they are not
+        // adjacent in the file either.
+        const last = doc.blocks[doc.blocks.length - 1];
+        if (fromFile && last && last.kind === "user" && last.text === text(m.content)) return;
         push(doc, { kind: "user", text: text(m.content) });
       } else if (m.role === "assistant") {
-        if (text(m.content) || text(m.reasoning)) {
+        // The other half of the same problem, and the same answer with the opposite sign: a
+        // block built from deltas is an *unfinished* copy of the message the file kept, so the
+        // file's line fills it in rather than opening a second one beside it. `carryStreaming`
+        // protects the same thing in the other direction -- it will not re-add an answer the
+        // file has already written.
+        const open = fromFile ? currentAnswer(doc) : null;
+        if (open) {
+          open.text = text(m.content);
+          open.reasoning = text(m.reasoning);
+          open.open = false;
+          touched(doc, open);
+        } else if (text(m.content) || text(m.reasoning)) {
           push(doc, { kind: "assistant", text: text(m.content), reasoning: text(m.reasoning), open: false });
         }
         // The calls are placed where they were asked for; the results arrive later as
@@ -932,7 +951,11 @@ function callArgs(call) {
 }
 
 /// Parse one line into the document. Returns nothing: damage becomes a block, not a throw.
-function applyLine(doc, line) {
+///
+/// `fromFile` says where the line came from, and it is not bookkeeping: the same moment reaches
+/// this page twice -- once as the stream's own event and once as the session file's entry --
+/// and the two are drawn differently. See the `chat` arm.
+function applyLine(doc, line, fromFile) {
   const trimmed = line.trim();
   if (!trimmed) return;
   let ev;
@@ -946,12 +969,12 @@ function applyLine(doc, line) {
     push(doc, { kind: "damage", text: "a line with no type: " + clip(trimmed, 200) });
     return;
   }
-  applyEvent(doc, ev);
+  applyEvent(doc, ev, fromFile);
 }
 
 /// A whole file, or a whole stream: one object per line, and never anything else.
-function applyText(doc, whole) {
-  for (const line of whole.split("\n")) applyLine(doc, line);
+function applyText(doc, whole, fromFile) {
+  for (const line of whole.split("\n")) applyLine(doc, line, fromFile);
   return doc;
 }
 
@@ -2395,7 +2418,9 @@ function sizeComposer() {
 
 function load(whole) {
   const fresh = newDoc();
-  applyText(fresh, whole);
+  // Into a *fresh* document, where the two guards in `applyEvent`'s `chat` arm have nothing to
+  // find -- there is no stream-drawn block to duplicate -- so "from the file" is exactly right.
+  applyText(fresh, whole, true);
   doc.meta = fresh.meta;
   doc.title = fresh.title;
   doc.usage = fresh.usage;
@@ -2418,23 +2443,38 @@ function authHeader() {
   return { "X-Flint-Token": tokenFromSearch(location.search) };
 }
 
-/// The highest frame this page has applied. Everything at or below it is already on screen.
+/// The highest cursor this page has applied. Everything at or below it is already on screen.
+///
+/// A *position in the session file* -- the length of the file as of the last frame applied --
+/// and not a count of frames. That is what makes it worth sending back: the same number means
+/// the same place to any process serving that file, where a frame count only ever meant
+/// something to the process that minted it. See `Live::follow` in `src/web.rs`.
 let applied = 0;
 
 /// Re-read the conversation from the process, and take its cursor.
 ///
-/// The response says which event frame the file it just returned is current as of, and that
-/// number is the whole reason the file and the stream can be two sources without disagreeing:
-/// frames at or below it may already be in the file, and frames above it cannot be -- they
-/// were emitted after the read. So a page that renders this and then applies the rest loses
-/// nothing and shows nothing twice, whatever the timing was.
+/// Called once when the page starts, and again on a `reset` -- when the run moved to another
+/// conversation, or this connection fell so far behind that the frames in between are gone. It
+/// is deliberately *not* called on every reconnect any more: that rebuilt the document for a
+/// two-second outage, which threw away where the reader was and any answer still streaming.
+/// What a reconnect is missing now arrives on the stream itself.
 async function readSession() {
   const response = await fetch("/session", { headers: authHeader() });
   if (!response.ok) throw new Error("HTTP " + response.status);
-  const cursor = Number(response.headers.get("X-Flint-Event-Seq") || 0);
+  const cursor = Number(response.headers.get("X-Flint-At") || 0);
   const whole = await response.text();
   load(whole);
   applied = cursor;
+}
+
+/// Which conversation this page is showing, as the file's own `meta` line names it.
+///
+/// Sent beside the cursor, because a cursor is a position in a file and two files have the same
+/// positions: without it, a page that reconnects after the run switched conversations would be
+/// handed the entries of a conversation it is not reading -- positioned, in order, and wrong.
+function sessionParam() {
+  const id = doc.meta && doc.meta.id;
+  return id ? "&session=" + encodeURIComponent(id) : "";
 }
 
 /// Follow the live feed, reconnecting for as long as the page is open.
@@ -2445,6 +2485,9 @@ async function readSession() {
 /// the file first would leave a window in which a frame belonged to neither source.
 async function follow() {
   let delay = 500;
+  // The conversation, once, before the feed opens: after this the page only ever applies what
+  // the stream sends it, and a reconnect is a delta rather than a rebuild.
+  await readSession();
   // `?debug=1`, and only then: the trace answers the one question the page cannot ask itself (is
   // the feed delivering, and do the frames become blocks?) and it is noise in every session that
   // works. Added after "the page does not change at all", where no frames, skipped frames and
@@ -2462,7 +2505,7 @@ async function follow() {
       const giveUp = setTimeout(() => deadline.abort(), 10000);
       let response;
       try {
-        response = await fetch("/events?last=" + applied, {
+        response = await fetch("/events?last=" + applied + sessionParam(), {
           headers: authHeader(),
           signal: deadline.signal,
         });
@@ -2470,7 +2513,6 @@ async function follow() {
         clearTimeout(giveUp);
       }
       if (!response.ok) throw new Error("HTTP " + response.status);
-      await readSession();
       delay = 500;
       feedLast = "connected, applied " + applied;
       postLog("connected · " + feedTrace(feedReceived, doc.blocks.length, feedLast));
@@ -2489,7 +2531,7 @@ async function follow() {
           // Counted before anything decides what to do with it: a frame this page skips is the
           // whole reason the trace exists, and a counter after the skipping would show zero.
           feedReceived++;
-          feedLast = (frame.event || "message") + " seq " + frame.id;
+          feedLast = (frame.event || "message") + " at " + frame.id;
           if (feedReceived === 1) postLog("first frame · " + feedTrace(feedReceived, doc.blocks.length, feedLast));
           if (debugFeed) setHint(feedTrace(feedReceived, doc.blocks.length, feedLast));
           // A named event, not a line of the run's vocabulary: it means this page's
@@ -2563,9 +2605,24 @@ async function follow() {
             schedulePaint();
             continue;
           }
-          const seq = Number(frame.id);
-          if (!(seq > applied)) continue;
-          applied = seq;
+          // The session file's own lines, sent when the ring could not answer this page's cursor
+          // -- a gap of more than the ring holds, or a process that has only just started. They
+          // are the record of what was missed, and they are drawn as the file draws them: see
+          // `applyLine`'s `fromFile` and the two guards in `applyEvent`'s `chat` arm.
+          if (frame.event === "file") {
+            const at = Number(frame.id);
+            if (Number.isFinite(at)) applied = Math.max(applied, at);
+            if (frame.data) applyLine(doc, frame.data, true);
+            schedulePaint();
+            continue;
+          }
+          // A frame of the run, applied without comparing anything: what arrives is what this
+          // page does not have, because the cursor it was sent is the last one this page
+          // applied and the server replays nothing at or below it. The frame-count comparison
+          // that used to stand here is the check a position makes unnecessary -- and it is what
+          // dropped a page's own deltas whenever two of them shared a cursor.
+          const at = Number(frame.id);
+          if (Number.isFinite(at)) applied = Math.max(applied, at);
           if (frame.data) applyLine(doc, frame.data);
           schedulePaint();
         }

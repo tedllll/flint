@@ -1470,6 +1470,43 @@ check("the island an exported page carries", () => {
   eq(viewer.islandLines({ textContent: escaped }), nasty, "an escaped island still reads exactly");
 });
 
+console.log("the file's own lines, sent to catch a page up");
+
+// A reconnect is answered from the session file when the ring cannot cover the cursor, and those
+// lines describe moments the page may already have drawn from the stream. Both guards below are
+// about that overlap: without them a caught-up page shows a question twice and an answer twice.
+check("a question the stream already drew is not drawn again from the file", () => {
+  const d = viewer.applyText(
+    viewer.newDoc(),
+    `{"type":"chat","message":{"role":"user","content":"the same question"}}`
+  );
+  viewer.applyLine(
+    d,
+    `{"type":"chat","message":{"role":"user","content":"the same question"}}`,
+    true
+  );
+  eq(kinds(d).filter((k) => k === "user").length, 1, "one question, not two");
+  // The same line from the *stream* is not deduped: a person asking twice asked twice.
+  viewer.applyLine(d, `{"type":"chat","message":{"role":"user","content":"the same question"}}`);
+  eq(kinds(d).filter((k) => k === "user").length, 2, "a stream line is never treated as a repeat");
+});
+
+check("an answer built from deltas is filled in from the file, not opened twice", () => {
+  const d = viewer.newDoc();
+  viewer.applyLine(d, `{"type":"turn.started","prompt":"a question"}`);
+  viewer.applyLine(d, `{"type":"message.delta","text":"half an ans"}`);
+  viewer.applyLine(
+    d,
+    `{"type":"chat","message":{"role":"assistant","content":"half an answer, whole","reasoning":"why"}}`,
+    true
+  );
+  eq(kinds(d).filter((k) => k === "assistant").length, 1, "one answer block");
+  const last = d.blocks[d.blocks.length - 1];
+  eq(last.text, "half an answer, whole", "the file's copy is the one that stands");
+  eq(last.reasoning, "why", "and its reasoning with it");
+  eq(last.open, false, "the block is finished");
+});
+
 if (failures) {
   console.log(`\n${failures} failed`);
   process.exit(1);

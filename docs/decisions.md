@@ -141,6 +141,45 @@ writes another, and the machine where the provider is in doubt is exactly where 
 handing to somebody. No messages means no page, refused the way `/import` refuses an empty file: one
 that looks like a conversation and holds nothing cannot be told from one that failed to load.
 
+## A cursor is a position in a file
+
+The browser's reconnect cursor was a **frame count minted by the process** (`Live::next`), and that was
+wrong in a way that only shows up when something restarts. A count starts at 1 in every process, so a
+cursor means nothing in the next one; the ring answers only what it still holds, so a gap larger than it
+is answered with `reset`; and the page rebuilt its whole transcript from `/session` on *every* reconnect
+rather than only when it had to, which is what a two-second network blip cost — the reader's place, and
+any answer still streaming.
+
+It is now the **length of the session file** at the moment the frame was pushed, carried on every frame's
+SSE `id:` line and reported by `GET /session` as `X-Flint-At`. The decision is not "use bytes": it is
+that a cursor should name a position in the only thing here that outlives the process that made it. The
+session file is append-only and is already the truth about the conversation, so a position in it is a
+fact two processes can agree on, and `flush`-free: nothing has to be written anywhere to keep it true.
+
+Three things follow, and the third is the one that took the work.
+
+**The ring stays, as the fast path, because it holds what the file does not.** The deltas of an answer
+being streamed are in no file yet. So the ring answers whenever it still holds every frame written at or
+after the cursor, which is the ordinary case of a page that dropped for a second, and it replays frames.
+The file answers when the ring cannot: the entries after that position go out as `event: file` frames,
+and the page applies them as the file's lines. `reset` is left for a cursor neither source can place.
+
+**A cursor names a conversation as well as a position, so the client sends both.** A position in a file
+and a position in another file are the same number, and `/resume` moves the run between files while a
+page may be disconnected and never see the `reset` frame that would have told it. So `?session=<id>`
+travels beside `?last=`, and a mismatch is a reload rather than somebody else's lines in the middle of the
+transcript.
+
+**What was refused, and why.** Writing a line number or an entry id *into* the format — that is a change
+to a hand-editable file to serve a browser, and a position needs no such change: it is derived from the
+file's own newlines, so a hand-edited file degrades to "start at the next line boundary" rather than to a
+dangling pointer. Keeping a durable log of the frame *stream* — that is the derived state this repository
+does not keep, and the file is already a better log. And a page that persists its cursor in
+`localStorage` — nothing would read it: a restarted flint listens on a new port with a new token, so the
+page has nowhere to send it. That last one is the honest limit of the feature rather than a decision
+against it; the server half now exists, and the client half needs a run that will accept a cursor it did
+not mint.
+
 ## Turns, and the lines typed into them
 
 **A queued follow-up is the run's memory, not the file's.** `/queue <text>` holds a line until the turn
