@@ -87,8 +87,11 @@ file were answered on 2026-09-16 at the recommended values** — the depth bound
 2), the mailbox default (a peer's words are shown to the human and reach a model only when that run was
 asked to hear peers, which is what decision 3 said the opt-in had to be), what "another agent is here"
 may claim (no author, ever), and presence in
-`FLINT_HOME` only. What stage 3 still owes is one thing, and it is a deliberate "not yet": the
-`.flint/` marker in the project. Stage
+`FLINT_HOME` only. What stage 3 still owed — the `.flint/` marker in the project, so two installations
+with different homes can see each other — **is now built**, and the answer decision 5 left open is
+settled the other way with a bound on the cost: the home record stays, and a project that already keeps
+a `.flint/` gets a second copy of the presence record and the mailbox. **flint never creates the
+marker**, so nothing is written into a checkout that did not ask. Stage
 4 was written into `ROADMAP.md` and `docs/agents.md` in the same commit as the code, with the line
 drawn where it was built: profiles and an explicit, capped fan-out, and nothing above it — no shared
 context, no merge, and no flint choosing to parallelise on its own.

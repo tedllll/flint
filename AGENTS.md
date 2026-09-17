@@ -44,11 +44,11 @@ whoever is changing the code — a person or a model driving it.
 | `src/session.rs` | reading and writing `sessions/*.jsonl`, listing, archiving, and the `children/` directory a child run's conversation goes in |
 | `src/schema.rs` | the JSON Schema subset flint validates a `--schema` answer against, by hand |
 | `src/context.rs` | `AGENTS.md` discovery, the skill catalog, and the agent profiles in `.flint/agents/*.md` |
-| `src/config.rs` | config load/save and the paths under `FLINT_HOME` |
+| `src/config.rs` | config load/save, the paths under `FLINT_HOME`, and the project's `.flint/` marker that a run looks for but never creates |
 | `src/ndjson.rs` | the `--json` stream: one object per line, and the rules that keep it that way |
 | `src/search.rs` | web search: where the credential comes from, and DeepSeek's search endpoint |
 | `src/fetch.rs` | reading a URL: markup stripped, length bounded, and the one rule — a fetch may only reach the public internet |
-| `src/live.rs` | who else is working here: the presence record a run keeps while it lives, and the recent-changes signal that names no author |
+| `src/live.rs` | who else is working here: the presence record a run keeps while it lives (at home always, and in the project's `.flint/` when the project has one), the mailbox a peer speaks through, and the recent-changes signal that names no author |
 | `src/web.rs` | `--web`: the embedded viewer and the loopback listener that serves it |
 | `src/util.rs` | small shared helpers (truncation on a char boundary, and the two-ended cut a long answer gets) |
 | `tests/` | `agent_loop` (stub provider), `cli_output` (real binary, raw bytes — including a resumed conversation whose request past `max_request_chars` opens with the note while the file on disk still has the first question), `json_output` (the `--json` stream: one object per line, the heartbeat, the stop channel, the exit codes and the turn's outcome, the balance preflight, and the refusals a caller has to be able to read), `term_capture` (byte-exact terminal), `search_tool` (stub search endpoint), `balance` (the preflight, stub provider), `who` (the presence record and the changes that name no author), `task` (one flint starting another: argv, the child's stream, the depth bound, a readonly parent that cannot be talked into a writing child, a profile deciding the child's instructions and model, a fan-out whose children are shown to have started together, a child's own progress arriving on the parent's status row, what a dropped turn says about the child it left running -- in a session and on a `--json` stream, a child's conversation being kept out of the person's list of conversations, and the background handle: a parent that does not wait, a status that says where the child is, a wait that collects its answer, and a stop that ends it, a model that says so when the next step needs the answer, and a job that ends while its parent is working being reported to it exactly once), `say` (the mailbox: a peer's words reaching the person and the session file, and never a request body -- unless the run asked to hear peers, and then exactly once, in the request that followed, with `"heard":true` on the record), `web_view` (the page's policy), `tty_hangup` (Unix only, the one suite that needs a real pty: a child is given a terminal, the master is closed, and the run must end rather than spin -- the defect `watch_for_hangup` in `src/main.rs` exists for) |
@@ -64,7 +64,7 @@ whoever is changing the code — a person or a model driving it.
 | `docs/sandbox.md` | a plan for replacing permission modes with grants — **not built, and it argues against the "Not doing, and why" entry in `ROADMAP.md` on purpose**; read it as an argument, not as the state of the tree |
 | `docs/research-permissions-prior-art.md` | how other coding-agent CLIs do permissions and sandboxing, read off their own pages for `docs/sandbox.md` — every claim is sourced from a page that was loaded, and the ones that could not be verified say so |
 | `docs/sandbox-alternatives-research.md` | capability- and scope-based alternatives to the read-only / workspace-write / full-access ladder, read for `docs/sandbox.md` §3.4 — in its own words, not a proposal for the tree |
-| `docs/agents.md` | the plan for runs that spawn, find and talk to each other (a `task` tool, presence, a mailbox, profiles) — stages 1–4 are built, including a `task` that hands back a handle by default and reports the job once when it ends, a background command that is the same job with a log file where a child has a conversation, and `job_op` (`src/live.rs`, `TaskTool`/`TasksTool`/`JobOpTool` in `src/tools.rs`, the report in `Agent::with_jobs`, profiles in `src/context.rs`, `flint say` and the `--hear-peers`/`/hear-peers` opt-in that lets a peer's words reach a model); only the `.flint/` marker that would let two `FLINT_HOME`s see each other is not |
+| `docs/agents.md` | the plan for runs that spawn, find and talk to each other (a `task` tool, presence, a mailbox, profiles) — stages 1–4 are built, including a `task` that hands back a handle by default and reports the job once when it ends, a background command that is the same job with a log file where a child has a conversation, `job_op` (`src/live.rs`, `TaskTool`/`TasksTool`/`JobOpTool` in `src/tools.rs`, the report in `Agent::with_jobs`, profiles in `src/context.rs`, `flint say` and the `--hear-peers`/`/hear-peers` opt-in that lets a peer's words reach a model), and the `.flint/` project marker that lets two `FLINT_HOME`s see each other |
 | `ROADMAP.md` | the plan of record: the ordered queue, and what is deliberately not done |
 | `HANDOFF.md` | state of the project at the end of the last working session |
 
@@ -91,10 +91,16 @@ in a scratch directory for the same reason.
 | `<project>/AGENTS.md` | instructions for that project |
 | `<project>/.flint/skills/<name>/SKILL.md` | skills for that project |
 | `<project>/.flint/agents/<name>.md` | an agent profile: front matter for `model`, `provider` and `readonly`, body for the instructions a `task`/`tasks` child starts from. `<FLINT_HOME>/agents/<name>.md` works too, and the project's copy wins on a name |
+| `<project>/.flint/live/<pid>-<n>.json` | the same presence record by another route, written only when the project *already* has a `.flint/` directory — flint never creates that marker, so a checkout that has not asked for flint's project state gets none of this. It exists for one reason: two installations with different `FLINT_HOME`s cannot see each other through their homes, and this is the copy they can both read. `flint who` reads both directories and counts one run once, by the file name (pid plus nonce, identical in both places), keeping whichever copy said the later word |
+| `<project>/.flint/mailbox.jsonl` | the same mailbox, one file for the whole project rather than one per working directory, so a run in `src/` and a run at the root can hear each other and two installations can too. It *replaces* `<FLINT_HOME>/mailbox/<dir-key>.jsonl` rather than being written beside it: a mailbox is a log of events, and one message in two logs would arrive twice with no way to tell a duplicate from a repetition |
 
 Nothing else — and `live/` is the one directory here that is not a record of the past: a run that
 ends removes its own file, and anything left in there is reported as stale rather than cleaned up by
-somebody else. A web search keeps no state on this machine at all: the request goes out, the
+somebody else. The two `<project>/.flint/` rows are the same state by another route and are written
+only where a person already put a `.flint/` directory; **flint never creates that marker**, which is
+what keeps a checkout nobody asked about untouched — and it means the project's copy can be deleted at
+any time without losing anything, because the home's is the one that always exists. A web search keeps
+no state on this machine at all: the request goes out, the
 answer comes back as a tool result, and the sources land in the session file like any other
 tool output.
 

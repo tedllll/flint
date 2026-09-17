@@ -5424,7 +5424,10 @@ fn say_and_stop(cwd: std::path::PathBuf, to: String, text: String, json: bool) -
 /// failure, and the one thing this must never do is make a caller treat an uncertain answer as a
 /// negative one.
 fn who_and_stop(cwd: std::path::PathBuf, all: bool, json: bool) -> Result<i32> {
-    let listing = live::scan();
+    // `scan_in(&cwd)` rather than `scan()`: the project marker belongs to the directory being asked
+    // about, not to whatever directory this process happens to be sitting in, and `who --cwd <dir>`
+    // is the case where those differ.
+    let listing = live::scan_in(&cwd);
     let (here_alive, elsewhere_alive): (Vec<_>, Vec<_>) = listing
         .alive
         .iter()

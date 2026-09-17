@@ -1789,7 +1789,11 @@ row, so nothing there was broken.
   shared context, no automatic fan-out, no merge step. One run may ask another run one question,
   and the answer comes back with its exit code and its session path attached. The other half
   `docs/agents.md` argues for, two runs in one directory being able to see each other, is built
-  too (`flint who`, `src/live.rs`) and does not contradict this bullet. **The mailbox is built as
+  too (`flint who`, `src/live.rs`) and does not contradict this bullet — and the one gap that used to
+  be named here is closed: a project that keeps a `.flint/` gets a second copy of the presence record
+  and the mailbox, so two installations with different `FLINT_HOME`s see and hear each other. The
+  marker is never created by flint, which is what keeps this from writing into a checkout nobody
+  asked about. **The mailbox is built as
   well, in the only form this bullet allows by default**: `flint say` writes a line, a running flint
   shows it to its person, and it reaches no request — a peer's words cannot become a second author of
   this conversation, so the "one conversation, one context window" claim is untouched. **The one

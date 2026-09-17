@@ -118,8 +118,15 @@ impl Presence {
         }
     }
 
+    /// The file name is the run's identity on disk: pid plus nonce, the same in every directory this
+    /// record is written to. That is what lets a reader that sees two copies of one record count it
+    /// once, and what makes removing one on exit unable to remove another run's.
+    fn file_in(&self, dir: &Path) -> PathBuf {
+        dir.join(format!("{}-{}.json", self.pid, self.nonce))
+    }
+
     fn file(&self) -> PathBuf {
-        crate::config::live_dir().join(format!("{}-{}.json", self.pid, self.nonce))
+        self.file_in(&crate::config::live_dir())
     }
 }
 
@@ -136,6 +143,11 @@ pub struct Guard {
     /// Held separately: the file name is pid plus nonce and never changes, so `Drop` can remove the
     /// record without taking the lock.
     path: PathBuf,
+    /// The project's copy of the same record, when the project keeps flint state in `.flint/`.
+    ///
+    /// `None` is the common case and means what it says: this checkout never asked for flint's
+    /// project state, so nothing of flint's is written into it. See [`crate::config::project_dir`].
+    mirror: Option<PathBuf>,
     /// Closed when the guard is dropped, which is what wakes the thread immediately.
     ///
     /// A channel rather than an `AtomicBool` beside a `sleep`: the thread is *joined* on the way out,
@@ -172,6 +184,20 @@ impl Guard {
             eprintln!("flint: warning: cannot write {}: {e}", record.file().display());
         }
 
+        // The project's copy, when the project has opted in by keeping a `.flint/` directory. A
+        // failure here is reported for the same reason and is not fatal for the same reason: this
+        // copy is how a run with a different `FLINT_HOME` is seen, and a run that silently stopped
+        // being seen across installations is the failure the whole marker exists to prevent.
+        let mirror = crate::config::project_dir(cwd).map(|dir| dir.join("live"));
+        if let Some(dir) = &mirror {
+            if let Err(e) = write_record_in(dir, &record) {
+                eprintln!(
+                    "flint: warning: cannot write {}: {e}",
+                    record.file_in(dir).display()
+                );
+            }
+        }
+
         let path = record.file();
         // Poisoning is ignored on purpose: the record is a single JSON object and the worst a panic
         // under the lock can leave behind is a stale one, which readers already handle by design.
@@ -179,6 +205,7 @@ impl Guard {
         let (stop, wake) = std::sync::mpsc::channel::<()>();
         let thread = {
             let shared = std::sync::Arc::clone(&shared);
+            let mirror = mirror.clone();
             std::thread::Builder::new()
                 .name("flint-live".to_string())
                 .spawn(move || {
@@ -192,6 +219,9 @@ impl Guard {
                         let mut record = shared.lock().unwrap_or_else(|e| e.into_inner());
                         record.last_seen = now_secs();
                         let _ = write_record(&record);
+                        if let Some(dir) = &mirror {
+                            let _ = write_record_in(dir, &record);
+                        }
                     }
                 })
                 .ok()
@@ -199,6 +229,7 @@ impl Guard {
         Guard {
             record: shared,
             path,
+            mirror,
             stop: Some(stop),
             thread,
         }
@@ -218,9 +249,14 @@ impl Guard {
         }
         record.session = text;
         let _ = write_record(&record);
+        if let Some(dir) = &self.mirror {
+            let _ = write_record_in(dir, &record);
+        }
     }
 
     /// Where this run's record is, for a message that wants to name it.
+    ///
+    /// The home's copy, which is the one that exists whether or not the project keeps flint state.
     pub fn path(&self) -> PathBuf {
         self.path.clone()
     }
@@ -234,6 +270,10 @@ impl Drop for Guard {
             let _ = thread.join();
         }
         let _ = std::fs::remove_file(&self.path);
+        if let Some(dir) = &self.mirror {
+            let record = self.record.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = std::fs::remove_file(record.file_in(dir));
+        }
     }
 }
 
@@ -243,9 +283,13 @@ impl Drop for Guard {
 /// truncated JSON object would be reported as damage -- a warning the reader cannot act on, produced
 /// by flint itself, is worse than the microseconds a rename costs.
 fn write_record(record: &Presence) -> std::io::Result<()> {
-    let dir = crate::config::live_dir();
-    std::fs::create_dir_all(&dir)?;
-    let path = record.file();
+    write_record_in(&crate::config::live_dir(), record)
+}
+
+/// The same, into one named directory: the home's `live/`, or a project's `.flint/live/`.
+fn write_record_in(dir: &Path, record: &Presence) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let path = record.file_in(dir);
     let text = serde_json::to_string(record)?;
     let temp = path.with_extension("json.tmp");
     {
@@ -266,33 +310,42 @@ pub struct Listing {
     pub unreadable: Vec<(PathBuf, String)>,
 }
 
+/// Every record this machine's home knows about.
 pub fn scan() -> Listing {
+    scan_in(&std::env::current_dir().unwrap_or_default())
+}
+
+/// Every record this *directory* can see: the home's, and a project's when the project keeps one.
+///
+/// Two directories rather than one because the two records are one record: a run inside a project
+/// that has a `.flint/` writes the same file -- same pid, same nonce -- in both places, so the file
+/// *name* is the identity and a reader that sees both copies counts one run. That is why the home is
+/// read first: a record in both is one run, and the home's copy is the one that cannot be missing.
+///
+/// This is the whole of what the project marker buys, and it is worth stating plainly: with two
+/// installations whose `FLINT_HOME`s differ, this is the only way either sees the other. Nothing
+/// else about the record changes -- the staleness window, the unreadable-line report and the "names
+/// no author" rule for the changed-files line are all the same facts in a second directory.
+pub fn scan_in(cwd: &Path) -> Listing {
     let mut listing = Listing {
         alive: Vec::new(),
         stale: Vec::new(),
         unreadable: Vec::new(),
     };
-    let dir = crate::config::live_dir();
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(entries) => entries,
-        // No directory is the normal state of a machine where nothing has run yet.
-        Err(_) => return listing,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        match std::fs::read_to_string(&path).map(|t| serde_json::from_str::<Presence>(&t)) {
-            Ok(Ok(record)) => {
-                if record.is_stale() {
-                    listing.stale.push(record);
-                } else {
-                    listing.alive.push(record);
-                }
-            }
-            Ok(Err(e)) => listing.unreadable.push((path, e.to_string())),
-            Err(e) => listing.unreadable.push((path, e.to_string())),
+    // One entry per file name, and the later word about a run wins: a pair of records where one was
+    // refreshed and the other was not is a half-written pair, not two runs. Equal timestamps leave
+    // whichever was read first, which is the home's -- the copy that cannot be missing.
+    let mut freshest: std::collections::HashMap<String, Presence> =
+        std::collections::HashMap::new();
+    read_records(&crate::config::live_dir(), &mut listing, &mut freshest);
+    if let Some(project) = crate::config::project_dir(cwd) {
+        read_records(&project.join("live"), &mut listing, &mut freshest);
+    }
+    for record in freshest.into_values() {
+        if record.is_stale() {
+            listing.stale.push(record);
+        } else {
+            listing.alive.push(record);
         }
     }
     listing
@@ -302,6 +355,44 @@ pub fn scan() -> Listing {
         .stale
         .sort_by_key(|record| std::cmp::Reverse(record.last_seen));
     listing
+}
+
+/// Read one directory's records into `freshest`, and its damage into `listing`.
+///
+/// Keyed by file name rather than by pid because the name is what a run writes into both
+/// directories, and because two runs may share a pid across a reboot -- the nonce is what separates
+/// them, and the nonce is in the name.
+fn read_records(
+    dir: &Path,
+    listing: &mut Listing,
+    freshest: &mut std::collections::HashMap<String, Presence>,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        // No directory is the normal state of a machine where nothing has run yet, and of a project
+        // that has a `.flint/` but has never had a run in it.
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        match std::fs::read_to_string(&path).map(|t| serde_json::from_str::<Presence>(&t)) {
+            Ok(Ok(record)) => match freshest.get(&name) {
+                Some(older) if older.last_seen >= record.last_seen => {}
+                _ => {
+                    freshest.insert(name, record);
+                }
+            },
+            Ok(Err(e)) => listing.unreadable.push((path, e.to_string())),
+            Err(e) => listing.unreadable.push((path, e.to_string())),
+        }
+    }
 }
 
 /// A file that changed recently, with the only two facts the filesystem will admit to.
@@ -420,9 +511,20 @@ pub struct PeerMessage {
     pub at: u64,
 }
 
-/// The mailbox for one directory: `<FLINT_HOME>/mailbox/<dir-key>.jsonl`, the same key the sessions
-/// use, so a message reaches the runs working where it was left and not the ones somewhere else.
+/// The mailbox for one directory: `<project>/.flint/mailbox.jsonl` when the directory is inside a
+/// project that keeps flint state there, and otherwise the home's, one file per directory key.
+///
+/// **The project's file wins rather than being written beside the home's**, and that is the one
+/// place the mailbox differs from the presence record. A record is *state* -- the same facts in two
+/// directories, deduplicated by name -- while a mailbox is an append-only log of *events*, and two
+/// logs holding the same message would show it twice to a run that can see both, with no way to tell
+/// a duplicate from somebody saying the same sentence again. So there is one mailbox per directory:
+/// the project's when the project asked for it, which is also what makes two installations able to
+/// hear each other at all.
 pub fn mailbox_path(cwd: &Path) -> PathBuf {
+    if let Some(project) = crate::config::project_dir(cwd) {
+        return project.join("mailbox.jsonl");
+    }
     crate::config::mailbox_dir().join(format!("{}.jsonl", crate::session::dir_key(cwd)))
 }
 

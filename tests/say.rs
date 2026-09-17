@@ -395,3 +395,63 @@ async fn saying_something_needs_no_key_and_says_where_it_went() {
 
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// A project that keeps a `.flint/` directory has one mailbox for the whole project, and that is the
+/// file `flint say` writes -- not a copy beside the home's.
+///
+/// The home's mailbox is one file per *working directory*; the project's is one file per project,
+/// which is what lets two installations hear each other at all, and lets a run in `src/` hear a run at
+/// the root. It replaces the home's file rather than being written beside it on purpose: a mailbox is
+/// a log of events, and one message in two logs would be shown twice by a run that can see both, with
+/// no way to tell a duplicate from somebody repeating themselves.
+#[test]
+fn a_project_marker_holds_one_mailbox_for_the_whole_project() {
+    let (home, work) = scratch("marker-mailbox", "http://127.0.0.1:1/v1");
+    std::fs::create_dir_all(work.join(".flint")).expect("the marker");
+    // Asked from a *subdirectory*, because that is where the walk matters: the marker is above it, and
+    // the two runs are in one project rather than in two unrelated directories.
+    let nested = work.join("src/deep");
+    std::fs::create_dir_all(&nested).expect("nested directory");
+
+    let project_mailbox = work.join(".flint").join("mailbox.jsonl");
+    assert_eq!(
+        flint::live::mailbox_path(&nested),
+        project_mailbox,
+        "the reader resolves a different mailbox than the one this test is about to check"
+    );
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_flint"))
+        .args([
+            "say",
+            "the tree is yours",
+            "--cwd",
+            &nested.display().to_string(),
+            "--json",
+        ])
+        .env("FLINT_HOME", &home)
+        .output()
+        .expect("flint say");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "say failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.lines().next().expect("a line")).expect("json");
+    assert_eq!(
+        PathBuf::from(parsed["mailbox"].as_str().expect("mailbox path")),
+        project_mailbox,
+        "say reported a mailbox somewhere else, so the project's is not the one in use"
+    );
+    let written = std::fs::read_to_string(&project_mailbox)
+        .unwrap_or_else(|e| panic!("no project mailbox at {}: {e}", project_mailbox.display()));
+    assert!(written.contains("the tree is yours"), "{written}");
+    assert!(
+        !home.join("mailbox").exists(),
+        "the home's mailbox was written as well, so one message now sits in two logs"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}

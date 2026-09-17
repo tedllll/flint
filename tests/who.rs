@@ -204,6 +204,183 @@ async fn a_run_says_it_is_here_and_stops_saying_it_when_it_ends() {
     );
 }
 
+/// A project that keeps a `.flint/` directory is a project whose runs can be seen *across
+/// installations*, which is the one hole the presence record could not close by itself.
+///
+/// The home's record stays the one that must exist -- a `readonly` run has to be able to announce
+/// itself and a checkout is not always writable -- so the project's copy has exactly one job: it is
+/// the only thing a flint with a *different* `FLINT_HOME` can see. That is what this asserts, with a
+/// second, empty home doing the asking, and it asserts the other half too: the copy is removed on the
+/// way out, like the record it copies.
+#[tokio::test]
+async fn a_project_marker_lets_another_installation_see_a_run() {
+    let server = MockServer::start().await;
+    let cwd = cwd_for("marker");
+    std::fs::create_dir_all(cwd.join(".flint")).expect("the marker");
+    let home = home_for("marker-here", &server.uri(), "not-a-real-key");
+    // A second installation: its own home, nothing in it, and no way to see the first one's run
+    // except through the project.
+    let stranger = home_for("marker-there", &server.uri(), "not-a-real-key");
+    Mock::given(method("POST"))
+        .respond_with(Slow(one_fragment()))
+        .mount(&server)
+        .await;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_flint"))
+        .args(["-p", "say hello", "--json"])
+        .arg("--cwd")
+        .arg(&cwd)
+        .env("FLINT_HOME", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn flint");
+
+    let project_records = || records(&cwd.join(".flint"));
+    let mut found = false;
+    for _ in 0..100 {
+        if !project_records().is_empty() {
+            found = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        found,
+        "a run in a marked project did not write into {}",
+        cwd.join(".flint/live").display()
+    );
+
+    // The whole point: asked by the *other* installation, about this directory.
+    let (stdout, code) = run_who(&stranger, &cwd, &[]);
+    assert_eq!(code, 0, "who failed: {stdout}");
+    let answer = json_of(&stdout);
+    let live = answer["live"].as_array().expect("live");
+    assert_eq!(
+        live.len(),
+        1,
+        "the second installation cannot see the run: {answer}"
+    );
+    assert_eq!(live[0]["provider"], "stub");
+    assert_eq!(live[0]["cwd"].as_str().unwrap(), cwd.display().to_string());
+
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().expect("stdin");
+        stdin.write_all(b"/stop\n").expect("stop");
+        stdin.flush().expect("flush");
+    }
+    let _ = child.wait();
+
+    let mut gone = false;
+    for _ in 0..100 {
+        if project_records().is_empty() && records(&home).is_empty() {
+            gone = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        gone,
+        "the run ended but left records behind: project {:?}, home {:?}",
+        project_records(),
+        records(&home)
+    );
+}
+
+/// A checkout that never asked for flint's project state does not get any.
+///
+/// This is the promise that makes writing a copy into the project acceptable at all: `.flint/` is
+/// created by a person -- a skill, a profile, or a bare `mkdir .flint` -- and never by flint. A run
+/// in a stranger's tree therefore leaves exactly what it left before, which is what makes the marker
+/// safe to look for on every run.
+#[tokio::test]
+async fn a_run_leaves_no_project_state_where_the_project_did_not_ask() {
+    let server = MockServer::start().await;
+    let cwd = cwd_for("nomarker");
+    let home = home_for("nomarker", &server.uri(), "not-a-real-key");
+    Mock::given(method("POST"))
+        .respond_with(Slow(one_fragment()))
+        .mount(&server)
+        .await;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_flint"))
+        .args(["-p", "say hello", "--json"])
+        .arg("--cwd")
+        .arg(&cwd)
+        .env("FLINT_HOME", &home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn flint");
+
+    let mut found = false;
+    for _ in 0..100 {
+        if !records(&home).is_empty() {
+            found = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(found, "the live run never announced itself in its home");
+    assert!(
+        !cwd.join(".flint").exists(),
+        "flint created {} in a checkout that never asked for flint state",
+        cwd.join(".flint").display()
+    );
+
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().expect("stdin");
+        stdin.write_all(b"/stop\n").expect("stop");
+        stdin.flush().expect("flush");
+    }
+    let _ = child.wait();
+    assert!(
+        !cwd.join(".flint").exists(),
+        "flint left project state behind in a checkout that never asked for it"
+    );
+}
+
+/// One run writes one record into two directories, and it is one run, not two.
+///
+/// The name is the identity -- pid plus nonce, the same in both places -- and the later word about a
+/// run is the one believed, because a pair of records where one was refreshed and the other was not
+/// is a half-written pair rather than two processes. Without this, a run in a marked project would be
+/// listed twice by `flint who`, which is the sort of wrong answer that makes a person stop trusting
+/// the command.
+#[test]
+fn one_record_in_two_places_is_still_one_run() {
+    let cwd = cwd_for("dedup");
+    std::fs::create_dir_all(cwd.join(".flint")).expect("the marker");
+    let home = home_for("dedup", "http://127.0.0.1:1/v1", "not-a-real-key");
+    let now = now_secs();
+    write_record(&home, "4242-samenonce.json", &cwd, now, false);
+    write_record(&cwd.join(".flint"), "4242-samenonce.json", &cwd, now + 5, false);
+    // A different run: its own nonce, so it is a second entry rather than a duplicate.
+    write_record(&cwd.join(".flint"), "4242-othernonce.json", &cwd, now, false);
+
+    let (stdout, code) = run_who(&home, &cwd, &[]);
+    assert_eq!(code, 0, "who failed: {stdout}");
+    let answer = json_of(&stdout);
+    let live = answer["live"].as_array().expect("live");
+    assert_eq!(
+        live.len(),
+        2,
+        "two runs, each written once to the home and once to the project: {answer}"
+    );
+    let deduped = live
+        .iter()
+        .find(|record| record["last_seen"] == serde_json::json!(now + 5))
+        .unwrap_or_else(|| panic!("the fresher copy of the shared record was not the one kept: {answer}"));
+    assert_eq!(
+        deduped["pid"], 4242,
+        "the record that won is the run that wrote both copies"
+    );
+}
+
 /// Every conversation file in a home, whichever working directory keyed it.
 fn session_files(home: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();

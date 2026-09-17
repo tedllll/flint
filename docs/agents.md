@@ -7,10 +7,10 @@ with `tasks` (`src/tools.rs`, `tests/task.rs`), a profile in `.flint/agents/` sa
 start (`src/context.rs`), a peer can leave it a message with `flint say` that is shown to the person
 and sent to a model only when that run asks to hear peers (`tests/say.rs`), so *being called*, *seeing
 each other*, *spawning*, *talking*, *naming a way to work* and *handling a run nobody waited for* all
-work today. The one thing stage 3 still owes is the `.flint/` marker that would let two `FLINT_HOME`s
-see each other, and that is a deliberate "not yet" rather than unfinished work. The five
-decisions at the end of this file **were answered on 2026-09-16: every recommended value was adopted**,
-and each is marked below with what that means for the code.
+work today. The `.flint/` marker that lets two `FLINT_HOME`s see each other is built as well (see
+"Presence lives under `FLINT_HOME`" below and decision 5), so what stage 3 promised it now all does. The
+five decisions at the end of this file **were answered on 2026-09-16: every recommended value was
+adopted**, and each is marked below with what that means for the code.
 
 Written because of three questions asked directly, and because the same afternoon produced the incident
 that makes the middle of this document concrete: two agents were working in this checkout at once, one
@@ -88,10 +88,26 @@ Two rules fall out of the table:
    your own editor's autosave.
 
 Presence lives under `FLINT_HOME`, next to the sessions it describes, because a `readonly` run must
-still be able to announce itself and a project directory is not always writable. The cost is honest and
-must be documented: **two flint installations with different `FLINT_HOME`s cannot see each other.** A
-`.flint/` marker inside the project would fix that and is the natural stage-3 addition, at the price of
-writing into somebody's checkout.
+still be able to announce itself and a project directory is not always writable. That home record is
+still the one that must exist; what was missing was that **two flint installations with different
+`FLINT_HOME`s cannot see each other**, and the `.flint/` marker in the project is now built to close it.
+
+**The marker is a directory that flint never creates.** A project that keeps a `.flint/` — for a skill,
+a profile, or a bare `mkdir .flint` — is a project that has opted into flint's project-local state, and
+a run in it writes a *second* copy of its presence record to `<project>/.flint/live/`, with the same
+file name (pid plus nonce), and removes both copies on the way out. `flint who` reads both directories
+and counts a name it has seen once, keeping the fresher of the two copies: two files, one run. The
+opt-in rule is what makes this safe to look for on every run — a checkout that never asked gets nothing,
+not even an empty `.flint/`, which is held by a test that starts a real run in an unmarked directory and
+asserts the directory was not created. The cost is the one this section always named — **flint writes
+into somebody's checkout, but only one that asked** — and the honest residue is that a project which
+never creates `.flint/` still cannot be seen across installations, which is now a choice a person can
+make in one command rather than a missing feature.
+
+Two directories are refused even when they are named `.flint`, and the reason is worth keeping: the walk
+stops at the home directory, because `~/.flint` is `FLINT_HOME`'s default and belongs to every project
+and none. Without that rule every run under a home directory would find the marker, and `flint say`
+would write one mailbox for the whole machine.
 
 A record that is not cleaned up (a killed process cannot clean up) is not an error: every record
 carries `last_seen`, and anything older than a fixed window is reported as *stale* rather than as
@@ -100,10 +116,17 @@ depend on the machine rather than on the file.
 
 ## Talking: the mailbox
 
-`flint say` appends one line to a mailbox under `FLINT_HOME`, addressed to a session, to a directory,
-or to whoever is listening. A running flint already polls a channel every turn — the stdin reader that
-takes `/stop` — so a mailbox is one more source on a mechanism that exists, not a new lifetime, not a
-socket, and not a server. The record stays append-only plain JSONL, so a human can read it, and so the
+`flint say` appends one line to a mailbox, addressed to a session, to a directory,
+or to whoever is listening. The file is `<FLINT_HOME>/mailbox/<dir-key>.jsonl` for a directory that is
+not part of a project, and **`<project>/.flint/mailbox.jsonl`** for one that is — one mailbox for the
+whole project, so a run in `src/` and a run at the root can hear each other, and so can two
+installations with different homes. The project's file *replaces* the home's rather than being written
+beside it, and that is the one place the mailbox differs from the presence record, which is written to
+both: a record is state, deduplicated by file name, while a mailbox is a log of events, and one message
+in two logs would be shown twice by a run that can see both with no way to tell a duplicate from somebody
+saying the same sentence again. A running flint already polls a channel every turn — the stdin reader
+that takes `/stop` — so a mailbox is one more source on a mechanism that exists, not a new lifetime, not
+a socket, and not a server. The record stays append-only plain JSONL, so a human can read it, and so the
 conversation between two agents is on disk like everything else in this project.
 
 **The safety rule, which is not negotiable and is the reason this is stage 3:**
@@ -360,10 +383,13 @@ worth reading:
 
 **Stage 3 — the mailbox.** `flint say`, `peer.message`, and the opt-in that lets a peer's words reach
 the model. Presumably a `.flint/` presence marker in the project as well, so two `FLINT_HOME`s can see
-each other. — **Built, except the `.flint/` marker.** `flint say "…"
+each other. — **Built, including the `.flint/` marker.** `flint say "…"
 [--to <pid>] [--cwd <dir>] [--json]` appends one JSON line to `<FLINT_HOME>/mailbox/<dir-key>.jsonl`
-(the same directory key the sessions use, so a message reaches the runs working where it was left), and
-it needs no key, like `who`: it writes a file rather than asking a model anything. A run follows its
+(the same directory key the sessions use, so a message reaches the runs working where it was left), or
+to `<project>/.flint/mailbox.jsonl` when the directory is inside a project that keeps a marker — one
+file for the whole project, which is what lets a run in `src/` hear a run at the root and what lets two
+installations hear each other. It needs no key, like `who`: it writes a file rather than asking a model
+anything. A run follows its
 own directory's mailbox from wherever it is *when the run starts*, so it shows what arrives while it
 works rather than replaying yesterday -- and a fresh run therefore begins quiet, which is the honest
 default.
@@ -403,7 +429,9 @@ rather than a detail:
 - **Nothing arrives mid-loop.** The mailbox is read between turns, so a peer's words cannot change a
   request that is already being written; `--hear-peers` affects the future and never the present.
 
-What is *not* built: the `.flint/` marker in the project, and a `/say` inside the prompt. `flint say`
+What is *not* built: a `/say` inside the prompt, so that a person or a model can leave a message without
+a second terminal. The `.flint/` marker this stage used to owe is built (above and decision 5).
+`flint say`
 from another terminal is the primitive, which is the case two agents in one directory actually have.
 `tests/say.rs` holds both halves to the bytes: with the default, a peer speaks *during* a turn through
 the real command and the test asserts the person saw it, the session file kept it, and **every request
@@ -477,10 +505,14 @@ because a decision that is only in a conversation is not a decision.
 4. **What "another agent is here" may claim.** — **Name no author, ever.** Built: the human line says
    "this names no author", and the machine-readable answer carries the same warning in a `note` field,
    because a program is the reader most likely to treat a short list as a complete one.
-5. **Presence in `FLINT_HOME` only, or also `.flint/` in the project?** — **`FLINT_HOME` only, for now**
-   (the stage-3 `.flint/` marker is the addition that makes two installations see each other). Built as
-   decided, with the cost written down where a reader will meet it: two `FLINT_HOME`s cannot see each
-   other.
+5. **Presence in `FLINT_HOME` only, or also `.flint/` in the project?** — **`FLINT_HOME` only, for
+   now** was the answer on 2026-09-16, and **the marker is now built as well**, which supersedes it:
+   the home record stays (a `readonly` run must be able to announce itself, and a checkout is not always
+   writable) and a project that keeps a `.flint/` gets the second copy that crosses installations. The
+   cost this decision named — writing into somebody's checkout — is bounded rather than accepted in
+   general: **flint never creates the marker**, so the write happens only where a person already put
+   one. A project with no `.flint/` is still invisible to a flint with a different home, which is now a
+   one-command choice rather than a gap.
 
 ## What would make this the wrong idea
 

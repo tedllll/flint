@@ -503,11 +503,46 @@ pub fn sessions_dir() -> PathBuf {
 /// Where a running flint says it is alive, so that another one can see it.
 ///
 /// Under `FLINT_HOME` rather than in the project, for one reason: a `readonly` run must still be able
-/// to announce itself, and a checkout is not always writable. The cost is stated wherever this is
-/// documented rather than hidden -- two installations pointed at different `FLINT_HOME`s cannot see
-/// each other. `docs/agents.md` records the `.flint/` marker in the project as the stage-3 answer.
+/// to announce itself, and a checkout is not always writable. That is why this stays the home every
+/// run writes to, even now that a project can carry a copy: the home record is the one that cannot
+/// fail. [`project_dir`] is the copy, and it exists to be *shared* rather than to be reliable -- two
+/// installations pointed at different `FLINT_HOME`s see each other through it and through nothing else.
 pub fn live_dir() -> PathBuf {
     config_dir().join("live")
+}
+
+/// The `.flint/` directory of the project `cwd` belongs to, when that project has one.
+///
+/// **Its existence is the whole opt-in, and flint never creates it.** That is the price
+/// `docs/agents.md` recorded for closing the two-`FLINT_HOME` hole -- writing into somebody's
+/// checkout -- paid only where somebody has already paid it, with a skill, a profile, or a bare
+/// `mkdir .flint`. A checkout that never asked for flint's project state stays untouched, which is
+/// what makes this safe to do on every run.
+///
+/// Two directories are refused even when they are named `.flint`. The walk stops *at* the home
+/// directory, because `~/.flint` is `FLINT_HOME`'s default and belongs to every project and none:
+/// without that rule, every run under a home directory would see the marker, and `flint say` would
+/// write one mailbox for the whole machine. And a `.flint` that *is* the configured `FLINT_HOME` is
+/// skipped for the same reason, which covers a home pointed somewhere unusual.
+pub fn project_dir(cwd: &std::path::Path) -> Option<PathBuf> {
+    project_dir_until(cwd, &home_dir())
+}
+
+/// The walk above, with its stopping point passed in so that a test can put one somewhere it can
+/// create -- a test cannot move the real home directory.
+fn project_dir_until(cwd: &std::path::Path, stop: &std::path::Path) -> Option<PathBuf> {
+    let mut dir = Some(cwd);
+    while let Some(d) = dir {
+        if d == stop {
+            return None;
+        }
+        let candidate = d.join(".flint");
+        if candidate != config_dir() && candidate.is_dir() {
+            return Some(candidate);
+        }
+        dir = d.parent();
+    }
+    None
 }
 
 /// Where one directory's peers leave each other messages.
@@ -698,6 +733,44 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `.flint/` walk: the nearest marker wins, and the stopping point is never inspected.
+    ///
+    /// The second half is the one worth a test, because it is invisible in the happy case and
+    /// catastrophic in the unhappy one: `~/.flint` is `FLINT_HOME`'s default, so a walk that looked
+    /// *at* the home directory would find a marker above every project on the machine, and every
+    /// run under a home directory would write its presence into the same file -- and `flint say`
+    /// would leave one mailbox for the whole machine instead of one per project.
+    #[test]
+    fn the_project_marker_is_the_nearest_one_and_never_the_home_directory() {
+        let root = std::env::temp_dir().join(format!("flint-project-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let nested = root.join("project/src/deep");
+        std::fs::create_dir_all(&nested).expect("directories");
+        let far = root.join("somewhere-else");
+        assert_eq!(
+            project_dir_until(&nested, &far),
+            None,
+            "a tree with no marker anywhere has none"
+        );
+
+        // The home directory's own `.flint`, which is FLINT_HOME and not a project's marker.
+        std::fs::create_dir_all(root.join(".flint")).expect("home marker");
+        assert_eq!(
+            project_dir_until(&nested, &root),
+            None,
+            "the walk looked at the directory it is supposed to stop before"
+        );
+
+        // ...and a marker *below* that stopping point is found, and is the nearest one.
+        std::fs::create_dir_all(root.join("project/.flint")).expect("project marker");
+        assert_eq!(
+            project_dir_until(&nested, &root),
+            Some(root.join("project/.flint"))
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// The generated file has to explain the engine fields, because it is where a person —
     /// or an agent asked to configure flint — actually looks. Knowledge that lives only in
