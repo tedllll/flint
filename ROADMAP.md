@@ -1953,8 +1953,24 @@ argument, the cost and what flint has today are in the document, §3.
   command has a stale set in its environment. Both spawn sites go through one `apply_child_env`. A
   `task` child still gets `FLINT_DEPTH` and `FLINT_PARENT`, and a command gets neither: it is not a run
   and does not claim to be one.
-- **A thinking level** — flint sends no reasoning parameter at all, and stores what a provider sends.
-  The per-provider shape of that field is read first, and the document says why.
+- **A thinking level — built, 2026-09-17.** flint sent no reasoning parameter at all, and stored what a
+  provider sent back. It now asks, out of four words (`off`, `low`, `medium`, `high`), and the design is
+  the answer to the census the reading of Pi produced: **the value is standard, the field is not**, so
+  the level is flint's and the JSON field it goes in is the *provider's*
+  (`thinking_field = "reasoning_effort"`, or whatever the endpoint wants; empty means never ask). That
+  is instead of Pi's per-vendor compatibility table, which is a list of other people's servers to keep
+  in step with, and it is why nothing is sent until both halves are set: a field flint guessed wrong is
+  a request an endpoint may refuse outright. `--thinking <level>` for a run, `/thinking [level]` while
+  one is open, `thinking = "off"` as the config default, and the same switch on the page — the frame's
+  `toggles` row, so the browser offers exactly the words the command accepts and carries no copy of
+  them. **The level travels with the conversation**: it is an appended `thinking` line, the last one
+  wins, and a resumed conversation asks for what it was being held at without being told again — which
+  is the half a flag alone would not have. Two things are deliberately not built: hiding levels a model
+  does not have (flint cannot know, and a menu that lies is worse than four words), and any automatic
+  choice of level. `off` says what it is honestly — flint sends nothing, so the endpoint's own default
+  applies, which for some models is reasoning *on*. A `task` child is a new run and starts at the
+  config's level rather than the parent's; the endpoint travels to a child because a child is the same
+  endpoint, and a level is a choice about this conversation.
 - **Several tool calls of one assistant message, at once** — flint runs them in order, one at a time.
 
 **Read and not taken, recorded so the argument is not lost:** a **run-level tool allowlist** (Pi's

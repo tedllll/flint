@@ -473,6 +473,7 @@ mod tests {
             stop: None,
             start_timeout_secs: 0,
             proxy: None,
+            thinking_field: String::new(),
         }
     }
 

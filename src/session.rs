@@ -173,14 +173,22 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<serde_json::Value>,
     },
+    /// The reasoning level this conversation is being held at.
+    ///
+    /// One word: `off`, `low`, `medium` or `high`. The *field* it is sent in is the provider's and is
+    /// deliberately not here -- it is a fact about the endpoint, not about the conversation, and a
+    /// conversation resumed against a different endpoint must ask in that endpoint's own field. What
+    /// travels with the file is how much reasoning the person asked for, which is the part that is
+    /// theirs.
+    Thinking { level: String },
 }
 
 /// The event names this build understands.
 ///
 /// Used for one decision only: a line that failed to parse but names a type in here is
 /// damage, and a line that names anything else is somebody else's event.
-const KNOWN_TYPES: [&str; 9] = [
-    "meta", "chat", "import", "fork", "usage", "title", "switch", "schema", "peer",
+const KNOWN_TYPES: [&str; 10] = [
+    "meta", "chat", "import", "fork", "usage", "title", "switch", "schema", "peer", "thinking",
 ];
 
 /// Whether a line names an event type this build knows.
@@ -535,6 +543,19 @@ impl SessionWriter {
         })
     }
 
+    /// Record the reasoning level this conversation is held at.
+    ///
+    /// An event rather than a field of `meta`, and written for the same reason `schema` is: the level
+    /// travels with the conversation, so a run resumed tomorrow asks for what the person chose today
+    /// -- and a conversation that changed level mid-way says so where it happened rather than
+    /// rewriting what it started as. Always written when a run was *told* a level, `off` included,
+    /// so "the last `thinking` line wins" can answer "and back to nothing".
+    pub fn thinking(&mut self, level: &str) -> Result<()> {
+        self.append(&SessionEvent::Thinking {
+            level: level.to_string(),
+        })
+    }
+
     /// Record that the run moved to another provider or model.
     ///
     /// An event rather than a new file, and the argument is the one `Usage` already makes for its own
@@ -568,6 +589,12 @@ pub struct LoadedSession {
     /// the conversation to the same contract it was held to when it was written -- the file says
     /// what that was, and nothing outside the file has to be passed again to continue it.
     pub output_schema: Option<serde_json::Value>,
+    /// The reasoning level in force, from the last `thinking` line in the file.
+    ///
+    /// `None` when the conversation never recorded one, which is every conversation written before
+    /// this event existed and every one whose level is the config's default. A run resumed with a
+    /// level here holds at it without being told again, which is the whole point of writing it down.
+    pub thinking: Option<String>,
     /// Where this conversation came from, when it was copied rather than started here.
     ///
     /// Read so that the places a conversation is named to a person can say it: a copy and an original
@@ -625,6 +652,7 @@ pub fn load(path: &Path) -> Result<LoadedSession> {
         messages: Vec::new(),
         last_usage: None,
         output_schema: None,
+        thinking: None,
         origin: None,
     };
 
@@ -693,6 +721,9 @@ pub fn load(path: &Path) -> Result<LoadedSession> {
             Ok(SessionEvent::Schema { schema }) => {
                 loaded.output_schema = schema.filter(|s| !s.is_null());
             }
+            // Last one wins, like `schema` and `title`: a conversation that changed level mid-way is
+            // held at the level it was left at, and the lines before it are the history of the choice.
+            Ok(SessionEvent::Thinking { level }) => loaded.thinking = Some(level),
             // Read, and deliberately kept out of `messages`: a peer's words belong to the person
             // reading the conversation, not to the history a model is sent. That is the whole safety
             // rule of the mailbox, and this line is where it is enforced on the way back in.
@@ -1859,6 +1890,24 @@ mod tests {
         );
         let loaded = load(&path).unwrap();
         assert!(loaded.messages.is_empty());
+    }
+
+    /// A reasoning level travels in the file, and the last line wins.
+    ///
+    /// Both halves are the feature: writing it down is what makes the choice outlive the run, and
+    /// reading the *last* one is what makes a conversation that changed level mid-way resume where it
+    /// was left rather than where it started. It is also the test that would catch the event being
+    /// renamed out from under the reader, which is silent in the other direction -- an unknown type is
+    /// skipped without comment, so a conversation would resume at the config's default and say nothing.
+    #[test]
+    fn a_reasoning_level_is_read_back_and_the_last_one_wins() {
+        let dir = TempDir::new("thinking");
+        let path = dir.file("t.jsonl", &[meta("t", Some(2))]);
+        let mut writer = SessionWriter::resume(&path).unwrap();
+        writer.thinking("medium").unwrap();
+        writer.thinking("high").unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.thinking.as_deref(), Some("high"));
     }
 
     /// The point of `scan`: a name appended after a very long conversation is still

@@ -33,6 +33,57 @@ pub struct Provider {
     /// of one request: every turn of a schema run is a schema turn, including the repair turns that
     /// follow a bad answer, and threading it through each call would be one more place to forget it.
     json_mode: bool,
+    /// How much reasoning this run is asking for, and in which field. See [`Thinking`].
+    ///
+    /// Here for `json_mode`'s reason: a level holds for every turn of a run, and `/thinking` changes
+    /// it while the run is open, so it is state rather than an argument.
+    thinking: Thinking,
+}
+
+/// A reasoning level, and the JSON field to carry it in.
+///
+/// Two facts because this area has no standard, and naming both is the alternative to a
+/// compatibility table. The *level* is flint's, a small ladder a person can hold in their head; the
+/// *field* is the endpoint's, named by [`crate::config::ProviderConfig::thinking_field`], because
+/// vendors disagree about it and flint will not keep a census of other people's servers. Pi does keep
+/// one -- `reasoning_effort`, `openrouter`, `deepseek`, `together`, `qwen`, `chat-template` -- with
+/// its own comment that "Grok models don't like `reasoning_effort`", and the lesson taken from
+/// reading it is the opposite of copying it: the value is standard, the field is not, so the person
+/// says which field their endpoint wants and flint asks in that one.
+///
+/// Nothing is sent unless *both* are set. A run at `off`, or a provider with no `thinking_field`, has
+/// exactly the request body it had before this existed -- which is what keeps a wrong guess about
+/// somebody's endpoint from arriving as a 400 in the middle of a turn.
+#[derive(Clone, Debug)]
+pub struct Thinking {
+    /// `off`, `low`, `medium` or `high`.
+    pub level: String,
+    /// The field name from the provider's config. Empty means "do not ask".
+    pub field: String,
+}
+
+impl Thinking {
+    /// The levels flint asks in, which is also the order the page's switch offers them in.
+    ///
+    /// Deliberately shorter than Pi's (`off|minimal|low|medium|high|xhigh|max`): flint cannot check
+    /// which rungs a given model has, and offering seven words an endpoint may not know is a menu
+    /// that lies. Four cover "none, some, more, most" and every one of them is a word in real use.
+    pub const LEVELS: [&'static str; 4] = ["off", "low", "medium", "high"];
+
+    /// Whether `word` is a level this build knows.
+    pub fn is_a_level(word: &str) -> bool {
+        Self::LEVELS.contains(&word)
+    }
+
+    /// The field and the level to put in the request, or `None` when nothing is asked for.
+    pub fn asked(&self) -> Option<(&str, &str)> {
+        let field = self.field.trim();
+        if self.level == "off" || field.is_empty() {
+            None
+        } else {
+            Some((field, self.level.trim()))
+        }
+    }
 }
 
 /// Which proxy to reach this provider through -- an explicit one, or none.
@@ -261,6 +312,7 @@ pub fn request_body(
     messages: &[Message],
     tools: &[(String, String, Value)],
     json_mode: bool,
+    thinking: &Thinking,
 ) -> Value {
     let tools_payload: Vec<Value> = tools
         .iter()
@@ -288,6 +340,12 @@ pub fn request_body(
     }
     if json_mode {
         body["response_format"] = json!({ "type": "json_object" });
+    }
+    // The reasoning level, when the person asked for one *and* this provider named the field for it.
+    // Last, so the two conditions are in one place and a reader can see that neither alone sends
+    // anything: a level with no field is silence, and a field with no level is the default.
+    if let Some((field, level)) = thinking.asked() {
+        body[field] = json!(level);
     }
     body
 }
@@ -346,6 +404,7 @@ impl Provider {
             stop: None,
             start_timeout_secs: 0,
             proxy: None,
+            thinking_field: String::new(),
         }
     }
 
@@ -528,10 +587,19 @@ impl Provider {
         }
 
         let client = builder.build().context("cannot build HTTP client")?;
+        // Read before `config` is moved into the struct. The *level* starts at `off` and is set by the
+        // run that owns this provider (`Agent::hold_to_thinking`), because it is a choice about the
+        // conversation rather than a fact about the endpoint -- which is exactly what the split
+        // between this and `thinking_field` is for.
+        let thinking = Thinking {
+            level: "off".to_string(),
+            field: config.thinking_field.clone(),
+        };
         Ok(Provider {
             config,
             client,
             json_mode: false,
+            thinking,
         })
     }
 
@@ -541,6 +609,31 @@ impl Provider {
     /// a schema turn, so the flag belongs to the run rather than to one call.
     pub fn expect_json(&mut self, on: bool) {
         self.json_mode = on;
+    }
+
+    /// Set the reasoning level for this run, keeping the provider's field.
+    ///
+    /// `/thinking` is the only caller, and it can only set a level: the field is the endpoint's and
+    /// belongs in the file a person edits, not in a command.
+    pub fn set_thinking(&mut self, level: &str) {
+        self.thinking.level = level.trim().to_string();
+    }
+
+    /// The reasoning level in force.
+    pub fn thinking(&self) -> &str {
+        &self.thinking.level
+    }
+
+    /// The field this provider carries a level in, empty when it carries none.
+    pub fn thinking_field(&self) -> &str {
+        self.thinking.field.trim()
+    }
+
+    /// The level and the field together, for the one caller that builds a body without sending it
+    /// ([`crate::agent::Agent::request_preview`]): the preview has to carry both exactly as the
+    /// request will, or it is a preview of a different request.
+    pub fn thinking_spec(&self) -> &Thinking {
+        &self.thinking
     }
 
     pub fn model(&self) -> &str {
@@ -560,7 +653,13 @@ impl Provider {
     ) -> Result<()> {
         // Built by the same function `flint debug prompt-input` prints, so the preview
         // cannot drift from the request that is actually sent.
-        let body = request_body(&self.config.model, messages, tools, self.json_mode);
+        let body = request_body(
+            &self.config.model,
+            messages,
+            tools,
+            self.json_mode,
+            &self.thinking,
+        );
 
         let key = self.config.resolved_key();
 

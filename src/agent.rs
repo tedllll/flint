@@ -404,6 +404,43 @@ impl Agent {
         self.schema.as_ref()
     }
 
+    /// Hold this conversation at a reasoning level.
+    ///
+    /// A setter, for [`Agent::hold_to_schema`]'s reason: a resumed conversation's level is read out of
+    /// its *file*, which happens after the agent may already exist, and the places that rebuild an
+    /// agent (`/provider`, `/model`, `/reload`) carry the conversation across -- so a level living in
+    /// a local would be quietly dropped by the first switch, and the person's `/thinking high` would
+    /// last until they changed model. The *field* the level goes in is the provider's and comes with
+    /// the provider, so a switch re-reads it rather than carrying the old endpoint's name along.
+    pub fn hold_to_thinking(&mut self, level: &str) {
+        self.provider.set_thinking(level);
+    }
+
+    /// Write the reasoning level into this conversation's file.
+    ///
+    /// Called by the run that was *told* a level -- `--thinking`, or `/thinking` typed by hand -- and
+    /// not by a run that merely inherited one, which is [`Agent::record_schema`]'s rule and for the
+    /// same reason: a file gains a line when somebody decided something.
+    pub fn record_thinking(&mut self, level: &str) -> Result<()> {
+        match &mut self.writer {
+            Some(writer) => writer.thinking(level),
+            // No file to write to (a run with no session): the level is in force for this run and is
+            // just not being kept anywhere.
+            None => Ok(()),
+        }
+    }
+
+    /// The reasoning level in force, and the field it would go in (empty when this provider is sent
+    /// no reasoning parameter at all).
+    pub fn thinking(&self) -> &str {
+        self.provider.thinking()
+    }
+
+    /// The field this run's requests carry a reasoning level in, empty when they carry none.
+    pub fn thinking_field(&self) -> &str {
+        self.provider.thinking_field()
+    }
+
     /// The answer shape this conversation is being held to, as it would be written to a session.
     ///
     /// The raw schema, not the parsed one: what the file records has to be what the caller wrote, so
@@ -503,6 +540,10 @@ impl Agent {
             // that the shape went into the prompt *and* into `response_format`, and a preview that
             // quietly left one out would be a preview of a different request.
             self.schema.is_some(),
+            // ...and the reasoning level, for the same reason one step out: whether a request asks
+            // for reasoning is not visible anywhere in the conversation, so a preview that dropped it
+            // would be the only way to see it -- and would show the wrong thing.
+            self.provider.thinking_spec(),
         )
     }
 

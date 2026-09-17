@@ -6069,6 +6069,13 @@ async fn the_page_is_told_the_state_its_controls_would_show() {
     // that pinned it would fail on a change that means nothing to the page.
     let told = read_until(&mut watching, "\"value\":\"full\"", 20);
 
+    // A switch whose values are a ladder rather than a pair, and the only one that changes what a
+    // *request* carries rather than what flint does with an answer: `/thinking high`. It goes through
+    // the same route, and what comes back is the same three fields -- so a page offers exactly the
+    // words the command accepts without carrying a list of them.
+    let reasoned = post_message(port, &token, "/thinking high");
+    let reasoning = read_until(&mut watching, "\"value\":\"high\"", 20);
+
     // And a page that opens *now* -- a second subscriber with no backlog at all, so what it is
     // sent can only be the snapshot.
     let mut later_page = http_stream(port, "/events", &token);
@@ -6108,6 +6115,26 @@ async fn the_page_is_told_the_state_its_controls_would_show() {
         opening.contains("\"name\":\"verbose\"") && opening.contains("\"values\":[\"off\",\"on\",\"full\"]"),
         "the state does not carry a toggle as a name and the values that name takes, which is \
          what a switch is drawn from and what the page must not carry a copy of: {opening:?}"
+    );
+    assert!(
+        opening.contains("\"name\":\"thinking\"")
+            && opening.contains("\"values\":[\"off\",\"low\",\"medium\",\"high\"]")
+            && opening.contains("\"value\":\"off\""),
+        "the state does not offer the reasoning ladder, so the page has nothing to pick from and \
+         the default is not visible: {opening:?}"
+    );
+    assert!(
+        reasoned.starts_with("HTTP/1.1 202"),
+        "the line the reasoning switch sends was not accepted: {reasoned:?}"
+    );
+    assert!(
+        reasoning.contains("\"name\":\"thinking\"") && reasoning.contains("\"value\":\"high\""),
+        "the run was not shown the reasoning level it had just set: {reasoning:?}"
+    );
+    assert!(
+        transcript.contains("thinking high"),
+        "the terminal does not say which level is in force, which is the only place the field it \
+         goes in is named: {transcript:?}"
     );
     assert!(
         switched.starts_with("HTTP/1.1 202"),
@@ -6442,6 +6469,7 @@ async fn the_page_is_told_which_commands_it_may_offer() {
         "\"label\":\"/detail",
         "\"label\":\"/readonly",
         "\"label\":\"/hear-peers",
+        "\"label\":\"/thinking",
         "\"label\":\"/web",
         "\"label\":\"!<command>\"",
     ] {

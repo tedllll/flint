@@ -2297,3 +2297,141 @@ async fn the_stream_is_frames_and_nothing_else_on_the_bytes() {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// A reasoning level rides in the field the provider names, and in no other.
+///
+/// The value is flint's word and the field is the endpoint's, which is the whole design: the level
+/// ladder is one small vocabulary a person learns once, and the JSON key it goes in is named in the
+/// provider's own config. This watches both halves on the wire -- the field the endpoint was told to
+/// expect, and the absence of the key flint would have guessed at otherwise.
+#[tokio::test]
+async fn a_thinking_level_rides_in_the_field_the_provider_names() {
+    let server = MockServer::start().await;
+    let cwd = cwd_for("thinking-level");
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    Mock::given(method("POST"))
+        .respond_with(Scripted {
+            answers: vec![sse_text("reasoning hard.")],
+            seen: std::sync::Arc::clone(&seen),
+        })
+        .mount(&server)
+        .await;
+
+    let home = home_configured(
+        "thinking-level",
+        "",
+        &format!(
+            "name = \"stub\"\nbase_url = \"{}\"\napi_key = \"test\"\nmodel = \"stub-model\"\n\
+             thinking_field = \"reasoning_effort\"\n",
+            server.uri()
+        ),
+    );
+    let (code, lines, stderr) = run_json(
+        &home,
+        &cwd,
+        &["-p", "think about it", "--json", "--thinking", "high"],
+    );
+    assert_eq!(code, 0, "the run failed: {stderr} {lines:?}");
+
+    let bodies = recorded(&seen);
+    assert_eq!(bodies.len(), 1, "one turn for one answer");
+    assert_eq!(
+        bodies[0]["reasoning_effort"], "high",
+        "the level did not reach the request: {}",
+        bodies[0]
+    );
+}
+
+/// Nothing is asked for unless a level was asked for.
+///
+/// The default is the request body flint has always sent, and it has to stay that way: a provider
+/// whose `thinking_field` is written down is a provider that *can* be asked, not one that is. A
+/// flint that sent `reasoning_effort: "off"` on its own would be inventing a word for a vendor it
+/// knows nothing about, and the endpoints that refuse an unknown effort value refuse the turn.
+#[tokio::test]
+async fn no_reasoning_is_asked_for_until_somebody_asks() {
+    let server = MockServer::start().await;
+    let cwd = cwd_for("thinking-default");
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    Mock::given(method("POST"))
+        .respond_with(Scripted {
+            answers: vec![sse_text("plain.")],
+            seen: std::sync::Arc::clone(&seen),
+        })
+        .mount(&server)
+        .await;
+
+    let home = home_configured(
+        "thinking-default",
+        "",
+        &format!(
+            "name = \"stub\"\nbase_url = \"{}\"\napi_key = \"test\"\nmodel = \"stub-model\"\n\
+             thinking_field = \"reasoning_effort\"\n",
+            server.uri()
+        ),
+    );
+    let (code, _lines, stderr) = run_json(&home, &cwd, &["-p", "say hello", "--json"]);
+    assert_eq!(code, 0, "the run failed: {stderr}");
+
+    let bodies = recorded(&seen);
+    assert!(
+        bodies[0].get("reasoning_effort").is_none(),
+        "a level nobody asked for was sent: {}",
+        bodies[0]
+    );
+}
+/// A level is written into the conversation's own file, and comes back with it.
+///
+/// Both halves matter and neither is visible from one run. Writing it down is what makes the choice
+/// survive the run that made it; reading it back is what makes a resumed conversation ask for the
+/// same reasoning *without* being told again -- and the silent failure of the second half is a
+/// conversation that looks resumed and has quietly gone back to the endpoint's default.
+#[tokio::test]
+async fn a_reasoning_level_comes_back_with_the_conversation() {
+    let server = MockServer::start().await;
+    let cwd = cwd_for("thinking-travels");
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    Mock::given(method("POST"))
+        .respond_with(Scripted {
+            answers: vec![sse_text("first."), sse_text("second.")],
+            seen: std::sync::Arc::clone(&seen),
+        })
+        .mount(&server)
+        .await;
+
+    let home = home_configured(
+        "thinking-travels",
+        "",
+        &format!(
+            "name = \"stub\"\nbase_url = \"{}\"\napi_key = \"test\"\nmodel = \"stub-model\"\n\
+             thinking_field = \"reasoning_effort\"\n",
+            server.uri()
+        ),
+    );
+    let (code, _lines, stderr) = run_json(
+        &home,
+        &cwd,
+        &["-p", "first", "--json", "--thinking", "high"],
+    );
+    assert_eq!(code, 0, "the first run failed: {stderr}");
+
+    let events = session_events(&home);
+    let written = events
+        .iter()
+        .find(|event| event["type"] == "thinking")
+        .unwrap_or_else(|| panic!("no thinking line in the session: {events:?}"));
+    assert_eq!(written["level"], "high");
+
+    // Resumed with no flag at all: the file has the last word over the config's `off`.
+    let session = session_files(&home);
+    let path = session[0].to_str().expect("a session path");
+    let (code, _lines, stderr) = run_json(&home, &cwd, &["--resume", path, "-p", "second", "--json"]);
+    assert_eq!(code, 0, "the resumed run failed: {stderr}");
+
+    let bodies = recorded(&seen);
+    assert_eq!(
+        bodies.last().expect("a second request")["reasoning_effort"],
+        "high",
+        "the resumed run did not ask for the level its own file records"
+    );
+}

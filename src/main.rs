@@ -156,6 +156,12 @@ struct Args {
     /// The counterpart to a `schema` line following the session: a container of a resumed
     /// conversation has to be able to say "not this time" without editing the file.
     no_schema: bool,
+    /// How much reasoning to ask the provider for: `off`, `low`, `medium` or `high`.
+    ///
+    /// `None` means "not said here", which lets the conversation's own file have the last word over
+    /// the config: a conversation held at `high` stays there when it is resumed, which is the point
+    /// of writing it down. Giving the flag *at all* is the override, `off` included.
+    thinking: Option<String>,
 }
 
 /// Whether ANSI colour may be emitted.
@@ -1065,6 +1071,28 @@ async fn real_main(args: Args) -> Result<i32> {
     }
     if shaping.stated {
         agent.record_schema(shaping.schema_json.as_ref())?;
+    }
+
+    // ---- how much reasoning to ask for ----
+    //
+    // The same three inputs as the shape above, in the same order of authority: the flag, then the
+    // level this conversation's own file records, then the config. A conversation that was held at
+    // `high` stays there when it is resumed, which is what writing the level down was for; `--thinking
+    // off` on the next run is the override.
+    let thinking = resolve_thinking(&args, resumed_history.as_ref(), &cfg)?;
+    agent.hold_to_thinking(&thinking);
+    if args.thinking.is_some() {
+        agent.record_thinking(&thinking)?;
+    }
+    // Said out loud, because the alternative is a person who asked for reasoning and cannot tell
+    // whether they got it: with no field named, the request body is byte-for-byte what it was before
+    // this setting existed, and no endpoint was asked for anything.
+    if thinking != "off" && agent.thinking_field().is_empty() {
+        eprintln!(
+            "thinking {thinking}: this provider sends no reasoning field, so nothing was asked for. \
+             Set `thinking_field` in [providers] to the field your endpoint wants \
+             (`reasoning_effort` is the common one)."
+        );
     }
 
     // ---- `@path`: a document named in the prompt, inlined before the request ----
@@ -2315,6 +2343,14 @@ async fn provider_wizard(
         // Inherited from the config's shell proxy, which is what a user setting up a
         // provider behind one has already told us.
         proxy: cfg.proxy.clone(),
+        // Carried over like the engine commands, and for the same reason: this wizard is a form for
+        // reaching an endpoint, and a field name somebody worked out for their vendor is not
+        // something to lose because they corrected a URL. A new provider starts with none, which
+        // sends nothing -- see `ProviderConfig::thinking_field`.
+        thinking_field: existing
+            .as_ref()
+            .map(|e| e.thinking_field.clone())
+            .unwrap_or_default(),
     };
 
     save_provider(cfg, &p, printer)?;
@@ -2852,6 +2888,16 @@ const COMMANDS: &[CommandHelp] = &[
         "/hear-peers [on|off]",
         "/hear-peers",
         "send what a peer says here to the model (off: show it to you only)",
+        HelpSection::Commands,
+        OnPage::Toggles,
+    ),
+    // A switch rather than a field, because the ladder is four words and the page can draw a
+    // `<select>` from the same row every other setting uses. What it cannot say is whether the
+    // endpoint *has* the field, so the command says it when the level is set -- see `/thinking`.
+    CommandHelp::row(
+        "/thinking [off|low|medium|high]",
+        "/thinking",
+        "how much reasoning to ask the provider for",
         HelpSection::Commands,
         OnPage::Toggles,
     ),
@@ -3460,6 +3506,11 @@ async fn handle_command(
                         stop: None,
                         start_timeout_secs: 0,
                         proxy: cfg.proxy.clone(),
+                        // `reasoning_effort` for a provider added by hand, because the one-word line
+                        // `/provider add <name> <url>` cannot carry a per-vendor detail and this is
+                        // the field nearly every OpenAI-compatible endpoint takes. A vendor that
+                        // wants another one is one edit away, and `/config` prints which is in force.
+                        thinking_field: "reasoning_effort".to_string(),
                     };
                     save_provider(cfg, &p, printer)?;
                     // Switching is what the wizard offers as its default, and it is what makes the
@@ -3684,6 +3735,47 @@ async fn handle_command(
             }
         }
 
+        // How much reasoning to ask for.
+        //
+        // Three things are said here, because a person typing this needs all three and none of them
+        // is visible from the conversation: the level now in force, the field it is sent in (empty on
+        // a provider that is sent none), and -- when a level was asked for and there is no field --
+        // that nothing was asked for at all. A silent "ok" would be the worst answer of the three: it
+        // is the one that leaves somebody believing a provider is reasoning when it was told nothing.
+        "/thinking" => {
+            let word = arg.trim();
+            if !word.is_empty() && !provider::Thinking::is_a_level(word) {
+                return Err(anyhow!(
+                    "expected one of {}, got '{word}'",
+                    provider::Thinking::LEVELS.join(", ")
+                ));
+            }
+            if !word.is_empty() {
+                // The run first, then the file: a level that could not be kept is still in force for
+                // this run, which is the same order `record_schema` writes in.
+                agent.hold_to_thinking(word);
+                agent.record_thinking(word)?;
+            }
+            let level = agent.thinking().to_string();
+            let field = agent.thinking_field().to_string();
+            if field.is_empty() {
+                printer.term().line(format_args!(
+                    "thinking {bold}{level}{reset} {dim}(this provider sends no reasoning field: set \
+                     `thinking_field` in [providers] to the field it wants — `reasoning_effort` is the \
+                     common one){reset}"
+                ));
+            } else if level == "off" {
+                printer.term().line(format_args!(
+                    "thinking {bold}off{reset} {dim}(no reasoning parameter is sent — the endpoint's \
+                     own default, which for some models is reasoning on){reset}"
+                ));
+            } else {
+                printer.term().line(format_args!(
+                    "thinking {bold}{level}{reset} {dim}(sent as {field} on every request){reset}"
+                ));
+            }
+        }
+
         // Leave a message for whoever else is working here, without a second terminal.
         //
         // The primitive is `flint say`, and this is the same write through the same function: the
@@ -3870,6 +3962,25 @@ async fn handle_command(
             ));
             printer.term().line(format_args!("  verbose           = {}", cfg.verbose.word()));
             printer.term().line(format_args!("  tool_detail       = {}", cfg.tool_detail));
+            // The value in force and the field it goes in, because either half being unset is
+            // invisible otherwise: `thinking = "high"` with no `thinking_field` sends nothing, and a
+            // person reading their own config would have every reason to think it did.
+            printer.term().line(format_args!(
+                "  thinking          = {}{}",
+                agent.thinking(),
+                if agent.thinking_field().is_empty() {
+                    format!(
+                        " {dim}(no reasoning field for this provider; the file says {}){reset}",
+                        cfg.thinking
+                    )
+                } else {
+                    format!(
+                        " {dim}(sent as {}; the file says {}){reset}",
+                        agent.thinking_field(),
+                        cfg.thinking
+                    )
+                }
+            ));
             let workspace = context::Workspace::discover(agent.cwd(), &cfg.skill_dirs);
             printer.term().line(format_args!(
                 "  instructions      = {}{}",
@@ -5316,6 +5427,35 @@ fn resolve_output_schema(
     })
 }
 
+/// How much reasoning this run asks for, from the three places it can be said.
+///
+/// The flag wins, then the conversation's own file, then the config -- the same order of authority
+/// `resolve_output_schema` uses, and for the same reason: the file is what the conversation was being
+/// held at, and a flag on this run is somebody deciding something now.
+///
+/// A word this build does not know is refused rather than passed on. The endpoint would either 400 in
+/// the middle of a turn or, worse, ignore it: an unrecognised word in a field a server does not check
+/// is a run that looks like it is reasoning hard and is not.
+fn resolve_thinking(
+    args: &Args,
+    session: Option<&session::LoadedSession>,
+    cfg: &config::Config,
+) -> Result<String> {
+    let level = match &args.thinking {
+        Some(word) => word.trim().to_string(),
+        None => session
+            .and_then(|loaded| loaded.thinking.clone())
+            .unwrap_or_else(|| cfg.thinking.clone()),
+    };
+    if !provider::Thinking::is_a_level(&level) {
+        return usage(format!(
+            "unknown thinking level '{level}': use one of {}",
+            provider::Thinking::LEVELS.join(", ")
+        ));
+    }
+    Ok(level)
+}
+
 /// What a page's controls can be drawn from, as the frame named `state`.
 ///
 /// §8's read channel, and the reason it comes before any control: a picker cannot be built
@@ -5584,6 +5724,14 @@ fn toggles(agent: &agent::Agent, printer: &Printer<'_>) -> serde_json::Value {
         // door -- and it shows its value for the same reason the others do, so a session that is
         // relaying says so rather than looking like every other session.
         { "name": "hear-peers", "values": ["off", "on"], "value": on_off(agent.hears_peers()) },
+        // The fifth switch, and the only one whose values are a ladder rather than a pair: the words
+        // are the levels flint asks in, so the page offers exactly what `/thinking` accepts. Whether
+        // the *endpoint* has the field is not something a switch can show, and the command says it.
+        {
+            "name": "thinking",
+            "values": crate::provider::Thinking::LEVELS,
+            "value": agent.thinking(),
+        },
     ])
 }
 
@@ -6209,6 +6357,12 @@ fn parse_args(argv: Vec<String>, stream_seen: &mut bool) -> Result<Args> {
             "--readonly" | "--no-edit" => args.readonly = true,
             "--no-session" => args.no_session = true,
             "--hear-peers" => args.hear_peers = true,
+            "--thinking" => {
+                args.thinking = Some(
+                    iter.next()
+                        .ok_or_else(|| anyhow!("--thinking requires a level"))?,
+                )
+            }
             "--all" => args.all = true,
             "--no-color" => args.no_color = true,
             "--json" => {
@@ -6434,6 +6588,9 @@ fn print_help(color: bool, term: &Term) {
   --provider <name>   use a specific provider          (config: default_provider)
   --model <name>      override the model for this run
   --readonly          refuse writes and mutating commands
+  --thinking <level>  ask the provider for reasoning: off, low, medium or high (config: thinking).
+                      The field the level goes in is the provider's (`thinking_field`), because
+                      vendors disagree about it; with no field named, nothing is sent
   --hear-peers        relay what `flint say` leaves in this directory to the model, on the next
                       request, instead of only showing it to you. Off unless asked for, per run,
                       and it needs a session: a one-shot run has no next turn. A peer's words can
@@ -7206,6 +7363,7 @@ mod tests {
                 stop: None,
                 start_timeout_secs: 0,
                 proxy: None,
+                thinking_field: "reasoning_effort".to_string(),
             }],
             ..config::Config::default()
         };

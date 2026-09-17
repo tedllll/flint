@@ -89,7 +89,11 @@ fn test_config(base_url: &str) -> Config {
             // dead system proxy would make the suite fail for reasons that have nothing
             // to do with the code under test.
             proxy: None,
+            // This endpoint *can* be asked for reasoning, so a test that sets a level exercises
+            // the sending rather than the "no field for this provider" path.
+            thinking_field: "reasoning_effort".to_string(),
         }],
+        thinking: "off".to_string(),
     }
 }
 

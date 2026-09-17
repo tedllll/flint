@@ -43,7 +43,7 @@ conversation such a run could otherwise create by itself.
 
 ## One event per line
 
-Every line is a JSON object with a `type`. This build understands nine:
+Every line is a JSON object with a `type`. This build understands ten:
 
 | `type` | Written when | Fields |
 |---|---|---|
@@ -56,13 +56,19 @@ Every line is a JSON object with a `type`. This build understands nine:
 | `title` | the conversation is named | `name` |
 | `switch` | the provider or model in force changes | `provider`, `model` |
 | `schema` | the answer shape in force changes | `schema` (absent or `null` when cleared) |
+| `thinking` | the reasoning level in force changes (`--thinking`, `/thinking <level>`) | `level` (`off`, `low`, `medium` or `high`) |
 
-Three of the nine are not conversation and never become history: `peer` (a peer's words are shown to
+Three of the ten are not conversation and never become history: `peer` (a peer's words are shown to
 the person and kept out of `messages` on purpose — see its section), `import` and `fork` (both
 provenance, read into `LoadedSession::origin` and read by the lines that name a conversation). An
 **unknown** `type` is skipped in silence, which is what lets a hand-edited file, or one written by a
-newer flint, still load; a line that names one of these nine and cannot be parsed is reported as
-damage instead.
+newer flint, still load; a line that names one of these ten and cannot be parsed is reported as
+damage instead. `thinking` is the one event that changes what a *request* carries without changing
+the conversation: the last line wins, and the field name the level is sent in is deliberately **not**
+in the file — that is the provider's, so a conversation resumed against another endpoint asks in that
+endpoint's own field. A bare `/thinking` reports the level and writes nothing; a `/thinking <level>`
+is a decision about this conversation, so it is written down (and creates the file if the
+conversation has not said anything yet, like `--schema`).
 
 A whole conversation, then — a real one is longer, this is the shape:
 

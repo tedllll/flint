@@ -180,6 +180,43 @@ page has nowhere to send it. That last one is the honest limit of the feature ra
 against it; the server half now exists, and the client half needs a run that will accept a cursor it did
 not mint.
 
+## The level is flint's, the field is the endpoint's
+
+Asking a model to reason more is four words and a JSON key, and the two halves belong to different
+people. The words are flint's — `off`, `low`, `medium`, `high` — because a ladder the person has to
+learn once should not change shape when the provider does. The key is the endpoint's, written in that
+endpoint's own provider table as `thinking_field`, because that is the part vendors actually disagree
+about: `reasoning_effort` for OpenAI-compatible servers, something else for the vendors that spell it
+their own way.
+
+The alternative was read first and refused. Pi keeps a per-provider compatibility table naming the
+format (`reasoning_effort`, `openrouter`, `deepseek`, `together`, `qwen`, `chat-template`, …) with one
+comment saying outright that "Grok models don't like `reasoning_effort`". That is a census of other
+people's servers, kept in step by hand, and every entry in it is a guess about an endpoint flint cannot
+see. A field *name* in the config is one string the person who knows their endpoint can set, and the
+config is hand-editable — which is the whole reason this repository keeps its state in text.
+
+**Nothing is sent unless both halves are set**, and that is the load-bearing rule. `thinking = "high"`
+with no `thinking_field` sends exactly the request body flint sent before this existed, and says so out
+loud (the flag warns, `/thinking` and `/config` name the field, and the run's own file records the
+level). A field flint guessed wrong is not a preference that gets ignored: it is a request an endpoint
+may refuse outright, in the middle of a turn, for a reason nobody watching could connect to a config
+key. Guessing is therefore the one thing this does not do.
+
+`off` is the default and it means *ask for nothing*, which is not the same as telling an endpoint to
+reason less. flint does not know the word for that on any given server, and a wrong word is worse than
+silence — so `off` is documented for what it is: the endpoint's own default applies, and for some models
+that default is reasoning *on*. Naming the limit is the honest version of the feature; inventing a
+`"none"` that half the servers reject is not.
+
+Three smaller decisions came with it. The level **travels with the conversation** (an appended
+`thinking` line, last one wins) rather than living only in the config, because a choice made in a
+conversation is part of it — that is the same argument as `schema`, and the same mechanism. The *field*
+deliberately does **not** travel: it is a fact about the endpoint, so a conversation resumed against
+another provider asks in that provider's field with the level the person chose. And levels a model does
+not have are **not** hidden: flint cannot know which rungs an endpoint supports without asking it, and a
+menu that quietly drops one is a menu that lies. Four words, offered as they are.
+
 ## Turns, and the lines typed into them
 
 **A queued follow-up is the run's memory, not the file's.** `/queue <text>` holds a line until the turn

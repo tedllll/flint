@@ -534,6 +534,27 @@ The honest position is the one Pi's author takes: reasoning is provider-shaped, 
 after a switch should be a decision (keep it, convert it to text, or drop it) rather than a default
 nobody chose. That is a measurement for §5, not a defect to fix blind.
 
+**Built, 2026-09-17, and the census above is what was refused.** flint now sends a reasoning level:
+`--thinking off|low|medium|high`, `/thinking`, a `thinking` key in the config, and the same switch on
+the page. The step this section argued from -- "for flint that is the argument for a config key with a
+per-provider override instead of one global flag: the value is standard, the field is not" -- was taken,
+but split one notch further than the sentence above imagines: the *level* is run-level (config default,
+flag, `/thinking`, and an appended `thinking` line in the session that a resumed conversation inherits),
+and the *field* is per-provider (`thinking_field`), because the field is the endpoint's and nothing else
+in this area is. Pi's `compat` table was not copied: naming the field the endpoint wants is one string
+in a hand-editable config, and a table of other people's servers kept in step by hand is exactly the
+kind of derived state this repository refuses. Nor were Pi's seven rungs copied -- `minimal`, `xhigh`
+and `max` are not levels flint can check an endpoint for, and offering seven words one of which a
+server rejects is a menu that lies. Four words, and nothing sent unless a level *and* a field are both
+set: a wrong guess at somebody's JSON key is a 400 in the middle of a turn, where silence is merely
+silent.
+
+The question the next paragraph raises is left open on purpose, and nothing above changed it: a stored
+`reasoning` string is still re-sent verbatim to whatever endpoint the person switched to (flint speaks
+one protocol and has no signed blob to replay). What did change is that a switch now *also* changes the
+level asked for, because the field comes with the provider -- so the level travels in the file's own
+words rather than in the provider's, and the question below stays a question.
+
 ### 3.11 RPC, and the framing lesson that comes with it
 
 Flint's `--json` is a one-way stream: `src/ndjson.rs` is a writer, with a closed vocabulary of event

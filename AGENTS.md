@@ -35,7 +35,7 @@ whoever is changing the code — a person or a model driving it.
 | `src/event.rs` | the one enum a turn's events go through — provider deltas and agent activity alike — so the UI knows one vocabulary |
 | `src/sink.rs` | what a turn's events *become*: the transcript, the status line and the page's stream, shared by the REPL and `examples/live_turn.rs` rather than copied |
 | `src/attach.rs` | `@path` in a one-shot prompt: which names are files, the inline block the model reads, and the 256 KB cap |
-| `src/provider.rs` | the OpenAI-compatible client, streaming, retries, usage — including `usage_from`, which collapses the two cache-split shapes endpoints use into one number |
+| `src/provider.rs` | the OpenAI-compatible client, streaming, retries, usage — including `usage_from`, which collapses the two cache-split shapes endpoints use into one number, and `Thinking`, the split that keeps the *level* flint's (`off`/`low`/`medium`/`high`, state on the provider so `/thinking` can move it) and the JSON *field* the endpoint's (`thinking_field`, from the provider table) — nothing is sent unless both are set, because a field guessed wrong is a request an endpoint may refuse |
 | `src/engine.rs` | bringing a *local* model engine up and letting it go: a provider's `start`/`stop` commands, and the derived command for the three engines flint knows |
 | `src/tools.rs` | the tool set (`task`/`tasks` for children — a handle at once, `background: false` when the next step needs the answer — `bash`/`pwsh`/`exec` with `background: true` for a command nobody waits for, `job_op` for either kind of job, and the notice a job that ends leaves behind), `JobMoment` (when a job started and ended, recorded once in both clocks rather than derived from the clock at each look, because a start that can move by a second between two glances is not a start), `jobs_report`/`stop_job` (the same listing and the same stop for a person, a page and a model — one answer, three doors, with `ended_by_us` recording that *this* run ended a job so a kill never reads as a failure), `RunEnv`/`apply_child_env` (what a command a run starts is told about the run — `FLINT_SESSION`, `FLINT_PROVIDER`, `FLINT_MODEL`, and the proxy variables, on both spawn sites; a run that is not a conversation takes them away instead of leaving what it inherited), `task_argv` (a `task` child's whole command line, which is where a run hands its own properties down — the endpoint, and `--no-session`, so a run that keeps no conversation starts children that keep none), and the read-before-mutate gate |
 | `src/patch.rs` | the `apply_patch` format, parsed and applied — pure functions |
@@ -121,6 +121,10 @@ api_key_env = "DEEPSEEK_API_KEY"           # ...or read it from the environment
 model = "deepseek-chat"
 models = []                     # extra models for /model to offer
 proxy = ""                      # route to this provider, e.g. socks5h://127.0.0.1:10808
+thinking_field = ""             # the JSON key a reasoning level goes in, e.g. "reasoning_effort".
+                                # Empty (or absent) = this endpoint is never asked for reasoning,
+                                # whatever level the run is at: vendors disagree about this field
+                                # and a wrong guess is a request an endpoint may refuse
 ```
 
 ```toml
@@ -137,6 +141,11 @@ verbose = "on"                  # off|on|full: how much of the agent's activity 
 tool_detail = false             # print the output behind a tool result
 instructions = "hint"           # AGENTS.md: "hint" (name them), "paste", "off"
 skill_dirs = []                 # extra skill directories, after the standard two
+thinking = "off"                # off|low|medium|high: reasoning to ask for. "off" sends no
+                                # reasoning parameter at all (the endpoint's own default applies).
+                                # The conversation's file has the last word over this key, and
+                                # --thinking / /thinking over both. Needs the provider's
+                                # `thinking_field` to be set, or nothing is sent and flint says so
 ```
 
 ```toml

@@ -86,12 +86,19 @@ readonly = false          # true = refuse every write
 instructions = "hint"     # AGENTS.md: "hint" (name them) | "paste" | "off"
 skill_dirs = []           # extra skill directories, after the standard two
 
+thinking = "off"          # reasoning to ask for: off | low | medium | high. "off" sends no
+                          # reasoning parameter at all -- the endpoint's own default, which for
+                          # some models is reasoning on. /thinking changes it while a run is open
+
 [[providers]]
 name = "deepseek"
 base_url = "https://api.deepseek.com/v1"
 api_key = ""                       # or leave empty and export the env var
 api_key_env = "DEEPSEEK_API_KEY"
 model = "deepseek-chat"
+thinking_field = "reasoning_effort"   # the JSON key the level goes in. Vendors disagree about
+                                      # this one and agree about nothing else here, so it is a
+                                      # per-provider field name; empty = never ask this endpoint
 
 [[providers]]
 name = "ollama"                    # local fallback: still works when the
@@ -113,6 +120,8 @@ flint -p "apply @rules.csv"      # @file is replaced by that file's contents (fo
                                  # big to fit on a command line)
 flint -p "why?" --max-seconds 30 # bound the whole run; over budget it ends `incomplete` (exit 65)
 flint -p "what is in /etc/hosts" --no-session   # answer without writing a conversation anywhere
+flint -p "prove it" --thinking high   # ask for more reasoning (the field it goes in is the
+                                      # provider's `thinking_field`; with none set, nothing is sent)
 flint --continue                 # resume the last session here
 flint --resume 3                 # resume a particular one (see the list)
 flint --resume 1789116592        # ...by id prefix, or by path to the .jsonl
@@ -226,6 +235,7 @@ Inside the REPL:
 | `/verbose [on\|off\|full]` | how much of the agent's activity to narrate |
 | `/detail [on\|off]` | print tool output (default off: one line per result) |
 | `/readonly [on\|off]` | toggle the write guard |
+| `/thinking [off\|low\|medium\|high]` | how much reasoning to ask the provider for, and which field it goes in (default `off`: ask for none) |
 | `/hear-peers [on\|off]` | relay messages from `flint say` to the model (default off) |
 | `/say <text>` | leave a message for whoever else is working in this directory (`--to <pid>` first to address one) |
 | `/queue <text>` | say this after the turn that is running, without interrupting it |
@@ -261,7 +271,7 @@ when nothing is running is simply this turn's message, because there is no turn 
 hold it for. The page's command panel offers it as a form, which is the only shape
 a follow-up can take from a composer.
 
-Flags: `--provider`, `--model`, `--readonly`, `--no-session`, `--hear-peers`, `--cwd`, `--no-color`
+Flags: `--provider`, `--model`, `--readonly`, `--no-session`, `--thinking`, `--hear-peers`, `--cwd`, `--no-color`
 (or `NO_COLOR`), `--continue`, `--resume`, `--fork`, `--name`, `--archive`, `--delete`,
 `--json`, `--schema`, `--result-file`, `--list-sessions`, `--max-seconds`.
 

@@ -6,6 +6,50 @@ of it.
 
 ## Where things stand
 
+**The tenth of the twelve items taken from the reading of Pi is built: flint asks for reasoning, and the
+field it asks in is the endpoint's.** Before this the request body was model, messages, `stream`,
+`stream_options`, tools and `response_format`, and nothing else — flint read reasoning when a provider
+volunteered it (`reasoning_content`, or `reasoning`) and stored it, but there was no way to ask for more
+or less. There is now `--thinking off|low|medium|high`, `/thinking [level]` while a run is open,
+`thinking = "off"` in the config, and the same switch on the page.
+
+**The design is the sentence §3.10 of `docs/pi-agent-harness.md` already ended on — the value is
+standard, the field is not — split one notch further than that sentence imagined.** The *level* is
+flint's and belongs to the run (a config default, a flag, a live switch, and a `thinking` line in the
+session's own file that a resumed conversation inherits); the *field* is the endpoint's and lives in the
+provider table as `thinking_field` (`"reasoning_effort"` for the two providers flint writes by default,
+whatever the vendor wants otherwise, empty for a provider that should never be asked). **Nothing is sent
+unless both halves are set**, and when a level is asked for and there is no field, flint says so out
+loud on stderr, in `/thinking`'s own line, in `/config`, and in the file. Pi's per-vendor `compat` table
+was refused on purpose: it is a census of other people's servers kept in step by hand, which is the
+derived state this repository does not keep, and a field name in a hand-editable config is one string
+the person who knows their endpoint can set. Pi's seven rungs were refused too — `minimal`, `xhigh` and
+`max` are not levels flint can check an endpoint for, and a menu that offers a word a server rejects is a
+menu that lies.
+
+**`off` is the default and it means "ask for nothing", which is documented as what it is.** It is not
+the same as telling an endpoint to reason less: flint does not know that vendor's word for it, and a
+guessed value in a field the server does check is a 400 in the middle of a turn. Both halves of that
+honesty are in the tree — `/thinking` says "no reasoning parameter is sent — the endpoint's own default,
+which for some models is reasoning on", and the README's config block says the same.
+
+**Both halves were watched red.** `a_thinking_level_rides_in_the_field_the_provider_names` failed with
+"the level did not reach the request" while the field lookup returned `None`;
+`a_reasoning_level_comes_back_with_the_conversation` failed with "the resumed run did not ask for the
+level its own file records" while the session arm of the resolver was blanked; and the page's switch was
+watched failing the frame assertion with the toggle renamed. `cargo test` 615 → **620 passing, 1 ignored**
+(348 → **350** lib, 36 → **39** `json_output`, and the extended `the_page_is_told_the_state_its_controls_would_show`
+in `cli_output` now drives `/thinking high` over the page's own route). `cargo clippy --all-targets` is
+silent and both Node checks pass.
+
+**What is deliberately not built, and named where a reader will meet it:** levels a model does not have are
+not hidden (flint cannot know which rungs an endpoint has without asking it), nothing chooses a level
+automatically, and **a `task` child starts at the config's level rather than its parent's** — the endpoint
+travels to a child because a child is the same endpoint, while a level is a choice about *this*
+conversation; a profile or the config is how a person gives a child one. The switch question §3.10 leaves
+open is still open and unchanged by this: flint still re-sends a stored `reasoning` string verbatim to
+whatever endpoint the person switched to, because it speaks one protocol and has no signed blob to replay.
+
 **The ninth of the twelve items taken from the reading of Pi is built: the page's reconnection cursor is a
 position in the session file.** It used to be a **frame count**, minted by `Live::next`, starting at 1 in
 every process — so it meant nothing in the next one, the ring could only answer what it still held, and

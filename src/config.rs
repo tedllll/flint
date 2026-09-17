@@ -63,6 +63,19 @@ pub struct ProviderConfig {
     /// Empty or absent means "ask the environment, then the system setting".
     #[serde(default, deserialize_with = "de_opt_string")]
     pub proxy: Option<String>,
+
+    /// The JSON field to put a reasoning level in, for this endpoint.
+    ///
+    /// A field *name* rather than a level, and empty by default, because this area has no standard
+    /// at all: the value is flint's (`low`, `medium`, `high`) and the field is the vendor's. Pi
+    /// keeps a compatibility table for this -- `reasoning_effort`, `openrouter`, `deepseek`,
+    /// `together`, `qwen`, `chat-template` -- with its own comment that "Grok models don't like
+    /// `reasoning_effort`", and a table like that is a list of other people's servers to keep in
+    /// step with. `reasoning_effort` is the common one. Empty means this provider is never sent a
+    /// reasoning parameter, whatever level the run is at: a field flint guessed wrong is a request
+    /// an endpoint may refuse outright, which reads as flint being broken.
+    #[serde(default)]
+    pub thinking_field: String,
 }
 
 /// Web search: where a `search` tool gets its answers.
@@ -256,7 +269,27 @@ pub struct Config {
     #[serde(default)]
     pub search: Option<SearchConfig>,
 
+    /// How much reasoning to ask the provider for: `"off"`, `"low"`, `"medium"` or `"high"`.
+    ///
+    /// A word, because the ladder is a ladder and a bool cannot hold four rungs. `"off"` is the
+    /// default and means *ask for nothing*, which is what flint has always done -- and it is not the
+    /// same as telling an endpoint to reason less: flint does not know that vendor's word for it, and
+    /// silence is honest where a guessed word is a refusal in the middle of a turn.
+    ///
+    /// The *field* the level goes in is the provider's (`thinking_field`), because that is the part
+    /// vendors disagree about. Both have to be set for anything to be sent.
+    ///
+    /// A conversation remembers the level it was held at (a `thinking` line in its file), and
+    /// `--thinking` or `/thinking` overrides that for the run in front of you.
+    #[serde(default = "default_thinking")]
+    pub thinking: String,
+
     pub providers: Vec<ProviderConfig>,
+}
+
+/// The reasoning level flint asks for without being told anything: nothing at all.
+fn default_thinking() -> String {
+    "off".to_string()
 }
 
 fn default_instructions() -> String {
@@ -425,6 +458,7 @@ impl Default for Config {
             // Absent on purpose: with no block, search inherits the credential of the
             // DeepSeek provider below, which is what "configured once" should mean.
             search: None,
+            thinking: default_thinking(),
             providers: vec![
                 ProviderConfig {
                     name: "deepseek".to_string(),
@@ -437,6 +471,11 @@ impl Default for Config {
                     stop: None,
                     start_timeout_secs: 0,
                     proxy: None,
+                    // DeepSeek takes `reasoning_effort`, and writing it into the default provider is
+                    // what makes `--thinking high` work out of the box for the endpoint flint ships
+                    // configured. Nothing is sent until a level is asked for, so this is not a change
+                    // for anyone who has not: the two halves are deliberately independent.
+                    thinking_field: "reasoning_effort".to_string(),
                 },
                 // A local fallback costs nothing to configure and still works
                 // when every hosted provider is unreachable.
@@ -451,6 +490,10 @@ impl Default for Config {
                     start_timeout_secs: 0,
                     api_key_env: None,
                     proxy: None,
+                    // A local model server is nobody's reasoning endpoint: `ollama` has its own way
+                    // of asking (a `think` field on newer builds) and flint will not guess at it. The
+                    // cost of being wrong here is a refused request, so silence is the default.
+                    thinking_field: String::new(),
                 },
             ],
         }
@@ -749,6 +792,18 @@ impl Config {
                 config_path().display()
             ));
         }
+        // Checked here rather than where the request is built, so a typo is a startup complaint
+        // naming the file and the words it takes, and not a turn that quietly asked for nothing.
+        if !crate::provider::Thinking::is_a_level(&self.thinking) {
+            return Err(anyhow::anyhow!(
+                "unknown thinking level '{}' in {}.\n\
+                 Use one of {}, or drop the key: \"off\" is the default and asks the provider \
+                 for no reasoning parameter at all.",
+                self.thinking,
+                config_path().display(),
+                crate::provider::Thinking::LEVELS.join(", ")
+            ));
+        }
         Ok(())
     }
 
@@ -939,6 +994,25 @@ mod tests {
         assert!(err.contains("sometimes"), "{err}");
         for mode in ["hint", "paste", "off"] {
             assert!(err.contains(mode), "the error must offer {mode}: {err}");
+        }
+    }
+
+    /// A reasoning level is refused by name, with the words that would have worked.
+    ///
+    /// The same shape as the instruction-mode test above and for the same reason: this value reaches
+    /// a *request*, so a level this build does not know is either a 400 in the middle of a turn or --
+    /// worse, because it is silent -- a word the endpoint ignores, leaving a run that looks like it
+    /// is reasoning hard and is not.
+    #[test]
+    fn an_unknown_thinking_level_is_rejected_by_name() {
+        let cfg = Config {
+            thinking: "loud".to_string(),
+            ..Config::default()
+        };
+        let err = format!("{:#}", cfg.validate().unwrap_err());
+        assert!(err.contains("loud"), "{err}");
+        for level in crate::provider::Thinking::LEVELS {
+            assert!(err.contains(level), "the error must offer {level}: {err}");
         }
     }
 }
