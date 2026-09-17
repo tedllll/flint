@@ -1507,8 +1507,13 @@ the test written for exactly this, **stayed silent**. Two reasons, and they are 
 - **The marker list knows one generation of damage.** It matches what *one* bad round trip produces;
   a second round trip over already-damaged text produces characters it does not hold. That is what
   happened here (the file already held second-generation characters from an earlier accident), and it
-  is why the damage was only caught by reading the diff. **Not fixed**: `ROADMAP.md`'s "Small, agreed,
-  unscheduled" now carries it, with the whitelist-of-intended-characters as the way worth doing.
+  is why the damage was only caught by reading the diff. **Fixed the same day, and not by extending the
+  list**: the test is a whitelist now, so every non-ASCII character in a scanned file has to be one the
+  repository means — a punctuation or symbol class, or CJK in a file declared in `CJK_FILES` with a
+  reason. Both layers were watched failing for the right reason: U+597D in `docs/web-mode.md` is
+  refused by the whitelist and held by no marker, and U+8DEF in `README.md` is refused by the marker
+  list while the whitelist allows it. The residue is stated rather than implied — inside a declared
+  Chinese document, a second-generation artifact is still indistinguishable from prose.
 
 The practical rule that came out of it, for the next session: **do not rewrite a source file with
 PowerShell's text cmdlets or `WriteAllText`.** They round-trip through the console code page. The `edit`

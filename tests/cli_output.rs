@@ -257,6 +257,81 @@ async fn a_piped_one_shot_run_ignores_its_stdin() {
     );
 }
 
+/// Non-ASCII a scanned file may always contain: the punctuation and symbols this repository's
+/// English prose and its terminal tests are written with.
+///
+/// Ranges rather than a list of characters, so that typing an ellipsis does not fail the build
+/// for the wrong reason, and so the rule can be read as a *class*: punctuation, symbols, box
+/// drawing and emoji, and no writing system at all.
+fn always_allowed(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x00A0..=0x00FF // Latin-1: § · × ¥ © « » and the accented letters in the code
+            | 0x2000..=0x206F // general punctuation: — – … ‹ › and the curly quotes
+            | 0x2070..=0x209F // super- and subscripts
+            | 0x20A0..=0x20CF // currency signs
+            | 0x2190..=0x21FF // arrows: ← → ↔
+            | 0x2200..=0x22FF // mathematical operators: ≡ ⋯
+            | 0x2500..=0x257F // box drawing, which the terminal fixtures draw with
+            | 0x25A0..=0x27BF // geometric shapes and dingbats: ✓ ✗ ✔ ⚠
+            | 0x2E00..=0x2E7F // supplemental punctuation
+            | 0xFE00..=0xFE0F // variation selectors, as in a warning sign with an emoji look
+            | 0x1F000..=0x1FAFF // emoji
+    )
+}
+
+/// A character from a writing system this repository writes in *deliberately*, and only in the
+/// files named below.
+///
+/// This is the second half of a whitelist, and the half that makes it worth having. The
+/// artifacts of a CP936 round trip (`鈥`, `璺`, `鍩`) are ordinary CJK ideographs, so no rule of
+/// the form "these ideographs mean damage" can be complete: it is a list of accidents, and the
+/// second accident over the first produces characters the list has never seen. The rule here is
+/// a different kind of statement -- **CJK belongs to a file, not to a character** -- so a file
+/// that holds Chinese text says so, in the table below, with a reason; and every other file may
+/// hold no ideograph at all. That is where damage is hardest to see, because it reads as text.
+fn cjk(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x3000..=0x303F // CJK punctuation: 。 、 （ ） and the fullwidth colon
+            | 0x3040..=0x30FF // kana
+            | 0x3400..=0x4DBF // unified ideographs, extension A
+            | 0x4E00..=0x9FFF // unified ideographs
+            | 0xF900..=0xFAFF // compatibility ideographs
+            | 0xFF00..=0xFFEF // fullwidth and halfwidth forms: ， （ ）
+            | 0x20000..=0x2FFFF // extensions B and beyond, for completeness
+    )
+}
+
+/// Every scanned file that may contain CJK, and why that file does. Paths are relative to the
+/// repository root, with `/`, because that is how an offender is reported on both platforms.
+///
+/// The list is the point rather than a formality: it is what makes Chinese in a *new* file fail
+/// the build until somebody writes down that it belongs there, and what keeps the one file that
+/// has to name the artifacts (`tests/cli_output.rs`, the marker table) from being the file where
+/// real damage hides. Adding a file here is a claim about its contents; the reason is the claim.
+const CJK_FILES: &[(&str, &str)] = &[
+    ("README.md", "quotes the questions a person asked, in the words they asked them"),
+    ("ROADMAP.md", "quotes the reports this plan was built from, in the words they arrived in"),
+    ("HANDOFF.md", "the same, for the reports the last sessions were built from"),
+    ("docs/deepseek-search.md", "quotes DeepSeek's own description of the search endpoint"),
+    ("docs/python.md", "a Python call written the way its author would write it"),
+    ("docs/sandbox.md", "two characters quoted for how they feel, not for what they say"),
+    ("docs/windows.md", "the console title Windows prints, in Chinese"),
+    ("docs/windows-tooling.md", "the `你好` whose mangling *is* the measurement"),
+    ("examples/channels.rs", "the Chinese prompt the example defaults to"),
+    ("examples/live_turn.rs", "the command line a person would run the example with"),
+    ("scripts/layout-trace.js", "the transcript it draws is Chinese"),
+    ("scripts/term-layout-test.js", "the layout fixtures are Chinese, and width is measured in it"),
+    ("src/fetch.rs", "one character, to prove an HTML entity decodes to it"),
+    ("src/term.rs", "the width tests: a CJK character is two columns, which is the point"),
+    ("src/tools.rs", "the `你好` a code page mangles, in the comment that says why"),
+    ("src/util.rs", "`你好 café 日本語`, the truncation test's non-ASCII sample"),
+    ("tests/agent_loop.rs", "the same mangling, asserted through a script"),
+    ("tests/cli_output.rs", "the marker table, which has to name the characters it looks for"),
+    ("tests/term_capture.rs", "the byte-exact terminal fixtures: Chinese prompts and answers"),
+];
+
 /// Whether a line is one of the marker definitions the scan itself needs.
 ///
 /// Recognised by shape rather than by line number, so adding a marker does not silently
@@ -293,6 +368,22 @@ fn is_marker_definition(line: &str) -> bool {
 /// file over -- and it went unscanned for as long as this list did not name it. Measured
 /// 2026-09-17: with a middle dot in `web/view.html` replaced by the CP936 artifact it decodes to,
 /// this test passed while `"html"` was missing from the list and failed once it was added.
+///
+/// **A list of markers is a list of accidents, so the second check is a whitelist.** Two things
+/// are true of the characters above and are the reason they cannot be the whole guard: they are
+/// what *one* bad round trip produces, and a second round trip over already-damaged text produces
+/// characters they have never held. That is not hypothetical either -- it is how this session
+/// found the hole, by making some (`U+95B3`, `U+95BB`) in this very file while editing it through
+/// a PowerShell pipeline, and watching the guard pass. So the tree is also checked the other way
+/// round: every non-ASCII character in a scanned file has to be one this repository *means* --
+/// either a punctuation or symbol class (`always_allowed`), or CJK in a file that is declared to
+/// hold CJK text (`CJK_FILES`, each with a reason).
+///
+/// The two checks are not redundant. The marker list still earns its place *inside* a declared
+/// file, where a whitelist cannot tell prose from damage; the whitelist is what refuses an
+/// ideograph in the ~30 scanned files that hold none, which is every Rust source, every document
+/// that quotes no Chinese, the page, and `Cargo.toml` -- the places damage is invisible because
+/// nothing else there is non-ASCII.
 #[test]
 fn the_source_tree_contains_no_mojibake() {
     // Characters CP936 produces when it swallows a UTF-8 multi-byte sequence. Any of
@@ -311,6 +402,8 @@ fn the_source_tree_contains_no_mojibake() {
 
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut offenders: Vec<String> = Vec::new();
+    let mut unmeant: Vec<String> = Vec::new();
+    let mut declared_seen: Vec<&str> = Vec::new();
     let mut scanned = 0usize;
 
     let mut walk = vec![root.to_path_buf()];
@@ -336,10 +429,18 @@ fn the_source_tree_contains_no_mojibake() {
             let Ok(text) = std::fs::read_to_string(&path) else {
                 continue;
             };
+            // `/` on both platforms, because that is how a declaration is written and how an
+            // offender is reported; a Windows path here would silently match nothing.
+            let relative = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let declared = CJK_FILES.iter().find(|(file, _)| *file == relative);
+            if let Some((file, _)) = declared {
+                declared_seen.push(file);
+            }
             for (n, line) in text.lines().enumerate() {
-                if !MARKERS.iter().any(|m| line.contains(*m)) {
-                    continue;
-                }
                 // This file has to name the characters it looks for, and the marker
                 // definitions are the only lines where that is legitimate. Excluding the
                 // whole file instead -- which this used to do -- leaves the one file that
@@ -347,22 +448,50 @@ fn the_source_tree_contains_no_mojibake() {
                 if path.ends_with("cli_output.rs") && is_marker_definition(line) {
                     continue;
                 }
-                offenders.push(format!(
-                    "{}:{}: {}",
-                    path.strip_prefix(root).unwrap_or(&path).display(),
-                    n + 1,
-                    line.trim()
-                ));
+                if MARKERS.iter().any(|m| line.contains(*m)) {
+                    offenders.push(format!("{relative}:{}: {}", n + 1, line.trim()));
+                }
+                // The whitelist half: a character this repository does not mean is an artifact,
+                // whatever list it is on. Reported with its code point, because a character that
+                // is damage looks like text in the failure message otherwise.
+                for c in line.chars().filter(|c| !c.is_ascii()) {
+                    if always_allowed(c) || (declared.is_some() && cjk(c)) {
+                        continue;
+                    }
+                    unmeant.push(format!(
+                        "{relative}:{}: U+{:04X} `{c}` in: {}",
+                        n + 1,
+                        c as u32,
+                        line.trim()
+                    ));
+                }
             }
         }
     }
 
     assert!(scanned > 5, "the walk found almost nothing ({scanned} files)");
+    for (file, reason) in CJK_FILES {
+        assert!(
+            declared_seen.contains(file),
+            "`{file}` is declared as a file that holds CJK ({reason}), and the walk never saw \
+             it -- a renamed file leaves a declaration that now protects nothing"
+        );
+        assert!(
+            !reason.trim().is_empty(),
+            "`{file}` is declared as holding CJK with no reason, which is the form alone"
+        );
+    }
     assert!(
         offenders.is_empty(),
         "mojibake in the source tree -- a UTF-8 file was written back through a CP936 \
          code page:\n{}",
         offenders.join("\n")
+    );
+    assert!(
+        unmeant.is_empty(),
+        "non-ASCII this repository does not mean -- damage that no marker list holds, or a \
+         writing system in a file that was never declared to hold one (`CJK_FILES`):\n{}",
+        unmeant.join("\n")
     );
 }
 

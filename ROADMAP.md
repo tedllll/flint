@@ -1714,18 +1714,20 @@ and C6 is the note that the documentation has to say so).
   coming back (`the_example_renders_with_the_repls_sink`: no `match event` in the example). That the
   extraction changed no output is what the byte-exact `term_capture` suite is for, and it passed
   unchanged.
-- **The mojibake scan knows one generation of damage.** `the_source_tree_contains_no_mojibake` matches
-  a list of characters *one* bad CP936 round trip produces, and it skips `///` lines by design (the
-  marker table has to name what it looks for). A **second** round trip over already-damaged text
-  produces characters the list does not hold, and this session made some by accident — rewriting
-  `tests/cli_output.rs` through PowerShell's `Get-Content`/`WriteAllText` — while the guard stayed
-  silent; it took `git checkout` and a re-apply to notice. Two ways to close it, and the first is the
-  one worth doing: assert that every non-ASCII character in a scanned file is one this repository
-  intends (a whitelist per file, since the layout script and some documents are written in Chinese),
-  rather than extending a blacklist of artifacts with the artifacts of artifacts. The second is to add
-  the observed second-generation characters to `MARKERS`, which is whack-a-mole and honest about it.
-  `.html` was the other hole in this test and is closed (`web/view.html` is scanned now, measured with
-  a middle dot replaced by its artifact).
+- ~~**The mojibake scan knows one generation of damage.**~~ **Closed 2026-09-17, by making the second
+  check a whitelist instead of a longer blacklist.** The marker list stays and still earns its place —
+  inside a file that holds Chinese text it is the only thing that can tell prose from damage — but the
+  tree is now checked the other way round as well: every non-ASCII character in a scanned file must be
+  one this repository *means*, either a punctuation or symbol class, or CJK in a file that is declared
+  to hold CJK (`CJK_FILES`, each entry with a reason, so Chinese in a new file fails the build until
+  somebody writes down that it belongs there). Both halves were watched failing for the right reason:
+  U+597D in `docs/web-mode.md` is refused by the whitelist and held by no marker, and U+8DEF in
+  `README.md` is refused by the marker list while the whitelist allows it. The residual is stated
+  rather than implied — a *second* generation artifact inside a declared Chinese document is still
+  invisible, because that is the one place a whitelist cannot tell damage from prose, and closing it
+  would need a per-file character list whose maintenance cost is larger than what it buys. `.html` was
+  the other hole in this test and is closed too: `web/view.html` is scanned, measured with a middle dot
+  replaced by its artifact.
 
 ## Known unfinished
 
