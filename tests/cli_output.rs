@@ -2822,6 +2822,190 @@ async fn a_resumed_conversation_is_drawn_and_not_only_loaded() {
     );
 }
 
+/// Drive a real REPL with one line typed into it: what it drew, and what the model was sent.
+///
+/// `files` are written under the home before the run starts, which is where a prompt file lives
+/// (`<FLINT_HOME>/prompts/<name>.md`), and the run's working directory is `<home>/work` so that a
+/// project's own copy (`<cwd>/.flint/prompts/`) can be a fixture too. The pipe is closed after the
+/// line rather than `/exit` being typed, because `/exit` arrives while the turn is still running and
+/// is now run as the command it is -- which cancels the turn whose request this reads.
+async fn typed_at_a_repl(
+    server: &MockServer,
+    tag: &str,
+    files: &[(&str, &str)],
+    typed: &str,
+) -> (String, serde_json::Value) {
+    let home = test_home(tag, &server.uri());
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("working directory");
+    for (rel, body) in files {
+        let path = home.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("a directory for the fixture");
+        }
+        std::fs::write(&path, body).expect("write the fixture");
+    }
+
+    let mut child = binary()
+        .current_dir(&work)
+        .env("FLINT_HOME", &home)
+        .env("FLINT_TERM_CAPTURE", "1")
+        .env("FLINT_TERM_SIZE", "100x24")
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to run flint");
+    {
+        use std::io::Write;
+        child
+            .stdin
+            .as_mut()
+            .expect("no stdin handle")
+            .write_all(typed.as_bytes())
+            .expect("failed to write stdin");
+    }
+    let out = child.wait_with_output().expect("flint did not finish");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+
+    let requests = server.received_requests().await.expect("requests");
+    let body = requests
+        .first()
+        .map(|r| serde_json::from_slice(&r.body).expect("the request body is JSON"))
+        .expect("no request was made, so nothing typed at the prompt reached the model");
+    let _ = std::fs::remove_dir_all(&home);
+    (stdout, body)
+}
+
+/// A prompt file is a saved prompt: typing its name sends what the file holds.
+///
+/// The half that makes it worth having is the arguments -- a prompt worth saving is usually one
+/// with a hole in it -- and the half that makes it usable is that the *transcript* still shows the
+/// line the person typed. Echoing three paragraphs of file instead would make every invocation a
+/// screenful, and the person already knows what they saved.
+#[tokio::test]
+async fn a_prompt_file_is_sent_when_its_name_is_typed() {
+    let server = MockServer::start().await;
+    answer_once(&server).await;
+    let (stdout, sent) = typed_at_a_repl(
+        &server,
+        "prompt-typed",
+        &[(
+            "prompts/tidy-commits.md",
+            "---\ndescription: Squash and reword the commits.\n---\n\n\
+             Tidy the commits touching {args}, then say what changed.\n",
+        )],
+        "/tidy-commits src/parser.rs\n",
+    )
+    .await;
+
+    assert!(
+        sent.to_string()
+            .contains("Tidy the commits touching src/parser.rs, then say what changed."),
+        "the file's words, with the line's arguments in the hole, are what the model must be sent: \
+         {sent}"
+    );
+    assert!(
+        stdout.contains("/tidy-commits src/parser.rs"),
+        "the transcript must echo the line the person typed: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("Tidy the commits touching"),
+        "the expansion was echoed as though the person had typed it: {stdout:?}"
+    );
+}
+
+/// A skill can be invoked by the person, not only loaded by the model.
+///
+/// The `skill` tool is the model's door and it has always been the only one: `/skills <name>` prints
+/// the body, which is reading, not doing. So a catalog flint hopes the model consults was a set of
+/// instructions nobody else could aim at anything.
+#[tokio::test]
+async fn a_skill_can_be_invoked_by_the_person() {
+    let server = MockServer::start().await;
+    answer_once(&server).await;
+    let (stdout, sent) = typed_at_a_repl(
+        &server,
+        "skill-invoked",
+        &[(
+            "work/.flint/skills/tidy-commits/SKILL.md",
+            "---\nname: tidy-commits\ndescription: Squash and reword the commits.\n---\n\n\
+             Squash the commits on this branch and reword each one.\n",
+        )],
+        "/skill tidy-commits only the last three\n",
+    )
+    .await;
+
+    assert!(
+        sent.to_string()
+            .contains("Squash the commits on this branch and reword each one."),
+        "the skill's body is what the person's turn must carry: {sent}"
+    );
+    assert!(
+        sent.to_string().contains("only the last three"),
+        "what the person typed after the name was dropped: {sent}"
+    );
+    assert!(
+        stdout.contains("/skill tidy-commits only the last three"),
+        "the transcript must echo the line the person typed: {stdout:?}"
+    );
+}
+
+/// The prompt files are listed, with the description that says what each is for.
+///
+/// A saved prompt nobody can find is a saved prompt nobody uses, and the listing is the only door
+/// onto the names: the catalog the model is given must not grow a line per template, because a
+/// template is not the model's to invoke.
+#[tokio::test]
+async fn prompt_files_are_listed_with_their_descriptions() {
+    let server = MockServer::start().await;
+    let home = test_home("prompt-listing", &server.uri());
+    std::fs::create_dir_all(home.join("prompts")).expect("prompt directory");
+    std::fs::write(
+        home.join("prompts/tidy-commits.md"),
+        "---\ndescription: Squash and reword the commits.\n---\n\nTidy the commits.\n",
+    )
+    .expect("write the template");
+
+    let mut child = binary()
+        .current_dir(&home)
+        .env("FLINT_HOME", &home)
+        .env("FLINT_TERM_CAPTURE", "1")
+        .env("FLINT_TERM_SIZE", "100x24")
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to run flint");
+    {
+        use std::io::Write;
+        child
+            .stdin
+            .as_mut()
+            .expect("no stdin handle")
+            .write_all(b"/prompts\n/exit\n")
+            .expect("failed to write stdin");
+    }
+    let out = child.wait_with_output().expect("flint did not finish");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+
+    assert!(
+        text.contains("tidy-commits"),
+        "/prompts listed none of the templates: {text:?}"
+    );
+    assert!(
+        text.contains("Squash and reword the commits."),
+        "the listing is a name and nothing else, so nobody can tell which one to type: {text:?}"
+    );
+    assert!(
+        text.contains("prompts"),
+        "the listing does not say where it looked: {text:?}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 /// Resuming an ordinary session must send the model a system prompt.
 ///
 /// A session file holds the conversation and **not** the prompt: the prompt is rebuilt at
@@ -5199,6 +5383,86 @@ async fn a_skill_the_run_has_is_readable_from_the_page_and_nothing_else_is() {
             "a listing the page asked for was printed on this terminal as well: {transcript:?}"
         );
     }
+}
+
+/// The page can read a saved prompt, and can send one -- and the two are different rows.
+///
+/// A template is the one command a page cannot type: its invocation is `/<name>`, and a row the page
+/// can press sends a fixed `send` plus one value. So the discovery result is offered twice, and the
+/// pair is the whole point: `/prompts <name>` is a `panel` row whose value is a **reading** -- the
+/// body, in the panel, with the terminal quiet -- while `/prompt <name>` is a `selector` whose value
+/// is the command itself, sent as a line and answered in the transcript where the work is. A page
+/// that could *read* through the second one would be running a turn through the report route, which
+/// is the same boundary `a_switch_is_offered_the_values_it_may_take` holds for `/provider`.
+#[tokio::test]
+async fn a_saved_prompt_is_readable_and_sendable_from_the_page() {
+    let home = test_home("report-prompts", "http://127.0.0.1:9/v1");
+    let prompts = home.join("prompts");
+    std::fs::create_dir_all(&prompts).expect("prompt directory");
+    std::fs::write(
+        prompts.join("demo.md"),
+        "---\ndescription: a fixture prompt\n---\n\nDo the demo thing with {args}.\n",
+    )
+    .expect("prompt file");
+
+    let log = home.join("transcript.txt");
+    let mut child = binary()
+        .arg("--web")
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::fs::File::create(&log).expect("transcript file"))
+        .stderr(std::fs::File::create(home.join("stderr.txt")).expect("stderr file"))
+        .spawn()
+        .expect("failed to run flint");
+
+    let (port, token) = port_and_token(&wait_for_url(&log));
+    let mut watching = http_stream(port, "/events", &token);
+    let opening = read_until(&mut watching, "\"type\":\"state\"}\n\n", 20);
+
+    // Both rows, each with the one name this run found. The frame's keys are alphabetical, so each
+    // fragment is the whole row.
+    assert!(
+        opening.contains("\"label\":\"/prompts [name]\",\"send\":\"/prompts\",\"values\":[\"demo\"]"),
+        "the page's menu does not offer the saved prompt at all: {opening:?}"
+    );
+    assert!(
+        opening.contains("\"label\":\"/prompt <name> [args]\",\"send\":\"/prompt\",\"values\":[\"demo\"]"),
+        "there is no row that sends a saved prompt, so a page could read one and never use it: \
+         {opening:?}"
+    );
+
+    // Reading it: the body arrives as a panel's.
+    let asked = post_to(port, &token, "/report", "/prompts demo");
+    assert!(asked.starts_with("HTTP/1.1 202"), "the report route refused it: {asked:?}");
+    let read = read_until(&mut watching, "\"input\":\"/prompts demo\"", 20);
+    assert!(
+        read.contains("\"panel\":true") && read.contains("Do the demo thing with {args}."),
+        "asking for a prompt the menu offered did not come back as a reading: {read:?}"
+    );
+
+    // Sending it is not a reading: the same value on the other row must not run a turn in the quiet.
+    let sent = post_to(port, &token, "/report", "/prompt demo");
+    assert!(sent.starts_with("HTTP/1.1 202"), "the request itself was refused: {sent:?}");
+    let refused = read_until(&mut watching, "\"input\":\"/prompt demo\"", 20);
+    assert!(
+        refused.contains("not a report"),
+        "a saved prompt was sent through the report route, which is a turn nobody asked for: \
+         {refused:?}"
+    );
+
+    drop(watching);
+    drop(child.stdin.take());
+    let exited = wait_for_exit(&mut child, 20);
+    let transcript = std::fs::read_to_string(&log).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit");
+    assert_eq!(
+        transcript.matches("Do the demo thing").count(),
+        0,
+        "a listing the page asked for was printed on this terminal as well: {transcript:?}"
+    );
 }
 
 /// A switch is offered the values it may take, and a switch is not a reading.

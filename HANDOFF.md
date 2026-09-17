@@ -217,8 +217,8 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 576 passing, 1 ignored on this machine
-(335 lib, 5 in the binary's own tests, 33 `agent_loop`, 77 `cli_output`, 35 `json_output` (7 structured
+As of the commit that carries this file, `cargo test` is 583 passing, 1 ignored on this machine
+(338 lib, 5 in the binary's own tests, 33 `agent_loop`, 81 `cli_output`, 35 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
 be able to read, 4 the answer written where the caller asked, 3 the file inlined into the prompt,
@@ -768,7 +768,7 @@ still building when the second landed.
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
 cargo build                                       # the Python and browser checks run this binary
-cargo test                                        # 569 passing, 1 ignored
+cargo test                                        # 583 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed
@@ -1854,6 +1854,71 @@ Verified by running `--resume … -p hello --json` and reading the stream: three
 A plain one-shot *does* print it, which is the right side of that line — a person reading a terminal
 wants it, a program reading a stream does not.
 
+### Prompt files, and a skill a person can invoke
+
+**The third of the twelve items taken from the reading of Pi is built and pushed: a prompt you type
+often is a file, and the person can aim a skill.** Both halves are one act rather than two features,
+which is what makes the round small: a saved prompt (`/<name>`) and a skill invoked by hand
+(`/skill <name> [args]`) become the person's next message through the same `Flow::Send`, composed by
+the same `context::fill_args`. Until this existed the `skill` tool's description was the only door out
+of the catalog — *call this before following a skill* — so a procedure flint hoped the model would
+consult could be read by a person (`/skills <name>`) and never aimed at anything.
+
+**The files.** `<project>/.flint/prompts/<name>.md`, then `<cwd>/.flint/prompts/`, then
+`<FLINT_HOME>/prompts/`, first found wins on a name — the skill catalog's three places and its
+priority order, one level deep, `.md` only, front matter's `description` (or the body's first line) as
+the one line `/prompts` lists, and front matter's `name` able to override the file name. Arguments are
+a hole: `{args}` is replaced where the author put it. With no `{args}` the words typed after the name
+are appended as a last paragraph, because "save this and aim it at something else" is the whole point
+and most templates are written in thirty seconds without thinking about arguments. An empty argument is
+not an error in either case, which is the branch that is easy to get wrong: `/name` with nothing after
+it sends the file as written.
+
+**The one decision worth arguing is that a template never reaches the model's prompt.** A skill is
+offered (one summary line per skill, by design, in every request); a template is not — no catalog line,
+no tool schema, nothing, so a directory of long prompts costs a run exactly zero until one is typed.
+The price of that is discoverability, and the answer is a command rather than a prompt cost:
+`/prompts` lists what was found and where, `/prompts <name>` prints one as it would be sent, and the
+unknown-command line now ends `/help for the commands, /prompts for your saved prompts`.
+
+**Typing `/<name>` resolves after every built-in command, and that order is the safety property.**
+The lookup is in the dispatcher's last arm, which is only reached by a word no command matched, so a
+template called `help` loses to `/help` instead of shadowing it — a person's own files get a namespace
+that cannot take the commands they depend on. `/prompt <name> [args]` is the second spelling, and it
+exists for one mechanical reason: a page's menu row sends a fixed command plus one value and cannot
+type `/<name>`, so `/prompt` is the press a page can make (`/prompts` stays the reading). The pair is
+what `docs/web-mode.md`'s new section measures; the four commands are rows in `COMMANDS`, so `/help`
+and the page's panel are built from the same table as always.
+
+**The transcript keeps the person's line and the session file keeps the truth.** Both sends return
+`Flow::Send { text, note }` — the text is what the turn carries, the note is drawn *under* the echo
+(`> /skill tidy-commits the parser`, then `  sent 75 characters from …SKILL.md`) — and the note is in
+the variant rather than printed by the command because a command runs before the echo and the two have
+to be drawn in that order. Echoing three paragraphs of template back at somebody who just saved it
+makes every invocation unreadable; echoing the typed line and naming the file once answers both "was
+that understood" and "which of the two files by that name won". The session file and the request carry
+the expanded text, which is what a resumed conversation is rebuilt from.
+
+**Red first, in four places.** `a_prompt_file_is_sent_when_its_name_is_typed` (the request body holds
+the filled template, the echo holds the typed line, and the expansion is *not* printed) and
+`a_skill_can_be_invoked_by_the_person` were watched failing with "no request was made, so nothing typed
+at the prompt reached the model" — which is exactly what an unknown command does; `prompt_files_are_listed_with_their_descriptions`
+failed on `/prompts` drawing nothing. The page test was made red on purpose by emptying the frame's
+values (it failed on exactly that fragment) and then restored, and the two unit tests in `src/context.rs`
+— precedence, and the `{args}`/append rule — were made red by mutating `prompt_dirs_for`'s order and
+`fill_args`'s substitution, each failing on its own assertion. `tests/cli_output.rs` gained a
+`typed_at_a_repl` helper for the two REPL cases: a scratch `FLINT_HOME`, one line on stdin, the pipe
+closed rather than `/exit` typed (an `/exit` arriving mid-turn now interrupts the turn whose request
+the test reads).
+
+**Checked by hand on a real screen, and one thing it caught that no assertion would have.** The
+capture of a run typing `/prompts`, `/tidy-commits src/parser.rs`, `/skill tidy-commits only the last
+three` and `/nope` shows the four answers in the order the design wants, and the session file holds
+`{"type":"chat","message":{"role":"user","content":"Tidy the commits touching src/parser.rs, then say
+what changed."}}` — the expansion, not the line. See the note under *Traps* about `$home` in
+PowerShell: running that check cost two minutes of cleanup because `$home` is read-only and the scratch
+`FLINT_HOME` silently became the real one.
+
 ### Still owed on the page
 
 **§8 is built, so this list is now the residues rather than a class.** The command list, its panel, the
@@ -2648,6 +2713,18 @@ git config core.sshCommand   # ssh -i C:/Users/<you>/.ssh/flint_github -o Identi
 Note the forward slashes: `core.sshCommand` is parsed by git, which eats the backslashes
 in a Windows path and then reports an identity file that does not exist. The Mac checkout
 has no `core.sshCommand` set at all, so a push there uses the default key.
+
+### Driving flint by hand from PowerShell
+
+Checking a REPL change without the test harness means pointing `FLINT_HOME` at a scratch directory and
+typing into the binary, and there is one trap in that worth writing down because it silently ruins the
+check instead of failing it: **`$home` is a read-only automatic variable in PowerShell**, so
+`$home = "$env:TEMP\flint-scratch"` is refused with *"Cannot overwrite variable HOME"* — the *session*
+keeps the real home directory — and every later `$home\...` path then writes into your own profile: a
+`config.toml`, a `prompts\`, a `work\`, and a `sessions\` full of scratch conversations, all of which
+have to be found and removed by hand afterwards. Use another name (`$fh`) and set `$env:FLINT_HOME`
+from it. The same shape of trap catches a real run: `FLINT_TERM_CAPTURE_FILE` is read only by a debug
+build, so a release binary ignores it and the capture goes nowhere.
 
 ### Reading a red job without a log
 

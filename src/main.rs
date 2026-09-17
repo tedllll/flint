@@ -1616,6 +1616,13 @@ async fn interactive(
             None => input,
         };
 
+        // What the turn will send, when a command has decided it: a saved prompt or an invoked skill
+        // replaces the typed line with the words the file holds. `None` is the ordinary case, where
+        // the turn carries exactly what was typed.
+        let mut sending: Option<String> = None;
+        // The one line to say under the echo about what that command sent. See `Flow::Send`.
+        let mut note_after_echo: Option<String> = None;
+
         if input.starts_with('/') {
             // A command's answer, for the page as well as the terminal.
             //
@@ -1660,6 +1667,13 @@ async fn interactive(
             match flow {
                 Flow::Continue => continue,
                 Flow::Exit => break,
+                // A command that is the person's message rather than an answer to it: the echo below
+                // prints the line they typed, and `note` is printed under it to say what that line
+                // sent. See `Flow::Send`.
+                Flow::Send { text, note } => {
+                    sending = Some(text);
+                    note_after_echo = Some(note);
+                }
                 Flow::NewAgent(mut new_agent, new_provider) => {
                     // The page follows whichever file the run is writing, and it is told here rather
                     // than in each command because `/new` and `/resume` do move the run to another
@@ -1710,11 +1724,21 @@ async fn interactive(
                 printer.style(BOLD, line)
             ));
         }
+        // Under the echo, and only for a command that sent something: what the line above actually
+        // sent, and from which file. A person sees their own prompt in the transcript, and the file
+        // it stood for named once, rather than a screenful of template repeated back at them.
+        if let Some(note) = note_after_echo {
+            printer.term().line(format_args!("{dim}{note}{reset}"));
+        }
+        // A message a command composed takes the place of the typed line only here: everything above
+        // this point -- the echo, the page's record of the command, the flag translation -- is about
+        // what the person did, and this is the first line that is about the model.
+        let send = sending.unwrap_or(input);
 
         match run_turn(
             agent,
             provider_cfg,
-            &input,
+            &send,
             printer,
             input_rx,
             true,
@@ -1752,6 +1776,15 @@ enum Flow {
     /// and the session header kept reading the old one, so switching to a local provider
     /// and back reported a model that was no longer in use.
     NewAgent(agent::Agent, config::ProviderConfig),
+    /// A command that *is* the person's next message: a saved prompt, or a skill invoked by hand.
+    ///
+    /// The two halves travel together because of the order they have to be drawn in. The REPL echoes
+    /// the line the person typed and then runs the turn, and the text this carries is what the turn
+    /// actually sends -- so the note has to be printed *after* that echo, which the command itself
+    /// cannot do: it runs before it. The note is the file it came from and how much of it there was,
+    /// which is the answer to "why did `/tidy-commits` say that" when two directories both hold a
+    /// file by that name and only one of them won.
+    Send { text: String, note: String },
 }
 
 /// Ask this machine to show a URL. Returns whether a program was started.
@@ -2649,6 +2682,13 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp::row("/jobs", "/jobs", "the background work this run started", HelpSection::Commands, OnPage::Panel),
     CommandHelp::destroying("/jobs stop <pid>", "/jobs stop", "end one of them", ArgFrom::Jobs),
     CommandHelp::row("/skills [name]", "/skills", "list skills, or print one as the model would see it", HelpSection::Commands, OnPage::Panel),
+    // The two doors onto invoking what a file holds: a skill the model can already load, and a saved
+    // prompt, which only a person can send. Both are selectors rather than panels because their
+    // answer is a *turn* -- the page sends the line and the transcript shows the work, where a panel
+    // is for a read.
+    CommandHelp::row("/skill <name> [args]", "/skill", "send a skill's instructions as your next message", HelpSection::Commands, OnPage::Selector),
+    CommandHelp::row("/prompts [name]", "/prompts", "list your saved prompts, or print one as it would be sent", HelpSection::Commands, OnPage::Panel),
+    CommandHelp::row("/prompt <name> [args]", "/prompt", "send a saved prompt (typing /<name> is the same thing)", HelpSection::Commands, OnPage::Selector),
     CommandHelp::row("/agents [name]", "/agents", "list agent profiles (.flint/agents/*.md), or print one", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/sessions", "/sessions", "list past sessions, numbered", HelpSection::Commands, OnPage::Panel),
     CommandHelp::row("/resume <n|id>", "/resume", "switch to one of them", HelpSection::Commands, OnPage::Selector),
@@ -2692,6 +2732,35 @@ fn split_to(arg: &str) -> (String, &str) {
     match rest.find(char::is_whitespace) {
         Some(end) => (rest[..end].to_string(), rest[end..].trim_start()),
         None => (rest.to_string(), ""),
+    }
+}
+
+/// A command's argument split into its first word and the rest of the line.
+///
+/// What `/prompt` and `/skill` take: the name of the file to send, and whatever the person typed
+/// after it to aim it at something. Written beside `split_to` because they are the same split with
+/// different words around it, and a second hand-rolled one inside the match arm is how the two come
+/// to disagree about a name with a space in it.
+fn split_first(arg: &str) -> (&str, &str) {
+    let arg = arg.trim_start();
+    match arg.find(char::is_whitespace) {
+        Some(end) => (&arg[..end], arg[end..].trim_start()),
+        None => (arg, ""),
+    }
+}
+
+/// The line the transcript says under a line a command turned into a message.
+///
+/// How much of the file was sent and which file it was, in one shape for all three sends (`/skill`,
+/// `/prompt`, and a template typed as its own name) -- because "why did that say what it said" is one
+/// question and the three answers should not read differently. The path is `None` only when the file
+/// was discovered but could not be named, which cannot happen today: the lookup that finds a body
+/// finds its path in the same list.
+fn sent_note(text: &str, path: Option<&std::path::Path>) -> String {
+    let size = text.chars().count();
+    match path {
+        Some(path) => format!("  sent {size} characters from {}", path.display()),
+        None => format!("  sent {size} characters"),
     }
 }
 
@@ -3745,6 +3814,76 @@ async fn handle_command(
             }
         }
 
+        // `/prompts` and `/prompt` are to `/skills` and `/skill` what a saved prompt is to a skill:
+        // the same two halves, listing and sending, over a directory of the person's own files. The
+        // line between them is the line the whole feature is built on -- printing a file is reading,
+        // and sending it is *doing* -- so the naming keeps the plural for the read.
+        "/prompts" => {
+            let workspace = context::Workspace::discover(agent.cwd(), &cfg.skill_dirs);
+            if arg.is_empty() {
+                if workspace.prompts.is_empty() {
+                    printer
+                        .term()
+                        .line(format_args!("{dim}no prompt files found{reset}"));
+                    printer.term().line(format_args!(
+                        "{dim}  a prompt is <dir>/<name>.md, sent by typing /<name>; \
+                         `{{args}}` in the body is where the rest of the line goes{reset}"
+                    ));
+                } else {
+                    printer
+                        .term()
+                        .line(format_args!("{dim}saved prompts (type /<name> to send one):{reset}"));
+                    for prompt in &workspace.prompts {
+                        printer.term().line(format_args!(
+                            "  {:<20} {dim}{}{reset}",
+                            prompt.name,
+                            prompt.path.display()
+                        ));
+                        printer.term()
+                            .line(format_args!("      {}", prompt.description));
+                    }
+                }
+                let searched: Vec<String> = workspace
+                    .prompt_dirs
+                    .iter()
+                    .map(|d| d.display().to_string())
+                    .collect();
+                printer
+                    .term()
+                    .line(format_args!("{dim}  searched: {}{reset}", searched.join(", ")));
+            } else {
+                for line in workspace.load_prompt(arg)?.lines() {
+                    printer.term().line(format_args!("{line}"));
+                }
+            }
+        }
+
+        // One act, two sources: `/prompt <name>` sends a file of the person's own words and
+        // `/skill <name>` sends the instructions flint hopes a model loads -- which, until this
+        // existed, only a model could aim at anything. Both become the person's next message, both
+        // take the rest of the line as arguments, and both are the same read `/skills` and
+        // `/prompts` print, so "did it send what I wrote" has one answer rather than two.
+        "/prompt" | "/skill" => {
+            let (name, words) = split_first(arg);
+            if name.is_empty() {
+                printer.term().line(format_args!(
+                    "{yellow}{cmd} takes a name{reset} — {cmd} <name> [what to aim it at]"
+                ));
+                return Ok(Flow::Continue);
+            }
+            let workspace = context::Workspace::discover(agent.cwd(), &cfg.skill_dirs);
+            let (body, path) = if cmd == "/skill" {
+                let path = workspace.skill(name).map(|skill| skill.path.clone());
+                (workspace.load(name)?, path)
+            } else {
+                let path = workspace.prompt(name).map(|prompt| prompt.path.clone());
+                (workspace.load_prompt(name)?, path)
+            };
+            let text = context::fill_args(&body, words);
+            let note = sent_note(&text, path.as_deref());
+            return Ok(Flow::Send { text, note });
+        }
+
         "/agents" => {
             // Re-discovered rather than remembered, for the same reason as `/skills`: what is on
             // disk now is the answer, and a profile edited while a run is open is a profile the next
@@ -3995,7 +4134,23 @@ async fn handle_command(
         }
 
         other => {
-            printer.term().line(format_args!("{dim}unknown command '{other}'. /help for the list.{reset}"));
+            // A saved prompt is typed as its own name, so this is the arm where `/tidy-commits`
+            // stops being an unknown command. Built-ins win by construction rather than by a check:
+            // this arm is only reached by a word no command matched, so a template called `help`
+            // loses to `/help` instead of shadowing it -- which is the safe way round for a namespace
+            // a person's own files are allowed into, and the reason `/prompts` lists the names while
+            // `/help` stays a fixed table.
+            let workspace = context::Workspace::discover(agent.cwd(), &cfg.skill_dirs);
+            if let Some(prompt) = workspace.prompt(other.trim_start_matches('/')) {
+                let body = workspace.load_prompt(&prompt.name)?;
+                let text = context::fill_args(&body, arg);
+                let note = sent_note(&text, Some(&prompt.path));
+                return Ok(Flow::Send { text, note });
+            }
+            printer.term().line(format_args!(
+                "{dim}unknown command '{other}'. /help for the commands, \
+                 /prompts for your saved prompts.{reset}"
+            ));
         }
     }
     Ok(Flow::Continue)
@@ -4789,6 +4944,11 @@ fn page_rows(
                 // them: the reader is shown the names rather than asked to remember one.
                 values: match (row.send, row.on_page) {
                     ("/skills", _) => agent.skills().to_vec(),
+                    ("/skill", _) => agent.skills().to_vec(),
+                    // The saved prompts, which the frame carries for this one purpose: a page cannot
+                    // type `/<name>` -- a row it can press sends a fixed `send` and one value -- so
+                    // `/prompt <name>` is the spelling that reaches the same act from a button.
+                    ("/prompts", _) | ("/prompt", _) => agent.prompts().to_vec(),
                     ("/provider", OnPage::Selector) => {
                         cfg.providers.iter().map(|p| p.name.clone()).collect()
                     }

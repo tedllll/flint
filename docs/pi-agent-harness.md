@@ -219,19 +219,40 @@ slipping in.
 
 ### 3.6 Prompt templates, and a skill the person can invoke
 
-A Markdown file in a known directory, typed as `/name`, with arguments substituted. Flint has skills
-(which the *model* loads through the `skill` tool) and profiles (which start a child), but nothing
-that lets a person save a prompt they type often. Same discovery shape as the skill catalog, no new
-format, plain files.
+**Built, 2026-09-17.** A Markdown file in a known directory, typed as `/name`, with arguments
+substituted. Flint has skills (which the *model* loads through the `skill` tool) and profiles (which
+start a child), but nothing that lets a person save a prompt they type often. Same discovery shape as
+the skill catalog, no new format, plain files.
 
-The companion gap is one line away from it and worth stating separately, because it is a door that
-exists on only one side: Pi registers every skill as a `/skill:name` command, appending whatever the
-person typed after the name to the skill's content as `User: <args>`. flint's skills are the model's
-to load -- the `skill` tool's description says "call this before following a skill" -- and
-`/skills <name>` only *prints* the body. So the model can act on a skill and the person can only read
-it. A person-facing "invoke this skill" is the other half of progressive disclosure, and it is the
-difference between a catalog flint hopes the model consults and a set of instructions a person can
-aim.
+What was built is that shape rather than Pi's `User: <args>` verbatim, and the differences are the
+decisions worth keeping. A prompt file is `<dir>/<name>.md` in the skill catalog's three places and its
+priority order — `<project>/.flint/prompts/`, then the working directory's, then `<FLINT_HOME>/prompts/`
+— with the file name as the word typed and front matter's `description` (or the body's first line) as
+the one line `/prompts` lists. Arguments are a hole rather than an appendix: `{args}` is replaced where
+the author put it, and a file with no `{args}` gets the words appended as a last paragraph, because
+"save this and aim it at something else" is what a template is for and most authors do not think about
+arguments while writing. An empty argument is not an error either way: the file is sent as written.
+
+The companion gap was one line away and is closed by the same mechanism, with a second spelling rather
+than a second implementation. `/skill <name> [args]` sends a skill's instructions *as the person's next
+message* — the same body the `skill` tool would return and `/skills <name>` prints, through the same
+`load_skill` — so the person's door onto progressive disclosure is `/skill`, and `/skills` keeps
+meaning "print it". Pi spells it `/skill:name`; flint spells it as a command with an argument, because
+a name inside the command token is a spelling the page's menu cannot send: a row there is a fixed
+`send` plus one value, which is exactly `/skill <name>`. The same reason gives `/prompt <name> [args]`
+as the door a *page* can press (`/prompts` is the reading), while `/<name>` typed at the keyboard is
+the fast path for the person who already knows what they saved.
+
+Three properties are the design rather than the plumbing. **A template never reaches the model**:
+nothing about `/prompts` enters the system prompt or a tool schema, so a directory of long templates
+costs a run nothing until one is typed — the opposite of the skill catalog, which is a summary per
+skill in every request by design. **The transcript keeps the person's line**: the echo is
+`> /tidy-commits src/parser.rs`, and the file it stood for is named once underneath, with how much of
+it was sent, because a screenful of repeated template makes every invocation unreadable and the question
+"which of the two files by that name won" still deserves an answer. **The session file keeps the
+truth**: the request and the record carry the expanded text, so a conversation resumed from the file is
+rebuilt from what the model was actually sent rather than from a line that no longer means anything
+without the file that produced it.
 
 ### 3.7 Compaction that lives in the session file
 

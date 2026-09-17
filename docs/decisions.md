@@ -93,6 +93,38 @@ lie.
 **Nothing about context is cached.** Not the instruction files, not the catalog. `/reload`
 re-reads them, and a file written mid-session takes effect on the next turn.
 
+**A saved prompt is the person's, and stays out of the model's prompt.** `.flint/prompts/*.md`
+and `<FLINT_HOME>/prompts/*.md` are found in the same three places, in the same priority order,
+and one level deep like the skills — but unlike the skill catalog, no line about them enters the
+system prompt and no tool schema mentions them. A skill is offered to the model because the model
+is the one who has to decide to load it; a template is only ever sent because a *person* typed its
+name, so putting it in the prompt would spend tokens on every request of every conversation to
+answer a question nobody asked. The cost of that choice is discoverability, and the answer is one
+command: `/prompts` lists what was found, where, and what each is for.
+
+**Arguments fill a hole or are appended, and never silently vanish.** `{args}` in a template is
+replaced where the author put it; with no `{args}`, what was typed after the name becomes a last
+paragraph. Both are one function (`context::fill_args`) so a prompt file and an invoked skill
+cannot drift, and an empty argument is not an error: the file is sent as written. The alternative —
+appending always, Pi's `User: <args>` — reads well until the author wants the words in the middle
+of a sentence, and the alternative of substituting only when a hole exists is what "aim this saved
+prompt at something else" means for the file somebody wrote in thirty seconds.
+
+**Typing `/<name>` is the same act as `/prompt <name>`, and a command always wins the name.** The
+dispatcher looks at a saved prompt only after no built-in command matched, so a template called
+`help` loses to `/help` rather than shadowing it. A person's own files getting a namespace that can
+override the commands they depend on would be a surprising thing for a feature whose whole promise
+is "save this and type it again"; the second spelling (`/prompt <name>`) exists because a page's
+menu can send a fixed command plus one value and cannot type `/<name>`.
+
+**A skill has two doors, and reading is not one of them.** `/skills <name>` prints the body and
+`/skill <name> [args]` *sends* it as the person's own next message — the same bytes the `skill`
+tool would return, through the same loader, so "did it send what I wrote" has one answer. The
+transcript keeps the line the person typed (`> /skill tidy-commits the parser`) with one dim line
+naming the file underneath, and the session file and the request carry the expanded text: the echo
+is for the person, who already knows what they saved, and the file is the record of what was
+actually said.
+
 ## Tools
 
 **Read before you mutate.** `write`, `edit` and patch updates refuse a file this run has not

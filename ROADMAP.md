@@ -1831,8 +1831,19 @@ argument, the cost and what flint has today are in the document, §3.
 - **A static export of a finished conversation** — one HTML file, no process behind it.
 - **An entry id the page can resume from after a restart** — the reconnection cursor today is a
   per-process ring, so a reload after a restart re-reads from nothing.
-- **Prompt templates, and a way for a *person* to invoke a skill** — today the `skill` tool is the
-  model's door and `/skills <name>` only prints the body.
+- **Prompt templates, and a way for a *person* to invoke a skill — built, 2026-09-17.** A prompt file is
+  `<dir>/<name>.md`, in the same three places and the same priority order as a skill
+  (`<project>/.flint/prompts/`, `<cwd>/.flint/prompts/`, `<FLINT_HOME>/prompts/`, first found wins on a
+  name), and it is sent by typing `/<name>`: one line, with everything after the name filling `{args}`
+  where the file put it, or becoming a last paragraph where it did not. The skill half is the second
+  door onto what the `skill` tool already loads — `/skill <name> [args]` sends a skill's instructions as
+  the person's own next message, so an instruction file flint hoped a model would consult can finally be
+  aimed at something by the person who wrote it. Both go through one act (`Flow::Send`) and one
+  `fill_args`, and both are listed and printed by the plural command a person reads first (`/prompts
+  [name]`, and `/skills [name]` unchanged for reading). Nothing about a template reaches the model's
+  prompt or the tool schemas — a directory of long templates costs a run exactly nothing — and the
+  transcript keeps the line the person typed while the request carries the file's words, named once
+  under the echo with the file it came from.
 - **Compaction written into the session file** — an appended entry carrying the summary and the first
   entry it keeps (`firstKeptEntryId`), never cutting at a tool result. This one is the largest, and it
   is the one where Pi's design is ahead of flint's own request-side pruning.

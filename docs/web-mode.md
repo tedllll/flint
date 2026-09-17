@@ -974,6 +974,27 @@ run. Long answers and reconnection, which are §11's own performance section and
 over a different harness, are the other half — and the composer at the *keyboard* was measured in the
 earlier pass, with the button driven here.
 
+### A saved prompt, readable and sendable — measured, 2026-09-17
+
+A template is the one command a page cannot type: its invocation is `/<name>`, and a row a page can
+press sends a fixed `send` plus one value. So a run's saved prompts are offered twice, and the pair is
+the whole design rather than a convenience. `/prompts <name>` is a `panel` row whose value is a
+**reading** — the body, into the panel, with the terminal quiet, exactly like `/skills <name>`. `/prompt
+<name>` is a `selector` whose value is the command itself: the page types the line, the turn runs, and
+the answer lands in the transcript where the work is. A page that could read through the second one
+would be starting a model turn through the report route.
+
+| Claim | How | Result |
+|---|---|---|
+| Both rows carry the run's own templates | a real `--web` process with a scratch `FLINT_HOME` holding `prompts/demo.md` | `{"label":"/prompts [name]","send":"/prompts","values":["demo"]}` and `{"label":"/prompt <name> [args]","send":"/prompt","values":["demo"]}` — mutation-checked: with the values emptied the frame is still a valid menu and the test fails on exactly those fragments |
+| Reading one is quiet, like any report | the same run; `/prompts demo` to `POST /report` | a `command` frame with `"panel":true` and the body in `text`, and the transcript does not contain the body at all |
+| Sending one is not a reading | the same run; `/prompt demo` to `POST /report` | refused, `not a report`. The values are the permission and the class is the route — the same boundary `/provider other` is held to one section above |
+| The list is the run's, and it costs a run nothing until it is used | the same frame, and `Agent::prompts` | the names come from the run's own discovery walk, like `Agent::skills` — and unlike it, nothing about a template appears in the system prompt or a tool schema |
+
+**Not measured here**: pressing the button in a real browser. The frame and the route are held at the
+bytes; the press belongs to the harness in §11, which drives the page's controls and could be extended
+to these two rows.
+
 ---
 
 ## 12. A file the transcript names, opened beside it

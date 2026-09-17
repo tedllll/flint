@@ -216,6 +216,9 @@ Inside the REPL:
 | `/jobs` | the background work this run started, with each job's pid and what it is doing |
 | `/jobs stop <pid>` | end one of them (a child is asked, a command is killed) |
 | `/skills [name]` | list skills, or print one the way the model would get it |
+| `/skill <name> [args]` | send a skill's instructions as your next message, aimed at `args` |
+| `/prompts [name]` | list your saved prompts, or print one the way it would be sent |
+| `/prompt <name> [args]` | send a saved prompt (typing `/<name>` is the same thing) |
 | `/sessions` | list past sessions, numbered |
 | `/resume <n\|id>` | switch to one of them, without restarting — it prints the conversation it moved to, as `--resume` does |
 | `/name [text]` | show or set a name for this conversation |
@@ -1084,6 +1087,43 @@ the model would receive it, which is the answer to "did it load what I wrote".
 Search is one level deep, `<dir>/<name>/SKILL.md` and no deeper: a recursive search
 would offer a project's test fixtures as procedures. The project's skills win a name
 conflict, then the working directory's, then yours, then `skill_dirs`.
+
+A skill is not only the model's to load. `/skill <name> [args]` sends the same body as
+your own next message, with everything after the name appended -- or put where the body
+says `{args}` -- so the person who wrote a procedure can aim it instead of watching for
+the model to decide to. `/skills <name>` still only prints it, which is the difference
+between reading one and using one.
+
+### Saved prompts
+
+A prompt you type often is a file, in the same shape and the same three places as a skill,
+and it is sent by typing its own name:
+
+```text
+<project>/.flint/prompts/tidy-commits.md
+~/.flint/prompts/release-notes.md
+```
+
+```markdown
+---
+description: Tidy the commits on this branch.
+---
+
+Tidy the commits touching {args}, then say what changed.
+```
+
+`/tidy-commits src/parser.rs` sends `Tidy the commits touching src/parser.rs, then say what
+changed.` -- one line, no ceremony. `{args}` is where the rest of the line goes; a file with
+no `{args}` gets it appended as a last paragraph, so a saved prompt can be aimed at
+something else even if you did not plan for it. With nothing after the name the file is sent
+as written. `/prompts` lists what was found and where, `/prompts <name>` prints one as it
+would be sent, and `/prompt <name> [args]` is the same send under a name a menu can press.
+
+Nothing about a template reaches the model until you send it: no line in the prompt, no tool
+schema, unlike the skill catalog. The transcript shows the line you typed and a dim line
+under it naming the file it came from, so which of two files by the same name won is
+answerable at a glance; the session file keeps the expanded text, because that is what was
+actually sent.
 
 ## Build from source
 

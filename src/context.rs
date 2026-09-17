@@ -141,6 +141,11 @@ pub struct Workspace {
     pub agents: Vec<AgentProfile>,
     /// The directories those profiles were found in, for the same reason as `skill_dirs`.
     pub agent_dirs: Vec<PathBuf>,
+    /// Prompt templates, by name, nearest directory first. The person's door, not the model's: see
+    /// `Prompt`.
+    pub prompts: Vec<Prompt>,
+    /// The directories those templates were found in, for the same reason as `skill_dirs`.
+    pub prompt_dirs: Vec<PathBuf>,
 }
 
 impl Workspace {
@@ -182,6 +187,32 @@ impl Workspace {
             .ok_or_else(|| unknown_agent_error(name, &self.agents))
     }
 
+    /// One skill by name, or nothing.
+    ///
+    /// The listing's counterpart to `prompt`, and the same reason for the `Option`: a caller that
+    /// wants the file a body came from should not have to load the body to find out.
+    pub fn skill(&self, name: &str) -> Option<&Skill> {
+        self.skills.iter().find(|skill| skill.name == name)
+    }
+
+    /// One template by name, or nothing.
+    ///
+    /// `Option` rather than an error, because the caller is the dispatcher's last resort: a word
+    /// that is neither a command nor a template is an unknown command, and that message -- with
+    /// `/help` and `/prompts` named in it -- is a better answer than naming a template list to
+    /// somebody who was not asking about templates.
+    pub fn prompt(&self, name: &str) -> Option<&Prompt> {
+        self.prompts.iter().find(|prompt| prompt.name == name)
+    }
+
+    /// Load one template's body by name, re-read from disk.
+    ///
+    /// Re-read rather than remembered, like `/reload`'s catalog: a saved prompt is exactly the kind of
+    /// file a person tweaks between two uses of it, and the next `/name` should send what is on disk.
+    pub fn load_prompt(&self, name: &str) -> Result<String> {
+        load_prompt(&self.prompt_dirs, name)
+    }
+
     /// The skill names, in the order the model is given them.
     ///
     /// Names only, and deliberately: the description is prose for the *model*, and a caller that
@@ -190,6 +221,14 @@ impl Workspace {
     /// menu needs.
     pub fn skill_names(&self) -> Vec<String> {
         self.skills.iter().map(|skill| skill.name.clone()).collect()
+    }
+
+    /// The template names, for the same reader as `skill_names`: the page's menu.
+    pub fn prompt_names(&self) -> Vec<String> {
+        self.prompts
+            .iter()
+            .map(|prompt| prompt.name.clone())
+            .collect()
     }
 
     /// The text to append to the system prompt. Empty when there is nothing to say.
@@ -351,6 +390,7 @@ pub fn discover_with(
 
     let dirs = skill_dirs_for(cwd, config_dir, root.as_deref(), extra_skill_dirs);
     let agent_dirs = agent_dirs_for(cwd, config_dir, root.as_deref());
+    let prompt_dirs = prompt_dirs_for(cwd, config_dir, root.as_deref());
     Workspace {
         root,
         instruction_files,
@@ -358,6 +398,8 @@ pub fn discover_with(
         skill_dirs: dirs,
         agents: agents_in(&agent_dirs),
         agent_dirs,
+        prompts: prompts_in(&prompt_dirs),
+        prompt_dirs,
     }
 }
 
@@ -487,6 +529,160 @@ pub fn load_skill(dirs: &[PathBuf], name: &str) -> Result<String> {
     let text = std::fs::read_to_string(&skill.path)
         .with_context(|| format!("cannot read skill {}", skill.path.display()))?;
     Ok(split_front_matter(&text).1.trim().to_string())
+}
+
+/// One prompt template: a saved prompt a person types by name.
+///
+/// The other half of the skill catalog, and deliberately a different list. A skill is instructions
+/// the *model* loads through the `skill` tool; a template is the person's own words, saved, and the
+/// model is never told it exists -- nothing about it enters the system prompt or a tool schema, so a
+/// directory of long templates costs a run nothing until one is typed.
+#[derive(Debug, Clone)]
+pub struct Prompt {
+    /// The word typed after the slash.
+    pub name: String,
+    /// One line for `/prompts`: front matter's `description`, or the body's first line.
+    pub description: String,
+    pub path: PathBuf,
+}
+
+/// Which directories are searched for prompt templates, in the order that decides name conflicts.
+///
+/// The same order and the same reasoning as `skill_dirs_for` -- the project's own prompts win, then
+/// the working directory's, then the user's -- with one difference worth stating: the config's extra
+/// directories are *not* searched. `skill_dirs` exists because a collection of skills is a thing
+/// people already keep in other places; a saved prompt is a sentence about this machine, and a second
+/// key saying what `<FLINT_HOME>/prompts/` already says would be one more thing to keep in step.
+pub fn prompt_dirs_for(cwd: &Path, config_dir: &Path, root: Option<&Path>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut push = |dir: PathBuf| {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    };
+    if let Some(root) = root {
+        push(root.join(".flint").join("prompts"));
+    }
+    push(cwd.join(".flint").join("prompts"));
+    push(config_dir.join("prompts"));
+    dirs
+}
+
+/// Every template in these directories, first directory first.
+///
+/// One level deep, exactly, like the skills and the profiles: `<dir>/<name>.md` and nothing nested,
+/// so a draft in a subdirectory is not offered as a command. The file name is the word typed, since
+/// that is what a person sees in their own directory listing; `name:` in front matter overrides it
+/// for the case where the two should differ, which is the rule the skills already follow.
+pub fn prompts_in(dirs: &[PathBuf]) -> Vec<Prompt> {
+    let mut out: Vec<Prompt> = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        let mut found: Vec<Prompt> = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let file_name = path
+                .file_stem()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let (front, body) = split_front_matter(&text);
+            let field = |key: &str| {
+                front
+                    .as_ref()
+                    .and_then(|fields| fields.iter().find(|(k, _)| k == key))
+                    .map(|(_, v)| v.trim().to_string())
+                    .unwrap_or_default()
+            };
+            let name = match front {
+                Some(_) => {
+                    let declared = field("name");
+                    if declared.is_empty() {
+                        file_name
+                    } else {
+                        declared
+                    }
+                }
+                None => file_name,
+            };
+            let description = {
+                let d = field("description");
+                if d.is_empty() {
+                    first_line(body)
+                } else {
+                    d
+                }
+            };
+            if name.trim().is_empty() {
+                continue;
+            }
+            found.push(Prompt {
+                name,
+                description,
+                path,
+            });
+        }
+        // `read_dir` order is arbitrary, and a listing that reshuffles between runs is one a person
+        // cannot learn -- the same reason the skill catalog sorts.
+        found.sort_by(|a, b| a.name.cmp(&b.name));
+        for prompt in found {
+            if !out.iter().any(|p| p.name == prompt.name) {
+                out.push(prompt);
+            }
+        }
+    }
+    out
+}
+
+/// Load one template's body by name, without its front matter.
+///
+/// Against the discovered names rather than a path built from the argument, for the same reason as
+/// `load_skill`: a name that is not a template is not a path, it is an error listing the ones that
+/// are.
+pub fn load_prompt(dirs: &[PathBuf], name: &str) -> Result<String> {
+    let prompts = prompts_in(dirs);
+    let prompt = prompts.iter().find(|p| p.name == name).ok_or_else(|| {
+        let known: Vec<&str> = prompts.iter().map(|p| p.name.as_str()).collect();
+        anyhow::anyhow!(
+            "unknown prompt '{}'. Available: {}",
+            name,
+            if known.is_empty() {
+                "(none)".to_string()
+            } else {
+                known.join(", ")
+            }
+        )
+    })?;
+    let text = std::fs::read_to_string(&prompt.path)
+        .with_context(|| format!("cannot read prompt {}", prompt.path.display()))?;
+    Ok(split_front_matter(&text).1.trim().to_string())
+}
+
+/// Put the words typed after a name where the file asked for them.
+///
+/// `{args}` is the hole, and a file without one gets the words appended as a last paragraph -- which
+/// is what "save this prompt and aim it at something else" means when the author did not think about
+/// arguments. Both ends are trimmed, and that is not tidiness: a body's own trailing newline would
+/// otherwise become a blank line before the appended words, and `{args}` at the end of a sentence
+/// must not drag one in. An empty substitution on an empty argument is deliberate, so `/name` with
+/// nothing after it sends the file as written rather than dropping the hole and the sentence with it.
+pub fn fill_args(body: &str, args: &str) -> String {
+    let body = body.trim_end();
+    let args = args.trim();
+    if body.contains("{args}") {
+        body.replace("{args}", args)
+    } else if args.is_empty() {
+        body.to_string()
+    } else {
+        format!("{body}\n\n{args}")
+    }
 }
 
 /// Which directories are searched for agent profiles, in the order that decides name conflicts.
@@ -1040,5 +1236,75 @@ mod tests {
             loud.summary(),
             "reader — Looks, does not touch. [readonly, model cheap, provider local]"
         );
+    }
+
+    #[test]
+    fn a_prompt_is_a_markdown_file_one_level_deep_named_by_its_file() {
+        let tree = Tree::new("prompts");
+        let cwd = tree.dir("work");
+        let config_dir = tree.dir("config");
+        tree.file(
+            "config/prompts/tidy-commits.md",
+            "---\ndescription: Squash and reword the commits.\n---\n\nTidy {args}.\n",
+        );
+        // The file name is the word typed, and front matter may override it; a `.txt`, a nested file
+        // and a directory are not prompts, for the same reason a nested `SKILL.md` is not a skill.
+        tree.file("config/prompts/release.md", "---\nname: cut-release\n---\nCut it.\n");
+        tree.file("config/prompts/notes.txt", "not a prompt");
+        tree.file("config/prompts/deep/draft.md", "not a prompt either");
+
+        let found = discover_with(&cwd, &config_dir, &tree.0.join("home"), &[]);
+        let names: Vec<&str> = found.prompts.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["cut-release", "tidy-commits"], "{:?}", found.prompts);
+        assert_eq!(found.prompts[1].description, "Squash and reword the commits.");
+        // No front matter at all: a person who writes `foo.md` and nothing else has written a prompt,
+        // the same reading the profiles and the skills take.
+        assert_eq!(found.prompts[0].description, "Cut it.");
+        assert_eq!(found.prompts[0].path, config_dir.join("prompts/release.md"));
+    }
+
+    #[test]
+    fn the_projects_prompt_wins_over_the_users_and_a_name_is_never_a_path() {
+        let tree = Tree::new("prompts-order");
+        let project = tree.git("project");
+        let config_dir = tree.dir("config");
+        tree.file("config/prompts/tidy-commits.md", "---\n---\nUser words.\n");
+        tree.file(
+            "project/.flint/prompts/tidy-commits.md",
+            "---\n---\nProject words.\n",
+        );
+        let found = discover_with(&project, &config_dir, &tree.0.join("home"), &[]);
+        assert_eq!(found.prompts.len(), 1, "{:?}", found.prompts);
+        assert_eq!(
+            found.load_prompt("tidy-commits").expect("load"),
+            "Project words."
+        );
+        assert!(found.prompt("tidy-commits").is_some());
+        assert!(found.prompt("nothing-by-that-name").is_none());
+
+        let err = format!("{:#}", found.load_prompt("../../etc/passwd").unwrap_err());
+        assert!(err.contains("unknown prompt"), "{err}");
+        assert!(err.contains("tidy-commits"), "the error does not say what exists: {err}");
+    }
+
+    #[test]
+    fn arguments_fill_the_hole_and_are_appended_when_there_is_none() {
+        // The hole, filled and trimmed: what the person typed is read as one argument however much
+        // whitespace they put around it, and `{args}` in the middle of a sentence does not drag a
+        // newline into it.
+        assert_eq!(
+            fill_args("Tidy {args}, then stop.\n", "  src/parser.rs \n"),
+            "Tidy src/parser.rs, then stop."
+        );
+        // No hole: the words become a last paragraph, and the body's own trailing newline is not
+        // allowed to become a blank line first.
+        assert_eq!(
+            fill_args("Summarise the README.\n", "in five lines"),
+            "Summarise the README.\n\nin five lines"
+        );
+        // Nothing typed: the file is sent as written, with no empty paragraph and no `{args}` left in
+        // a sentence that asked for one.
+        assert_eq!(fill_args("Summarise the README.\n", ""), "Summarise the README.");
+        assert_eq!(fill_args("Tidy {args}.", ""), "Tidy .");
     }
 }

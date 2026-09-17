@@ -199,6 +199,12 @@ pub struct Agent {
     /// rebuilds this agent) is what makes a new one appear. `/skills` typed by hand still discovers
     /// fresh, because that is a person asking what is on disk right now.
     skills: Vec<String>,
+    /// The names of the saved prompts this run found, for the page's menu.
+    ///
+    /// Not the model's: nothing about a prompt file enters the system prompt or a tool schema, which
+    /// is what keeps a directory of long templates free until one is typed. It is still discovered
+    /// once per agent for the page's sake -- see [`Agent::prompts`].
+    prompts: Vec<String>,
     /// The system prompt without the answer shape, so the shape can be added or dropped later.
     ///
     /// See [`Agent::hold_to_schema`]: a resumed session's schema is read out of its file, which
@@ -285,9 +291,11 @@ impl Agent {
                 provider.name(),
                 provider.model(),
             );
-        // One walk, two answers: the prompt's note and the page's menu. See `Agent::skills`.
+        // One walk, three answers: the prompt's note, the page's skill menu and the page's prompt
+        // menu. See `Agent::skills`.
         let workspace = context::Workspace::discover(&cwd, &config.skill_dirs);
         let skills = workspace.skill_names();
+        let prompts = workspace.prompt_names();
         let base_prompt = prompt_with_workspace(config, &cwd, &workspace);
         Agent {
             provider,
@@ -303,6 +311,7 @@ impl Agent {
             repeats: std::collections::HashMap::new(),
             drawn: String::new(),
             skills,
+            prompts,
             base_prompt,
             // No shape until a caller says so: an agent built for the REPL answers in prose.
             schema: None,
@@ -507,11 +516,21 @@ impl Agent {
         // The prompt was rebuilt, so the menu the page draws is rebuilt with it: a page offering a
         // skill this run's prompt no longer mentions would be promising more than the model has.
         self.skills = workspace.skill_names();
+        self.prompts = workspace.prompt_names();
     }
 
     /// The skills this run was given, in the order the model sees them.
     pub fn skills(&self) -> &[String] {
         &self.skills
+    }
+
+    /// The saved prompts this run found, for the page's menu.
+    ///
+    /// Unlike `skills` these are *not* what the model was given -- a template never reaches the
+    /// prompt -- so the page is the only reader, and the list is here for the reason the skill list
+    /// is: the frame is built after every line, and a directory walk per line is not free.
+    pub fn prompts(&self) -> &[String] {
+        &self.prompts
     }
 
     /// The file this conversation is being appended to, when it is being saved at all.
