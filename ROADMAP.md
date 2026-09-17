@@ -128,8 +128,11 @@ could only be settled on a Windows machine were settled on one (Windows 10.0.262
   quotes an argument only when it has a space in it, and a URL does not.
 
 **Left open, deliberately, and recorded in the document**: a Unix process-group kill for
-work a command backgrounds (§6.1) and the line-ending sentence for `apply_patch` (§6.4).
-Neither is a Windows item, and both need a test before they need code.
+work a command backgrounds (§6.1). It is not a Windows item, and it needs a test before it
+needs code. The other item this paragraph used to carry — the line-ending sentence for
+`apply_patch` (§6.4) — **is built**, and `docs/windows-tooling.md` is where that is written
+down. This file claimed otherwise for a session, and the correction is spelled out rather than
+dropped in silence, because "what is left" is the sentence the next reader trusts.
 
 ### 6. The transcript as cells — **all three steps landed**
 

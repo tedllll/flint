@@ -1514,6 +1514,15 @@ The practical rule that came out of it, for the next session: **do not rewrite a
 PowerShell's text cmdlets or `WriteAllText`.** They round-trip through the console code page. The `edit`
 and `write` tools write UTF-8 and are safe; `git checkout -- <file>` then re-applying is the repair.
 
+**Reading is a trap too, and it cost a detour while this paragraph was being written**: `Get-Content`
+without `-Encoding UTF8` decodes a file as the ANSI code page, so it *fabricated* U+9225 and U+6402 in
+`HANDOFF.md` and `ROADMAP.md` — files this test passes — and made the plan of record look damaged. A
+clean file read that way reports the same characters a damaged one does, so the check is worthless as
+a detector of anything. Read non-ASCII with
+`[System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)`, or with the `read` tool; and
+when a marker's code point has to be named *inside a markdown file*, name the number (`U+9225`) rather
+than the character, because the guard scans `.md` too and would rightly flag the character itself.
+
 **The step 7 measurement pass, and the four defects it found.** `docs/web-mode.md` §11 has the
 numbers; the short version is that three of the four had one cause — `paint` rebuilt the whole
 transcript on every frame, so every node on screen was a new node, and the scroll position, which
@@ -1978,10 +1987,11 @@ when nothing has been drawn.
 is next, the small agreed items and the not-doing list. It was written by folding this
 section into it, so the two do not drift. The shape of it now:
 
-1. **The Windows command line**, settled in full in
-   [`docs/windows-tooling.md`](docs/windows-tooling.md) and now **half built**: the runner
-   extraction, `exec` and the `glob`/`grep` separator fix are in the tree. What is left is
-   the part that needs the machine.
+1. **The Windows command line** — settled in full in
+   [`docs/windows-tooling.md`](docs/windows-tooling.md) and **built**: all five steps are in the
+   tree, and the parts that needed a real machine were settled on one (Windows 10.0.26200,
+   rustc 1.98.1, PowerShell 5.1 as the only PowerShell on `PATH`). What is left is one item, and
+   it is not a Windows one: a Unix process-group kill for work a command backgrounds (§6.1).
 2. **The transcript as cells** — steps 1 and 2 are done. The measurement found one 40-line
    answer streamed in 256 deltas painting **10×** the characters it contains (about 78
    characters of waste per delta) for a screen identical to the one a single delta produces;
@@ -2035,20 +2045,14 @@ section into it, so the two do not drift. The shape of it now:
    sampling them separately is how one frame's text gets measured against the previous frame's
    rows — the rows in between are then either committed twice or dropped. The two sites that used
    to hold a guard across a region are both scoped.
-3. **Web mode** — `--web` as a window onto the running process rather than a mode. The first
-   three steps need no decision, and the one open question (§7 of that document: a hand-rolled
-   HTTP server or `hyper`, which is already in the tree via `reqwest`) blocks only step 4.
-   The next web work is §8's **commands and config from the page**: the page sends the command
-   *line* over the channel the composer already uses; the `state` frame it needs for options
-   **is built** (provider, model, what each provider offers, the toggles, and now the command list
-   with §8's classes — see above); the provider and model pickers and the toggles are the first
-   controls drawn from it, and the command list is drawn as a panel of reports; and a
-   command's *output* now reaches the page too (the `command` line built two rounds ago), so
-   nothing structural is left between here and the buttons. What is left is a control per class:
-   buttons for the no-argument actions (**built** — see above), selectors, forms, and a
-   confirmation step for the destructive ones — the decisions taken for that unit are listed
-   under "Still owed on the page" above. `config.toml` writes are allowed because the per-run
-   loopback token already covers them, and `/exit` stays off the page.
+3. **Web mode** — `--web` as a window onto the running process rather than a mode, and it is
+   **built**: the three levels, §7's server question (settled without `hyper` — `src/web.rs` is a
+   hand-rolled loopback listener), and §8's five classes of control — the buttons, the panels that
+   read, the selectors, the forms and the destructive ones. What is left is the two residues listed
+   under "Still owed on the page" above: `/config edit` as a page form, which would need a
+   `/config set` the terminal does not have, and the later controls, which are asserted as bytes and
+   have not been driven as clicks in a real browser. `config.toml` writes are allowed because the
+   per-run loopback token already covers them, and `/exit` stays off the page.
 
 Both of the last two are platform-independent and can be done on either machine.
 
