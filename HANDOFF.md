@@ -6,8 +6,18 @@ of it.
 
 ## Where things stand
 
-**The second of the twelve items taken from the Pi reading is built and pushed: `--no-session`, a run
-that writes no conversation.** A one-off question asked against a big model, a look at a machine
+**A conversation you switch to inside a run is drawn, and not only loaded — reported against the
+terminal, and the page had already been doing it.** Starting with `--continue`, `--resume` or
+`--fork` has printed the tail of the conversation since sessions became reachable, but `/resume
+<n|id>` — the door you use when you are already in a run and want the older conversation — printed one
+line naming the file and left the screen otherwise as it was, so a switch that loaded a conversation
+and a switch that loaded nothing looked the same. It now prints the same block, from the same function,
+at the same point in the arm (before the loaded messages are *moved* into the new agent, which is what
+the ordering costs). The page was never the problem: `Viewer::follow` makes a browser re-read the file
+the run moved to, so this is the terminal catching up with its own startup path.
+
+**The second of the twelve items taken from the reading of Pi is built and pushed: `--no-session`, a
+run that writes no conversation.** A one-off question asked against a big model, a look at a machine
 somebody else owns, a script that wants no trace in the list. The file is the small half; the *doors*
 are the whole of it, and that is the sentence to remember: a flag whose promise is "nothing is written"
 is only true if the ways to write something are closed, so `--continue`, `--resume`, `--fork` and
@@ -207,8 +217,8 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 575 passing, 1 ignored on this machine
-(335 lib, 5 in the binary's own tests, 33 `agent_loop`, 76 `cli_output`, 35 `json_output` (7 structured
+As of the commit that carries this file, `cargo test` is 576 passing, 1 ignored on this machine
+(335 lib, 5 in the binary's own tests, 33 `agent_loop`, 77 `cli_output`, 35 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
 be able to read, 4 the answer written where the caller asked, 3 the file inlined into the prompt,
@@ -806,6 +816,16 @@ the block is drawn — then open the `commands` panel and read it against `/help
 
 ## What was just done
 
+**`/resume` drew nothing, and the fix is one call in the right place.** Reported from a real session:
+going back to an older conversation inside a running flint left the screen clean apart from the one
+`resumed: <file> (N messages)` line. `--resume` at startup had printed the conversation for a long time,
+so the run had two readings of the same act: opening a conversation, and *showing* it. The page had both
+too (`Viewer::follow` re-reads the file), and only the terminal's mid-run door had one. A test watched
+red first — `/resume` in a real REPL, with a fixture whose words appear nowhere else — then the same
+`print_transcript` the startup path calls. The subtlety the fix is arranged around is that
+`splice_loaded_history` *moves* the loaded messages, so the count and the drawing both have to happen
+before it. The section is below.
+
 **`--no-session`: a run that keeps no conversation, and the door it would have left open.** The second
 of the twelve items taken from the Pi reading, its own commit, and the shape of it is the doors rather
 than the file — `--continue`/`--resume`/`--fork`/`--name` refused at the command line before the config
@@ -818,11 +838,12 @@ been written *outside* `children/` and shown to the person as one of their own. 
 watched failing with the branch disabled and restored byte-for-byte. The section is below.
 
 **And the failure that was not a compile error.** The release matrix's `aarch64-unknown-linux-musl` job
-went red on the previous commit and never ran cargo: its zig install step died after one second while
+went red on the commit before that and never ran cargo: its zig install step died after one second while
 the sibling x86_64 job spent sixteen minutes downloading the same version successfully. Read off the
 step timings through the actions API rather than guessed at, fixed by moving the step to the maintained
-action — which also means the next builds will not spend sixteen minutes per musl job fetching the same
-tarball. `## Pushing from this machine` now records how to read a red job without a log.
+action (`adcde74`) — and the run that carried the fix brought that step down to ten seconds for arm64
+and forty-five for x86_64, four green targets. `## Pushing from this machine` records how to read a red
+job without a log.
 
 **The round before this one, recorded here so it is not re-done: an interrupt no longer throws away the
 answer it was drawing, the commands that rebuild the agent
@@ -1793,6 +1814,45 @@ code — re-reading config is not opening a conversation.
 new field for this. Omitting a field is not the claim "not yet" — which is exactly the claim that had to
 be fixed in the three child renderings — and a peer's line says the truth by saying nothing. If a second
 door onto that distinction appears, the record is where it would go.
+
+### `/resume` moved to a conversation and drew none of it
+
+Reported: *going back to an older conversation leaves the screen clean.* That was exact, and it was
+only true of one door. `--continue`, `--resume` and `--fork` have printed the conversation's tail since
+sessions became reachable — `print_transcript`, twelve messages, under a line saying how many earlier
+ones were left out — and that is why the report read as strange rather than as a missing feature: the
+run *had* a reading of "open a conversation" that included showing it. `/resume <n|id>`, the door for
+someone already inside a run, had the other half: it printed `resumed: <file> (N messages)` and nothing
+else, so a switch that loaded a conversation and a switch that loaded nothing looked identical on
+screen. The page has never had this problem, which is what makes it a defect rather than a design:
+`Viewer::follow` makes every open browser re-read the file the run moved to, so the browser draws the
+conversation the terminal was hiding.
+
+**The fix is the same call, in the one place where the messages still exist.** The `/resume` arm builds
+the new agent and hands the loaded history over with `splice_loaded_history` — which *moves* it — so the
+count (`count`), the `resumed:` line and the new `print_transcript(&loaded.messages, &printer)` all have
+to happen before that call. The arm is now ordered: resolve and load, apply the file's model, build the
+provider and the writer and the agent, print the line, draw the conversation, move the history in,
+return. Everything fallible is before the first line of output, which is why the drawing sits where it
+does rather than immediately after the load.
+
+**Measured red first, in a real REPL.** `a_resumed_conversation_is_drawn_and_not_only_loaded` (in
+`tests/cli_output.rs`) builds a fixture session whose two messages say
+"the socket question from yesterday" and "the socket answer from yesterday" — words that appear nowhere
+else in the run — drives the binary at `100x24` with `FLINT_TERM_CAPTURE=1`, types `/resume 111-1`, asks
+one question so the switch is followed by a turn, and asserts on the captured bytes. Before the fix it
+failed on the first assertion with the capture in the message; after it, both lines are there. The
+startup path's half was confirmed by hand through the byte stream rather than by reading the code:
+`FLINT_TERM_CAPTURE_FILE` plus `scripts/vtscreen.js` shows a sixteen-message conversation drawn as the
+last twelve under `── — 4 earlier messages, resumed transcript ──`, which is also what told us the block
+was working and only the mid-run door was not.
+
+**One thing checked and left alone: `--json` prints none of it, and that is correct.** The transcript
+goes to a person, and a `--json` caller must be able to read every line of stdout as one object; the
+same conversation is already in the request the model is sent, so nothing is lost by not printing it.
+Verified by running `--resume … -p hello --json` and reading the stream: three objects, no transcript.
+A plain one-shot *does* print it, which is the right side of that line — a person reading a terminal
+wants it, a program reading a stream does not.
 
 ### Still owed on the page
 

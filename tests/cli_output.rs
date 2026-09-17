@@ -2789,6 +2789,39 @@ async fn resume_and_capture(
     (stdout, body)
 }
 
+/// A conversation you switch to is drawn, and not only loaded.
+///
+/// `/resume` moved the run to another file and said one line about it -- the name and the count of
+/// messages -- so the screen after a switch held the line and nothing else. It is the same fault the
+/// startup path fixed: a conversation that was loaded and not drawn cannot be told apart from an
+/// empty one, and seeing where the conversation got to is the whole reason for going back to it. The
+/// page has always drawn it -- `Viewer::follow` makes a browser re-read the file the run moved to --
+/// and the terminal was the door that showed nothing.
+#[tokio::test]
+async fn a_resumed_conversation_is_drawn_and_not_only_loaded() {
+    let server = MockServer::start().await;
+    answer_once(&server).await;
+    let (stdout, _sent) = resume_and_capture(
+        &server,
+        "resume-draws",
+        &[
+            &meta_line("111-1"),
+            r#"{"type":"chat","message":{"role":"user","content":"the socket question from yesterday"}}"#,
+            r#"{"type":"chat","message":{"role":"assistant","content":"the socket answer from yesterday"}}"#,
+        ],
+    )
+    .await;
+
+    assert!(
+        stdout.contains("the socket question from yesterday"),
+        "/resume moved to a conversation and drew none of it: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("the socket answer from yesterday"),
+        "/resume drew what the person asked and not what was answered: {stdout:?}"
+    );
+}
+
 /// Resuming an ordinary session must send the model a system prompt.
 ///
 /// A session file holds the conversation and **not** the prompt: the prompt is rebuilt at

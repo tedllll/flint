@@ -3852,7 +3852,9 @@ async fn handle_command(
             // entirely when the file had none, which left the model with no instructions at
             // all and no sign that anything was wrong: the REPL looked normal, and the
             // answers just got worse.
-            new_agent.splice_loaded_history(cfg, &cwd, loaded.messages);
+            //
+            // The splice is what *moves* the loaded messages, so everything that reads them --
+            // the count above, and the transcript below -- has to happen before it.
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -3865,6 +3867,14 @@ async fn handle_command(
                     format!(", model {}", provider_cfg.model)
                 }
             ));
+            // Draw it, and not merely load it: the reading the startup path already gives the same
+            // thing. One line naming a file, on a screen that still holds the conversation just
+            // left, cannot be told apart from a switch that loaded nothing -- and seeing where a
+            // conversation got to is the whole reason for going back to it. The page has always
+            // drawn it (`Viewer::follow` makes a browser re-read the file the run moved to); this
+            // is the terminal catching up with its own startup path.
+            print_transcript(&loaded.messages, printer);
+            new_agent.splice_loaded_history(cfg, &cwd, loaded.messages);
             return Ok(Flow::NewAgent(new_agent, provider_cfg.clone()));
         }
 

@@ -217,7 +217,7 @@ Inside the REPL:
 | `/jobs stop <pid>` | end one of them (a child is asked, a command is killed) |
 | `/skills [name]` | list skills, or print one the way the model would get it |
 | `/sessions` | list past sessions, numbered |
-| `/resume <n\|id>` | switch to one of them, without restarting |
+| `/resume <n\|id>` | switch to one of them, without restarting — it prints the conversation it moved to, as `--resume` does |
 | `/name [text]` | show or set a name for this conversation |
 | `/archive <n\|id>` | move a session into `sessions/archive/` |
 | `/delete <n\|id>` | delete a session file |
@@ -1106,6 +1106,14 @@ Sessions are append-only JSONL at `~/.flint/sessions/<dir>/<id>.jsonl`, one even
 per line. A damaged line is skipped and reported rather than taking the session
 down. A resumed session is appended to, not rewritten, so nothing said after
 `--continue` is lost.
+
+**A conversation you go back to is drawn, not merely loaded.** `--continue`, `--resume`, `--fork`
+and `/resume <n|id>` all print the tail of the conversation they open — the last twelve messages,
+under a line that says how many earlier ones were left out — before the prompt comes back. The
+reason is that a line naming a file, on a screen that still holds the conversation you just left,
+cannot be told apart from a switch that opened nothing: seeing where the conversation got to is the
+whole reason for going back to it. A `--json` run prints none of it — that stream is for a program,
+and the same fact is already in the request the model is sent.
 
 A session file is created by the first thing *said*, not when flint starts. Open the REPL or
 `--web` and type nothing, and there is no file, no row in `/sessions` and nothing in the
