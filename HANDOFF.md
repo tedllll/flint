@@ -62,7 +62,7 @@ stopwatch — a steering line fails that assertion because the client abandons t
 more`, `> and then check the tests`, and both questions in the session file afterwards — which is the
 stop rule and the drain in one screen.
 
-**Gate and counts: `cargo test` 600 → 604 passing, 1 ignored** (343 lib, 5 → **6** in the binary's own
+**Gate and counts: `cargo test` 600 → 605 passing, 1 ignored** (343 → **344** lib, 5 → **6** in the binary's own
 tests — the `follow_up` boundary — 92 → **95** `cli_output`: the follow-up that waits, the stop that
 keeps the queue, and the idle send, plus the page-frame test from the fork round extended with the
 `/queue` form row and renamed `the_page_is_offered_the_arguments_a_command_takes`). `cargo clippy
@@ -72,6 +72,26 @@ even though this round adds a command row and no page code, because a new form i
 own JS renders and the harness is the only thing that presses it. It does not press `/queue`, so what it
 shows is that the new row broke nothing the page already did; the row itself is held in CI by the frame
 assertion in `cli_output`.
+
+**The push caught a second defect, and it is fixed in its own commit.** The `ci` job's Windows leg went
+red on the `/queue` commit with `tools::background_command_tests::a_job_is_snapshotted_while_it_runs_and_again_when_it_has_ended`
+failing at "the same start": `left: 1789641929, right: 1789641928`. Nothing to do with the queue — the
+test compares a running job's `started_secs` against the same job's after it ended, and `jobs_snapshot`
+was *deriving* that number at read time as `SystemTime::now() - job.started.elapsed()`. Both ends of that
+subtraction are truncated to whole seconds, so which second comes back depends on where the fractional
+part of the clock happens to fall: the two looks straddled a boundary and disagreed. The test had been
+passing by luck since the jobs panel was built, and the whole jobs panel was affected — a page polling one
+running job can be told it started at two different times a second apart.
+
+The fix records the moment instead of recomputing it: `JobMoment { at: Instant, wall: SystemTime }`,
+taken once at `JobMoment::now()` when the job starts and once when it ends, with `epoch_secs(wall)` now
+reading a stored clock rather than subtracting two. The two clocks are kept because each is good for one
+thing — `at` answers "running for 40s" and orders jobs by when they started, `wall` is the absolute second
+the page and a person read. Red first, and *deliberately* rather than by luck this time: the new test
+samples a running job's `started_secs` 25 times over two and a half seconds and demands one answer, and it
+failed on the old code with `{1789642232, 1789642233}` before the fix. That also settles the argument the
+old comment made — "a stored second field would be the same fact recorded twice" — which is now recorded
+where it was wrong, in `docs/web-mode.md` §13.
 
 **The sixth of the twelve items taken from the reading of Pi is built: a fork from a chosen point.**
 `--fork` copied a whole conversation and its tail came with it, so "that went wrong four messages ago,
@@ -522,8 +542,8 @@ drawn where it was built: profiles and an explicit, capped fan-out, and nothing 
 context, no merge, and no flint choosing to parallelise on its own.
 
 Everything is committed, the working tree is clean, and `main` is pushed to `origin/main`.
-As of the commit that carries this file, `cargo test` is 604 passing, 1 ignored on this machine
-(343 lib, 6 in the binary's own tests, 33 `agent_loop`, 95 `cli_output`, 36 `json_output` (7 structured
+As of the commit that carries this file, `cargo test` is 605 passing, 1 ignored on this machine
+(344 lib, 6 in the binary's own tests, 33 `agent_loop`, 95 `cli_output`, 36 `json_output` (7 structured
 output, 1 the heartbeat, 2 the stop channel, 8 the exit codes and the turn's outcome, 2 the
 balance, 1 what a caller's pipe must not come back out of, 3 the refusal a `--json` caller has to
 be able to read, 4 the answer written where the caller asked, 3 the file inlined into the prompt,
@@ -1073,7 +1093,7 @@ still building when the second landed.
 ```bash
 git clone git@github.com:tedllll/flint.git && cd flint
 cargo build                                       # the Python and browser checks run this binary
-cargo test                                        # 604 passing, 1 ignored
+cargo test                                        # 605 passing, 1 ignored
 cargo clippy --all-targets                        # silent, and worth keeping that way
 node scripts/term-layout-test.js                  # 全部通过
 node scripts/web-view-test.js                     # all passed

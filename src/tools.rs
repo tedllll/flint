@@ -1022,6 +1022,37 @@ enum JobKind {
 /// because there is no conversation to interrupt. The pid, the budget, the `reported` bookkeeping
 /// and the notice are shared, which is why there is one `job_op` rather than one verb per kind of
 /// thing a run can leave running.
+/// A moment in a job's life, in the two clocks that are each good for one thing: `at` is how long
+/// ago it was, and `wall` is the time a person and a page read.
+///
+/// The pair is recorded together and never recomputed, which is the whole point of it existing.
+/// `now - elapsed` looks equivalent and is not: both ends are truncated to whole seconds, so which
+/// second comes back depends on where the fractional part of the clock happens to fall, and two looks
+/// at the same running job can land a second apart. Windows CI found that once; the test beside the
+/// snapshot test finds it on purpose.
+///
+/// The comparison is `at` first, which is the monotonic clock and therefore the right one for
+/// ordering -- two jobs are sorted by when they started, not by whether the wall clock was adjusted
+/// between them.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct JobMoment {
+    at: std::time::Instant,
+    wall: std::time::SystemTime,
+}
+
+impl JobMoment {
+    fn now() -> Self {
+        Self {
+            at: std::time::Instant::now(),
+            wall: std::time::SystemTime::now(),
+        }
+    }
+
+    fn elapsed(&self) -> std::time::Duration {
+        self.at.elapsed()
+    }
+}
+
 struct Job {
     kind: JobKind,
     pid: u32,
@@ -1030,9 +1061,9 @@ struct Job {
     /// person read the session file to tell two children apart. For a command this is its command
     /// line, which is the same question ("which one is this?") with the same answer.
     prompt: String,
-    started: std::time::Instant,
+    started: JobMoment,
     /// Set when the child ended, so "finished 40s ago" is answerable without waiting for anything.
-    ended: std::sync::Mutex<Option<std::time::Instant>>,
+    ended: std::sync::Mutex<Option<JobMoment>>,
     depth: u32,
     readonly: bool,
     /// Whether this run started it *without waiting* -- which is what makes ending worth a notice of
@@ -1154,7 +1185,10 @@ fn jobs_changed() {
 /// scanning. Three of its fields exist because the page has no clock of the server's:
 ///
 ///   * `started_secs` and `ended_secs` are absolute epoch seconds, so a page that has been open for
-///     an hour shows the true age of a job rather than counting from whenever it last heard.
+///     an hour shows the true age of a job rather than counting from whenever it last heard. Both are
+///     read off the moment the job recorded for itself -- see `JobMoment` -- rather than computed from
+///     the clock at the time of the look, because a start that can move by a second between two
+///     glances is not a start.
 ///   * `status` is a word rather than a sentence -- `running`, `completed`, `killed`, `failed` --
 ///     and `detail` carries the fact sentence beside it, because a row needs a word it can colour
 ///     and a person wants the exit code.
@@ -1164,7 +1198,6 @@ fn jobs_changed() {
 /// Nothing here is a new record: every field is read off the `Job` the handle already is, which is
 /// why the page cannot come to disagree with `job_op`.
 pub fn jobs_snapshot() -> serde_json::Value {
-    let now = std::time::SystemTime::now();
     let jobs: Vec<serde_json::Value> = jobs_listed()
         .iter()
         .map(|job| {
@@ -1194,8 +1227,8 @@ pub fn jobs_snapshot() -> serde_json::Value {
                 "label": util::truncate(&job.prompt, 200),
                 "status": status,
                 "detail": detail,
-                "started_secs": epoch_secs(now, job.started.elapsed()),
-                "ended_secs": ended.map(|ended| epoch_secs(now, ended.elapsed())),
+                "started_secs": epoch_secs(job.started.wall),
+                "ended_secs": ended.map(|ended| epoch_secs(ended.wall)),
                 "path": path,
             })
         })
@@ -1223,11 +1256,10 @@ fn job_status(code: i32) -> &'static str {
 /// needs a wall clock because that is what survives a page that was open across the two. This is the
 /// one conversion between them, and it is derived rather than stored: a second field on the job
 /// would be the same fact recorded twice, and the rule here is that only one of them can be wrong.
-fn epoch_secs(now: std::time::SystemTime, ago: std::time::Duration) -> u64 {
-    now.duration_since(std::time::UNIX_EPOCH)
+fn epoch_secs(wall: std::time::SystemTime) -> u64 {
+    wall.duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-        .saturating_sub(ago.as_secs())
 }
 
 /// One child by pid, when this run is the one that started it.
@@ -2354,7 +2386,7 @@ async fn start_background_command(
         pid,
         label: label.clone(),
         prompt: label,
-        started: std::time::Instant::now(),
+        started: JobMoment::now(),
         ended: std::sync::Mutex::new(None),
         // A command is not a run: it is not part of the depth chain, and `readonly` was decided by
         // the tool call that got here, before anything was spawned.
@@ -2440,7 +2472,7 @@ async fn start_background_command(
         *supervisor
             .ended
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+            .unwrap_or_else(|e| e.into_inner()) = Some(JobMoment::now());
         supervisor.done.notify_waiters();
         // A job that ended is news to a page that is showing it as running, whether or not anybody
         // was waiting for it -- and the notice below goes to the *person's* screen, which is a
@@ -5326,7 +5358,7 @@ fn start_child(child: Child) -> Result<std::sync::Arc<Job>> {
         pid,
         label: label.clone(),
         prompt,
-        started: std::time::Instant::now(),
+        started: JobMoment::now(),
         ended: std::sync::Mutex::new(None),
         depth: child.depth,
         readonly: child.readonly,
@@ -5411,7 +5443,7 @@ fn start_child(child: Child) -> Result<std::sync::Arc<Job>> {
         *supervisor_job
             .ended
             .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now());
+            .unwrap_or_else(|e| e.into_inner()) = Some(JobMoment::now());
         // Its stdout is closed and its exit status is known, so nothing is left running -- and this is
         // the one place that still runs when the parent stopped waiting: the tool's own future may
         // have been dropped long before, which is what a `task` child outliving its turn proved.
@@ -6807,6 +6839,44 @@ mod background_command_tests {
             ended["ended_secs"].as_u64().unwrap_or(0) >= started,
             "it ended before it started: {ended}"
         );
+    }
+
+    /// The same job's start, looked at twice: one number, because it is a fact recorded when the job
+    /// started rather than a subtraction done at each look.
+    ///
+    /// This is the test that made the fix. `started_secs` used to be `now - elapsed`, which looks
+    /// equivalent and is not: both ends are truncated to whole seconds, so where the fractional part
+    /// of the clock happens to fall decides which second comes back, and a page polling one running
+    /// job could be told it started at two different times a second apart. Windows CI found it once,
+    /// which is the worst way to find out, so here it is on purpose: sample a running job across more
+    /// than the second the derivation can be wrong about and demand one answer.
+    #[tokio::test]
+    async fn a_jobs_start_does_not_move_between_snapshots() {
+        let dir = TempDir::new("jobs-start");
+        let tools = toolbox(&dir, false);
+        let handle = tools
+            .invoke(
+                "bash",
+                &json!({ "command": slow_command(), "background": true }),
+            )
+            .await
+            .expect("background bash");
+        let (pid, _) = handle_of(&handle);
+
+        // `slow_command` runs for three seconds and the derivation is wrong about one of them, so
+        // 25 samples a tenth of a second apart cover the whole of what it can be wrong about. The
+        // loop is counted rather than "until it ends" on purpose: a job that never ended would
+        // otherwise hang this test rather than fail it.
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..25 {
+            seen.insert(
+                job_row(pid)["started_secs"]
+                    .as_u64()
+                    .expect("a start time"),
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(seen.len(), 1, "a running job's start moved while it ran: {seen:?}");
     }
 
     /// One job's row out of the snapshot, by pid. A helper rather than an index, because the list is

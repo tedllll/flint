@@ -1103,11 +1103,16 @@ same `Job` records `job_op` answers from — the same `finished`, the same `log`
 `started` — so the page and the tool cannot describe one job two ways. Three fields exist because the
 page is not the model:
 
-- **`started_secs`/`ended_secs` are absolute epoch seconds**, derived at read time from the job's
-  `Instant` (`SystemTime::now() - elapsed`) rather than stored: a stored second field would be the same
-  fact recorded twice, and the point of the absolute clock is that a page which has been open for an
-  hour still shows the true age of a job it heard about when it opened. Ticking is the page's own
-  arithmetic — one `setInterval` that rewrites the `.when` text of the *running* rows, no request.
+- **`started_secs`/`ended_secs` are absolute epoch seconds**, recorded once in the job's own moment
+  (`JobMoment`: an `Instant` for "how long ago", a `SystemTime` for the time a person reads) rather than
+  computed at read time. They *were* computed — `SystemTime::now() - job.started.elapsed()` — on the
+  argument that a stored second field would be the same fact recorded twice, and the argument was wrong
+  in a way Windows CI caught: both ends of that subtraction are truncated to whole seconds, so where the
+  fractional part of the clock falls decides which second comes back, and two looks at one running job
+  could report it starting a second apart. A start that moves is not a start. The point of the absolute
+  clock is unchanged — a page open for an hour still shows the true age of a job it heard about when it
+  opened — and ticking is still the page's own arithmetic: one `setInterval` that rewrites the `.when`
+  text of the *running* rows, no request.
 - **A status word beside the fact.** `running`, `completed`, `killed`, `failed`, from the exit code
   alone (`job_status`), with `exit code 0 (finished)` beside it in the row. A kill and a failure look
   identical from outside, and a row that said "failed" for a kill sends somebody looking for a bug that
