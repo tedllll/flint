@@ -51,6 +51,16 @@ events so a fold does not travel into a copy, and the parts of Pi's design flint
 as the trigger, splitting a turn that does not fit into a "turn prefix" summary, and a private rendering
 of the conversation for the summarizer.
 
+**One CI failure on the ubuntu job of this commit, and it is not this change's:** `tests/task.rs:512`,
+`a_readonly_run_cannot_be_talked_into_a_writing_child`, panicked with "the child should have been
+writable here" — the second phase of that test did not see the child's `readonly: false` line. The same
+job passed on the previous commit minutes earlier, the windows job passed on this one, and the test
+touches neither the session format nor the request path; the fixture drives parent and child against one
+`Scripted` stub whose answers are handed out by a global step counter, so a shifted request order in
+either process misaligns both. That is the shape to fix if it recurs: key the scripted answer on the
+request body rather than on arrival order. Left alone on purpose here rather than guessed at, because a
+fix that cannot be watched failing is not a fix.
+
 **The tenth of the twelve items taken from the reading of Pi is built: flint asks for reasoning, and the
 field it asks in is the endpoint's.** Before this the request body was model, messages, `stream`,
 `stream_options`, tools and `response_format`, and nothing else — flint read reasoning when a provider
