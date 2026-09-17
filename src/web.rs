@@ -1007,6 +1007,19 @@ fn serve_session(state: &State) -> Response {
             }
             response
         }
+        // The file is created by the first thing said in it, and the run has a session named
+        // before that -- so a fresh run's page asks for a path that is not there yet, and it is
+        // asking about a conversation that is genuinely empty rather than about a fault. Serving
+        // that as a 500 (which it was, measured in a browser) left the page unable to draw any of
+        // its controls, because it cannot finish until this route has answered. An empty body is
+        // what an empty file would have been, and the page reads the file or nothing.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Response {
+            status: 200,
+            reason: "OK",
+            content_type: "application/x-ndjson; charset=utf-8",
+            body: String::new(),
+            extra: Vec::new(),
+        },
         Err(e) => Response::text(
             500,
             "Internal Server Error",
@@ -1918,6 +1931,43 @@ mod tests {
         let response = ask(&ours("/session"), &state());
         assert_eq!(response.status, 404);
         assert!(response.body.contains("not writing a session"), "{}", response.body);
+    }
+
+    /// A session file that does not exist *yet* is an empty conversation, not an error.
+    ///
+    /// Found by driving the page in a real browser rather than by reading this file: a run with
+    /// `--web` produces the page's controls from the `state` frame, and the page cannot finish
+    /// drawing until `/session` has answered. The session is named the moment the run starts --
+    /// the id is part of the run, and a switch prints it -- while the *file* is created by the
+    /// first thing said in it, which is a deliberate rule from `session.rs` (opening flint and
+    /// typing nothing leaves nothing behind). So the first thing a fresh run's browser asks for
+    /// is the one path that does not exist, and this route answered 500 with the raw
+    /// `os error 3`, which is a page that never draws a single control and a person who sees a
+    /// broken view rather than a new conversation.
+    ///
+    /// An empty body is the honest answer and it is the same one an empty file would get: the
+    /// page is a reader of the file, and a file with nothing in it reads as a conversation with
+    /// nothing in it. Any *other* read failure still goes to the 500 below, because a permission
+    /// problem or a bad path is a real fault and hiding it would be worse than showing it.
+    #[test]
+    fn a_session_file_that_does_not_exist_yet_is_an_empty_conversation() {
+        let dir = std::env::temp_dir().join(format!("flint-web-unwritten-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        // The directory as well as the file is missing, which is the case a fresh run is in: the
+        // run's directory under `sessions/` is created with the file.
+        let path = dir.join("subdir").join("1.jsonl");
+        assert!(!path.exists());
+
+        let response = ask(&ours("/session"), &with_session(path));
+        assert_eq!(
+            response.status, 200,
+            "a fresh run's page is refused the conversation it has not started yet: {}",
+            response.body
+        );
+        assert_eq!(response.body, "", "there is nothing to read, so there is nothing to serve");
+        assert!(response.content_type.starts_with("application/x-ndjson"), "{}", response.content_type);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A path is never looked up on disk, so there is no traversal to get wrong (§6).

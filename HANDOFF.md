@@ -1412,15 +1412,22 @@ each with the reason it is left:
    feed (`turn.completed`, then the answer). The mechanism (`Handover` stashing it rather than
    treating it as an interrupt) was already right; what was missing was a turn slow enough to ask
    during, and the stub now provides one.
-3. **A browser** — **half done, and the two halves are worth keeping apart.** §11's `L3 in a real
-   browser` table was measured over the Chrome DevTools protocol against the real page and the real
-   binary: the sidebar listing, switching by clicking a row, `+ new`, Enter to send, the layout at two
-   window sizes — and it found three defects that reading the source could not. What is still
-   unmeasured is every *later* control, and §11 says so in its own `Not yet measured in a browser`
-   lines: the switches were checked as bytes rather than as clicks, and nobody has opened the
-   `commands` panel with a real font, pressed one of the action buttons, typed into the masked
-   credential field, or opened a destructive row's menu with a real pointer. So the gap has narrowed
-   from "a browser" to a named list of controls.
+3. **A browser** — **done for every control §8 built, and the two halves are still worth keeping
+   apart.** §11's `L3 in a real browser` table was measured over the Chrome DevTools protocol against
+   the real page and the real binary: the sidebar listing, switching by clicking a row, `+ new`, Enter
+   to send, the layout at two window sizes — and it found three defects that reading the source could
+   not. The *later* controls have since had the same treatment, from a committed harness rather than a
+   one-off: `scripts/browser-controls-test.js` drives the switches, the command panel, an action
+   button, the masked credential field and a destructive row's menu with real input events, and checks
+   every press against the *run's* stdout rather than against the page — which is the only witness that
+   can tell a click that sent something from a click that sent nothing. It found two defects, both
+   fixed and both invisible in the source: a fresh `--web` run answered 500 on `/session` (the run
+   names its session before the file exists, so the page never drew a single control), and with the
+   `commands` panel open the `send` button could not be clicked at all, because the panel is the one
+   thing in the header that grows without bound and it pushed the reading over the composer. §11's
+   `The later controls, in a real browser` is the table and the method; what is still unmeasured is a
+   short and named list — a native `<select>`'s open dropdown, the sidebar's own menu, and the drag
+   grips.
 4. **Renaming from the sidebar** — ~~a `/name` field exists in the panel and works, and the sidebar
    has no affordance for it~~ **built 2026-09-17**, exactly as this line predicted: a `/name <text>`
    line through `/message` like every other row action, with no route of its own. The row's menu
@@ -2080,7 +2087,9 @@ section into it, so the two do not drift. The shape of it now:
    **closed** — the terminal got the `/config set <key> <value>` it was missing, so the page writes the
    config file through a two-field form like any other row, and the wizard stays in the terminal where
    a person can answer it (see that entry for the lie in the wizard this also fixed). The later
-   controls are the one thing still asserted as bytes rather than driven as clicks, and §11 names them.
+   controls were the one thing still asserted as bytes rather than driven as clicks; they have since
+   been driven, in `scripts/browser-controls-test.js`, which found two defects and fixed both (see
+   entry 3 under "Still owed on the page"). §11 names what a browser still has not touched.
    `config.toml` writes are allowed because the per-run loopback token already covers them, and
    `/exit` stays off the page.
 

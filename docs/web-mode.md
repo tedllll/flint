@@ -13,8 +13,11 @@ of a file, and closing the tab loses nothing.
 **All of §9 is implemented.** The static viewer, the `--web` listener with `GET /`, the two
 data routes `GET /session` and `GET /events`, and step 6 — `GET /sessions` and `POST /message`,
 which is what makes the page a **composer** and gives it a sidebar. §11 records what has been
-measured in a browser versus what has not. What is left is not a level but a polish list: §8's
-"not doing" is still not being done.
+measured in a browser versus what has not, and as of 2026-09-17 that includes every control §8
+built: the switches, the panel, the buttons, the forms and the destructive rows have all been
+driven with real input events, and driving them found two defects. What is left is not a level but
+a polish list, named at the end of §11: a native `<select>`'s dropdown, the sidebar's own menu,
+and the drag grips. §8's "not doing" is still not being done.
 
 The token goes in two different places, and the difference is deliberate: `?token=` is accepted
 on `/` alone, because that is the URL `--web` prints and the only one a person pastes into an
@@ -39,9 +42,14 @@ measured machine:
 **Some of this file has now been run in a browser.** §9 step 2's viewer was rendered in
 headless Chrome and looked at, and §11 records what that measured. It is a weaker thing than
 a test and a stronger thing than reasoning: it immediately found a defect that no amount of
-reading would have. Everything about the *listener* — §4's boundary, §6's routes, and every
-question about backpressure and reconnection — is still unmeasured, because the listener does
-not exist yet.
+reading would have. The same has since been done to every control in §8 — driven over the
+DevTools protocol by `scripts/browser-controls-test.js`, which found two more defects, one of
+them a page with no controls on it at all. What remains unmeasured is a named list at the end of
+§11 rather than a section: a native `<select>`'s open dropdown, the sidebar's own menu, and the
+drag grips. The *listener*'s own questions — §4's boundary, §6's routes, backpressure and
+reconnection — were measured in the macOS pass this file records, and the phrasing above used to
+say they were unmeasured "because the listener does not exist yet", which stopped being true when
+it was built.
 
 ---
 
@@ -587,11 +595,12 @@ way as everything else in this section, against a real `--web` process:
 | A setting can be switched from the page | `POST /message` with `/verbose full`, the line the switch composes | the feed carried `"name":"verbose"…"value":"full"` a moment later. The frame carries each toggle as a name, the values that name takes and the value in force, so the page holds no list of its own — not the toggles, not the words, and not which one is on |
 | The switches are drawn right | `showToggles` under Node, over the stub DOM | one labelled switch per toggle in the frame, each holding that toggle's values with the value in force selected; a frame with no toggles in it removes them rather than leaving values behind that nothing is reporting |
 
-**Not yet measured in a browser**, and it is the next thing to look at: the controls were checked as
-*behaviour* (which options, which value, what a change sends) and as bytes (the markup starts
-hidden, one line per control, the frame applied where it arrives), but nobody has looked at the
-header with a real font, or used a picker or a switch from the keyboard. Everything in this section
-that says "measured" means a process and a socket; §9 step 7 is still the rule for the rest.
+**Measured in a browser since, 2026-09-17** — see `The later controls, in a real browser` at the end of
+this section, which drives the header with a real font and a real window: the switches, the pickers and
+the panel are all now looked at rather than only reasoned about, and one of the four switches was moved
+by a real key event rather than by a script setting a value. What is still not measured there is the
+*picker* (a native `<select>` opened by a pointer is an OS widget no protocol can reach into) and the
+sidebar's own menu.
 
 The command list was deliberately not in the frame until something read it — and what reads it is the
 panel in the next section, which is why it arrived then rather than here. The other half of that
@@ -615,9 +624,13 @@ tool result twice.
 | Colour does not reach the page | `Term::plain`'s two escape forms, in the unit test | `\x1b[2mdim\x1b[0m` records as `dim`, an OSC title records as nothing, and a truncated sequence loses its tail rather than printing junk. The e2e run cannot see this: its stdout is a file, so it has no colour to strip |
 | The page draws it as a transcript block | the page's real `paint` under Node, over the stub DOM | one `turn command` row, with `/tools` as its label and `bash\nread\nedit` as its body; a frame with no `text` paints nothing rather than the word `undefined` |
 
-**Not yet measured in a browser**: nobody has watched a `/config` typed into the composer land in the
-transcript with a real font and a real scroll position. The block is drawn like a user message with
-the command as its label, and that is a guess until someone looks at it.
+**Measured in a browser since, 2026-09-17**: a line typed into the composer and sent with a real click
+on `send` reaches the run and its answer lands in the transcript, read off the process's own output
+rather than off the page — see `The later controls, in a real browser`. What that run did *not* do is
+scroll: the answer's block is drawn the same way whether the page is at the top or a thousand lines
+down, and the scroll position is still the page's own business, reasoned about rather than seen. The
+part that *was* only a guess is gone with it: the block is drawn like a user message with the command
+as its label, and a real browser has now drawn one.
 
 ### The command list, and the panel drawn from it — measured, 2026-09-15
 
@@ -648,9 +661,9 @@ The panel was deliberately not a control at this point: it listed the rows and g
 clicking one did nothing. Both halves have since been built — the header's buttons send, and a report
 row is read — and this paragraph is left as the record of what this commit measured.
 
-**Not yet measured in a browser**: nobody has opened the `commands` panel with a real font and read
-it against `/help` in the terminal, or used it while an answer was streaming. It is pinned as
-behaviour and as bytes, and that is all it is pinned as.
+**Measured in a browser since, 2026-09-17**: the panel is opened by a real click on its `summary`, read
+against the frame's own rows, and photographed — see `The later controls, in a real browser`, which
+also found that it could cover the composer while it was open.
 
 ### The first control: a button for the actions — measured, 2026-09-15
 
@@ -669,9 +682,11 @@ confirmation this page does not have yet.
 | The press sends the frame's line | `tests/web_view.rs`, over the page's own bytes | `sendText(command.send)` — the line the process composed, not a name the page put back together — with the class filter and the refused-send path (`showState(doc)`) pinned beside it. The stub DOM has no event delivery, so this is pinned as bytes and the Node checks pin what is drawn, exactly as the switches' `/<name> <value>` is |
 | An action answers with something | the frame's button `send` strings posted to `POST /message`, the answers read off the feed | non-empty `text` for every button row. A button's whole feedback here is the line it prints, so an empty one would be indistinguishable from a press that never arrived. Mutation-checked: neutering `Live::command`'s push fails it naming `/new` |
 
-**Not yet measured in a browser**: nobody has pressed one. What a press does is pinned as bytes and
-what comes back is pinned end to end, and nothing here says how the button looks or where it lands
-under a real cursor.
+**Measured in a browser since, 2026-09-17**: `/reload`'s button is clicked with a real pointer and the
+run prints `reloaded`. Being measured at all is worth noting for where the button is — the *header*,
+not the panel: an action takes no argument, so the panel keeps it as a row of reference and the button
+lives beside the switches (`showActions`). A harness that looked for it in the command list, as this
+one did first, finds nothing and learns something.
 
 ### A report is read, not printed — measured, 2026-09-15
 
@@ -796,11 +811,10 @@ sitting at. That is a hang, not a wrong answer, which is why it is asserted rath
 | A form row without the mark is still a row | Node, over the stub DOM | the marked rows are `form` elements holding `input:text` / `input:password` with buttons reading `/name` and `/provider key`, and `/config edit` is a `div` |
 | The page does not name a command to build the line | the frame, by construction | the button reads the row's own `send` and the answers are joined to it; the page has no list of commands and no table of which answers they take |
 
-**Not measured**: a browser, as ever — and the masked field has never been typed into by a person, so
-what is pinned is the markup and the route, not the browser's own password-manager behaviour. Nor has
-the *submit* path been seen in a browser: the Node harness delivers listeners to the handlers the page
-registered, which is enough to show that a refusal refuses, but a form's own Enter key and a
-`type="submit"` button exist only in the real thing.
+**Measured in a browser since, 2026-09-17**: the field is typed into and its submit button is pressed in
+a real browser, with the masking, the emptying and the secret's absence from the page all checked there
+— see `The later controls, in a real browser`. What is still not measured is the browser's own
+password-manager behaviour, which is the browser's and not this page's.
 
 ### A conversation's own actions, one level down — measured, 2026-09-15
 
@@ -883,8 +897,64 @@ be drawn before anything can be confirmed and the two lists are different ones. 
 | A choice list with nothing in it says so | Node, the same check, opened on `from: "sessions"` with no list | one row reading `nothing to choose from` rather than an empty list that looks like one with nothing in it |
 | An open list does not outlive its numbers | `web/view.html`, read | `readSessions` redraws the panel when a choice list is open, and a `reset` clears `doc.confirm` — `/delete` in the terminal shifts every number below the one that went, and the numbers in a list are positions |
 
-**Not measured**: a browser, as ever, and the deletion itself — that is the terminal's own command
-reached through the composer's route, and it is measured in the terminal's terms elsewhere. What this
-class adds is the two presses, and the thing that stops a single press is that there is nothing on the
-page to press that sends.
+**Measured in a browser since, 2026-09-17**: the first press is made with a real pointer on a real
+`/delete <n|id>` row, its candidates are read, and the way out is pressed — with the *nothing sent* half
+asserted against the run's own output and the sessions still on disk afterwards. See `The later
+controls, in a real browser`. The second press still has not been made from a browser, and that is on
+purpose: it would delete a real conversation, and what the two-press shape promises is exactly that the
+first press is not it.
+
+### The later controls, in a real browser — measured, 2026-09-17
+
+§11's own list of what a browser had never seen, closed one control at a time: the switches, the command
+panel, an action button, the masked credential field, and a destructive row's menu. Driven over the
+Chrome DevTools protocol from `scripts/browser-controls-test.js` — node's own `WebSocket`, so no package
+is installed for it, and headless Chrome on Windows at 1374×800 — with the page's real font, a real
+window, and real input events: `Input.dispatchMouseEvent` at each element's own box and
+`Input.dispatchKeyEvent` for the switch.
+
+**Every claim is checked against the run's stdout, not against the page.** That is the whole method: a
+click that sent nothing leaves the page looking exactly like a click that worked, so the witness has to
+be the process on the other end of the socket. The harness also keeps the browser's console and network
+traffic, which is what turned the first failure from "the controls never appeared" into a 500 on
+`/session`.
+
+| Claim | How | Result |
+|---|---|---|
+| The switches are drawn from the run's own state | the header, read from the page | `verbose`, `detail`, `readonly`, `hear-peers` — the frame's four, in its order |
+| A switch moves the control and the run together | `ArrowDown` on the focused `readonly` select | the page's value changed *and* the run printed `/verbose full …` — the same line the keyboard path sends, because a native select opened by a pointer is an OS widget no protocol can reach into |
+| The panel opens with a click, and lists the run's commands | a real click on `commands`, then the panel's text | open, with rows from all five classes including `/config`, `/provider key`, `/delete <n|id>` and `/name`; the form rows appear as their submit buttons, which is why the check reads text rather than `code` elements |
+| The run's actions are buttons in the header | the same frame, `#actions` | `/new` and `/reload` — not rows in the panel, which is the design and was worth writing down |
+| A report is answered in the panel and nowhere else | a real click on `/config`, then the panel and the run's stdout | the listing was drawn in the panel and the terminal gained **not one byte** — the quiet-answer channel, seen from a browser for the first time |
+| An action button runs the command | a real click on `/reload` | the run printed `reloaded` |
+| The credential field is masked, and the secret does not come back | typing `sk-not-a-real-key-0000` into the `/provider key` field, then its submit | the input is `type=password`, the run printed `key saved`, the field was emptied, the secret is nowhere in the page's markup — and `config.toml` *does* contain it, which is what stops the other three passing on a command that never ran |
+| A destructive row opens its candidates instead of sending | a real click on `/delete <n|id>` | candidates drawn, the run's stdout gained nothing, and backing out left the sessions directory byte-identical |
+| The composer sends a line the run answers | `/usage` typed into the box, then a real click on `send` | the run printed, and the answer was in the transcript |
+
+**Two defects, and both were unreachable from the source.** The first: a run with `--web` that has not
+been spoken to yet answered **500** on `/session` — the run names its session when it starts, the *file*
+is created by the first thing said in it, and `serve_session` treated the missing file as a fault. The
+page cannot finish drawing until `/session` has answered, so a fresh `--web` showed a page with no
+controls at all, and retried the feed forever. Fixed in `src/web.rs`: a file that is not there yet is an
+empty conversation, which is what an empty file would have been; every other read failure is still a
+500. Held by `a_session_file_that_does_not_exist_yet_is_an_empty_conversation`, which was watched fail
+with the raw `os error 3` first.
+
+The second: **with the `commands` panel open, the `send` button could not be clicked.** The panel is the
+one thing in the header that grows without bound — a row per command the run offers — and on a pane
+800px tall it took 742 of them and pushed the reading and the composer into the same 54px, where
+`elementFromPoint` at the send button's own centre answered `main#transcript`. Two fixes, cause and
+guard: the list is now bounded and scrolls inside itself (`.panel[open] .body { max-height: 40vh }`),
+and the composer is `position: relative` **without a `z-index`**, because the reading is positioned (the
+hand inside it is positioned against it) and a *static* composer paints below it wherever they overlap —
+tree order puts the later sibling back on top, and a number would only be a number to escalate against
+the sidebar's own menu. The harness's check was red before the fix and is the reason to believe it.
+
+**What this does not cover, and it is a shorter list than it was.** The pickers: a native `<select>`'s
+open dropdown belongs to the operating system, so the page's own two pickers are still only pinned as
+bytes and as behaviour. The sidebar's `⋯` menu and the drag grips, which the earlier pass reported as
+reasoned rather than seen and which this one does not touch. Long answers and reconnection, which are
+§11's own performance section and were measured on macOS over a different harness. And the composer at
+the *keyboard*: this drives Enter's neighbour, the button, and a person's Enter was measured in the
+earlier pass.
 
