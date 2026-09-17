@@ -2851,7 +2851,6 @@ fn an_imported_conversation_is_copied_in_and_its_source_is_left_alone() {
     let given = home.join("given-to-me.jsonl");
     let lines = [
         r#"{"type":"chat","message":{"role":"user","content":"why does the socket close early"}}"#,
-        r#"{"type":"chat","message":{"role":"assistant","content":"because the peer half-closes"}}"#,
     ];
     std::fs::write(&given, format!("{}\n", lines.join("\n"))).expect("write the given file");
     let before = std::fs::read(&given).expect("read the given file");
@@ -2859,8 +2858,8 @@ fn an_imported_conversation_is_copied_in_and_its_source_is_left_alone() {
     let text = repl_of(&home, &work, &[&format!("/import {}", given.display()), "/exit"]);
 
     assert!(
-        text.contains("imported"),
-        "/import said nothing about what it did: {text:?}"
+        text.contains("(1 message)"),
+        "a one-message import was reported as \"1 messages\": {text:?}"
     );
     assert!(
         text.contains("given-to-me.jsonl"),
@@ -2983,6 +2982,10 @@ fn a_resumed_import_says_where_it_came_from() {
     assert!(
         text.contains("imported from given-to-me.jsonl"),
         "the resumed line does not say where the conversation was copied from: {text:?}"
+    );
+    assert!(
+        text.contains("(2 messages, model stub-model), imported from given-to-me.jsonl"),
+        "the resumed line does not read as a person would write it: {text:?}"
     );
     let _ = std::fs::remove_dir_all(&home);
 }

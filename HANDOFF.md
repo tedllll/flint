@@ -132,16 +132,33 @@ directory, so a run started there reads *this* repository's `AGENTS.md` and belo
 checkout's sessions. None of these lines reach a model — every one of them is a command, and the
 provider in the config is a port that refuses — so the whole test costs a process spawn.
 
+**The one wording fault the built feature had, found by running the shipped binary by hand.**
+`/import` was finished, committed and pushed, and the hand check — a scratch home, a one-message file
+given to `/import` — printed `imported: given.jsonl (1 messages) into …`. The count is right and the
+plural is not, and one message is the case an import hits most often: an import is usually one
+question somebody handed over. A count as a person would write it is now one rule (`counted`) used by
+the four lines that put a conversation's size on screen — the startup `resumed` line, `/resume`,
+`/import`, and the header of a drawn transcript (`— 1 earlier message, `). The claim lives in the two
+import tests: a one-message import says `(1 message)`, and the resumed line reads `(2 messages, model
+stub-model), imported from given-to-me.jsonl`. Watched red by putting `{count} messages` back into the
+`/import` line, and the first version of the assertion was itself wrong in a way worth remembering:
+`contains("1 message")` passes against `"1 messages"`, so the assertion has to be on the whole
+parenthesised fragment.
+
 **Also in this round, and not part of the twelve: the agent's own working file was damaged and
 rebuilt.** While mutating the ordering claim, a `Get-Content -Raw` / `Set-Content -Encoding utf8`
-round trip on `src/main.rs` read UTF-8 as the system code page: the file came back with a BOM and
-`—` as `鈥?` in every comment. It was caught immediately (the byte check plus the `no_mojibake` test
-this repository already has), the pristine file was restored from the last commit, and the round's
-edits were re-applied from the record and then compared line by line against the damaged copy with
-non-ASCII stripped — 6690 lines each, two intended differences, nothing lost. The lesson is the one
-`docs/AGENTS.md` already carries and this session earned twice: **never round-trip source through
-PowerShell's text cmdlets**; use the file tools, or `[System.IO.File]::WriteAllText` with an explicit
-UTF-8-without-BOM encoding.
+round trip on `src/main.rs` read UTF-8 as the system code page: the file came back with a BOM, and
+every em dash in a comment had turned into the three-character CP936 reading of its own bytes. It was
+caught immediately (the byte check plus the `no_mojibake` test this repository already has), the
+pristine file was restored from the last commit, and the round's edits were re-applied from the record
+and then compared line by line against the damaged copy with non-ASCII stripped — 6690 lines each,
+two intended differences, nothing lost. The lesson is the one `AGENTS.md` already carries and this
+session earned twice: **never round-trip source through PowerShell's text cmdlets**; use the file
+tools, or `[System.IO.File]::WriteAllText` with an explicit UTF-8-without-BOM encoding. The guard then
+caught this paragraph, because writing *about* the damage is one more place the damaged characters can
+appear — which is the guard working as designed rather than a false positive (the first version of
+this paragraph quoted them, and the tree was red for a few minutes in CI until the words were used
+instead of the bytes).
 
 **A conversation you switch to inside a run is drawn, and not only loaded — reported against the
 terminal, and the page had already been doing it.** Starting with `--continue`, `--resume` or

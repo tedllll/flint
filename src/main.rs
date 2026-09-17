@@ -397,6 +397,20 @@ fn parent_session() -> Option<String> {
 /// conversation it is -- the last few exchanges do that, and scrolling a hundred
 /// messages of old transcript is worse than useless when the session file is right
 /// there.
+/// "1 message" or "12 messages" — a count as a person would write it.
+///
+/// Four lines put a conversation's size on screen (the startup `resumed` line, `/resume`, `/import`,
+/// and the header of a drawn transcript), and one message is the common case for an import: "1
+/// messages" beside a number is the kind of wrongness that makes a reader distrust the number, which
+/// is the opposite of what the count is there for.
+fn counted(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
+}
+
 /// The file name at the end of a path, whoever wrote the path.
 ///
 /// Used for the provenance of an imported conversation, where the path is a string that came out of
@@ -432,7 +446,7 @@ fn print_transcript(history: &[event::Message], printer: &Printer<'_>) {
         printer.dim(&format!(
             "\u{2500}\u{2500} {}{} \u{2500}\u{2500}",
             if start > 0 {
-                format!("— {start} earlier messages, ")
+                format!("— {}, ", counted(start, "earlier message"))
             } else {
                 String::new()
             },
@@ -785,12 +799,12 @@ async fn real_main(args: Args) -> Result<i32> {
                 }
                 let copied = args.fork.is_some();
                 eprintln!(
-                    "flint: {} {} ({} messages{}){}",
+                    "flint: {} {} ({}{}){}",
                     if copied { "forking" } else { "resumed" },
                     path.file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_default(),
-                    history.len(),
+                    counted(history.len(), "message"),
                     imported_note(&loaded),
                     match loaded.title.as_deref() {
                         Some(name) => format!(" — {name}"),
@@ -4062,7 +4076,8 @@ async fn handle_command(
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
             printer.term().line(format_args!(
-                "{green}resumed:{reset} {name} ({count} messages{}){}",
+                "{green}resumed:{reset} {name} ({}{}){}",
+                counted(count, "message"),
                 if loaded.model.is_empty() {
                     String::new()
                 } else {
@@ -4158,7 +4173,8 @@ async fn handle_command(
             let mut new_agent =
                 agent::Agent::new(cfg, provider, agent.readonly(), cwd.clone(), Some(writer));
             printer.term().line(format_args!(
-                "{green}imported:{reset} {name} ({count} messages) into {bold}{copied}{reset}{}",
+                "{green}imported:{reset} {name} ({}) into {bold}{copied}{reset}{}",
+                counted(count, "message"),
                 if loaded.model.is_empty() {
                     String::new()
                 } else {
