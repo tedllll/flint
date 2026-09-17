@@ -37,13 +37,13 @@ status line, and the answer a `wait` hands over.
 **Also in this round, and not part of the twelve: the `aarch64-unknown-linux-musl` job went red on
 `bacae13` and it was not the code.** It never reached cargo — the "Install zig" step of a workflow
 matrix built for static musl failed after *one second*, while the x86_64 musl job on the same commit
-downloaded the same tarball for sixteen minutes and then built and passed. `goto-bus-stop/setup-zig@v2`
+downloaded the same tarball for fourteen minutes and then built and passed. `goto-bus-stop/setup-zig@v2`
 is unmaintained, now force-run on Node 24, hits ziglang.org from every job and caches nothing; the step
 is `mlugg/setup-zig@v2` in its own commit (`adcde74`), which rotates the community mirror list, checks
 the tarball's signature and keeps the download and the Zig cache between runs. Nothing about the Rust
-build changed. **Measured on the run that carried the fix: the step went from 981 seconds to 10 (arm64)
-and 45 (x86_64), and all four targets are green** — so the sixteen minutes per musl job were never the
-download's size, they were one mirror being hammered twice a push.
+build changed. **Measured on the run that carried the fix: the step went from 981 and 991 seconds on the
+two commits before it to 10 (arm64) and 45 (x86_64), and all four targets are green** — so the sixteen
+minutes per musl job were never the download's size, they were one mirror being hammered twice a push.
 
 **The first of the twelve items taken from the Pi reading is built and pushed: a command knows what run
 it is in.** `FLINT_SESSION` (the conversation's file, absolute), `FLINT_PROVIDER` and `FLINT_MODEL` are
@@ -839,7 +839,7 @@ watched failing with the branch disabled and restored byte-for-byte. The section
 
 **And the failure that was not a compile error.** The release matrix's `aarch64-unknown-linux-musl` job
 went red on the commit before that and never ran cargo: its zig install step died after one second while
-the sibling x86_64 job spent sixteen minutes downloading the same version successfully. Read off the
+the sibling x86_64 job spent fourteen minutes downloading the same version successfully. Read off the
 step timings through the actions API rather than guessed at, fixed by moving the step to the maintained
 action (`adcde74`) — and the run that carried the fix brought that step down to ten seconds for arm64
 and forty-five for x86_64, four green targets. `## Pushing from this machine` records how to read a red
@@ -2666,8 +2666,9 @@ Two facts worth keeping: `ci` is `cargo test` and `clippy` on Linux and Windows,
 four binaries (two static musl, macOS, Windows). So **a red `release` job with a green `ci` is almost
 never a compile error** — read the step names before reading the diff. The case that proved it
 (2026-09-17) was `aarch64-unknown-linux-musl` failing on `bacae13` inside "Install zig (for static musl
-builds)" after **one second**, while the x86_64 musl job spent **981 seconds** on the same step for the
-same version, downloaded it, and passed. The action was the fault, not the code: the fix was
+builds)" after **one second**, while the x86_64 musl job on that same commit spent **824 seconds** on the
+same step for the same version, downloaded it, and passed — and the aarch64 job had spent **981** and
+**991 seconds** there on the two commits before it. The action was the fault, not the code: the fix was
 `mlugg/setup-zig@v2` (community mirrors, signature check, cached tarball) in its own commit, and the
 next run confirmed it — the same step took **10 seconds** for arm64 and **45** for x86_64, four green
 targets, and the `release` workflow has been quiet since.
