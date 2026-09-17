@@ -204,19 +204,23 @@ pub struct SessionWriter {
     meta: Option<SessionEvent>,
 }
 
-/// A conversation being copied into a file of its own: the messages, the name they travel with, and the
-/// file they were read from.
+/// A conversation being copied into a file of its own: the messages, the name they travel with, the file
+/// they were read from, and how much of it came along.
 ///
-/// The four fields are one fact -- this is a copy, and this is what it is a copy *of* -- which is why
-/// they travel together into [`SessionWriter::seed`] rather than as four arguments. The pair that
-/// matters most is `from` with `from_id`: they are the same fact read two ways (the path flint was
-/// pointed at, and the id that file's own `meta` line was created under), and a signature that took them
-/// side by side could be called with one file's path and another's id.
+/// The fields are one fact -- this is a copy, and this is what it is a copy *of* -- which is why they
+/// travel together into [`SessionWriter::seed`] rather than as separate arguments. The pair that matters
+/// most is `from` with `from_id`: they are the same fact read two ways (the path flint was pointed at,
+/// and the id that file's own `meta` line was created under), and a signature that took them side by
+/// side could be called with one file's path and another's id.
 pub struct Copy<'a> {
     pub messages: &'a [Message],
     pub title: Option<&'a str>,
     pub from: &'a Path,
     pub from_id: Option<&'a str>,
+    /// How many of the source's messages came along, or `None` when the whole conversation did. The
+    /// difference between `--fork` and `/fork <n>`, and it is part of the copy rather than of the call:
+    /// a description of a copy that does not say how much of it there is, is not a description.
+    pub kept: Option<usize>,
 }
 
 impl SessionWriter {
@@ -293,9 +297,11 @@ impl SessionWriter {
     /// conversation it describes. It used to be three calls at each site -- `create`, `forked_from`,
     /// `write_messages` -- and the reason it is one function is the reason it is written here rather
     /// than at the call sites: the ordering is the guarantee, and a caller that wrote the messages
-    /// first would leave a file whose provenance arrives after the thing it is about.
+    /// first would leave a file whose provenance arrives after the thing it is about. `/fork <n>` needs
+    /// the same guarantee with a cut in it, so it comes through here too -- which is why the copy
+    /// carries `kept` rather than the call carrying it.
     ///
-    /// The copy itself arrives as one [`Copy`] rather than as four arguments, which is what keeps this
+    /// The copy itself arrives as one [`Copy`] rather than as five arguments, which is what keeps this
     /// function's argument count honest -- and, more to the point, what keeps a source's path and its id
     /// from being passed as two unrelated strings that a caller can mismatch.
     pub fn seed(
@@ -307,7 +313,7 @@ impl SessionWriter {
         copy: Copy<'_>,
     ) -> Result<Self> {
         let mut writer = Self::create(dir, cwd, provider, model, parent)?;
-        writer.forked_from(copy.from, copy.from_id, None)?;
+        writer.forked_from(copy.from, copy.from_id, copy.kept)?;
         writer.write_messages(copy.messages, copy.title)?;
         Ok(writer)
     }
@@ -1741,6 +1747,7 @@ mod tests {
                 title: Some("a name"),
                 from: Path::new("/tmp/the-original.jsonl"),
                 from_id: Some("the-original"),
+                kept: None,
             },
         )
         .unwrap();

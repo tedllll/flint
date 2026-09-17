@@ -960,6 +960,8 @@ async fn real_main(args: Args) -> Result<i32> {
                     title: fork.title.as_deref(),
                     from: &fork.from,
                     from_id: Some(fork.from_id.as_str()),
+                    // `--fork` copies the whole conversation, which is what an absent `kept` says.
+                    kept: None,
                 },
             )?),
             (None, None) => Some(session::SessionWriter::create(
@@ -4365,16 +4367,6 @@ async fn handle_command(
             let kept = copy.len();
             let cwd = agent.cwd().clone();
             let provider = provider::Provider::new(provider_cfg.clone())?;
-            // The branch is this run's, exactly as an imported copy is: a fresh file in this run's own
-            // sessions, which is also what keeps `parent_session` right -- a child that forks is still a
-            // child, and its conversation still belongs under `children/`.
-            let mut writer = session::SessionWriter::create(
-                &config::sessions_dir(),
-                &cwd,
-                &provider_cfg.name,
-                &provider_cfg.model,
-                parent_session().as_deref(),
-            )?;
             let source_name = file_name_of(&path.display().to_string());
             // The id as flint reads it for its own conversation is the file's stem -- `Meta.id` is the
             // name it was created under, so the two agree by construction and no read is needed.
@@ -4385,8 +4377,26 @@ async fn handle_command(
             // The name travels with the branch, as it does through `--fork`: a name is a line in the
             // file it was given to, and a retry of the same question is the same conversation's work.
             let title = session::scan(&path)?.title;
-            writer.forked_from(&path, Some(&source_id), Some(kept))?;
-            writer.write_messages(&copy, title.as_deref())?;
+            // Through `seed` rather than through `create` + `forked_from` + `write_messages`, and that
+            // is the point of the function: the fork line has to land directly under `meta` and above
+            // the conversation, and a second call site doing it by hand is a second place to get the
+            // order wrong. The branch is this run's own conversation -- a fresh file in this run's
+            // sessions, and a child that forks is still a child, so `parent` is handed down here as it
+            // is at startup.
+            let writer = session::SessionWriter::seed(
+                &config::sessions_dir(),
+                &cwd,
+                &provider_cfg.name,
+                &provider_cfg.model,
+                parent_session().as_deref(),
+                session::Copy {
+                    messages: &copy,
+                    title: title.as_deref(),
+                    from: &path,
+                    from_id: Some(&source_id),
+                    kept: Some(kept),
+                },
+            )?;
             let branch = writer
                 .path()
                 .file_name()
