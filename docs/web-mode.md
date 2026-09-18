@@ -1409,3 +1409,25 @@ of thing that *could* be carried across — a client that remembered `(session i
 back to a run willing to accept a cursor it did not mint — and no such client exists. What was built is
 the server half of that, plus a page that no longer rebuilds itself for a dropped connection; the client
 half is named here as the next step rather than implied by the feature's name.
+
+**The client half, as far as it honestly goes — built 2026-09-18.** Read against the code, "the page
+should carry the cursor across a restart" splits in three, and two of the three are not the page's to
+do. Following a restart needs both the origin and the token: `--port` can hold the origin, and the token
+is minted fresh in every process and required on every route by §4.2, so a page that stored it to follow
+a restart would be putting a credential that can drive the composer where any document on that loopback
+origin can read it — a worse defect than the one being fixed. A reload must rebuild, because the DOM is
+not persisted and the file is the record; only a dropped *connection* keeps the in-memory cursor, and
+that path is already a delta. What is left is real and is built: the page writes `(session id, byte
+position)` to **`sessionStorage`** — per tab, so no other local document reads it, surviving exactly the
+reload in question, and never holding the token — on `pagehide`, where the position is final rather than
+as frames arrive (a load-time cursor would report a whole session as "arrived while you were away"). On
+load, before the conversation is read, it compares that pair against the file: the same conversation and
+a smaller position means the difference **arrived while this page was closed**, and it says so by
+count; a different id replaces the pair in silence, because another conversation is not a loss; and a
+position **past the end** of the file is a *stale read* — reachable by hand-editing or replacing a
+session — reported as a fact with the page carrying on and drawing what it read. That last case is the
+one the item said needed deciding before any code existed. Held by `tests/web_view.rs` (the wiring, the
+three wordings, and the refusal of the origin-wide store) and by three checks in
+`scripts/web-view-test.js` that call `notePosition` in the sandbox — the behavioural half, because a
+text assertion passes over an unreachable branch, which was measured: disabling the stale branch left
+the Rust test green and the harness check red.

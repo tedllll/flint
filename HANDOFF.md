@@ -76,11 +76,24 @@ pair silently for a different conversation, and treat a position *past the end* 
 read to report rather than an error to throw. That last case is the answer the item asked for before any
 code. The small piece of page code is queued in item 8 rather than claimed here.
 
-**The line after it is the page's own reconnect cursor and the picker of live runs the page's
-`/say --to` waits on.** §10's two holes that
-need a decision rather than code — C3 (nothing identifies a request, so a caller's retry may repeat
-tools) and C5 (a session carried into a second purpose by `--continue`) — are on the same list, to be
-settled in writing rather than left as an itch.
+**And §11 item 8's second half is now built as well as answered.** The page writes the pair the item
+names -- the conversation's id and the byte position it had drawn to -- into `sessionStorage` on
+`pagehide`, where the position is final rather than as frames arrive, and reads it back before the
+conversation is loaded so it can compare this file against the one this tab last read. Same conversation
+and a smaller position: it says how many bytes arrived while the page was closed. A different id: the
+pair is replaced in silence, because another conversation is not a loss. A position *past the end* of
+the file: a stale read, reported as a fact with the page carrying on, which is the case the item wanted
+decided before any code existed. The token is in no store, and the policy test forbids the origin-wide
+one outright. Held by `tests/web_view.rs` for the wiring and the policy, and by three checks in
+`scripts/web-view-test.js` that call the page's own `notePosition` in the Node sandbox for the behaviour
+-- a text assertion passes over an unreachable branch, which was measured. Adding them also found the
+sandbox had no `window`, so the page's `pagehide` hook was the first thing that needed one.
+
+**The line after it is the picker of live runs the page's `/say --to` waits on.** §10's two holes that
+needed a decision rather than code — C3 (nothing identifies a request, so a caller's retry may repeat
+tools) and C5 (a session carried into a second purpose by `--continue`) — were settled in writing in the
+previous round, and the paragraph below records what was decided; this sentence is kept only so that the
+item is not looked for twice.
 
 **The third is built, and it is the one §9 called "the obvious next door": `/export <file>` writes this
 conversation out as the page the CLI writes.** The only thing the door had to decide that `flint export`

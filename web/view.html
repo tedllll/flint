@@ -2455,6 +2455,75 @@ function authHeader() {
 /// something to the process that minted it. See `Live::follow` in `src/web.rs`.
 let applied = 0;
 
+/// Where this page was reading, kept where a reload can find it.
+///
+/// `sessionStorage` and deliberately not the origin-wide store beside it: this pair is about *this
+/// tab's* reading of a conversation, a second tab has no business reading it, and `sessionStorage`
+/// survives exactly the reload this is for. The token is the thing that must never be stored --
+/// `docs/web-mode.md` section 4.2 is why -- and the policy test beside this file forbids that other
+/// store outright, so that a later convenience cannot quietly put a credential somewhere every
+/// document on the loopback origin can read.
+///
+/// Best-effort by design: a browser that refuses storage (private mode) or never fires `pagehide`
+/// loses the pair, and a missing pair costs a message and nothing else.
+const SEEN_KEY = "flint.seen";
+
+function remembered() {
+  try {
+    return JSON.parse(sessionStorage.getItem(SEEN_KEY) || "null");
+  } catch (e) {
+    return null;
+  }
+}
+
+function remember(id, at) {
+  if (!id) return;
+  try {
+    sessionStorage.setItem(SEEN_KEY, JSON.stringify({ id: id, at: at }));
+  } catch (e) {
+    // Nothing to do about it, and nothing that depends on it: see above.
+  }
+}
+
+/// What to say about the last time this tab was reading this conversation.
+///
+/// Three cases, and the item that asked for this (`ROADMAP.md` section 11 item 8) wanted the third
+/// decided before any code existed. A *different* conversation is not a loss, so the pair is simply
+/// replaced and nothing is said. A **smaller** position means the difference arrived while this page
+/// was closed, which is said, because nothing in flint changes silently. A position **past the end**
+/// of the file is a stale read -- the file this pair was taken from is not this file any more, which
+/// a hand edit or a replaced session makes reachable -- and that is a fact to report rather than an
+/// error to throw, so the page shows the conversation from the file and says the position did not fit.
+///
+/// A reload always rebuilds: the DOM is not persisted and the file is the record, so there is no
+/// path here that draws only the tail. What the pair buys is knowing what was missed.
+function notePosition(before, cursor, id) {
+  if (!before || !before.id || !id || before.id !== id) return;
+  const at = Number(before.at);
+  if (!Number.isFinite(at) || at <= 0) return;
+  if (at > cursor) {
+    setHint(
+      "this conversation is " + cursor + " bytes and this page had read to " + at +
+        ": the file it was reading is not this one, so it is shown from the start",
+      true
+    );
+    return;
+  }
+  if (at < cursor) {
+    setHint("rebuilt from the file; " + (cursor - at) + " bytes arrived while this page was closed");
+  }
+}
+
+/// The position this tab has *drawn to*, written where the next load can find it.
+///
+/// On `pagehide` rather than as frames arrive: the pair is only ever read by a later load, and
+/// `applied` at that moment is the answer to "where had this page got to", including a turn that was
+/// still streaming. `pagehide` is the event that also fires when the tab goes into the back/forward
+/// cache, which `unload` does not.
+window.addEventListener("pagehide", () => {
+  remember(doc.meta && doc.meta.id, applied);
+});
+
 /// Re-read the conversation from the process, and take its cursor.
 ///
 /// Called once when the page starts, and again on a `reset` -- when the run moved to another
@@ -2466,9 +2535,13 @@ async function readSession() {
   const response = await fetch("/session", { headers: authHeader() });
   if (!response.ok) throw new Error("HTTP " + response.status);
   const cursor = Number(response.headers.get("X-Flint-At") || 0);
+  // Read *before* the conversation is loaded, because `load` is what replaces `doc.meta` -- and the
+  // whole point of the pair is comparing this conversation against the one this tab last read.
+  const before = remembered();
   const whole = await response.text();
   load(whole);
   applied = cursor;
+  notePosition(before, cursor, doc.meta && doc.meta.id);
 }
 
 /// Which conversation this page is showing, as the file's own `meta` line names it.
@@ -2972,6 +3045,10 @@ if (typeof module !== "undefined" && module.exports) {
     showToggles, showCommands, showActions, sessionRow, formLine,
     pathParts, asPath, bytesLabel, previewNote, linkNodes, renderBlock, fileRoute,
     jobsFrom, durationLabel, jobWhen, jobIsLive,
+    // The position this tab was reading from: exported so the Node harness can check the three cases
+    // -- a gap, a different conversation, and a position past the end -- against the real functions
+    // rather than against the page's text.
+    SEEN_KEY, remembered, remember, notePosition,
   };
 }
 </script>

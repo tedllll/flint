@@ -147,6 +147,25 @@ function loadViewer() {
       createTextNode: (t) => ({ text: t }),
       addEventListener() {},
     },
+    // A real page always has these two, and the page uses them for one thing: remembering where this
+    // tab was reading, so that a reload can say what arrived while it was closed. They were added when
+    // a `window.addEventListener("pagehide", ...)` in the page made this harness throw
+    // `ReferenceError: window is not defined` -- the page was right and the sandbox was incomplete,
+    // which is the failure a stub has to be read for rather than worked around.
+    window: {
+      handlers: {},
+      addEventListener(type, handler) {
+        (this.handlers[type] = this.handlers[type] || []).push(handler);
+      },
+    },
+    sessionStorage: (() => {
+      const store = new Map();
+      return {
+        getItem: (key) => (store.has(key) ? store.get(key) : null),
+        setItem: (key, value) => store.set(key, String(value)),
+        removeItem: (key) => store.delete(key),
+      };
+    })(),
   };
   vm.createContext(sandbox);
   vm.runInContext(html.slice(start + "<script>".length, end), sandbox, { filename: "view.html" });
@@ -166,6 +185,10 @@ function loadViewer() {
   // up. That is enough for the one thing worth reaching into -- a submit handler that refuses to
   // send -- without a DOM to lie about everything else.
   api.sent = sent;
+  // The page's own store, so a check can clear it between cases and prove what a load does to it: the
+  // pair belongs to one tab in the browser, and a stub that could not be reset would make the second
+  // check depend on the first.
+  api.storage = sandbox.sessionStorage;
   api.fire = (node, type, event) => {
     const handlers = (node && node.handlers && node.handlers[type]) || [];
     for (const handler of handlers) handler(event || { preventDefault() {} });
@@ -1505,6 +1528,51 @@ check("an answer built from deltas is filled in from the file, not opened twice"
   eq(last.text, "half an answer, whole", "the file's copy is the one that stands");
   eq(last.reasoning, "why", "and its reasoning with it");
   eq(last.open, false, "the block is finished");
+});
+
+// ROADMAP.md section 11 item 8: a reload must rebuild from the file, so what the page can hold
+// honestly is where this tab was reading -- and what it can do with that is say what arrived while it
+// was closed, or that the position does not fit the file it is looking at. The cases are checked
+// against the page's own functions rather than against its text, because the text said the right
+// words in a version of this that also said the wrong thing when nothing had been missed.
+const hint = () => viewer.__node("hint").textContent || "";
+
+check("closing the page remembers the conversation and the position it had drawn to", () => {
+  const store = viewer.storage;
+  store.removeItem(viewer.SEEN_KEY);
+  eq(viewer.remembered(), null, "nothing remembered before there is anything to remember");
+  viewer.remember("1789290356-957", 4096);
+  eq(viewer.remembered().id, "1789290356-957", "the conversation");
+  eq(viewer.remembered().at, 4096, "the position");
+  // A conversation the page does not know is not worth a pair: a pair with no id could be compared
+  // against the next conversation's file, which is the one thing this must never do.
+  viewer.remember("", 4096);
+  eq(viewer.remembered().id, "1789290356-957", "an id-less write leaves the pair alone");
+  store.removeItem(viewer.SEEN_KEY);
+});
+
+check("a page that comes back to the same conversation says what arrived while it was closed", () => {
+  viewer.storage.removeItem(viewer.SEEN_KEY);
+  viewer.notePosition({ id: "s-1", at: 1000 }, 4000, "s-1");
+  ok(hint().includes("3000 bytes arrived while this page was closed"), `the gap is not said: ${hint()}`);
+  // Nothing arrived, so there is nothing to say -- and the check is that the page said *nothing new*,
+  // not that the hint is empty: a hint belongs to whatever spoke last, and this is not its turn.
+  const said = hint();
+  viewer.notePosition({ id: "s-1", at: 4000 }, 4000, "s-1");
+  eq(hint(), said, "a page that missed nothing said something");
+  // A different conversation is not a loss, so it is not an occasion for a message either.
+  viewer.notePosition({ id: "s-1", at: 1000 }, 4000, "s-2");
+  eq(hint(), said, "another conversation was reported as a gap");
+});
+
+check("a position past the end of the file is a stale read, said and not thrown", () => {
+  viewer.notePosition({ id: "s-1", at: 9000 }, 4000, "s-1");
+  ok(hint().includes("is not this one"), `a stale position was not reported: ${hint()}`);
+  ok(hint().includes("9000") && hint().includes("4000"), `the two numbers are the fact: ${hint()}`);
+  // The page carries on: the conversation it just read from the file is on screen either way.
+  const d = viewer.newDoc();
+  viewer.applyText(d, SESSION);
+  eq(kinds(d), ["system", "user", "tool", "assistant"], "a stale pair does not cost the conversation");
 });
 
 if (failures) {

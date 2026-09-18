@@ -1835,9 +1835,10 @@ list's, not this one's, and each line is edited in the same commit as the code t
   this section's own item 6 rather than twice.
 - §9: `/export` from inside a running conversation ("the obvious next door") — **built 2026-09-18**;
   a job that can say it is `stopping` — **built 2026-09-18**; and the page's own half of the reconnect
-  cursor, whose *design* half is answered in this section's item 8 (the answer is narrower than the
-  item assumed: following a restart is not the page's to do, a reload must rebuild, and what is left is
-  the page saying what arrived while it was closed) with the small piece of page code queued there.
+  cursor — **built 2026-09-18**: the design answer in this section's item 8 is narrower than the item
+  assumed (following a restart is not the page's to do and a reload must rebuild), and what is built is
+  the honest remainder, the page remembering where this tab was reading so it can say what arrived while
+  it was closed and treat a position past the end of the file as a stale read rather than an error.
 - §8: the picker of live runs that the page's `/say --to` is waiting on.
 - §11 item 5: `flint --version` — **built 2026-09-18**, with the name collision it found (`session`'s
   `version` is the file format's, not the build's) stated in `README.md` where a reader meets it.
@@ -1963,17 +1964,25 @@ where prose and tree disagree are items 2, 3 and 9(iii).**
    `follow`). Only a *connection* drop keeps `applied` in memory, and that case is already a delta
    rather than a rebuild. Nothing the page could store would let it draw a conversation from the middle
    without the part before it.
-   **What is left, and is worth having, is that the page can say what it missed.** The reading position
-   is real state the page can keep honestly: `sessionStorage` (per tab, so no other local document can
-   read it, and it survives exactly the reload being discussed) holding the pair the item names — the
-   conversation's id from the file's own `meta` line and the byte position last drawn to. On load, after
-   the file is read: the same conversation and a smaller position means the difference **arrived while
-   this page was closed**, and saying so is the same rule the rest of flint follows (nothing happens
-   silently); a different id replaces the pair without comment, because a different conversation is not
-   a loss; a position **past the end** of this file is a *stale read*, and stale is a fact to report and
-   not an error to throw — that is the answer this item asked for, and it is the one case a hand-edited
-   or replaced session file makes reachable. The code is small, it is the page's own, and it is queued
-   as this item's remaining half rather than claimed as done here.
+   **What is left, and is worth having, is that the page can say what it missed — *built 2026-09-18*.**
+   The reading position is real state the page can keep honestly: `sessionStorage` (per tab, so no other
+   local document can read it, and it survives exactly the reload being discussed) holds the pair the
+   item names — the conversation's id from the file's own `meta` line and the byte position last drawn
+   to — written on `pagehide`, where the position is final rather than as frames arrive (a load-time
+   cursor would report a whole session as "arrived while you were away"). On load, after the file is
+   read: the same conversation and a smaller position means the difference **arrived while this page was
+   closed**, and that is said; a different id replaces the pair without comment, because a different
+   conversation is not a loss; a position **past the end** of the file is a *stale read* — a hand-edited
+   or replaced session makes it reachable — and stale is a fact to report and not an error to throw,
+   with the page carrying on and showing the conversation it read. That last case is the answer this
+   item asked for before any code, and it is the one the item existed for. The token is deliberately
+   *not* in any store, and the policy test forbids the origin-wide one outright, because a credential
+   that can drive the composer must not sit where every document on the loopback origin can read it.
+   Held by `tests/web_view.rs` (the wiring and that policy) and by three checks in
+   `scripts/web-view-test.js` that call the page's own `notePosition` in its Node sandbox — the
+   behavioural half, because a text assertion passes over an unreachable branch, which was measured.
+   Adding those checks is also what found that the harness's sandbox had no `window`, so the page's
+   `pagehide` hook was the first thing to need one.
 9. **Three small gaps that the code names about itself.** (i) `tests/cli_output.rs` says of itself that
    the paste fix "is not covered here (see `HANDOFF.md`)", which by this repository's own rule — a
    regression test that has never been red has not been shown to test anything — means a shipped fix

@@ -991,3 +991,51 @@ fn the_page_re_reads_the_list_when_the_process_says_it_changed() {
         "the transcript is not stale when only the list changed: {branch:?}"
     );
 }
+
+/// Where the page was reading is remembered for the next load, and the token never is.
+///
+/// What this holds is the *wiring* and the policy: that the pair is written where the position is
+/// final, that the three cases have words, and that the origin-wide store is not used at all. What the
+/// three cases *do* -- a gap, another conversation, a position past the end -- is checked behaviourally
+/// by `scripts/web-view-test.js`, which calls the page's own `notePosition` in its Node sandbox; a text
+/// assertion here still passes when the branch behind the wording is unreachable, which is what was
+/// measured while this was written.
+///
+/// `ROADMAP.md` section 11 item 8: a reload must rebuild from the file, so what the page can hold
+/// honestly is the pair -- the conversation's id and the byte position it had drawn to -- and what it
+/// can do with it is say what arrived while it was closed, or that a position does not fit this file.
+/// The negative half is the one that needs holding: the token can drive the composer, so a store any
+/// document on the loopback origin can read must never hold it, which is why the shared store is
+/// forbidden outright rather than merely unused today.
+#[test]
+fn the_page_remembers_where_it_was_and_never_stores_the_token() {
+    let html = view();
+    for needle in [
+        "sessionStorage",
+        "pagehide",
+        "\"flint.seen\"",
+        "bytes arrived while this page was closed",
+        "the file it was reading is not this one",
+    ] {
+        assert!(
+            html.contains(needle),
+            "the page no longer says {needle:?}, which is how a reload accounts for what it missed"
+        );
+    }
+    forbidden(
+        "localStorage",
+        "the pair is this tab's own reading, and a store shared with every other document on the \
+         loopback origin is where a token would end up by accident",
+    );
+    forbidden(
+        "sessionStorage.setItem(\"flint.token\"",
+        "the token must never be written to storage: it is a credential for a run with no permission layer",
+    );
+    // The write happens where the position is final, not as frames arrive: a page that stored the
+    // load-time cursor would report the whole of a session as "arrived while you were away".
+    let hook = from("addEventListener(\"pagehide\"", 4);
+    assert!(
+        hook.contains("remember(doc.meta && doc.meta.id, applied)"),
+        "the remembered position must be the one drawn to: {hook:?}"
+    );
+}
