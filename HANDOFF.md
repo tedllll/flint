@@ -29,11 +29,11 @@ reconstruct it:
 | 12. `docs/sandbox.md` contradicts `## Not doing, and why` | **declined in writing, 2026-09-18**: asked whether to build a permission layer or keep the default, the answer was keep the default (all permissions). The `ROADMAP.md` bullet is unchanged, `docs/sandbox.md` now labels itself an argument that lost, and the contradiction is closed in favour of the plan of record. Nothing else in §11 waited on it, and nothing does now |
 | 13. the addresses in the page's text, pressable | **built 2026-09-18**, asked for directly: a web address is a link in a new tab, a path stays a button into the preview, and the scheme test is an allowlist. Its one named residue — no OS-level open — was **built one session later** as `POST /open` plus the panel's `open` control (see `## What was just done`) |
 
-The gate as this session left it — re-measured after the note-and-flake fix and the readonly-door fix
-below, on a tree with the untracked verification record held aside (that file and no other is the one
-thing `cargo test` disagrees with; see the paragraph after this one): `cargo test`
-**645 passing, 1 ignored** across the 14 suites (lib 357, bin 6, `agent_loop` 34, `balance` 7,
-`cli_output` 111, `json_output` 41, `say` 6, `search_tool` 4, `task` 17, `term_capture` 20 + 1 ignored,
+The gate as this session left it — re-measured after the verification-pass fixes at the top of
+`## What was just done`, on a tree with the untracked verification record held aside (that file and no
+other is the one thing `cargo test` disagrees with; see the paragraph after this one): `cargo test`
+**648 passing, 1 ignored** across the 14 suites (lib 358, bin 6, `agent_loop` 34, `balance` 7,
+`cli_output` 113, `json_output` 41, `say` 6, `search_tool` 4, `task` 17, `term_capture` 20 + 1 ignored,
 `tty_hangup` 0 and the doc-tests 0 — both empty by construction — `web_view` 32, `who` 10);
 `cargo clippy --all-targets -- -D warnings` silent; the two headless Node harnesses green
 (`term-layout-test.js`, `web-view-test.js`) **and run by CI**; `examples/python/test_call.py` green; the
@@ -48,12 +48,14 @@ CP936 artifacts — the character a middle dot becomes when a UTF-8 file is read
 character is the second half of the Chinese word for a filesystem *path*, which is a word no Chinese
 document about this program can avoid. A long Chinese verification record therefore trips a check that is
 right about Rust sources and the page. Proven rather than assumed: with
-that one file moved aside the guard passes and the whole suite is the 643 above; with it present, 108 of
-`cli_output`'s 109 pass and the guard names only lines of that file. So a Chinese verification record
+that one file moved aside the guard passes and the whole suite is the 648 above; with it present, 112 of
+`cli_output`'s 113 pass and the guard names only lines of that file. So a Chinese verification record
 cannot live in this tree as it stands. Two ways out, and the choice is a person's: keep the file outside
 the checkout (its evidence already lives under `%TEMP%\fv\`), or teach the guard that `U+8DEF` is
 legitimate prose *inside a file declared to hold CJK* while staying a marker everywhere else — a change
-to a safety guard, which is why it was not made to make a red suite go green.
+to a safety guard, which is why it was not made to make a red suite go green. Everything the record
+found has been worked through and committed (`## What was just done`), so the file is now the evidence
+trail rather than an open to-do list.
 
 **That paragraph was first written with the character spelled out, and CI caught it** — the guard doing
 its job on a file (`HANDOFF.md`) that has been declared as holding Chinese since long before this
@@ -1756,6 +1758,66 @@ picker, type `/config` into the composer, and see whether the answer lands in th
 the block is drawn — then open the `commands` panel and read it against `/help` in the terminal.
 
 ## What was just done
+
+**The untracked verification record was worked through, and all ten of its findings were real: five in
+the code, four in the inventory, and the flaky test.** The user's question was narrow — "there is a test
+result in there, is it something to fix?" — and the answer was yes twice over: the file records one
+suite failure, and the same pass found things the suite could not see, including a guard that one of
+its own doors was not behind. All of it is committed on `main`, in the order it was fixed. What each
+finding was, and what was done:
+
+| The record said | What was true | What was done |
+|---|---|---|
+| §1.10 a test failed (`1 失败`) | the failing test's premise was a 1500 ms sleep sitting inside 5 % of the measured 1.42 s / 1.74 s it waited for | **fixed earlier in the session** — the test waits for the child's file on disk, and it was 10 red / 10 green under 16 busy cores |
+| §1.1 `readonly` does not judge the person's own doors | true, and the banner printed above the refusal said otherwise | **fixed earlier**: all four doors judge, one refusal string |
+| §1.2 `/name` on a conversation that has said nothing | true: the OS's own localized `cannot stat` sentence appeared at the prompt | **fixed** (`820b92f`): the arm checks the file exists, and says `(unnamed)` |
+| §1.7 `/stop` with nothing running | true: `unknown command '/stop'` — the fallback calling one of the table's rows unknown | **fixed** (`820b92f`): an idle arm that says `nothing is running` |
+| §1.8 a killed job reads as a failure in two doors | true, and it was two holes: `-1` (a signal) had no meaning in the bracket table, and `job_status` read the state from the code alone | **fixed** (`916579d`): `killed` for `-1`, and `ended_by_us` so a stopped child's `130` is not `failed` |
+| §1.6 `GET /events` had no CSP | true: the stream wrote its own copy of the four headers and that copy had three | **fixed** (`7f3c039`): one `SECURITY_HEADERS`, a `fn` on the stream's side because a `const` cannot splice a `const` |
+| §1.3 a `/stop`-ped turn prints `⏹ interrupted` | false: `⏹` belongs to a *steering* line; a `/stop` or Ctrl-C prints `stopped -- the model is not running any more` | **docs** (`ce1b7be`), §14.2 has both rows now |
+| §1.4 retry notices are on stderr with no frame | true, and the §7.3 paragraph contradicted itself two clauses later | **docs** (`ce1b7be`) |
+| §1.5 the ladder is 1, 2, 4 s, not 1, 2, 4, 8, 16 | true: with four attempts there is no fourth wait | **docs** (`ce1b7be`) |
+| §1.9 `turn.completed` carries `reason`, not `limit` | true: no frame ever had `limit` | **docs** (`ce1b7be`) |
+
+The `-1`/`130` finding is the one worth reading in the code rather than here: the two doors disagreed
+about one job *because the table of words was split in two*, and the flag that fixes it (`ended_by_us`)
+was already being recorded for exactly this reason — it was simply never asked for when the word was
+chosen. `tests/task.rs` already asserted `exit code: 130 (the run was stopped)` for a child this run
+stopped, so the child's own door was right and the page's was not.
+
+**The verification pass's own file cannot live in this tree, and that is a decision waiting for a
+person.** `docs/features-verification.md` is untracked, was never committed, and makes `cargo test` red
+by itself: `the_source_tree_contains_no_mojibake` lists `U+8DEF` among the CP936 artifacts it looks for,
+and that character carries the Chinese word for a filesystem *path*, which no Chinese document about
+this program can avoid — including that record's own opening paragraph, which lists the file's
+conversations and their paths in one breath. Proven rather than assumed: move that one file aside and
+every suite is green, put it back and only the guard fails, naming only its lines. Two ways out and the
+choice is a person's: keep the record outside the checkout (its evidence already lives under
+`%TEMP%\fv\`), or teach the guard that `U+8DEF` is legitimate prose *inside a file declared to hold CJK*
+while staying a marker everywhere else — a change to a safety guard, which is why it was not made merely
+to turn a red suite green.
+
+**The guard caught this session's own prose twice, which is the third and fourth time it has done so.**
+The `/name` fix's comment in `src/main.rs` quoted the operating system's error sentence verbatim,
+localized half included, and the guard named that line — right about a Rust source that is not declared
+as holding CJK, and right in the most useful way, because a source file is exactly where a stray CP936
+artifact is a symptom rather than prose. The same sentence in `tests/cli_output.rs`, a file that *is*
+declared, was caught by the marker half of the guard, which is the half a whitelist cannot cover. Both
+now describe the localized half instead of quoting it; the test's assertion is the same rule from the
+other side (none of the OS's phrasing may appear at the prompt, in any language).
+
+**CI red on the commit that fixed §1.1, and the annotation fix earned itself immediately.** The ubuntu
+job failed `a_run_that_is_already_deep_refuses_to_go_deeper` with "the depth limit was not reported",
+while the same test passed seven times in seven here (six of them under 16 busy cores). It is the same
+class as the flakes below and it is recorded rather than explained: the prime suspect is this file's own
+harness — `Scripted` hands out its bodies by HTTP request number, so any request that is not a step of
+the conversation moves the script on by one, and the *second* body answers the first step, which produces
+exactly this signature (a normal run, exit 0, missing the sentence). That suspect was **tested by hand
+and not confirmed**: a 500 served by a *different* mock does not touch the counter, and nothing has
+reproduced the real case. What changed is that the next occurrence will settle it — the count of model
+requests and the stderr a retry writes to are both in the message now, and the count is asserted first
+(`980b6c5`). The annotation step's wider `grep -A` is also why the failing *test's own words* were
+visible this time instead of six lines of setup.
 
 **`readonly` guarded one door out of three, and the two it missed were the person's own.** Found by the
 same external verification pass that reported the flaky test below, and the finding was two documents
