@@ -117,7 +117,7 @@ Every one of these is `EXIT_USAGE` (2) unless noted, and goes to **stderr** as
 | Invocation | Message observed | Exit |
 |---|---|---|
 | `flint --nope` | `unknown flag '--nope'. Try --help.` | 2 |
-| `flint --json` | `--json needs a prompt: `flint -p "..." --json`. Try --help.` (as `{"type":"error","message":…}` on stdout) | 2 |
+| `flint --json` | `--json needs a prompt: `flint -p "..." --json`. Try --help.` (as `{"message":…,"type":"error"}` on stdout — keys alphabetical, like every frame in §13.5) | 2 |
 | `flint --result-file x.txt` | `--result-file needs a prompt and --json: it exists so a caller does not have to read the stream, and with no --json the answer is already everything on stdout (redirect it instead).` | 2 |
 | `flint --max-seconds 5` | `--max-seconds bounds a call, and a call is a prompt: give one with -p, or leave the flag off. An interactive session is bounded by whoever is typing at it.` | 2 |
 | `flint -p hi --hear-peers` | `--hear-peers relays what a peer leaves between turns, and a one-shot run has no next turn to relay it in: start a session (no -p) and use /hear-peers there.` | 2 |
@@ -175,9 +175,10 @@ structure uses `--json`.
   so it cannot go into a prompt.`
 - All attachments together are capped at **256 KB**; past it the run is refused before
   anything is sent, naming the file that would have crossed the line.
-- The transcript shows `@notes.txt (812 bytes, 24 lines)`, and the **session file records
-  the expanded form** — what the model was actually given — while the stream and transcript
-  show what you typed.
+- The transcript shows `  inlined @notes.txt (812 bytes, 24 lines)` — two spaces of indent
+  and the verb, because it is a note about what was just sent rather than a line of either
+  voice — and the **session file records the expanded form** — what the model was actually
+  given — while the stream and transcript show what you typed.
 - Held by: `src/attach.rs`'s unit tests (the cap, the trailing punctuation, the non-file
   case, the byte-order mark being stripped).
 
@@ -242,8 +243,12 @@ Held by: `src/term.rs`'s key tests, and `tests/term_capture.rs` for the drawn re
 ### 4.3 While a turn is running
 
 - A clock appears **after 300 ms**, on its own row above the input, centred:
-  `── 12s read ──` — the elapsed time and what is happening ("waiting for the model" when
-  no tool is named). It repaints once a second.
+  `── 12s read ──` — the elapsed time and what is happening. What is happening is one of
+  three words, and which one is not a guess: the tool's name while a tool runs (`bash`,
+  `read`), `writing the answer` once the first token of the reply has arrived, and
+  `waiting for the model` before that, when nothing is named yet. It repaints once a
+  second. (`writing the answer` is the one that shows most of the time and the one this
+  list was missing, for a while.)
 - The answer streams into an **answer strip** of three rows just above that clock, and rows
   move up into the transcript as they are finished — so the transcript is never rewritten
   under you.
@@ -251,7 +256,13 @@ Held by: `src/term.rs`'s key tests, and `tests/term_capture.rs` for the drawn re
   lines` or `✗ read …` in red with the failure's own words. Output itself is not printed
   unless `/detail on`.
 - A long tool result is summarised and the full text is written to
-  `<FLINT_HOME>/spill/<session>/<n>.txt`, which the result line names.
+  `<FLINT_HOME>/spill/<session>/<n>.txt`. The transcript's one-line summary is
+  `✓ read … 9 lines` — **it does not name the file**; what names it is the copy of the
+  result the model is given, which keeps both ends and says
+  `[435 characters; kept the first 200 and the last 100; full output: <path>]` in the
+  middle. That line is printed here too when tool detail is on (`/detail on`), because it
+  is part of the result rather than decoration on it — but the summary is not where to look
+  for the path, and this section used to say it was.
 
 ### 4.4 Typing while it works
 
@@ -316,7 +327,7 @@ press; `terminal` is not offered on the page at all.
 | `/provider edit <name>` | change one, interactively | the same questions | form | — |
 | `/provider key <key>` | set the API key for the active provider | `saved …` | form | the key is **not** echoed; the row is redacted on the page. A blank key is refused |
 | `/provider rm <name>` | delete one | one line naming what went | danger (second press) | refuses the last provider: `refusing to delete the last provider — there would be nothing left to talk to` |
-| `/model` | show the model in force | one line | panel | — |
+| `/model` | show the model in force | four lines: which provider and endpoint the list belongs to, one line per model with the active one starred, the `/model <name>` usage, and where to add more | panel | — |
 | `/model <name>` | switch to one | the switch | selector | the conversation is kept, and a `switch` event records the move |
 | `/config` | show shell, steps, proxy | a listing of the settings that matter, plus the config path | panel | — |
 | `/config edit` | change shell, steps, proxy | interactive questions | form | — |
@@ -503,7 +514,10 @@ line by hand puts the conversation back whole.
 All-or-nothing, and judged where it can be:
 
 - `write`, `edit`, `apply_patch` are refused.
-- `pwsh` is refused entirely: a script is arbitrary code and flint cannot judge one.
+- `pwsh` is refused entirely, and the refusal is the whole sentence rather than a fragment of it:
+  `readonly mode is ON: refusing to run a PowerShell script. A script is arbitrary code and flint
+  cannot judge one; use a read-only `bash` or `exec` command, or turn readonly off with /readonly.`
+  No classifier is asked about a language it does not know.
 - `bash` is refused unless the command line is inspection only. The judgement is a string
   one: anything containing `>`, `>>`, `&&`, `||`, `;`, `|`, a backtick, `$(` or an
   elevation word (`sudo`, `doas`) disqualifies it, and what is left is judged by program and
@@ -685,7 +699,7 @@ Four checks run before any route, in this order, and each refusal is a `403` wit
 | Route | Body rules | Answer |
 |---|---|---|
 | `GET /` | — | the page (`text/html`); 405 for any other method |
-| `GET /session` | — | the session file verbatim (`application/x-ndjson`), with `X-Flint-At` = the cursor **only when this run has a live feed**; `404` when the run keeps no conversation; `200` with an empty body when the file does not exist yet |
+| `GET /session` | — | the session file verbatim (`application/x-ndjson`), with `X-Flint-At` = the cursor **only when this run has a live feed *and* there is a file to point into** — a cursor is an offset in the session file, so a run whose conversation has not been written yet answers `200` with an empty body and no `X-Flint-At`, and the header appears the moment the first line does; `404` when the run keeps no conversation |
 | `GET /sessions` | — | `{"sessions":[{"n","id","label","current"}]}` |
 | `GET /file?path=<p>[:<line>]` | `path` required, percent-encoded; resolved against the run's `cwd`; the literal path is tried first, then the `:N`-stripped one | the file's bytes (`text/plain`, cut at 512 KB with `X-Flint-Cut`/`X-Flint-Size`), or the route's own refusal: a directory, a file over 64 MB, a non-UTF-8 file, or nothing there |
 | `GET /jobs` | — | `{"jobs":[…]}` — the same record `/jobs` and `job_op` read |
