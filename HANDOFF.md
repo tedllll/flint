@@ -1835,16 +1835,19 @@ of one file disagreeing about where a conversation was held is its own bug.
 
 **CI red on the commit that fixed §1.1, and the annotation fix earned itself immediately.** The ubuntu
 job failed `a_run_that_is_already_deep_refuses_to_go_deeper` with "the depth limit was not reported",
-while the same test passed seven times in seven here (six of them under 16 busy cores). It is the same
-class as the flakes below and it is recorded rather than explained: the prime suspect is this file's own
-harness — `Scripted` hands out its bodies by HTTP request number, so any request that is not a step of
-the conversation moves the script on by one, and the *second* body answers the first step, which produces
-exactly this signature (a normal run, exit 0, missing the sentence). That suspect was **tested by hand
-and not confirmed**: a 500 served by a *different* mock does not touch the counter, and nothing has
-reproduced the real case. What changed is that the next occurrence will settle it — the count of model
-requests and the stderr a retry writes to are both in the message now, and the count is asserted first
-(`980b6c5`). The annotation step's wider `grep -A` is also why the failing *test's own words* were
-visible this time instead of six lines of setup.
+while the same test passed seven times in seven here (six of them under 16 busy cores). That made the
+message the next thing to fix rather than the test: the count of model requests and the stderr a retry
+writes to are in it now, and the count is asserted first (`980b6c5`). **It failed again on the ubuntu
+runner one commit later (`7fa67fa`), and this time the message answered a question**: exactly **2**
+requests and an **empty** stderr, which is a run that took two normal steps — so the desynchronized
+script (`Scripted` hands out its bodies by request number) is refuted rather than suspected. What is
+left is a transcript missing a sentence the run must have written, and the one fact the bytes cannot
+carry is *which* session file was read: a child's conversation has the same `cwd`, provider, model and
+event shape as its parent's, differing only by a `children/` component. The path is in the message now
+and the test asserts it is the parent's (`8f30326`), so the next occurrence settles it. Both runs are
+green everywhere except this one test, the rest of the ubuntu job included — and it has never once
+failed here, in a dozen runs, five of them the whole `task` suite under eight busy cores.
+
 
 **`readonly` guarded one door out of three, and the two it missed were the person's own.** Found by the
 same external verification pass that reported the flaky test below, and the finding was two documents
