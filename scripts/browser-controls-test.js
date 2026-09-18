@@ -17,6 +17,30 @@
 /// `announce_view` only opens anything when stdout is a terminal -- and its own browser never runs;
 /// and **the run must be alive the whole time**, because every control here is a line into a real
 /// REPL, so the process is killed at the end rather than left to a timeout.
+///
+/// ## What is driven here, and what is not
+///
+/// The claims in `docs/web-mode.md` are about a page somebody uses, and this is the only thing in the
+/// repository that presses its controls -- so "the page's controls are driven in a real browser" has to
+/// be a *list*. It is printed at the start of every run rather than only kept here, because a list that
+/// exists only in the source is one nobody reads before believing a claim.
+///
+/// Driven here, each against the run's own stdout: the switches; the command panel (opening it, a report
+/// answered in it, an action button, the masked credential field, and that the key really reached
+/// `config.toml`); the two-press destructive menu (a sidebar row's, and the jobs panel's stop list); the
+/// conversation row's menu, including naming the conversation being written; the sidebar's two drag
+/// handles, the arrow keys on the focused one and their double-click reset; the model picker from the
+/// keyboard; the composer's send button and a line the run answers; a tool block's path buttons; the
+/// preview panel (a grep hit's line, reload, Escape, and a refusal in the route's own words); and the
+/// jobs panel (a running job's clock, a finished row's exit code, a child's row opening its own
+/// conversation, output, and the stop's own two presses).
+///
+/// Not driven here, with where each is answered instead: a report asked for *mid-turn* -- measured from
+/// outside the page by `tests/cli_output.rs::a_report_asked_for_mid_turn_waits_for_the_turn`, which is
+/// what `docs/web-mode.md` section 11 now says rather than claiming a press; the `/prompt` row's send
+/// button, which section 12 records as not measured; a paste into the composer, an IME, a screen reader,
+/// two tabs on one run, touch, and any phone-sized viewport. None of those is refused or impossible --
+/// they are simply not measured, and the honest place to say so is the artifact that measures the rest.
 "use strict";
 
 const { spawn } = require("child_process");
@@ -374,7 +398,40 @@ const ROW = (line) =>
      if (!found) return null;
      found.closest("button").id = "harness-target"; return true; })()`;
 
+/// The scope of this harness, printed before anything is pressed.
+///
+/// Kept as data rather than only as the comment at the top of the file: a claim in `docs/web-mode.md`
+/// is about a page somebody uses, and the reader of a run's output is the person deciding whether to
+/// believe one. ASCII only, because a Windows console in its own code page turns anything else into
+/// noise -- the same reason the rest of this file says `--` rather than an em dash.
+function announceScope() {
+  console.log("driven in a real browser, each against the run's own stdout:");
+  for (const door of [
+    "  the switches",
+    "  the command panel: opened, a report answered in it, an action button, the masked key field",
+    "  the two-press destructive menu: a conversation's row, and the jobs panel's stop list",
+    "  a conversation row's menu, including naming the one being written",
+    "  the sidebar's drag handles, the arrow keys, and the double-click reset",
+    "  the model picker from the keyboard",
+    "  the composer's send button, and a line the run answers",
+    "  a tool block's path buttons, and the preview panel: a grep hit, reload, Escape, a refusal",
+    "  the jobs panel: a running clock, an exit code, a child's own conversation, output, a stop",
+  ]) {
+    console.log(door);
+  }
+  console.log("not driven here, and where each is answered instead:");
+  for (const gap of [
+    "  a report asked for mid-turn: measured from outside the page, tests/cli_output.rs",
+    "  the /prompt row's send button: docs/web-mode.md section 12 says it is not measured",
+    "  a paste into the composer, an IME, a screen reader, two tabs, touch, a phone viewport",
+  ]) {
+    console.log(gap);
+  }
+}
+
 async function main() {
+  announceScope();
+
   const binary = browserPath();
   if (!binary) {
     console.log("no browser found -- name one with --browser <path>");

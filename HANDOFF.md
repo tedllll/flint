@@ -140,8 +140,21 @@ no confirmation step yet" — the confirmation exists and is the *page's*, which
 cover this route. A stale comment about a safety check is worse than a stale comment anywhere else: it is
 the sentence a reader consults before deciding the check is redundant.
 
-**What is left in §11 is items 3 (which page claims the browser harness actually holds, versus the ones
-the docs make) and the "checked and left out" list at its end.** §10's two holes that
+**And §11 item 3 is bounded rather than closed by a new feature: the browser harness now says what it
+drives, and prints it.** `HANDOFF.md`'s own sentence ("the mid-turn report wait is unasserted") turned out
+to be too pessimistic about the *behaviour* and too generous about the *press*: `tests/cli_output.rs`
+measures a mid-turn report end to end against a real `--web` process with a stub that holds the turn open,
+while `docs/web-mode.md` §12 says of the `/prompt` send button that it is "not measured here" and offers
+the harness as something that "could be extended to these two rows" — a promise where a boundary belongs.
+So `scripts/browser-controls-test.js` gained a scope section: the doors it drives, each against the run's
+own stdout, and the ones it does not, each with where it is answered instead — and it **prints that list
+before pressing anything**, because a list that lives only in the source is one nobody reads before
+believing a claim. The two doc passages now point at it, and the unmeasured things are named rather than
+implied: that button, a paste into the composer, an IME, a screen reader, two tabs on one run, touch, a
+phone-sized viewport.
+
+**What is left in §11 is the "checked and left out" list at its end** — the candidates the survey
+proposed and the round before declined, written down so they are not re-proposed. §10's two holes that
 needed a decision rather than code — C3 (nothing identifies a request, so a caller's retry may repeat
 tools) and C5 (a session carried into a second purpose by `--continue`) — were settled in writing in the
 previous round, and the paragraph below records what was decided; this sentence is kept only so that the

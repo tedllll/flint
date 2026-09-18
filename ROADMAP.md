@@ -1899,18 +1899,23 @@ where prose and tree disagree is item 3.**
    here. All four were fixed rather than only the first, because a survey that points at a wrong
    sentence and leaves it there has made the problem worse. The general one — a snapshot section that
    says when it was true instead of sounding like state — is stated at the top of that section.
-3. **What the page claims and what the harness holds are not the same set.** `HANDOFF.md` records it in
-   its own words — "the mid-turn report wait is unasserted (`docs/web-mode.md` §11)" — and §11 does
+3. **What the page claims and what the harness holds are not the same set — bounded 2026-09-18.**
+   `HANDOFF.md` recorded it in
+   its own words — "the mid-turn report wait is unasserted (`docs/web-mode.md` §11)" — and §11 did
    claim the behaviour: a report is accepted at `/report` **mid-turn**, and the turn is then stopped (a
-   real interrupt, `outcome: stopped`). Both the Rust suite (`tests/web_view.rs`, a report read in the
-   panel) and the browser harness (`scripts/browser-controls-test.js`, a report answered in the panel)
-   cover a report *between* turns and neither covers one *during* a turn — the case where the composer
-   is busy and the stop is being asked for through a different door than `/stop`. `docs/web-mode.md`
-   §12 says the same thing about itself: pressing the button there is "**not measured here**", and "the
-   press belongs to the harness in §11, which drives the page's controls and could be extended to these
-   two rows". One extension of the harness that already exists, or two claims softened — the honest
-   version of "the page's controls are driven in a real browser" is a list of which presses are, and the
-   harness is where that list should be.
+   real interrupt, `outcome: stopped`). The claim itself turned out to be backed: `tests/cli_output.rs`
+   measures it end to end against a real `--web` process with a stub that holds the turn open
+   (`a_report_asked_for_mid_turn_waits_for_the_turn`). What was *not* true was the implication that a
+   browser press is driven: `docs/web-mode.md` §12 says of the `/prompt` send button that it is "**not
+   measured here**", and "the press belongs to the harness in §11, which drives the page's controls and
+   could be extended to these two rows" — a promise in place of a boundary.
+   **What was built is the boundary**: `scripts/browser-controls-test.js` now carries a list of what it
+   drives and what it does not, and *prints it* before pressing anything, because a list that exists only
+   in the source is one nobody reads before believing a claim. The two doc passages were corrected to
+   point at that list — §11 now says the mid-turn measurement is a request through the page's own door
+   rather than a press, and §12 says its button is on the harness's "not driven here" list. What is still
+   unmeasured is named rather than implied: a press of that button, a paste into the composer, an IME, a
+   screen reader, two tabs on one run, touch, a phone-sized viewport.
 4. **Retry safety: nothing identifies a request — answered in writing 2026-09-18.** `ROADMAP.md`'s §10
    states the hole — "A caller that times out and retries may repeat the tools the first attempt already
    ran" — and §10's own entry now carries the answer rather than the question: flint cannot see a

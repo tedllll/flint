@@ -724,7 +724,11 @@ open — and `a_report_asked_for_mid_turn_waits_for_the_turn` uses it against a 
 report is accepted at `/report` mid-turn, the turn is then stopped (a real interrupt, `outcome: stopped`),
 and both frames are read off one feed so the *order* is the assertion — `turn.completed` first, the
 `panel: true` answer with the config path after it. That is the property the wait exists for: a read that
-raced the turn would be a second writer in the transcript. Still open after it: a browser, as ever.
+raced the turn would be a second writer in the transcript. **What that measurement is, and is not**: it is
+a request to the route through the page's own door, not a *press*. Pressing a panel row while the composer
+is busy is not driven by `scripts/browser-controls-test.js`, and that harness prints what it does drive
+before it presses anything — this case is on its "not driven here" list, with this test named as where the
+behaviour is actually measured. See the end of §11.
 
 ### A read that takes an argument, and the values as the permission — measured, 2026-09-15
 
@@ -996,8 +1000,10 @@ would be starting a model turn through the report route.
 | The list is the run's, and it costs a run nothing until it is used | the same frame, and `Agent::prompts` | the names come from the run's own discovery walk, like `Agent::skills` — and unlike it, nothing about a template appears in the system prompt or a tool schema |
 
 **Not measured here**: pressing the button in a real browser. The frame and the route are held at the
-bytes; the press belongs to the harness in §11, which drives the page's controls and could be extended
-to these two rows.
+bytes. The press belongs to the harness in §11, which drives the page's controls — and that harness now
+*prints what it drives* before it presses anything, with these two rows on its "not driven here" list
+rather than in a promise that the list could grow to include them. So this is a bounded claim with a
+stated boundary, which is what it was always meant to be.
 
 ---
 
