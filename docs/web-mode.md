@@ -1634,6 +1634,8 @@ outcome is the sentence it already has is a press wasted.
 | All of it goes away with the last job | the same | the control is `hidden` and the summary is empty |
 | The failure chip says where the reason is | the same | its tooltip names the exit codes |
 | The header's shape is a policy, not a style | `tests/web_view.rs::the_header_names_the_conversation_and_what_the_run_is_doing` | the name and the work are on one line, the name's order is read, and the chips read `jobIsLive`, the child kind, the failures and the kills |
+| The chips and the rows are the same list, in a real browser | `scripts/browser-controls-test.js`, against a real run's own stdout | **61/61 claims held**, including `3 running` / `1 subagent` for a turn that started two background commands and one `task` child, with the three partition chips adding up to the rows and the subagent chip a cross-cut of the live ones |
+| The name on the header is the name the sidebar shows, in a real browser | the same run, with `/name` sent from the sidebar's own field | the line above the conversation read `named from the sidebar`, which is the row the sidebar had just named — and not `flint` |
 
 **The stub DOM found a real defect while this was being tested**, which is worth recording because it is
 the second time that harness has caught something the browser would not have. `summary.textContent = ""`

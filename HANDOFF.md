@@ -1801,13 +1801,26 @@ scripts/term-layout-test.js` all pass; `node scripts/web-view-test.js` all pass;
 examples/python/test_call.py`'s checks all pass. CI is green on both pushed commits — the run for `f6255f1`
 is 7/7 when it settles; the two before this session (`dffbf56`) were already green.
 
-**One step of the standing duty is blocked, and it is somebody else's process.** The release build for
-`f6255f1` is in `target/release/flint.exe` (SHA-256 `CA50BF52…`), but copying it over
-`C:\Users\zhangzhuo\bin\flint.exe` was refused by Windows: a plain interactive `flint` (pid 13272, started
-18:02) holds the file open, which is the trap `AGENTS.md` names. The copy is not run, nothing is broken,
-and `bin\flint.exe` is still the previous build (`96946B68…`, from `7fa67fa`). Closing that session and
-running `Copy-Item target\release\flint.exe C:\Users\zhangzhuo\bin\flint.exe -Force` is the whole fix;
-there is no need to rebuild.
+**The standing duty is done, and one step of it measured the trap `AGENTS.md` names.** The release
+build for this head is installed: `target\release\flint.exe` and `C:\Users\zhangzhuo\bin\flint.exe` are
+the same bytes (SHA-256 `CA50BF526ED7B3A600755D9753245AB0A759BB194C94DE42E74913C70A94D08A`) and
+`flint --version` prints `flint 0.1.0`, exit 0. The first attempt was refused by Windows — a plain
+interactive `flint` (pid 13272) held `bin\flint.exe` open, which is exactly the "close sessions before
+rebuilding" trap — and the copy went through unchanged once that session ended, with no rebuild needed.
+A `flint` still running is the only reason this step fails, and closing it is the whole fix.
+
+**The page's controls were driven in a real browser: 61/61 claims held, and the one that was red was
+the test's own.** `node
+scripts/browser-controls-test.js` (not in CI: it needs a browser, which a test may not assume is
+installed) drives every control against a real run's own stdout, and this session's first run came back
+60/61: the new header claim asserted a `subagent` chip at a moment when the scripted turn had two
+background *commands* running and its `task` child had not started yet. The claim was wrong, not the
+page — the chips showed `2 running` for two rows, which is the truth — so it now asserts the *relation*
+instead of a fixed set of words: the live, failed and done chips must add up to the rows, and the
+subagent chip must equal the live rows of kind `child`. That is the invariant the old `jobs (N)` trigger
+was held to, kept in the vocabulary §17 introduced. Re-run: **61/61 held**, including a tool block's
+paths being buttons with a `grep` hit carrying its line, and the header reading the name the sidebar had
+just given the conversation rather than `flint`.
 
 **The untracked verification record was worked through, and all ten of its findings were real: five in
 the code, four in the inventory, and the flaky test.** The user's question was narrow — "there is a test
