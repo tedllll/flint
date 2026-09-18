@@ -28,11 +28,23 @@ reports one retry") and is backed by a second assertion in the plainest test the
 says `0`. The Python caller carries it in the same field `duration_ms` travels in, and `README.md`'s
 sample frames show it.
 
-**The line after it is the schema-miss ending, then `/export` from inside a run, a job that can say it is
-`stopping`, the page's own reconnect cursor, and the picker of live runs the page's `/say --to` waits
-on.** §10's two holes that need a decision rather than code — C3 (nothing identifies a request, so a
-caller's retry may repeat tools) and C5 (a session carried into a second purpose by `--continue`) — are
-on the same list, to be settled in writing rather than left as an itch.
+**The line after it is `/export` from inside a run, a job that can say it is `stopping`, the page's own
+reconnect cursor, and the picker of live runs the page's `/say --to` waits on.** §10's two holes that
+need a decision rather than code — C3 (nothing identifies a request, so a caller's retry may repeat
+tools) and C5 (a session carried into a second purpose by `--continue`) — are on the same list, to be
+settled in writing rather than left as an itch.
+
+**The second of them is built: the one `--json` ending that looked like a bug is now documented and
+pinned (§11 item 6).** When a `--schema` run's answers never match, the stream carries `turn.completed`
+with `outcome: "complete"` **and then** an `error`, and the process exits 65 with no `result` line. §10
+said of it: "deliberate, undocumented and **untested** … the next reader will 'fix' it in one direction
+or the other." Nothing about the behaviour needed changing — the turn really did finish, and it is the
+*answer* that is unusable — so what was added is the three places a reader meets it: `README.md` states
+the combination for a caller, the comment above the `error` says it where the next reader is standing,
+and the existing test now asserts the **order** (`turn.completed` before `error`) and the **outcome**
+(`complete`) together, which are the two things either "fix" would break. The assertion was shown to be
+live: reporting the miss as `incomplete` makes it fail with `reason:"steps"` — a budget that never came
+due.
 
 **The round before this one surveyed the tree, and §11 of `ROADMAP.md` is what it found.** The ordered
 queue (§5–§10) has landed, the small unscheduled list is empty, `## Known unfinished` opens with "No

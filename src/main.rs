@@ -5380,6 +5380,16 @@ async fn run_json_turn(
             // No `result` line, ever, for an answer that did not pass: a caller reading that type
             // must be able to trust that what it holds is what the schema describes. The errors go
             // out as one `error`, last, so the exit code and the stream agree.
+            //
+            // Which leaves one combination worth stating, because it looks like a mistake and is not:
+            // the `turn.completed` above says `outcome: "complete"` and this `error` follows it. The
+            // turn *did* finish -- the model answered, three times, and flint stopped asking because
+            // the shape kept being refused, not because a budget ran out -- so `incomplete` here would
+            // name a limit that never came due, and moving the `turn.completed` after the `error`
+            // would report a turn that ended after it had been reported as failed. Two signals, two
+            // questions: `outcome` is about the turn, this frame and the code are about the answer.
+            // `tests/json_output.rs` pins the order and the outcome together, and README.md states it
+            // for a caller; neither is a detail to be "fixed" in one direction or the other.
             emit(ndjson::error(&format!(
                 "the answer did not match the schema after {attempt} attempts:\n{}",
                 errors

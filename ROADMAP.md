@@ -1777,7 +1777,7 @@ callbacks (a protocol to invent, against "no MCP and no subagents"), and `patter
 schema subset (a dependency and a rabbit hole — `enum` and the caller's own check are the substitute,
 and C6 is the note that the documentation has to say so).
 
-### 11. What a survey of the tree found, 2026-09-18 — **none of it started**
+### 11. What a survey of the tree found, 2026-09-18 — **the promised halves in §9/§10 are being finished first; item 6 below is built**
 
 Written because the queue above ran out. §5–§10 have all landed, the small unscheduled list below is
 empty, `## Known unfinished` opens with "No known defect is open", and the twelve items taken from the
@@ -1795,6 +1795,8 @@ list's, not this one's, and each line is edited in the same commit as the code t
 
 - §10 B5's retry half — `provider_retries` on `turn.completed` — **built 2026-09-18**. The remaining
   line in B5 is the money, which is refused with its reason rather than owed.
+- §10's B-section: the schema-miss ending written down and pinned — **built 2026-09-18**, recorded in
+  this section's own item 6 rather than twice.
 - §9: `/export` from inside a running conversation ("the obvious next door"); a job that can say it is
   `stopping`; and the page's own half of the reconnect cursor, which `HANDOFF.md` calls the part of the
   item that stays open.
@@ -1870,13 +1872,18 @@ where prose and tree disagree are items 2, 3 and 9(iii).**
    different number that is also true. The release workflow builds four targets by tag and the PATH copy
    is refreshed after every round, so "which flint is this" is the first question a bug report asks. One
    flag, one line in `--help`, one test that the number on the flag is the number on the banner.
-6. **One ending of a `--json` stream is deliberate, documented nowhere and untested.** §10 says it in
-   its own words: when a schema never matches, the stream carries `turn.completed` with
-   `outcome:"complete"` **and then** an `error`, and the process exits 65 — "deliberate, undocumented and
-   **untested** … It has to be written down and pinned by a test, or the next reader will 'fix' it in one
-   direction or the other." That is the cheapest item in this list after the guard: a paragraph in
-   `docs/` and two assertions in `tests/json_output.rs`, both of which already have the stub and the
-   harness for it.
+6. **One ending of a `--json` stream is deliberate — and was documented nowhere and untested.** *Built
+   2026-09-18.* §10 said it in its own words: when a schema never matches, the stream carries
+   `turn.completed` with `outcome:"complete"` **and then** an `error`, and the process exits 65 — "the
+   next reader will 'fix' it in one direction or the other". What was built is the two halves of that
+   sentence and nothing else, because the behaviour was already right: `README.md` states the
+   combination for a caller (two signals, two questions — the turn did finish, the answer is
+   unusable), the comment where the `error` is emitted says the same thing where the next reader will
+   actually be standing, and `tests/json_output.rs` pins **the order and the outcome together** in
+   `a_schema_that_never_matches_ends_the_stream_with_an_error`. The assertion was shown to be live
+   rather than decorative: reporting the schema miss as `incomplete` makes it fail with `outcome:
+   "incomplete"` and `reason:"steps"` — naming a budget that never came due, which is exactly the
+   "fix" the test exists to refuse.
 7. **A job cannot say it is stopping.** §9 records the limit: a `stopping` state "would need a flag on
    the `Job` that nothing sets today". A stopped job reads as `running` until it is gone, so the
    person's status row and the page's jobs panel cannot distinguish "asked to stop, not gone yet" from

@@ -1950,6 +1950,15 @@ async fn an_answer_of_the_wrong_shape_is_asked_for_again() {
 }
 
 /// A model that never gets it right ends the stream without a `result` at all.
+///
+/// And with a **combination a reader is likely to want to "fix"**: `turn.completed` says
+/// `outcome: "complete"`, and *then* an `error` arrives and the process exits 65. That is deliberate
+/// and the assertion below is the reason it is written down -- the turn really did finish (three
+/// answers were produced, and flint stopped asking because the schema kept refusing them), while the
+/// answer is unusable. Two signals answer two questions: `outcome` is about the turn, the `error` and
+/// the exit code are about the answer. Making either one agree with the other would throw away one of
+/// those facts: `incomplete` would blame a step limit that never ran out, and a `turn.completed` after
+/// the `error` would read as a turn that finished after it had been reported as failed.
 #[tokio::test]
 async fn a_schema_that_never_matches_ends_the_stream_with_an_error() {
     let server = MockServer::start().await;
@@ -1978,6 +1987,31 @@ async fn a_schema_that_never_matches_ends_the_stream_with_an_error() {
     assert!(
         !kinds(&lines).iter().any(|k| k == "result"),
         "a `result` line was emitted for an answer the schema did not accept: {lines:?}"
+    );
+    // The combination, in order: the turn's own end comes first and calls itself complete, and the
+    // unusable answer is reported after it. The order is load-bearing -- a caller that stops reading
+    // at `turn.completed` (the terminal frame, which is where a streaming caller is told it can stop
+    // waiting) still gets the `error` only by reading one more line, which is why the frame's own
+    // comment says the two answer different questions rather than that one of them is wrong.
+    let order = kinds(&lines);
+    let turned = order
+        .iter()
+        .position(|k| *k == "turn.completed")
+        .unwrap_or_else(|| panic!("no turn.completed in {:?}", kinds(&lines)));
+    let errored = order
+        .iter()
+        .position(|k| *k == "error")
+        .unwrap_or_else(|| panic!("no error in {:?}", kinds(&lines)));
+    assert!(
+        turned < errored,
+        "the answer's failure is reported before the turn's end: {:?}",
+        kinds(&lines)
+    );
+    assert_eq!(
+        line_of(&lines, "turn.completed")["outcome"],
+        "complete",
+        "the turn is being reported as something other than what it was: {}",
+        line_of(&lines, "turn.completed")
     );
     let error = line_of(&lines, "error")["message"]
         .as_str()

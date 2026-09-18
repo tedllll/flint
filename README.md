@@ -411,6 +411,17 @@ are worth knowing:
   Anthropic with a **400** and a sentence, and all three are now the one code
   `insufficient_balance`. Reading the body is what makes that possible; the status alone is not the
   classification.
+
+- **Two signals, two questions — the one combination that looks like a bug.** When a `--schema` run's
+  answers never match, the stream ends with `turn.completed` carrying `outcome:"complete"` **and then**
+  an `error`, and the process exits **65**, with no `result` line anywhere. It is deliberate, and it is
+  written down here because the next reader's instinct is to make the two agree. They answer different
+  questions: `outcome` is about the **turn** — the model did answer, three times, and flint stopped
+  asking because the shape kept being refused rather than because a budget ran out, so `incomplete`
+  would name a limit that never came due — while the `error` and the exit code are about the
+  **answer**, which is not one a caller can use. A caller that branches should read it as: `outcome`
+  says whether anything was cut short, `error`/`result` says whether what came back is trustworthy.
+  `tests/json_output.rs` pins the order and the outcome together so neither "fix" can land by accident.
 - **A silent run is not a dead one.** Between `tool.started` and `tool.completed` nothing happens
   for as long as the tool runs, and from a pipe that is the same thing as a crashed process. So a
   run that is working and not talking says so every five seconds:
