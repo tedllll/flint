@@ -922,6 +922,13 @@ program and its verb rather than by re-reading a command line it never had. Use 
 
 ## Tools
 
+Every tool call in one assistant message runs **at once**: a model that asks for six files, or three
+commands, in a single message does not wait for them one after another. Two things about that are
+deliberate. The **results are still reported in the order they were asked for**, so a transcript reads
+top to bottom and a call sits next to its own result; what is concurrent is the waiting, and no line
+ever carried that. And two calls that write the same file cannot lose each other's work by overlapping:
+the read-before-mutate gate refuses the second one, because the file changed since *that* call read it.
+
 | Tool | Purpose |
 |---|---|
 | `bash` | run a shell command (120s default timeout, `timeout_secs` to raise, `background: true` for one nobody should wait for) |

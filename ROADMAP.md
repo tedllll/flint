@@ -1989,7 +1989,19 @@ argument, the cost and what flint has today are in the document, §3.
   applies, which for some models is reasoning *on*. A `task` child is a new run and starts at the
   config's level rather than the parent's; the endpoint travels to a child because a child is the same
   endpoint, and a level is a choice about this conversation.
-- **Several tool calls of one assistant message, at once** — flint runs them in order, one at a time.
+- **Several tool calls of one assistant message, at once — built, 2026-09-17.** The calls of one message
+  are started together and awaited together (`futures_util::future::join_all`, a crate already in the
+  tree), and the unit is the **message** rather than the step, because that is the unit in which they
+  were asked for. `Tools::invoke` already took `&self` and kept what it must remember behind a `Mutex`,
+  so nothing about the tool set had to change: the calls share the tools and not their answers. Two
+  things are deliberately unchanged. The **report** stays in the order the model asked — the transcript
+  is read top to bottom and the pairing of a call with its result is the only structure in it, and
+  concurrency was never a thing a line of it carried — and there is **no tool-by-tool rule** about what
+  may run at once, because the read-before-mutate gate already refuses the second write of a file that
+  changed since that call read it. That is what makes it safe rather than lucky. What is left undone is
+  **cancelling the siblings** when one call fails: the model asked for all of them, a failure is
+  information about one of them, and killing work the person paid for because another command exited
+  non-zero is a decision flint should not make silently.
 
 **Read and not taken, recorded so the argument is not lost:** a **run-level tool allowlist** (Pi's
 `--tools`/`--exclude-tools`) as something narrower than `readonly`. It is the one candidate of the

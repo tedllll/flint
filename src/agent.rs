@@ -823,9 +823,56 @@ impl Agent {
             // interrupt from here on has nothing of its own left to keep.
             self.drawn.clear();
 
-            for call in &outcome.tool_calls {
-                let args: serde_json::Value = match serde_json::from_str(&call.arguments) {
-                    Ok(v) => v,
+            // Every call in this message is started before any of them is waited for. That is the
+            // whole of item 12 from the reading of Pi: a model that asks for four files, or four
+            // commands, in one message is already waiting for all four, so running them one after
+            // another spends three waits nobody asked for. The unit is the **message** and not the
+            // step -- what the model asked for together is what runs together -- and the tool set is
+            // built for it: `Tools::invoke` takes `&self` and keeps what it must remember behind a
+            // `Mutex`, so calls share the tools and not their answers.
+            //
+            // Arguments are parsed first, because a call nobody can run must not hold up the ones
+            // that can. A call whose arguments do not parse is answered with the parse error, which
+            // is what actually gets it fixed.
+            let mut parsed: Vec<Result<serde_json::Value, String>> =
+                Vec::with_capacity(outcome.tool_calls.len());
+            let mut runnable: Vec<(usize, serde_json::Value)> = Vec::new();
+            for (index, call) in outcome.tool_calls.iter().enumerate() {
+                match serde_json::from_str::<serde_json::Value>(&call.arguments) {
+                    Ok(args) => {
+                        parsed.push(Ok(args.clone()));
+                        runnable.push((index, args));
+                    }
+                    Err(e) => parsed.push(Err(e.to_string())),
+                }
+            }
+
+            // One future per call, all of them borrowing the tool set and none of them touching the
+            // conversation. `join_all` resolves in the order it was given, which is the order the
+            // calls arrived in, and the pairing below depends on that.
+            //
+            // Two calls that write one file cannot lose each other's work by running together: the
+            // read-before-mutate gate refuses the second one, because the file changed since *that*
+            // call read it. That gate is what makes this safe rather than lucky, and it is the reason
+            // no tool-by-tool rule about what may run at once is needed here.
+            let futures = runnable
+                .iter()
+                .map(|(index, args)| self.tools.invoke(&outcome.tool_calls[*index].name, args))
+                .collect::<Vec<_>>();
+            let done = futures_util::future::join_all(futures).await;
+            let mut results: Vec<Option<Result<String, anyhow::Error>>> =
+                (0..outcome.tool_calls.len()).map(|_| None).collect();
+            for ((index, _), result) in runnable.iter().zip(done) {
+                results[*index] = Some(result);
+            }
+
+            // Then the reporting, in the order the model asked for, whether the calls ran together or
+            // one at a time. Ordered on purpose: the transcript is read top to bottom and the pairing
+            // of a call with its result is the only structure in it. What was concurrent is the
+            // *waiting*, and no line of the transcript ever carried that.
+            for (index, call) in outcome.tool_calls.iter().enumerate() {
+                let args = match &parsed[index] {
+                    Ok(args) => args,
                     Err(e) => {
                         let msg = format!(
                             "invalid JSON arguments for tool '{}': {e}. Raw: {}",
@@ -847,11 +894,10 @@ impl Agent {
                     }
                 };
 
-                let result = self.tools.invoke(&call.name, &args).await;
-                match result {
+                match results[index].take().expect("every parsed call was run") {
                     Ok(output) => {
                         let ok = !output.contains("[exit code:");
-                        let output = match self.note_repeat(&call.name, &args) {
+                        let output = match self.note_repeat(&call.name, args) {
                             Some(note) => format!("{output}\n{note}"),
                             None => output,
                         };

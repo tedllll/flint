@@ -190,6 +190,120 @@ fn skill_workspace(tag: &str) -> PathBuf {
 /// is told what was wrong, and no result event is ever emitted. In a transcript that reads
 /// as a call that is still running; in a `--json` stream it is a `tool.started` with no
 /// `tool.completed`, which a caller waiting for the pair never recovers from.
+/// Frame sequence for a model that asks for two commands in one message.
+///
+/// The first command waits for a file only the second one writes, so the two can both succeed only
+/// if they were in flight together. That is the evidence the test below asserts on: not how long the
+/// turn took -- a clock would be a guess about the machine this runs on -- but whether one call ever
+/// saw the other.
+///
+/// `ping` is the portable sleep for `cmd`: it is on every Windows, and `timeout` refuses to run when
+/// stdin is not a terminal, which is exactly how a tool call runs a command. The arguments are built
+/// through `serde_json` rather than written by hand because this is JSON inside a JSON string inside
+/// a data frame, and the escaping is the part nobody should be reading in a test fixture.
+fn two_commands_in_one_message() -> String {
+    let (wait, touch) = if cfg!(windows) {
+        (
+            // `cmd`'s `if` swallows the rest of the line, `&` and all, when its condition is false --
+            // so the success message is the *then* branch here rather than a command after the `if`.
+            // Measured, not guessed: with the marker present the first spelling printed nothing.
+            r#"ping -n 3 127.0.0.1 >nul & if exist b.txt (echo saw-b) else (exit /b 9)"#,
+            "echo b > b.txt",
+        )
+    } else {
+        (
+            r#"sleep 2; [ -f b.txt ] || exit 9; echo saw-b"#,
+            "echo b > b.txt",
+        )
+    };
+
+    let frame = |index: usize, id: &str, command: &str| {
+        let arguments = serde_json::to_string(
+            &serde_json::json!({ "command": command }).to_string(),
+        )
+        .expect("a quoted argument string");
+        format!(
+            "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":{index},\"id\":\"{id}\",\
+             \"function\":{{\"name\":\"bash\",\"arguments\":{arguments}}}}}]}}}}]}}"
+        )
+    };
+    let first = frame(0, "call_1", wait);
+    let second = frame(1, "call_2", touch);
+    sse(&[
+        first.as_str(),
+        second.as_str(),
+        r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+        "data: [DONE]",
+    ])
+}
+
+/// Two calls of one message run at once.
+///
+/// This is the whole of what item 12 from the reading of Pi bought, and the proof is a rendezvous
+/// rather than a stopwatch: run one after the other, the first call *cannot* pass, because the file
+/// it waits for is written by a call that has not started yet. Nothing here depends on how fast the
+/// machine is, and the failure a regression would produce is the tool's own exit code rather than a
+/// timing that came out slightly too large.
+///
+/// The order of the results is asserted too, because it is part of the promise: the work is
+/// concurrent and the *report* is in the order the model asked, so a transcript reads the same
+/// whether the calls ran together or one at a time.
+#[tokio::test]
+async fn the_calls_of_one_message_run_at_once() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(SseFixture {
+            body: two_commands_in_one_message(),
+        })
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(SseFixture {
+            body: answer_only(),
+        })
+        .mount(&server)
+        .await;
+
+    let dir = std::env::temp_dir().join(format!("flint-parallel-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+
+    let mut agent = agent_for(&server, dir.clone()).await;
+    let mut results: Vec<String> = Vec::new();
+    agent
+        .run("run both of these", |ev| {
+            if let Event::ToolResult { output, .. } = ev {
+                results.push(output);
+            }
+        })
+        .await
+        .expect("the turn itself must finish, not fail");
+
+    assert_eq!(
+        results.len(),
+        2,
+        "one of the two calls produced no result at all: {results:?}"
+    );
+    assert!(
+        !results[0].contains("[exit code:"),
+        "the first call finished before the second one had started, so the calls of one message ran \
+         one at a time: {}",
+        results[0]
+    );
+    assert!(
+        results[0].contains("saw-b"),
+        "the first call did not report seeing the marker: {}",
+        results[0]
+    );
+    assert!(
+        dir.join("b.txt").exists(),
+        "the second call never wrote its marker"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn a_call_with_unparseable_arguments_still_reports_a_result() {
     let server = MockServer::start().await;

@@ -6,6 +6,53 @@ of it.
 
 ## Where things stand
 
+**The twelfth and last of the items taken from the reading of Pi is built: every tool call of one
+assistant message now runs at once.** It was the last item on purpose and the smallest of the twelve,
+because it is the one that changes no interface: no command, no config key, no line in a session file.
+The loop in `Agent::run` used to walk `outcome.tool_calls` and `await` each call in turn; it now parses
+every call's arguments first, builds one future per parsed call, and awaits them together
+(`futures_util::future::join_all`, a crate already in the tree — no new dependency).
+
+**The unit is the message, not the step and not the tool.** The model asked for those calls in one
+breath, so it is already waiting for all of them, and running them one at a time spends waits nobody
+asked for. The step stays sequential above it: the next request cannot be composed until this one's
+results are in the history. Nothing about the tool set had to change, and that is the reason this was
+cheap: `Tools::invoke` already took `&self` and kept what it must remember behind a `Mutex`, so the
+calls share the tools and not their answers.
+
+**Two of Pi's rules were taken and two refused, and the refusals are the interesting half.**
+*Taken:* the parallel batch by default, and the rule that the tool-result **messages** stay in the
+assistant's own order. flint goes one step further than Pi there — the display is in that order too,
+not printed as each result finalizes — because the transcript is a document a person reads top to
+bottom and the pairing of a call with its result is the only structure in it; what is concurrent is the
+*waiting*, and no line ever carried that. *Refused:* Pi's per-tool `executionMode: "sequential"` and its
+file-mutation queue keyed by canonical path. Pi needs both because in Pi nothing stands between two
+writers of one file; flint already has the read-before-mutate gate, which refuses the second write of a
+file that changed since *that* call read it — a refusal the model can read and act on rather than a
+hidden serialization, and the reason no tool-by-tool rule about what may run at once was needed.
+*Left undone:* cancelling the siblings when one call fails (the model asked for all of them; killing
+work somebody is paying for because a different command exited non-zero is not flint's decision), which
+`ROADMAP.md` now records as such.
+
+**The proof is a rendezvous and not a clock**, which is the only honest way to test this: the model asks
+for two commands in one message, and the first waits two seconds for a file only the second one writes,
+exiting non-zero on its own if it never appears. Run one after the other, the first call *cannot* pass,
+whatever the machine's speed. It was watched red that way — with the waiting call's own `[exit code:
+9]` in the message, "the first call finished before the second one had started" — before the join went
+in, and it passes in 2.7 s rather than the 4+ s a sequential loop would take. The ordering claim is
+asserted in the same test, since the results are indexed by position.
+
+**One measured surprise, which is why the fixture is written the way it is:** `cmd`'s `if` swallows the
+rest of the line, `&` and all, when its condition is false — so `if not exist b.txt exit /b 9 & echo
+saw-b` printed nothing when the file *did* exist, and the success message had to become the `else`
+branch. Caught by running the exact command line through `cmd /C` locally before trusting it in the
+test, and the comment in the fixture says so.
+
+**That is the twelve. Nothing in the reading of Pi is left to build** except the run-level tool
+allowlist, which was declined for the reason recorded in `ROADMAP.md` §"Taken from a reading of Pi" —
+the ordered queue there is what is left to work from. `cargo test` 622 → 623 passing, 1 ignored
+(`agent_loop` 33 → 34 and nothing else moved); clippy silent; both Node checks pass.
+
 **The eleventh of the twelve items taken from the reading of Pi is built: compaction written into the
 session file.** Before this, nothing in flint could make a conversation *smaller*: `trim_old_turns`
 dropped whole turns from the request when a conversation passed `max_request_chars`, a guard that fires

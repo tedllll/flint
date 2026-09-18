@@ -217,6 +217,41 @@ another provider asks in that provider's field with the level the person chose. 
 not have are **not** hidden: flint cannot know which rungs an endpoint supports without asking it, and a
 menu that quietly drops one is a menu that lies. Four words, offered as they are.
 
+## The calls of one message run together, and the report stays in order
+
+The model asks for several tool calls in one assistant message. flint used to run them one after
+another, in the order asked, and the question item 12 of the reading of Pi raised is why not at once.
+
+They are at once now, and the shape of the decision is that **the unit is the message**, not the step
+and not the tool: what the model asked for together is what runs together. It asked for all of them in
+one breath, so it is already waiting for all of them, and running them one at a time spends waits
+nobody asked for. The step stays sequential above that, because a step is what the model has not seen
+yet — the next request cannot be composed until this one's results are in the history.
+
+Two things had to be true for this to be a small change rather than a redesign, and both were already
+true. `Tools::invoke` takes `&self` and keeps what it must remember behind a `Mutex`, so the calls
+share the tool set and not their answers. And the read-before-mutate gate is what makes concurrent
+writers safe: two calls that write one file cannot lose each other's work, because the second one is
+**refused** — the file changed since that call read it. That is the decision worth writing down, since
+it is the one Pi needs a file-mutation queue and a per-tool `executionMode: "sequential"` for: flint
+gets it from a gate it already had, and gets the better half of it, because a refusal is something the
+model can read and act on while a hidden serialization is not. No tool-by-tool rule about what may run
+at once was needed, and adding one later would be a second thing to keep true.
+
+**The report stays in the order the model asked**, and the display does too. Only the waiting is
+concurrent, and no line of a transcript ever carried the waiting, so nothing is lost by finishing one
+sentence before starting the next. The alternative — printing each result the moment it finalizes, as
+Pi does — would put the transcript in completion order, which is a race made visible in the one
+artifact a person reads and greps; the pairing of a call with its result is the only structure the
+transcript has.
+
+What is deliberately **not** done: cancelling the siblings when one call fails. A failure is
+information about one call, the model asked for all of them, and killing work somebody is paying for
+because a different command exited non-zero is a decision flint should not make silently. The evidence
+that this is real is a test and not a clock: the first command waits two seconds for a file only the
+second one writes and exits non-zero on its own if it never appears, so a sequential loop cannot pass
+— and it was watched failing exactly that way, with that exit code, before the calls were joined.
+
 ## A fold is a position in the file, never a count
 
 Pi records a compaction as an appended entry carrying the summary and `firstKeptEntryId` — the id of

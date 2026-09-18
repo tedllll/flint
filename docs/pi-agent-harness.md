@@ -589,17 +589,39 @@ from the inside.
 Pi runs a batch of tool calls concurrently by default: it preflights them in order, executes the
 allowed ones in parallel, emits each result as it finalizes, and still delivers the tool-result
 messages in the assistant's own order. A tool that cannot be run concurrently declares
-`executionMode: "sequential"`, and one such tool in a batch makes the whole batch sequential. Flint
-runs tool calls one at a time, in the order the model asked for them (`src/agent.rs`, a plain loop over
-`outcome.tool_calls`).
+`executionMode: "sequential"`, and one such tool in a batch makes the whole batch sequential.
 
-Two things make this more than a speed question, and Pi names both. Concurrency is only safe if the
-tools that mutate one file cannot interleave, so its extension guide ships a `withFileMutationQueue`
-helper keyed by the canonical path and explains the failure it prevents: two calls read the same old
-contents, compute different updates, and the later write silently wins. And the *display* has to keep
-the model's order even when the completion order differs, which is a rule flint would have to keep in
-`src/sink.rs` rather than discover. The gain is real for a turn that reads six files; the cost is that
-"tools run in the order asked" stops being true, which is a property some of flint's own tests assume.
+**Built, 2026-09-17.** flint now starts every call of one assistant message together and awaits them
+together (`futures_util::future::join_all`, a crate already in the tree), and the unit is the
+**message** rather than the step, because that is the unit in which the model asked. The change is
+small on flint's side because `Tools::invoke` already took `&self` and kept what it must remember
+behind a `Mutex`: the calls share the tools and not their answers, so only the loop had to move.
+Three of Pi's rules were decided one way or the other, and the second is the interesting one.
+
+- **Adopted exactly: the result *messages* stay in the assistant's order.** The report is written in
+  the order the calls arrived, and flint goes one step further than Pi needs to — the *display* is
+  ordered too, rather than each result appearing as it finalizes. Pi's reason for its half is that the
+  model must not have to match results to calls by name; flint's reason for the other half is that the
+  transcript is a document a person reads top to bottom and the pairing of a call with its result is
+  the only structure in it. What was concurrent is the **waiting**, and no line of the transcript ever
+  carried that, so nothing is lost by finishing the sentence before starting the next one.
+- **Refused: the per-tool `executionMode: "sequential"`, and the file-mutation queue keyed by
+  canonical path.** Pi needs both because in Pi nothing stands between two writes to one file. flint
+  already has something that does: the read-before-mutate gate refuses the second write of a file that
+  changed since *that* call read it. So the failure two parallel writers would cause is a **refusal the
+  model can see and act on** rather than a silent serialization it cannot — which is the better half of
+  the same protection, and the reason no tool-by-tool rule about what may run at once is needed here.
+- **Left undone: cancelling the siblings when one call fails.** The model asked for all of them, and a
+  failure is information about one of them; killing work the person paid for because another command
+  exited non-zero is a decision flint should not make silently. `ROADMAP.md` records it as such.
+
+The gain is real for a turn that reads six files, and it is measured rather than assumed: the test
+(`tests/agent_loop.rs`, `the_calls_of_one_message_run_at_once`) makes the *first* command wait two
+seconds for a file only the *second* one writes, so a sequential loop cannot pass — and it was watched
+failing that way, with the waiting call's own `[exit code: 9]`, before the join was put in. Two of
+flint's own assumptions did have to be checked rather than assumed: nothing in the tool set serializes
+spawns behind a lock, and the tests that read a transcript were already keyed on ids rather than on
+arrival order.
 
 ## 4. Where flint goes the other way on purpose
 
