@@ -4498,7 +4498,11 @@ fn switching_provider_runs_the_engines_start_command() {
 ///
 /// Piped stdin is a first-class way to drive flint -- `/exit` ends it -- and it exercises the
 /// real command dispatch rather than a copy of it. A pty is needed only for the paths that
-/// read *keys*, which is why the paste fix is not covered here (see `HANDOFF.md`).
+/// read *keys*, and the paste fix splits along exactly that line: the **ask** that makes a terminal
+/// wrap a paste is asserted from a run's own bytes here
+/// (`the_terminal_is_asked_to_wrap_a_paste`, which needs the capture hook rather than a pty), while
+/// what the handler does with the paste it then receives still needs a pty to deliver -- this helper
+/// reads lines and never touches the event reader (see `HANDOFF.md`).
 fn repl(home: &std::path::Path, lines: &[&str]) -> String {
     use std::io::Write;
     let mut child = binary()
@@ -4656,6 +4660,60 @@ async fn the_web_command_twice_opens_one_listener() {
     assert_eq!(
         urls[0], urls[1],
         "the second `/web` opened a different listener: {text:?}"
+    );
+}
+
+/// The terminal is asked to wrap a paste, which is the half of the paste fix no unit test could reach.
+///
+/// `Event::Paste` had a handler and two unit tests for as long as it existed, and in a real terminal the
+/// branch was *unreachable*: a terminal only wraps a paste in `\x1b[200~ … \x1b[201~` when the program
+/// asks it to, and nothing ever asked. A three-line paste therefore arrived one keystroke per character
+/// with an Enter per newline -- three messages, the second and third interrupting the first through the
+/// steering path -- while the handler's test asserted a shape nothing could deliver. `HANDOFF.md` records
+/// that fix as verified by hand in a pty, and its own words are why this test exists: "the *enable*
+/// itself is only checked there". Now it is checked here, from the bytes a real process writes, so
+/// deleting the ask fails in the gate rather than in somebody's session.
+///
+/// What stays where it was: the handler's two shapes are held by the unit tests beside it, and a paste
+/// cannot be delivered through a pipe at all -- `from_stdin` reads lines and never touches the event
+/// reader -- so the end-to-end shape is still only reachable under a real pty. The enable is the part
+/// that can be held here, and it is the part that was missing. Like every capture test this needs a debug
+/// build (`FLINT_TERM_CAPTURE` is compiled out of a release one on purpose), which is what `cargo test`
+/// builds.
+#[tokio::test]
+async fn the_terminal_is_asked_to_wrap_a_paste() {
+    // No model is reached: the run is given `/exit` and never has a turn. The provider exists so that
+    // starting up is the ordinary path rather than a refusal.
+    let home = test_home("bracketed-paste", "http://127.0.0.1:9/v1");
+    let mut child = binary()
+        .env("FLINT_HOME", &home)
+        .env("FLINT_TERM_CAPTURE", "1")
+        .env("FLINT_TERM_SIZE", "80x24")
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to run flint");
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().expect("no stdin handle");
+        stdin.write_all(b"/exit\n").expect("failed to write stdin");
+    }
+    let out = child.wait_with_output().expect("flint did not finish");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(
+        text.contains("\u{1b}[?2004h"),
+        "the run never asked the terminal to wrap a paste, so a pasted block arrives as one message per \
+         line and the `Event::Paste` handler below it can never run: {text:?}"
+    );
+    // The interactive path is what the enable belongs to, so its absence would make the assertion above
+    // pass on some other line: this is the same stream the viewport draws itself with.
+    assert!(
+        text.contains("\u{1b}[2K"),
+        "the capture did not take the interactive path, so this test is not measuring a terminal: {text:?}"
     );
 }
 

@@ -122,9 +122,26 @@ the multi-field form §11 refused for `/config edit` is right for `/provider add
 worth the note: **nothing in the gate can catch prose**, so a claim is corrected by reading it against
 the tree, which is how all four were found.
 
-**What is left on §11 item 9 is its two test-and-comment halves**: a regression test for the paste fix
-(which `tests/cli_output.rs` says of itself is not covered there) and the stale comment on where the
-report whitelist lives. §10's two holes that
+**And §11 item 9 is closed, both halves.** (i) The paste fix has a regression test now, and writing it
+found a second fault in the same three lines. `the_terminal_is_asked_to_wrap_a_paste` starts a captured
+run and looks for `\x1b[?2004h` in its bytes — red first, by deleting the ask. It could not have been
+written against the old code, and the reason is the finding: the enable went to `std::io::stdout()`
+through `execute!(…, EnableBracketedPaste)`, which is **outside the run's own sink** (so the capture hook,
+whose whole promise is the interactive path's byte stream, could not record it) **and** which crossterm
+implements as a no-op when stdout is not a console on Windows (so a captured run could never have shown it
+on either platform). The *disable* has always gone through the sink — `Term::stop` says why it matters
+("a terminal left in bracketed paste mode wraps *every* subsequent paste"), so the enable was the one byte
+of the pair a recording could not see. It now goes through the sink, emitted on the interactive path
+rather than only where a console exists; on a real terminal the sink *is* stdout, so nothing changes
+there. What still needs a pty is delivering a paste (the handler's two shapes are unit-tested;
+`from_stdin` reads lines and never touches the event reader), and `HANDOFF.md`'s own sentence about that
+is what the test's doc comment quotes. (iii) The report whitelist's comment no longer says "the page has
+no confirmation step yet" — the confirmation exists and is the *page's*, which is exactly why it does not
+cover this route. A stale comment about a safety check is worse than a stale comment anywhere else: it is
+the sentence a reader consults before deciding the check is redundant.
+
+**What is left in §11 is items 3 (which page claims the browser harness actually holds, versus the ones
+the docs make) and the "checked and left out" list at its end.** §10's two holes that
 needed a decision rather than code — C3 (nothing identifies a request, so a caller's retry may repeat
 tools) and C5 (a session carried into a second purpose by `--continue`) — were settled in writing in the
 previous round, and the paragraph below records what was decided; this sentence is kept only so that the

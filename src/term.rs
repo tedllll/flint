@@ -20,7 +20,6 @@
 
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Mutex;
@@ -653,9 +652,28 @@ impl Term {
             // The handler for `Event::Paste` below has been in this file all along and had
             // never once run in a real terminal, because nothing asked the terminal to send
             // the markers it depends on.
-            let _ = execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste);
+            //
+            // The ask moved out of this block and onto the interactive path, and is written
+            // as the literal sequence through the run's own sink rather than with
+            // `execute!(stdout, EnableBracketedPaste)`. Both halves of that are about where
+            // the bytes can be seen. A captured run takes the interactive path without a
+            // console, which is what the capture hook is *for* -- its promise is the
+            // interactive path's whole byte stream -- and crossterm implements this command
+            // as a no-op when stdout is not a console on Windows, so an ask made this way was
+            // invisible to the capture on one platform and to the whole hook on the other.
+            // Nothing about the real-terminal case changes: the sink is stdout there. The
+            // *off* half has always gone through the sink (`stop`, beside the comment about a
+            // terminal left in bracketed paste mode wrapping every paste into whatever runs
+            // next), so the enable was the one byte of the pair that could not be recorded.
         }
         if interactive {
+            // A scope rather than a `drop`: `Sink` is a borrow of the run's file, so ending the
+            // borrow is all that is needed before the drawing below takes `&mut self`.
+            {
+                let mut out = term.sink();
+                let _ = write!(out, "\x1b[?2004h");
+                let _ = out.flush();
+            }
             term.reclaim();
             term.reserve_screen();
             term.redraw();

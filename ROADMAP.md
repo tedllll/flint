@@ -1859,7 +1859,7 @@ in the "checked and left out" list at the end instead (they were deliberate deci
 vocabulary of gaps). The sweeps also found no `TODO`, `FIXME`, `unimplemented!` or `todo!(` anywhere in
 the tree, and exactly one `#[ignore]`d test, which measures rather than asserts by its own comment. **So
 the work that is left is not marked in the code — it is prose that says a limit out loud, and the places
-where prose and tree disagree are items 2, 3 and 9(iii).**
+where prose and tree disagree is item 3.**
 
 1. **Two of the three Node harnesses are headless and a push runs neither of them — *built
    2026-09-18*.** The highest-value
@@ -1911,14 +1911,16 @@ where prose and tree disagree are items 2, 3 and 9(iii).**
    two rows". One extension of the harness that already exists, or two claims softened — the honest
    version of "the page's controls are driven in a real browser" is a list of which presses are, and the
    harness is where that list should be.
-4. **Retry safety: nothing identifies a request.** `ROADMAP.md`'s §10 already states the hole — "A
-   caller that times out and retries may repeat the tools the first attempt already ran" — and it is
-   the one item in that section that is a design question rather than an interface one. A caller has no
-   idempotency key to send and flint has nowhere to remember one, so a retry after a timeout is a
-   second run of `rm`, `git push` or `apply_patch`. The options all cost something this repository
-   cares about (a key on the request is a second protocol; remembering keys on disk is state that
-   outlives the process; refusing retries puts the decision on the caller), which is exactly why it is
-   worth a round of thinking rather than a paragraph of guessing. Highest-value *design* item here.
+4. **Retry safety: nothing identifies a request — answered in writing 2026-09-18.** `ROADMAP.md`'s §10
+   states the hole — "A caller that times out and retries may repeat the tools the first attempt already
+   ran" — and §10's own entry now carries the answer rather than the question: flint cannot see a
+   *request identity* (nothing in the request says which attempt it is) or a *purpose* (the same tool
+   call in two runs is the same call), and inventing either would be a second protocol or state that
+   outlives the process, so what flint hands over is **evidence** instead of a promise — the tool events
+   precede the ending, so a caller can see from the stream what the failed attempt had already done, and
+   `session.started` names the conversation so a retry can be pointed at the same one. No idempotency
+   key, no topic heuristic, no new config key; the decision and its reasons are in §10 and this entry
+   points at them rather than repeating them.
 5. **`flint --version` — a released binary cannot be asked what it is — *built 2026-09-18*.** Measured
    this round: `flint --version` printed `flint: error: unknown flag '--version'. Try --help.` and
    `--help` had no version line either. Checked where the number *did* appear, and it was two places,
@@ -1999,10 +2001,21 @@ where prose and tree disagree are items 2, 3 and 9(iii).**
    behavioural half, because a text assertion passes over an unreachable branch, which was measured.
    Adding those checks is also what found that the harness's sandbox had no `window`, so the page's
    `pagehide` hook was the first thing to need one.
-9. **Three small gaps that the code names about itself.** (i) `tests/cli_output.rs` says of itself that
+9. **Three small gaps that the code names about itself — all three closed 2026-09-18.** (i)
+   `tests/cli_output.rs` said of itself that
    the paste fix "is not covered here (see `HANDOFF.md`)", which by this repository's own rule — a
    regression test that has never been red has not been shown to test anything — means a shipped fix
-   with nothing holding it; (ii) **`/say` on the page has no `--to` — *built 2026-09-18*.** The code
+   with nothing holding it. **Built**: the split is the fix's own. What the *handler* does with a paste
+   still needs a pty to deliver one (`from_stdin` reads lines and never touches the event reader), but
+   the **ask** that makes a terminal wrap a paste is now asserted from a run's own bytes —
+   `the_terminal_is_asked_to_wrap_a_paste` starts a captured run and looks for `\x1b[?2004h` in its
+   stdout, watched red by deleting the ask. Writing that test found a second fault in the same three
+   lines: the enable went to `std::io::stdout()` through `execute!(…, EnableBracketedPaste)`, which is
+   *outside* the run's own sink (so the capture could not record it) and which crossterm implements as
+   a no-op when stdout is not a console on Windows (so a captured run could not have shown it on either
+   platform). The disable has always gone through the sink (`Term::stop`), so the enable was the one
+   byte of the pair a recording could not see; it now goes through the sink too, on the interactive
+   path rather than only where a console exists; (ii) **`/say` on the page has no `--to` — *built 2026-09-18*.** The code
    said why: "Addressing is a terminal move until the page can offer a picker of live runs", and the
    picker is what was missing. What it needed was a **read channel** for presence, and the shape was
    already in the tree: `ArgFrom` gained a fourth list (`Peers`) beside the sidebar's conversations, the
@@ -2018,9 +2031,14 @@ where prose and tree disagree are items 2, 3 and 9(iii).**
    by `tests/web_view.rs` (the page draws a picker and reads presence through the route rather than
    itself), and by two checks in `scripts/web-view-test.js` that compose the addressed and broadcast
    lines and fill the picker through the page's own functions; (iii) the comment that justifies
-   where the report whitelist lives says "the page has no confirmation step yet"
-   (`src/main.rs:3156`), while §8 records a second press as the confirmation for destructive rows — one
-   of the two is stale, and the whitelist's own reason is worth stating in the terms that are true.
+   where the report whitelist lives said "the page has no confirmation step yet" (`src/main.rs:3156`),
+   while §8 records a second press as the confirmation for destructive rows — one of the two was stale.
+   **Fixed 2026-09-18**: the comment now says what the guard is actually for. The confirmation exists and
+   is the *page's*, so it does not cover this route, which is reachable by anything holding the token —
+   including a stale tab and a `curl`. Without the check `/report` would be one request that runs any
+   slash command at all, deletions and sends included; with it, the only lines it takes are the ones the
+   frame already offers as reports. It also says the honest thing beside a `panel` class: a report is not
+   necessarily free (`/compact` spends one request), and nothing reachable here is destructive.
 10. **`/export` from inside a running conversation — *built 2026-09-18*.** §9 called it "the obvious
     next door": the export path existed and was tested for a finished conversation and for the command
     line, and what was missing was the door from a live run — which needed its own answer to where the

@@ -3219,9 +3219,15 @@ fn wrap(text: &str, room: usize) -> Vec<String> {
 ///
 /// The check that the command really is a report lives *here*, beside the table, rather than in the
 /// route: `web.rs` does not know what a slash command means, and keeping that true is worth more
-/// than a whitelist in the one file that is proudest of not having one. It is also the safety half.
-/// The page has no confirmation step yet, so a report route that ran whatever it was handed would be
-/// a way to delete a conversation with one click that never happened.
+/// than a whitelist in the one file that is proudest of not having one. It is also the safety half,
+/// and what it guards is not a misclick: the page does have a confirmation step now -- a destructive
+/// row opens a short list and the row in it prints the whole line before sending it -- but that step
+/// is the *page's*, and this route is reachable by anything holding the token, including a stale tab
+/// and a `curl`. Without the check, `/report` would be one request that runs any slash command at
+/// all, deletions and sends included; with it, the only lines it takes are the ones the frame already
+/// offers as reports, so a caller cannot reach a command the page never offered. A report is not
+/// necessarily free — `/compact` spends one request, and it is a report because its answer is a
+/// listing — but nothing here is destructive on its own.
 /// Eight arguments for `handle_command`'s reason: it dispatches a line the page asked for through the
 /// same match, so it carries the same collaborators -- including the mailbox, which a `/say` typed
 /// into the page's composer reaches through this door.
