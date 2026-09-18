@@ -261,7 +261,7 @@ This is the interaction most worth testing, because it is the one that surprises
 |---|---|
 | a plain sentence | the in-flight request is **cancelled**, `⏹ interrupted` is printed, your line is echoed as `> <text>`, and it becomes the next turn. This is steering. |
 | `/queue <text>` | **does not interrupt**: it is held and sent when the current turn ends. The transcript shows `queued for after this turn: <text>`. A bare `/queue` prints a usage line instead. |
-| `/stop` | stops the turn without clearing the process — the same as Ctrl-C on an empty line. It is deliberately *not* handed back to the command dispatcher, so you do not get "nothing is running" after it. |
+| `/stop` | stops the turn without clearing the process — the same as Ctrl-C on an empty line. Mid-turn it is deliberately *not* handed back to the command dispatcher, so you do not get "nothing is running" after it; with nothing running it *is* handed there, and answers `nothing is running`. |
 | any `/command`, `!command`, or a saved-prompt name | the turn is dropped and the line is handed to the command dispatcher |
 | a report the page asked for | answered after the model finishes, never mid-turn (one writer in the transcript) |
 
@@ -364,7 +364,7 @@ press; `terminal` is not offered on the page at all.
 | `/fork [n]` | start a new conversation cut at question `n` | with no argument, the questions are listed so you can pick; then the new conversation, with the original left byte-identical | selector | a turn boundary is the only place a conversation can be cut |
 | `/import <file>` | copy a conversation in from a session file | `imported: <file> (N messages) into <new file>`, then its transcript | form | the source is never written to; importing the file this run is writing is refused; a file with no messages is refused |
 | `/export <file>` | write **this** conversation out as one HTML page | `wrote <path> (N bytes)` | form | the path is an argument because stdout is the terminal; a write that fails is reported and the run carries on; with nothing said yet: `nothing to export yet — this conversation has no file until something is said in it` |
-| `/name [text]` | name this conversation | bare: `name: <title>` or `(unnamed)`; with text: `named: <text>` | form | the page's sidebar is told, so a rename shows up there |
+| `/name [text]` | name this conversation | bare: `name: <title>` or `(unnamed)` — including for a conversation that has said nothing yet, which has no file to read a title from; with text: `named: <text>` | form | the page's sidebar is told, so a rename shows up there |
 | `/archive <n\|id>` | file one away, out of the list | `archived <path>` | danger | refuses the conversation you are in; the page's list is refreshed |
 | `/delete <n\|id>` | delete one | `deleted <path>` | danger | same refusal; irreversible |
 | `/new` | start a fresh conversation | `started a new session` | button | `--no-session` refuses it with the one sentence every such door uses |
@@ -467,11 +467,22 @@ that never ends, not a ration; `/config set max_steps 0` is refused with that se
 
 ### 7.3 Retries
 
-A failed completion is retried up to **4 attempts** in total, waiting 1, 2, 4, 8, 16
-seconds (capped at 16). Each retry is a notice — on the terminal it appears in the
-transcript; under `--json` it is a frame — and the count of retries over the whole run
-rides on `turn.completed` as `provider_retries`, which is the only place a retry is
-visible to a program.
+A failed completion is retried up to **4 attempts** in total, waiting **1, 2 and 4 seconds**
+between them. The waits are the ladder's first three rungs and not the whole of it: with four
+attempts there is no fourth wait, so the `8` and `16` this section used to name could never
+happen (measured: 1 s + 2 s + 4 s, about 7.7 s of wall clock, then the failure below).
+
+Each retry is a notice, and it goes to **stderr** — `flint: provider 'x' returned HTTP 500 … --
+retrying in 1s (attempt 2/4)`. It is not a transcript line and it is not a `--json` frame; the
+only place a program sees that a retry happened is `provider_retries` on `turn.completed`,
+which counts them over the whole run. The sentence that used to say both things said one of
+them wrongly — "on the terminal it appears in the transcript; under `--json` it is a frame",
+followed two clauses later by "which is the only place a retry is visible to a program". The
+second half was the true one.
+
+When the four attempts are gone the run fails with
+`gave up after 4 attempts -- the network or the provider stayed unreachable: …` and exit **75**
+(`EXIT_TEMPFAIL`: asking again later is right).
 
 ### 7.4 What bounds a request
 
@@ -531,13 +542,14 @@ and the page (its jobs panel) — which is deliberate: one answer, three readers
 | started | the tool call returns at once with a pid and (for a command) a log file path |
 | running | the page's jobs panel shows a row badged with its kind, what was asked, and a duration ticking once a second; the model can poll `job_op status` |
 | ending | a job that ends leaves a notice in the parent's transcript exactly once, and its row keeps the exit code in words (`exit code 0 (finished)`) and how long it took |
-| stopped by us | `ended_by_us` is recorded, so a kill never reads as a failure — the row says `killed`, not `failed` |
+| stopped by us | `ended_by_us` is recorded before the signal goes out, so a kill never reads as a failure — the page's state word is `killed`, and the words beside the exit code say `killed` rather than `unknown` for the signal code `-1` and for a child's own `130`. The three doors read one judgement: the page's `status`, the row `/jobs` draws, and the sentence `job_op`/`wait` hands back |
 | being stopped | a flag set when the stop is asked for is read against `finished`, so a row can say "on its way out" rather than "still working" |
 
 - A background command's log is `<FLINT_HOME>/spill/<session>/background-<tool>-<n>.log`,
   both streams in one file, readable while it is still being written.
 - `job_op output` reads what a command has printed **since it was last asked**, without
-  collecting it; `wait` collects; `kill` ends it.
+  collecting it; `wait` collects; `stop` ends it — the fourth verb, and the one whose name is
+  the same in all three doors.
 - `task` children appear in the same list; pressing a child's row opens the child's own
   conversation rather than a log.
 - What a job leaves behind when the parent's turn is dropped is recorded rather than lost:
@@ -889,7 +901,8 @@ page's stream:
 reported a split) → `status` (`text`, `restarted`, and `elapsed_secs` on a heartbeat, every 5 s) →
 `error` (`message`, plus `code`/`retryable` when it is classified) → `result` (`json`, `attempts`, only
 with `--schema`) → `turn.completed` (`prompt_tokens`, `completion_tokens`, `outcome`, `duration_ms`,
-`provider_retries`, plus `limit` for an unfinished turn, plus `cache_hit_tokens`).
+`provider_retries`, plus `reason` for an unfinished turn (`"seconds"` or `"steps"`), plus
+`cache_hit_tokens`).
 
 Three details a caller has to know, and each has cost somebody a parser:
 
@@ -932,15 +945,20 @@ See §14.1. Under `--json` the code and the last `turn.completed.outcome` always
 | `refused: <what was asked>` | transcript | a line the run would not take from the page's report route; the command is named |
 | `unknown command '<x>'. /help for the commands, /prompts for your saved prompts.` | transcript | a word that is neither a command nor a saved prompt |
 | `✗ <tool> …` | transcript | a tool failed; the failure's own words follow |
-| `⏹ interrupted` | transcript | the turn was stopped |
+| `⏹ interrupted` | transcript | a turn stopped **by a line you typed**: the line is steering, so it interrupts and then becomes the next question |
+| `stopped -- the model is not running any more` | stderr (a `notice`; in the transcript when the terminal is the one that was drawn) | a turn stopped by `/stop` or Ctrl-C. A different sentence for a different fact: nothing follows this one, where a steering line is the question that comes next |
 | `queued for after this turn: <text>` | transcript | `/queue` did what it says |
 | `this run keeps no conversation (--no-session), so <cmd> has nothing to open. Start flint without the flag to keep one.` | transcript | the one sentence every door that would open a conversation gives |
 
 ### 14.3 A cancellation is said out loud
 
-A stopped turn prints `⏹ interrupted`, and a stopped turn's queued follow-ups are named as
-not coming (`dropped_queue`) — because a cancelled turn and a turn that finished with
-nothing to say look identical otherwise.
+A stopped turn says so, in the words the stop deserves — `⏹ interrupted` when a line you
+typed did the stopping (that line is the next question), `stopped -- the model is not running
+any more` when `/stop` or Ctrl-C did — and a stopped turn's queued follow-ups are named as
+not coming (`dropped_queue`), because a cancelled turn and a turn that finished with
+nothing to say look identical otherwise. Both sentences are in §14.2, and the difference
+between them was measured: a `/stop` mid-answer printed the notice and no `⏹`, which this
+section used to claim for every stop (2026-09-18).
 
 ---
 
