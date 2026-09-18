@@ -29,8 +29,10 @@ reconstruct it:
 | 12. `docs/sandbox.md` contradicts `## Not doing, and why` | **declined in writing, 2026-09-18**: asked whether to build a permission layer or keep the default, the answer was keep the default (all permissions). The `ROADMAP.md` bullet is unchanged, `docs/sandbox.md` now labels itself an argument that lost, and the contradiction is closed in favour of the plan of record. Nothing else in §11 waited on it, and nothing does now |
 | 13. the addresses in the page's text, pressable | **built 2026-09-18**, asked for directly: a web address is a link in a new tab, a path stays a button into the preview, and the scheme test is an allowlist. Its one named residue — no OS-level open — was **built one session later** as `POST /open` plus the panel's `open` control (see `## What was just done`) |
 
-The gate as this session left it — measured on `31313ba`, after this session's commits: `cargo test`
-**642 passing, 1 ignored** across the 14 suites (lib 356, bin 6, `agent_loop` 34, `balance` 7,
+The gate as this session left it — re-measured after the note-and-flake fix below, on a tree with the
+untracked verification record held aside (that file and no other is the one thing `cargo test` disagrees
+with; see the paragraph after this one): `cargo test`
+**643 passing, 1 ignored** across the 14 suites (lib 357, bin 6, `agent_loop` 34, `balance` 7,
 `cli_output` 109, `json_output` 41, `say` 6, `search_tool` 4, `task` 17, `term_capture` 20 + 1 ignored,
 `tty_hangup` 0 and the doc-tests 0 — both empty by construction — `web_view` 32, `who` 10);
 `cargo clippy --all-targets -- -D warnings` silent; the two headless Node harnesses green
@@ -38,6 +40,18 @@ The gate as this session left it — measured on `31313ba`, after this session's
 browser harness run by hand at **61/61 claims held**, printing the list of drives and not-drives it is
 bounded by. The release binary on `PATH` is the tree's (`flint --version` → `flint 0.1.0`, exit 0, and
 its SHA-256 is the one `target/release/flint.exe` was built with).
+
+**`docs/features-verification.md` is untracked, is not part of any commit, and makes the suite red on
+its own.** It is an external verification pass over `docs/features.md`, left in the tree rather than
+committed, and `the_source_tree_contains_no_mojibake` refuses it: the guard lists `路` among its CP936
+artifacts (a middle dot mis-decoded), and Chinese prose about *paths* says `路径`, so a long Chinese
+document trips a check that is right about Rust sources and the page. Proven rather than assumed — with
+that one file moved aside the guard passes and the whole suite is the 643 above; with it present, 108 of
+`cli_output`'s 109 pass and the guard names only lines of that file. So a Chinese verification record
+cannot live in this tree as it stands. Two ways out, and the choice is a person's: keep the file outside
+the checkout (its evidence already lives under `%TEMP%\fv\`), or teach the guard that `路` is legitimate
+prose *inside a file declared to hold CJK* while staying a marker everywhere else — a change to a safety
+guard, which is why it was not made to make a red suite go green.
 
 **One CI failure was seen, then a second of the same shape, and neither was reproduced — so the tests
 that saw them now say more.** The push that added the two Node harnesses to CI (`fef238f`) came back with
@@ -1737,6 +1751,32 @@ bytes rather than a `String`, because a chunk boundary can fall inside a charact
 sending `/stop`. The new premise was shown to bite: with the needle changed to a frame that never
 appears the panic is `the run never said "tool.completedZZZ" within 3s, so there is nothing to
 interrupt: {…}`, and the suite then ran four times in four green where it had been four in four red.
+
+**The same bet was in `task`, and one full-suite run in an external verification pass lost it.** A record
+of that pass (uncommitted, `docs/features-verification.md`) reported `cargo test` as **643 with one
+failure**: `an_interrupted_task_says_what_it_left_running`, "the note does not say what it left running".
+Chased before being believed, and it is the shape above one file over: the test slept **1,500 ms** and
+then typed at the parent, and 1,500 ms is not a premise but a measurement — the child's own conversation
+reaches disk **1.42 s** after the parent starts on an idle machine (measured, three runs) and **1.74 s**
+with sixteen busy cores (measured, three runs). So the premise was within five percent of the truth
+before any load at all, and under load the parent honestly wrote the branch it owns — `It has not named
+its conversation yet` — while the test demanded a session path. Red **10 runs out of 10** under load, in
+1.6 s each; the sibling `--json` test (`--max-seconds 2`, half a second of margin) is the same bet and
+was changed with it, to a 10 s budget with room in it. The fix is the one this repository already
+believes: wait for the **fact**, not for a duration — `wait_for_child_conversation` polls for the child's
+own file under `children/`, which is also proof the parent's reader had a `session.started` to absorb
+(the frame names the file *before* the first write). Green 5-of-5 under the same sixteen busy cores that
+made it red 10-of-10.
+
+**Two real defects were in the sentence those tests guard, and both are fixed.** It ended in **two full
+stops** — `…rather than asking for the same work again..` — because `children_running()` punctuated its
+lines and `close_dangling_tool_calls` punctuated them again; the punctuation now lives in exactly one
+place (`answer_location`, a pure function with a unit test for all four shapes). And the branch that
+fires when a child has not named its conversation yet was a **dead end**: it gave a pid and no verb, and
+this sentence exists to stop the same work being paid for twice, so a dead end reads as "nothing to
+collect, run it again" — it now names `job_op` with `action: "status"`. The documented promise was
+narrowed to match the code (`docs/agents.md`, `README.md`, `docs/features.md` §8): the pid always, the
+session path **once the child has named one**.
 
 **A path can be opened where it lives, and the guard that decides it is the run's own.** The previous
 session ended §11 item 13 by naming what it had deliberately not built: *"no OS-level open (a directory,

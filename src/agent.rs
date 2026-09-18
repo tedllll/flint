@@ -1038,12 +1038,14 @@ impl Agent {
                     );
                     // The children are processes of their own, so they are still there to be
                     // described -- and the place their answers will land is the one fact that turns
-                    // this from a loss into something to go and read.
+                    // this from a loss into something to go and read. Each line is a finished
+                    // sentence with its own full stop, which is why nothing is appended here: the
+                    // caller used to add one, and the note read "…again.." (measured, and fixed in
+                    // `tools::children_running`'s own doc).
                     if matches!(call.name.as_str(), "task" | "tasks") {
                         for line in crate::tools::children_running() {
                             content.push(' ');
                             content.push_str(&line);
-                            content.push('.');
                         }
                     }
                     let placeholder = Message::Tool {

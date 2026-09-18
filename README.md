@@ -674,9 +674,13 @@ search`, `explorer: waiting for the model` — because the child is already sayi
 own `--json` stream and a row that says one unchanging word for two minutes is a row that tells nobody
 whether anything is happening. Typing at the parent still interrupts the turn (that is what typing
 does), but the child is a process of its own and does **not** stop: the turn that was dropped records
-what it left running, with the child's pid and the session its answer will land in, so the work is
-collected rather than repeated. A `task` child outliving the turn that started it is real — measured,
-by way of a bug report — so the honest thing is to say so rather than to claim the tool never ran.
+what it left running, with the child's pid and — once the child has named its conversation, which it
+does at its first write — the session its answer will land in, so the work is collected rather than
+repeated. A child still starting up says `It has not named its conversation yet` and points at `job_op`
+instead of a path, because the sentence's promise is that the work is not lost and not worth paying for
+twice, not that a path is always available. A `task` child outliving the turn that started it is real —
+measured, by way of a bug report — so the honest thing is to say so rather than to claim the tool never
+ran.
 
 Three things it is not, said here because each one is a reasonable expectation to have:
 

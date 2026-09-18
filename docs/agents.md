@@ -397,10 +397,15 @@ worth reading:
   for minutes while the parent's record said the tool *"was requested but never ran"*. So: the child's
   `tool.started` and `status` frames are forwarded as `task: running search` (its answer is not — a
   status row is not a second transcript), and the placeholder a dropped turn writes says the result
-  never came back **and** describes the child that is still going, with its pid and the session its
-  answer will be written to. That sentence and the handle now read the same record, so a child that has
-  ended stops being described as "still going", and `job_op` can hand over the answer the sentence
-  promised.
+  never came back **and** describes the child that is still going, with its pid — and with the session
+  its answer will be written to, **once the child has named one**. That "once" is a measured state
+  rather than a hedge: a run names its conversation when it reaches its first write, so a turn dropped
+  while the child is still starting says `It has not named its conversation yet` and hands over
+  `job_op` for it instead of a path. The promise that sentence keeps is that the work is neither lost
+  nor worth paying for twice, which is why the fallback is a verb rather than a shrug — and why it was
+  found by loading the machine rather than by reading the code. That sentence and the handle now read
+  the same record, so a child that has ended stops being described as "still going", and `job_op` can
+  hand over the answer the sentence promised.
 
 **Stage 3 — the mailbox.** `flint say`, `peer.message`, and the opt-in that lets a peer's words reach
 the model. Presumably a `.flint/` presence marker in the project as well, so two `FLINT_HOME`s can see

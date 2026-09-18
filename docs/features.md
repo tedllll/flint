@@ -531,7 +531,10 @@ and the page (its jobs panel) — which is deliberate: one answer, three readers
 - `task` children appear in the same list; pressing a child's row opens the child's own
   conversation rather than a log.
 - What a job leaves behind when the parent's turn is dropped is recorded rather than lost:
-  the child is still running, and the parent says so.
+  the child is still running, and the parent says so — with its pid, and with the path its answer
+  will be written to once the child has named its conversation (`It has not named its conversation
+  yet.`, plus `job_op`, while it still has not). One sentence, one full stop: it read `…again..`
+  until the caller stopped punctuating a sentence that already ended in one.
 
 ---
 

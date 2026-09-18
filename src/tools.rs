@@ -1656,11 +1656,15 @@ impl Job {
 
 /// The children this run has left running, in the words a caller needs. Empty when there are none.
 ///
-/// One line each, and the session path is the important half: a child is a run of its own, so its
-/// answer is being written to a file of its own *whatever happens to this one* -- which is what turns
-/// "the task was interrupted" from a loss into a place to go and look. The other half is the warning
-/// not to ask for the same work again, which is the mistake this exists to prevent: the tokens are
-/// already spent, and a model that cannot see that spends them twice.
+/// One line each. What the line is *for* is the warning not to ask for the same work again -- the
+/// tokens are already spent, and a model that cannot see where the answer is going spends them twice.
+/// The session path is how that promise is usually kept: a child is a run of its own, so its answer is
+/// being written to a file of its own *whatever happens to this one*, which is what turns "the task was
+/// interrupted" from a loss into a place to go and look. A child that has not named its conversation
+/// yet has no path to give, and that is a measured state rather than a theoretical one (see
+/// `answer_location`): the line stays honest about it and hands over the *verb* instead, because the
+/// promise being kept is "the work is not lost and is not worth paying for again", not "here is a
+/// path".
 pub fn children_running() -> Vec<String> {
     jobs()
         .iter()
@@ -1681,23 +1685,48 @@ pub fn children_running() -> Vec<String> {
                     elapsed_label(child.started.elapsed())
                 ),
             };
-            match (&child.kind, child.session(), &child.log) {
-                (JobKind::Child, Some(path), _) => line.push_str(&format!(
-                    ". Its answer is being written to its own session, {path} -- read it there \
-                     rather than asking for the same work again"
-                )),
-                (JobKind::Child, None, _) => line.push_str(". It has not named its session yet"),
-                (JobKind::Command, _, Some(path)) => line.push_str(&format!(
-                    ". Its output is going to {} -- read it there, or ask `job_op` for it, \
-                     rather than running the same command again",
-                    path.display()
-                )),
-                (JobKind::Command, _, None) => line.push_str(". It has no output file"),
-            }
-            line.push('.');
+            line.push(' ');
+            line.push_str(&answer_location(
+                &child.kind,
+                child.session().as_deref(),
+                child.log.as_deref(),
+            ));
             line
         })
         .collect()
+}
+
+/// Where a running job's answer is, in words a reader can act on -- a *complete sentence*, punctuated
+/// here and in no caller.
+///
+/// That last part is the fix for a measured defect rather than a style: every caller used to append
+/// its own full stop to a sentence that already ended in one, so a dropped turn's note read
+/// "…rather than asking for the same work again.." and "It has not named its session yet..". Two
+/// writers punctuating one sentence is a mistake with no way to be right; one is a sentence that
+/// cannot be wrong twice.
+///
+/// Four shapes, and each is an answer rather than a fallback for another. A child that has named its
+/// conversation has a file to read. A child that has *not* has a verb to ask instead -- the pid in
+/// the line's head is the handle `job_op` takes -- and saying so matters more than it looks: this
+/// sentence exists to stop the same work being paid for twice, so a dead end here is read as "nothing
+/// to collect, run it again". A command has a log file, which is the whole difference between the two
+/// kinds; and a command without one still says so rather than leaving the sentence hanging.
+fn answer_location(kind: &JobKind, session: Option<&str>, log: Option<&Path>) -> String {
+    match (kind, session, log) {
+        (JobKind::Child, Some(path), _) => format!(
+            "Its answer is being written to its own session, {path} -- read it there rather than \
+             asking for the same work again."
+        ),
+        (JobKind::Child, None, _) => "It has not named its conversation yet -- ask `job_op` for it \
+             with `action: \"status\"` rather than asking for the same work again."
+            .to_string(),
+        (JobKind::Command, _, Some(path)) => format!(
+            "Its output is going to {} -- read it there, or ask `job_op` for it, rather than running \
+             the same command again.",
+            path.display()
+        ),
+        (JobKind::Command, _, None) => "It has no output file.".to_string(),
+    }
 }
 
 /// What a job that has *ended* contributes, to the model and to the person.
@@ -5761,6 +5790,47 @@ mod task_tests {
             Some(r"C:\s\x.jsonl")
         );
         assert_eq!(child_session(r#"{"type":"message.delta","text":"x"}"#), None);
+    }
+
+    /// The sentence about a job left running, in all four shapes -- and its punctuation.
+    ///
+    /// Held here because two of the four are hard to reach on purpose. A child that has not named its
+    /// conversation is a *race*, not a feature: it happens when the machine is loaded enough that the
+    /// child has not reached its first write when the turn is dropped, which is how the doubled full
+    /// stop below was found. A test that talked to the real thing could only catch these shapes on a
+    /// busy machine, so the words are asserted from the facts they are built out of.
+    #[test]
+    fn where_a_job_left_running_says_its_answer_is() {
+        // The named child: a path to read, and the reason not to ask again. A plain string rather
+        // than a raw one, because the line continuation is the point: the sentence is one line, and
+        // asserting it as one is what catches a stray newline inside it.
+        assert_eq!(
+            answer_location(&JobKind::Child, Some(r"C:\h\sessions\x\children\1.jsonl"), None),
+            "Its answer is being written to its own session, \
+             C:\\h\\sessions\\x\\children\\1.jsonl -- read it there rather than asking for the same \
+             work again."
+        );
+        // The child that has not said yet: no path, but a verb that answers for it later. A dead end
+        // here is read as "nothing to collect", and the whole sentence exists to prevent that.
+        let unnamed = answer_location(&JobKind::Child, None, None);
+        assert!(unnamed.contains("`job_op`"), "{unnamed}");
+        assert!(unnamed.contains("action: \"status\""), "{unnamed}");
+        // A command's answer is where its output is going, which is the one thing a child does not
+        // have -- and both kinds end in exactly one full stop, never two.
+        for (kind, session, log) in [
+            (
+                JobKind::Command,
+                None,
+                Some(Path::new("C:/h/spill/s/background-bash-1.log")),
+            ),
+            (JobKind::Command, None, None),
+            (JobKind::Child, Some("C:/h/child.jsonl"), None),
+            (JobKind::Child, None, None),
+        ] {
+            let line = answer_location(&kind, session, log);
+            assert!(line.ends_with('.'), "{line}");
+            assert!(!line.ends_with(".."), "{line}");
+        }
     }
 
     /// The child's command line is the whole interface between two flints, so its shape is held
