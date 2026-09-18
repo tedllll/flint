@@ -6449,6 +6449,66 @@ fn flint_exec_honours_the_readonly_flag() {
     );
 }
 
+/// Asking a conversation that has not been written yet for its name is not an error.
+///
+/// A file is created by the first thing said in it, so a run that has said nothing has no file to
+/// scan -- and asking anyway put the operating system's own sentence on the screen, localized and in
+/// the middle of an English transcript:
+///
+/// ```text
+/// /name: cannot stat C:\Users\…\1789718594-50-27488.jsonl: <the OS's own words> (os error 3)
+/// ```
+///
+/// The localized half of that sentence is *described* here rather than quoted, because one of the
+/// characters in it is a marker `the_source_tree_contains_no_mojibake` looks for -- it is one of the
+/// shapes a CP936 mis-decode leaves behind, so a source file that contains it is reported whatever
+/// the reason. The assertion below is the same rule from the other side: none of the OS's phrasing may
+/// appear at the prompt, in any language.
+///
+/// `docs/features.md` §5.5 promises `name: <title>` or `(unnamed)`, and `(unnamed)` is the word this
+/// state has: there is no title because there is no conversation yet, which is also what `--no-session`
+/// means and why the arm above it has its own sentence. The OS's error is not a report about the
+/// conversation, and its language is decided by the machine rather than by flint.
+#[test]
+fn naming_an_empty_conversation_says_it_is_unnamed() {
+    let home = test_home("name-empty", "http://127.0.0.1:9/v1");
+    // Nothing said first: this is the run before its first question, which is the state that broke.
+    let text = repl(&home, &["/name"]);
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(
+        text.contains("name: (unnamed)"),
+        "a conversation with nothing in it did not report itself as unnamed:\n{text}"
+    );
+    assert!(
+        !text.contains("os error") && !text.to_lowercase().contains("cannot stat"),
+        "the operating system's own error was printed at the prompt instead of an answer:\n{text}"
+    );
+}
+
+/// `/stop` with nothing running is an answer, not an unknown command.
+///
+/// Mid-turn the line never arrives here -- `run_turn`'s own poll loop takes it, deliberately, so that
+/// a stop is not followed by the dispatcher saying "nothing is running" about the turn it just ended.
+/// Idle, though, it fell through to the fallback, so a command `/help` lists answered
+/// `unknown command '/stop'` -- the single most confusing thing a table-driven dispatcher can say
+/// about one of its own rows. The turn really is not running, and this is the moment to say so.
+#[test]
+fn stopping_nothing_says_that_rather_than_unknown_command() {
+    let home = test_home("stop-idle", "http://127.0.0.1:9/v1");
+    let text = repl(&home, &["/stop"]);
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(
+        text.contains("nothing is running"),
+        "`/stop` at an idle prompt did not say what the state is:\n{text}"
+    );
+    assert!(
+        !text.contains("unknown command"),
+        "a command `/help` lists was called unknown:\n{text}"
+    );
+}
+
 /// `/readonly` is the only switch this tool has, so it has to be a switch.
 ///
 /// Measured before it was fixed: `/readonly on` printed "no writes, no mutating commands", the

@@ -3950,6 +3950,17 @@ async fn handle_command(
             }
         }
 
+        // `/stop` with nothing running. It reaches this table only when no turn is in flight --
+        // mid-turn `run_turn`'s own poll loop takes the line for itself, and that is the point of it: a
+        // stop must not be followed by the dispatcher announcing that nothing is running, about the
+        // very turn it just ended. Idle, the same fact is the honest answer, and saying it is better
+        // than the fallback, which called a command `/help` lists an unknown command.
+        "/stop" => {
+            printer
+                .term()
+                .line(format_args!("{dim}nothing is running{reset}"));
+        }
+
         // A follow-up with nothing to follow: `/queue <text>` typed at the prompt rather than
         // mid-turn. There is no turn to hold it for, so it is this turn's message -- the same act, one
         // turn earlier -- and the note says which of the two happened, because "queued" and "sent"
@@ -4893,7 +4904,19 @@ async fn handle_command(
                 return Ok(Flow::Continue);
             };
             if arg.is_empty() {
-                let title = session::scan(&path)?.title;
+                // A conversation that has said nothing has no file yet -- creating it is what claims
+                // a name -- so there is nothing to scan, and asking anyway put the operating
+                // system's own sentence on the screen: `/name: cannot stat <the path>: <the OS's
+                // wording, in whatever language the machine is set to> (os error 3)`. That is three
+                // mistakes in one line: a state with words of its own reported as a failure, in a
+                // language chosen by the machine rather than by flint, in the middle of an English
+                // transcript. `(unnamed)` is the word, and it is what this arm already prints for a
+                // file that holds no title.
+                let title = if path.exists() {
+                    session::scan(&path)?.title
+                } else {
+                    None
+                };
                 printer.term().line(format_args!(
                     "{dim}name:{reset} {}",
                     title.unwrap_or_else(|| "(unnamed)".to_string())
