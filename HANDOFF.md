@@ -28,13 +28,15 @@ reconstruct it:
 | 12. `docs/sandbox.md` contradicts `## Not doing, and why` | **a decision for the person**: take a first stage and edit the bullet, or decline it in writing. Nothing else in §11 waits on it |
 | 13. the addresses in the page's text, pressable | **built 2026-09-18**, asked for directly: a web address is a link in a new tab, a path stays a button into the preview, and the scheme test is an allowlist. Its one named residue — no OS-level open — was **built one session later** as `POST /open` plus the panel's `open` control (see `## What was just done`) |
 
-The gate as this session left it: `cargo test` **634 passing, 1 ignored** across the 14 suites (lib 351,
-bin 6, `agent_loop` 34, `balance` 7, `cli_output` 109, `json_output` 41, `task` 17, `search_tool` 4, `who`
-17, `term_capture` 20 + 1 ignored, `web_view` 29, `say` 10, and the two empty-by-construction suites);
-`cargo clippy --all-targets -- -D warnings` silent; both headless Node harnesses green **and now run by
-CI**; the browser harness run by hand at **56/56 claims held**, printing the list of drives and
-not-drives it is bounded by. The release binary on `PATH` is the tree's (`flint --version` → `flint
-0.1.0`, exit 0).
+The gate as this session left it — measured on `31313ba`, after the two commits below: `cargo test`
+**642 passing, 1 ignored** across the 14 suites (lib 356, bin 6, `agent_loop` 34, `balance` 7,
+`cli_output` 109, `json_output` 41, `say` 6, `search_tool` 4, `task` 17, `term_capture` 20 + 1 ignored,
+`tty_hangup` 0 and the doc-tests 0 — both empty by construction — `web_view` 32, `who` 10);
+`cargo clippy --all-targets -- -D warnings` silent; the two headless Node harnesses green
+(`term-layout-test.js`, `web-view-test.js`) **and run by CI**; `examples/python/test_call.py` green; the
+browser harness run by hand at **61/61 claims held**, printing the list of drives and not-drives it is
+bounded by. The release binary on `PATH` is the tree's (`flint --version` → `flint 0.1.0`, exit 0, and
+its SHA-256 is the one `target/release/flint.exe` was built with).
 
 **One CI failure was seen, then a second of the same shape, and neither was reproduced — so the tests
 that saw them now say more.** The push that added the two Node harnesses to CI (`fef238f`) came back with
