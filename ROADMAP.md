@@ -1835,7 +1835,9 @@ list's, not this one's, and each line is edited in the same commit as the code t
   this section's own item 6 rather than twice.
 - §9: `/export` from inside a running conversation ("the obvious next door") — **built 2026-09-18**;
   a job that can say it is `stopping` — **built 2026-09-18**; and the page's own half of the reconnect
-  cursor, which `HANDOFF.md` calls the part of the item that stays open.
+  cursor, whose *design* half is answered in this section's item 8 (the answer is narrower than the
+  item assumed: following a restart is not the page's to do, a reload must rebuild, and what is left is
+  the page saying what arrived while it was closed) with the small piece of page code queued there.
 - §8: the picker of live runs that the page's `/say --to` is waiting on.
 - §11 item 5: `flint --version` — **built 2026-09-18**, with the name collision it found (`session`'s
   `version` is the file format's, not the build's) stated in `README.md` where a reader meets it.
@@ -1940,13 +1942,38 @@ where prose and tree disagree are items 2, 3 and 9(iii).**
    waits for the job and asserts the word is gone. The first version of that test asserted on the bare
    word and was caught by its own fixture's directory name (`jobs-stopping`), which is why it now asserts
    on the state slot rather than on the word.
-8. **The page cannot get back to a restarted flint by itself.** §9's cursor work made the *server* able
-   to answer a reconnect from a file position, and `HANDOFF.md` names the half that is left: "the new
-   process listens on a new port with a new token, so the page's stream has nowhere to go, and the page
-   keeps no cursor of its own." The honest shape is the page holding the position it has read to (and
-   the run it was reading from) somewhere it survives a reload, so that reopening the page after a
-   restart is a reconnect rather than a fresh view — which needs an answer to what a *stale* position
-   means before it needs any code.
+8. **The page cannot get back to a restarted flint by itself — *answered 2026-09-18, and the honest
+   answer is narrower than the item assumed*.** §9's cursor work made the *server* able to answer a
+   reconnect from a file position, and `HANDOFF.md` names the half that is left: "the new process
+   listens on a new port with a new token, so the page's stream has nowhere to go, and the page keeps
+   no cursor of its own." Read against the code, that sentence splits into two problems, and only one
+   of them is the page's:
+
+   **Following a restart is not the page's to do, and the item's own premise says why.** `--port` lets
+   a person fix the port, so the *origin* can survive a restart (`src/main.rs`, `--port` → `/web <n>`),
+   but the token is minted fresh in every process (`web::new_token`, no `rand` crate, `RandomState`) and
+   §4.2 requires it on every route that reads the run. A page that stored the token to follow a restart
+   would be putting a credential that can drive the composer into a store any other document on that
+   loopback origin can read — a worse defect than the one being fixed. So the page reconnects to the
+   *process it was opened from*, and a restart means a new URL, which is a new document; there is
+   nothing to follow, and no code here would change that.
+   **A reload must rebuild, and rebuilding is not a defect.** The page's DOM is not persisted and the
+   file is the record, so a fresh load reads the whole conversation from the file and then follows with
+   the file's length as its cursor — which is what it already does (`web/view.html`, `readSession` then
+   `follow`). Only a *connection* drop keeps `applied` in memory, and that case is already a delta
+   rather than a rebuild. Nothing the page could store would let it draw a conversation from the middle
+   without the part before it.
+   **What is left, and is worth having, is that the page can say what it missed.** The reading position
+   is real state the page can keep honestly: `sessionStorage` (per tab, so no other local document can
+   read it, and it survives exactly the reload being discussed) holding the pair the item names — the
+   conversation's id from the file's own `meta` line and the byte position last drawn to. On load, after
+   the file is read: the same conversation and a smaller position means the difference **arrived while
+   this page was closed**, and saying so is the same rule the rest of flint follows (nothing happens
+   silently); a different id replaces the pair without comment, because a different conversation is not
+   a loss; a position **past the end** of this file is a *stale read*, and stale is a fact to report and
+   not an error to throw — that is the answer this item asked for, and it is the one case a hand-edited
+   or replaced session file makes reachable. The code is small, it is the page's own, and it is queued
+   as this item's remaining half rather than claimed as done here.
 9. **Three small gaps that the code names about itself.** (i) `tests/cli_output.rs` says of itself that
    the paste fix "is not covered here (see `HANDOFF.md`)", which by this repository's own rule — a
    regression test that has never been red has not been shown to test anything — means a shipped fix

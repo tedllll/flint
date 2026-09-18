@@ -61,6 +61,21 @@ carry those words inside the scripted tool call's arguments. Alone it passes in 
 second defect of that class in this file (`tests/task.rs:512` flaked on ubuntu the same way), so the
 next reader should treat "shared counting across processes" in a stub as a smell.
 
+**And §11 item 8's design half is answered, and the answer is smaller than the item assumed.** The item
+said the page should remember the position it read to *and the run it was reading from*, so that
+reopening after a restart is a reconnect. Read against the code, that splits in three: (i) following a
+restart is not the page's to do — `--port` can hold the origin, but the token is minted fresh per process
+and §4.2 requires it, so a page that stored the token to follow a restart would be putting a credential
+that can drive the composer where any document on that loopback origin could read it; (ii) a reload must
+rebuild from the file, because the DOM is not persisted and the file is the record — which is what the
+page already does, and only a *connection* drop keeps the in-memory cursor, where it is already a delta;
+(iii) what is left is worth having and is small: `sessionStorage` (per tab, survives exactly the reload
+in question) holding the pair the item names — the conversation's id from the file's own `meta` line and
+the byte position last drawn to — so the page can **say what arrived while it was closed**, replace the
+pair silently for a different conversation, and treat a position *past the end* of the file as a stale
+read to report rather than an error to throw. That last case is the answer the item asked for before any
+code. The small piece of page code is queued in item 8 rather than claimed here.
+
 **The line after it is the page's own reconnect cursor and the picker of live runs the page's
 `/say --to` waits on.** §10's two holes that
 need a decision rather than code — C3 (nothing identifies a request, so a caller's retry may repeat
