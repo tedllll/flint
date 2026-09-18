@@ -2119,6 +2119,228 @@ check("Escape puts the menu away before anything else", () => {
   eq(page.settingsOpen(), false, "closes the dialog");
 });
 
+console.log("the Markdown reading in the preview");
+
+// Which files are read as Markdown, and which are not. By name, like the picture route: a `.md` that is
+// really a log should read as a log, and the switch is one press away in both directions.
+check("a file is Markdown by its own name", () => {
+  for (const name of ["AGENTS.md", "C:\\x\\HANDOFF.MD", "docs/a.markdown", "b.mkd", "c.mdx"]) {
+    eq(viewer.isMarkdown(name), true, name + " is Markdown");
+  }
+  for (const name of ["notes.txt", "a.png", "readme", "md", "a.md.txt", ""]) {
+    eq(viewer.isMarkdown(name), false, JSON.stringify(name) + " is not Markdown");
+  }
+  eq(viewer.isMarkdown(null), false, "and a missing path is not Markdown either");
+});
+
+// The reading itself: lines in, blocks out. No DOM, which is the whole reason this half can be checked
+// here rather than in a browser.
+check("lines become blocks: headings, fences, lists, quotes, rules and paragraphs", () => {
+  const blocks = viewer.markdownBlocks([
+    "# The title",
+    "",
+    "Some prose that is",
+    "wrapped over two lines.",
+    "",
+    "## A section ##",
+    "",
+    "- one",
+    "- two",
+    "  - nested",
+    "",
+    "1. first",
+    "2. second",
+    "",
+    "> quoted words",
+    "> on two lines",
+    "",
+    "---",
+    "",
+    "```js",
+    "const a = 1;",
+    "```",
+  ].join("\n"));
+
+  eq(blocks.map((b) => b.kind),
+     ["heading", "paragraph", "heading", "list", "list", "quote", "rule", "code"],
+     "every block, in order");
+  eq(blocks[0], { kind: "heading", level: 1, text: "The title" }, "an ATX heading keeps its level");
+  eq(blocks[1].text, "Some prose that is wrapped over two lines.",
+     "a paragraph joins its wrapped lines with a space");
+  eq(blocks[2].level, 2, "and a closing run of hashes is not part of the text");
+  eq(blocks[3].ordered, false, "a bulleted list");
+  eq(blocks[3].items.map((i) => i.text), ["one", "two"], "with one item per marker");
+  eq(blocks[3].items[1].children.map((c) => c.kind), ["list"], "and an indented item holds a nested list");
+  eq(blocks[3].items[1].children[0].items[0].text, "nested", "which is a list of its own");
+  eq(blocks[4].ordered, true, "a numbered list is its own kind");
+  eq(blocks[5].blocks.map((b) => b.text), ["quoted words on two lines"],
+     "a quote is a block, and its lines are joined like a paragraph's");
+  eq(blocks[7].info, "js", "a fence keeps the language it named");
+  eq(blocks[7].lines, ["const a = 1;"], "and its body verbatim");
+});
+
+// The two shapes that are easy to get wrong and that these files are full of: a numbered list under a
+// bulleted one is a *new* list, and a fence inside an item belongs to the item.
+check("a list ends where a reader would say it ends", () => {
+  const sep = viewer.markdownBlocks("- bullet\n1. numbered\n- bullet again");
+  eq(sep.map((b) => b.kind + (b.ordered ? "(ol)" : "(ul)")), ["list(ul)", "list(ol)", "list(ul)"],
+     "a change of marker kind starts a new list");
+
+  const loose = viewer.markdownBlocks("- one\n\n- two");
+  eq(loose.length, 1, "a blank line between two items is one loose list, not two");
+  eq(loose[0].items.length, 2, "and both items are in it");
+
+  const split = viewer.markdownBlocks("- one\n\nafter the list");
+  eq(split.map((b) => b.kind), ["list", "paragraph"],
+     "but a blank line before prose ends the list");
+
+  const item = viewer.markdownBlocks("- item\n\n  ```\n  code\n  ```");
+  eq(item.length, 1, "the fence is part of the item, not a block after the list");
+  eq(item[0].items[0].children.map((c) => c.kind), ["code"], "and it is read as code");
+});
+
+// A pipe table, which is what `docs/features.md` and `AGENTS.md` are made of.
+check("a pipe table becomes a table, with the alignment its divider asks for", () => {
+  const blocks = viewer.markdownBlocks([
+    "| Area | Control | What |",
+    "|---|---:|:---:|",
+    "| header | the name | not a control |",
+    "| settings | a picker | sends a line |",
+  ].join("\n"));
+  eq(blocks.length, 1, "one table, not four paragraphs");
+  eq(blocks[0].kind, "table", "and it is a table");
+  eq(blocks[0].head.map((c) => c.text), ["Area", "Control", "What"], "with its head cells");
+  eq(blocks[0].align, ["", "right", "center"], "and the alignment its divider named");
+  eq(blocks[0].rows.length, 2, "two body rows");
+  eq(blocks[0].rows[0], ["header", "the name", "not a control"], "each split on its pipes");
+
+  // A line with a pipe and no divider under it is prose: a table is only a table when it says so, and
+  // guessing is how a paragraph about `a | b` would lose its words.
+  const prose = viewer.markdownBlocks("this | that\nnot a table");
+  eq(prose.length, 1, "a pipe in a paragraph is not a table");
+  eq(prose[0].kind, "paragraph", "it is a paragraph");
+});
+
+// Nothing is guessed and nothing is dropped: setext headings, indented code, raw HTML and a fence that
+// was never closed all come out as *something*, and the fallback is always the words themselves.
+check("what the renderer does not know, it does not eat", () => {
+  const setext = viewer.markdownBlocks("A title\n=======\n\nAnother\n-------");
+  eq(setext.map((b) => b.kind + b.level), ["heading1", "heading2"], "setext headings are read");
+  eq(setext[0].text, "A title", "with the line above as the text");
+
+  const html = viewer.markdownBlocks("<script>alert(1)</script>\n\n<img src=x onerror=y>");
+  eq(html.length, 2, "raw HTML is left as its own paragraphs");
+  eq(html[0].text, "<script>alert(1)</script>", "and the characters are the text");
+  eq(html[1].text, "<img src=x onerror=y>", "for a tag that would have run code in another page");
+
+  const unclosed = viewer.markdownBlocks("```\nno closing fence");
+  eq(unclosed.length, 1, "a fence that never closed is still a code block");
+  eq(unclosed[0].lines, ["no closing fence"], "with everything that followed it inside");
+
+  const indent = viewer.markdownBlocks("    four spaces");
+  eq(indent[0].kind, "paragraph", "indented text is read as text rather than dropped");
+  eq(viewer.markdownBlocks("").length, 0, "an empty file has no blocks");
+  eq(viewer.markdownBlocks(null).length, 0, "and neither has a missing one");
+});
+
+// The painter: what the blocks become as nodes, read through the same stub DOM every other check uses.
+check("the blocks become nodes, and every string arrives as text", () => {
+  const holder = viewer.__node("preview-md");
+  viewer.paintMarkdown(holder, viewer.markdownBlocks([
+    "# Title",
+    "",
+    "**bold** and `code` stay as written",
+    "",
+    "- a",
+    "  - b",
+    "",
+    "```py",
+    "x = 1",
+    "```",
+    "",
+    "| a | b |",
+    "|---|---|",
+    "| 1 | 2 |",
+  ].join("\n")));
+  const tags = holder.children.map((n) => n.tag);
+  eq(tags, ["h1", "p", "ul", "pre", "table"], "one node per block, of the right kind");
+  eq(holder.children[0].textContent, "Title", "a heading's text is its text");
+  // The decision that inline syntax is not parsed shows up here as a fact rather than as a promise: the
+  // emphasis and the backticks are the characters the file holds.
+  eq(holder.children[1].textContent, "**bold** and `code` stay as written",
+     "inline syntax is not parsed, so it stays readable");
+  eq(holder.children[2].children.length, 1, "one list item");
+  eq(holder.children[2].children[0].children.map((n) => n.tag), ["ul"],
+     "with the nested list inside it");
+  eq(holder.children[3].children.map((n) => n.tag + ":" + n.textContent),
+     ["div:py", "code:x = 1"], "a fence keeps its language and its body");
+  eq(holder.children[4].children.map((n) => n.tag), ["thead", "tbody"], "a table has a head and a body");
+  // Nothing the page draws can become markup: `el` sets `textContent`, and the policy test forbids the
+  // assignment functions outright, so this is the shape of the guarantee rather than a second check of it.
+  eq(holder.children[0].children.length, 0, "and a heading is a node with text, not markup");
+});
+
+console.log("the preview's two views");
+
+// The raw/rendered switch: which view a file opens in, what the button says, and which container is
+// showing. `line` is the whole rule -- a file opened at a line opens raw, because the line is why it was
+// opened at all and "line 412" has no meaning in a rendered view.
+check("a Markdown file opens rendered, and a line opens raw", () => {
+  eq(viewer.previewView("C:\\notes.md", 0), "rendered", "a Markdown file with no line opens rendered");
+  eq(viewer.previewView("C:\\notes.md", 412), "source", "the same file opened at a line opens raw");
+  eq(viewer.previewView("C:\\notes.txt", 0), "source", "a file that is not Markdown opens raw");
+  eq(viewer.previewView("C:\\notes.txt", 3), "source", "and stays raw at a line");
+  eq(viewer.previewView("C:\\shot.png", 0), "source", "a picture has no rendered view to open in");
+  eq(viewer.previewView(null, 0), "source", "and a missing path is read as text");
+});
+
+// The header's own headers, as the route really sends them: `previewNote` reads the cut and the size out
+// of them, so a fake response says there was no cut.
+const noCut = { headers: { get: () => null } };
+
+check("the switch is offered only where there is a choice, and it says what it does", () => {
+  const button = viewer.__node("preview-render");
+  const text = viewer.__node("preview-text");
+  const rendered = viewer.__node("preview-md");
+  const note = viewer.__node("preview-note");
+
+  viewer.paintPreviewView("# Title\n\n- one\n", noCut, "rendered", "C:\\notes.md", 0);
+  eq(button.hidden, false, "a Markdown file gets the switch");
+  eq(rendered.hidden, false, "the rendered view is showing");
+  eq(text.hidden, true, "and the raw one is not");
+  eq(button.textContent, "source", "the button says what pressing it does: show the source");
+  eq(button.getAttribute("aria-pressed"), "true", "and that the rendered view is in force");
+  ok(note.textContent.includes("rendered"), "the note says which view is showing: " + note.textContent);
+  eq(rendered.children.length, 2, "and the blocks are in it");
+
+  viewer.paintPreviewView("# Title\n", noCut, "source", "C:\\notes.md", 412);
+  eq(button.textContent, "rendered", "opened at a line, the button offers the rendering");
+  eq(button.getAttribute("aria-pressed"), "false", "and nothing rendered is in force");
+  eq(text.hidden, false, "the raw text is showing");
+  eq(text.textContent, "# Title\n", "and it is the file's own bytes");
+  eq(rendered.hidden, true, "with the rendered view shut");
+  eq(note.textContent, "line 412", "the note still says the line");
+
+  viewer.paintPreviewView("plain words\n", noCut, "source", "C:\\notes.txt", 0);
+  eq(button.hidden, true, "a file that is not Markdown is offered no switch");
+  eq(rendered.hidden, true, "and nothing rendered");
+  eq(text.hidden, false, "the text is what shows");
+});
+
+// A refusal is not a file either: the route's own sentence is the whole answer, and the switch belongs to
+// a reading that happened.
+check("a refusal takes the switch away with it", () => {
+  const button = viewer.__node("preview-render");
+  viewer.paintPreviewView("# Title\n", noCut, "rendered", "C:\\notes.md", 0);
+  eq(button.hidden, false, "the switch is there for the file");
+  viewer.paintPreviewRefusal("cannot read it: not there", 404);
+  eq(button.hidden, true, "and goes when the route refused");
+  eq(viewer.__node("preview-md").hidden, true, "with nothing rendered behind it");
+  eq(viewer.__node("preview-note").textContent, "HTTP 404", "the refusal is the note");
+  eq(viewer.__node("preview-text").textContent, "cannot read it: not there",
+     "and the route's sentence is what is shown");
+});
+
 // An exported page carries its conversation in a JSON island, and this is the one function that reads
 // it. The island is a list of the session file's own lines, so what comes out of it goes straight into
 // `applyText` -- which is why an export draws like a session somebody dropped on the page, and why

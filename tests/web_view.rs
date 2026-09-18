@@ -408,14 +408,19 @@ fn the_page_stops_a_job_from_the_rows_it_is_already_showing() {
 /// exists at all.
 #[test]
 fn the_preview_shows_the_routes_own_refusal_rather_than_an_empty_panel() {
-    let body = from("async function readText()", 30);
+    let body = from("function paintPreviewRefusal(body, status)", 14);
     assert!(
-        body.contains("text.textContent = body.trim()"),
+        body.contains("text.textContent = String(body == null ? \"\" : body).trim()"),
         "the refusal is shown as it was written:\n{body}"
     );
     assert!(
-        body.contains("HTTP \" + response.status"),
+        body.contains("\"HTTP \" + status"),
         "and the status beside it, for the reader who wants the code:\n{body}"
+    );
+    let status = from("async function readText()", 30);
+    assert!(
+        status.contains("paintPreviewRefusal(body, response.status)"),
+        "a refused read must hand its sentence and its code to that function:\n{status}"
     );
     let chooser = from("async function readPreview()", 20);
     assert!(
@@ -1392,6 +1397,87 @@ fn the_slash_menu_is_a_launcher_drawn_from_the_frame() {
 /// level down: a button that opens a short list, and a row in that list that prints the whole line
 /// it will send (`/delete 3`) before it sends it.
 ///
+/// The preview reads a Markdown file rather than only showing it, and the reading is the page's own.
+///
+/// What is checked here is the part a reader of this file can hold still: the two containers, the switch
+/// between them, the rule that a *line* opens the source, and the shape of the renderer -- a pure
+/// function for the reading, a painter that only ever sets text. What the reading *is* (headings, fences,
+/// nested lists, tables, and inline syntax deliberately left alone) is checked by
+/// `scripts/web-view-test.js`, which runs `markdownBlocks` under Node; a byte-scan of this page cannot
+/// show that a fence is read as a fence.
+#[test]
+fn a_markdown_file_is_read_not_just_shown() {
+    let html = view();
+    // The rendered view is a container of its own and it ships shut: the panel's first paint must not
+    // depend on a file having been read, and a `div` (rather than reusing the `pre`) is what lets a
+    // heading be a heading.
+    assert!(
+        html.contains(r#"<div class="md" id="preview-md" hidden></div>"#),
+        "the rendered container is missing, or does not ship hidden"
+    );
+    assert!(
+        html.contains(r#"<button id="preview-render" type="button" hidden></button>"#),
+        "the switch is missing, or does not ship hidden"
+    );
+    // The reading is lines in, blocks out -- no DOM in it, which is the whole reason the Node harness can
+    // ask it what a fence is.
+    let parser = from("function markdownBlocks(text)", 60);
+    assert!(
+        !parser.contains("document.") && !parser.contains("getElementById"),
+        "the reading must be a function of its text alone: {parser}"
+    );
+    assert!(
+        parser.contains(r#"kind: "code""#),
+        "a fence must be read as code: {parser}"
+    );
+    // The painter builds nodes and sets text. The page-wide rule against assigning markup is checked
+    // elsewhere; what matters here is that this function goes through `el`, which sets `textContent`.
+    let painter = from("function markdownNode(block)", 30);
+    assert!(
+        painter.contains("el(") && !painter.contains("innerHTML") && !painter.contains("outerHTML"),
+        "the painter must build nodes rather than markup: {painter}"
+    );
+    // A line opens the source. This is the one rule that keeps the rendered view from being a *replacement*
+    // for the file: a `grep` hit or a compiler error names a line, and a line has no meaning in a reading.
+    let view_rule = from("function previewView(path, line)", 4);
+    assert!(
+        view_rule.contains("isMarkdown(path)") && view_rule.contains("!line")
+            && view_rule.contains(r#"? "rendered" : "source";"#),
+        "a Markdown file opened at a line must open raw: {view_rule}"
+    );
+    // What the switch says: which view is showing, on the button *and* in the note. Two places on
+    // purpose -- the button is what a person presses, the note is what they check when the reading looks
+    // wrong -- and the `hidden` above is what keeps a file with no choice from being offered one.
+    let drawn = from("function paintPreviewView(body, response, view, path, line)", 40);
+    for (needed, why) in [
+        (r#"button.textContent = showing ? "source" : "rendered""#, "the button names the view it would show"),
+        (r#"button.hidden = !markdown"#, "a file that is not Markdown is offered no switch"),
+        (r#"if (text) text.hidden = showing"#, "only one of the two containers is ever showing"),
+        (r#"paintMarkdown(rendered, markdownBlocks(body))"#, "the reading is what the painter is handed"),
+        (" · rendered", "the note says which reading is on screen"),
+    ] {
+        assert!(
+            drawn.contains(needed),
+            "the preview does not draw `{needed}` ({why}): {drawn}"
+        );
+    }
+    // The bytes are read once and drawn twice: the switch re-reads rather than keeping a copy, because a
+    // second copy of a file in the page is exactly the derived state this project does not keep.
+    let flip = from(r#"document.getElementById("preview-render").addEventListener"#, 6);
+    assert!(
+        flip.contains("preview.view = preview.view === \"rendered\" ? \"source\" : \"rendered\"")
+            && flip.contains("readPreview()"),
+        "the switch must flip the view and read again: {flip}"
+    );
+    // A refusal is not a file: the route's sentence is the answer, and the switch goes with the reading
+    // that did not happen.
+    let refusal = from("function paintPreviewRefusal(body, status)", 16);
+    assert!(
+        refusal.contains("button.hidden = true") && refusal.contains("rendered.hidden = true"),
+        "a refusal must take the reading and its switch away: {refusal}"
+    );
+}
+
 /// The list is built from the **frame**, like every other control: the rows the state frame marks
 /// `class: "danger"` with `from: "sessions"`. This file does not know the word `/delete`, and a
 /// command the terminal gains or loses moves the menu with no edit here.

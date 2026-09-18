@@ -1815,7 +1815,7 @@ page's own functions); a `form` row with a `password` field still never reaches 
 menu's filtered list is the frame's commands and nothing else; and `readonly` still cannot be turned on
 and off by a control that reaches a route rather than the run.
 
-## 20. Markdown in the preview panel: an answer, not a plan — **the scope is a person's choice**
+## 20. Markdown in the preview panel: an answer, not a plan — **the scope was a person's choice, and the choice was made — see §24**
 
 Asked 2026-09-18, with the honest worry attached: *the preview should understand Markdown, but is that too
 much complexity?* It is a real question, and the numbers are what answer it.
@@ -1864,8 +1864,13 @@ can show. Doing all three at once would be the largest single piece of page-only
 (comparable to the whole jobs panel, §13) for a panel that is a side window — which is a fair thing to
 build, but it should be chosen rather than assumed.
 
-**Not built, and nothing else waits on it.** The preview's contents are plain text today, and that
-remains the honest answer to a URL inside a file (§16's closing sentence).
+**Built, and the two steps became one (§24).** B was built with A's styling folded into it rather than
+A first, because A's code would have been deleted by B's: styling a line by the shape of its first
+character and then reading that line as a block are the same loop with different bodies, and doing them
+in order would have meant writing the loop twice. C was **not** built, which is what this
+recommendation asked for — a link in a previewed document has not been missed by anyone, and the honest
+answer to "the renderer got it wrong" is still the file's own bytes, one press away. §24 has the
+measurements, the four defects the reading had, and what a person gives up by having it.
 
 ## 21. A picture in the panel, and the two rules it had to respect
 
@@ -2085,3 +2090,103 @@ settings → preview → jobs), and it is recorded there with the new count of k
 | `Enter` on a report row reads it instead of sending it | the same harness | the reading is drawn where the list was (a `‹ commands` button and the answer), the box is empty, and **the terminal gained nothing** — the claim the `/report` route exists for |
 | `Enter` on a form row writes nothing | the same harness | the dialog opens on the commands section with exactly one row marked, and the box is still empty |
 | `Enter` on an action row completes the line and sends nothing | the same harness | the box reads `/reload`, the menu is shut, the terminal gained nothing — and the person's own press of `send` is what makes it print |
+## 24. Markdown in the preview: a reading, with the file one press away — **built**
+
+§20 answered the question a person asked (*"the preview should understand Markdown, but is that too much
+complexity?"*) with three scopes and a recommendation: **B behind a raw/rendered toggle**, and C only when
+a link in a previewed document is actually missed. Built on 2026-09-18, in the same batch as §21–§23.
+
+**The two steps became one, and that is the one place the recommendation was not followed literally.**
+A (line-level styling) would have been a loop over lines deciding what to style from the first character;
+B is the same loop deciding what *block* the line starts. Nine tenths of A's code would have been deleted
+by B's, so A was folded into B rather than built first: the styling A promised -- a proportional face, a
+measure, a bolder heading, a monospaced fence -- is all there, it is just driven by a real reading rather
+than by the shape of a line. C was **not** built, which is exactly what §20 recommended, and the reason is
+still true: nobody has missed a link in a previewed document, and `**bold**` and `` `code` `` sitting there
+as they were written is legible in a way that a wrong render is not.
+
+**What it is.** A `.md`/`.markdown`/`.mdown`/`.mkd`/`.mdx` file read through `GET /file` is drawn by
+`markdownBlocks` (lines in, blocks out, no DOM) and `paintMarkdown` (blocks in, nodes out) into
+`#preview-md`, and the `pre` beside it keeps the file's own bytes. One button in the panel's head switches
+between them, its label naming what a press would *show* (`source` while a reading is on screen,
+`rendered` while the bytes are), its `aria-pressed` naming what is in force, and the note beside the path
+ending in `· rendered` — because the honest answer to "the renderer got it wrong" has to be visible
+without pressing anything.
+
+**The dialect is the whole honesty of this feature, so it is written down.** Blocks: ATX headings
+(`#`–`######`, with a closing run of hashes ignored), setext headings (`===`/`---` under a line), fenced
+code (three backticks or three tildes, with the info string kept as a caption), bulleted and numbered lists nested by
+indentation and split when the marker *kind* changes, blockquotes, thematic breaks, pipe tables with the
+alignment their divider asks for, and paragraphs whose wrapped lines are **joined with a space** — which is
+what these files' 100-column prose needs and what Markdown does. **Inline syntax is not parsed at all**:
+`**bold**`, `` `code` `` and `[text](url)` come out as the characters the file holds. Raw HTML is not
+"refused" — it is *text*, because the page never assigns markup, which is a property of the whole page
+rather than a rule of this function (the same test that has held since §1). And anything the reader does
+not recognise is a **paragraph**, never a guess: a line that looks like nothing else becomes words, which
+is exactly what the raw view would have shown.
+
+**Two rules the panel already had decided the shape of this.**
+
+- **A line opens the source.** `previewView(path, line)` is the whole of it: a Markdown file **without** a
+  line opens rendered, one **with** a line opens raw, and everything else opens raw. A `grep` hit or a
+  compiler error names a line, and "line 412" has no meaning in a reading — so asking for a line is asking
+  for the file's own lines. This is the rule that keeps a rendering from ever *replacing* the file.
+- **The bytes are read, not kept.** The switch flips `preview.view` and calls `readPreview()` again rather
+  than holding the last body: a second copy of a file in the page would be exactly the derived state this
+  project does not keep, and the route is one round trip away. It is the same reason `reload` exists as a
+  control rather than as a cache.
+
+**Four defects were found while building it, and three of them were the *point* of the design.**
+
+1. **An item's own words were lost when it had a nested list.** `markdownBlocks` returns an item's lines
+   as blocks, and the first version pushed *all* of them into the item's children — so `- two` followed by
+   `  - nested` became a bullet with an empty label and a list under it. Three Node checks went red at
+   once, which is the argument for making the reading a pure function: the failure was in the reading, it
+   was reported as the reading, and a browser never had to be opened to find it. The fix is that a leading
+   paragraph stays on the item as its text and everything after it is a child.
+2. **A `<script>` in a page *comment* broke the harness's own extractor**, which finds the first
+   `<script>` in the file to eval the page's script — so the markup comment that said "a file containing
+   `<script>` renders as text" made the harness parse markup as JavaScript. **And the same trap bit again
+   in the same block**: the harness's page-eval expressions are backtick-delimited, so a backtick inside
+   one (in a comment about a tag) closed the string and turned prose into code, which reads as
+   `b is not defined` from a line that has no `b` in it. Both are recorded because a page-eval string is a
+   program written inside a string: the extractor and the delimiter are two ways the *enclosing* file
+   decides what the page's code is.
+3. **A duplicate `const` in the harness** (`reading`, already bound by the settings block) — the same
+   shadowing mistake §23 hit with four names, and the reason the block was renamed to `drawnNotes` rather
+   than the older binding: the older one is a claim about the dialog.
+4. **The harness printed only an error's message, not its stack**, which cost a full browser run to locate
+   defect 3. It prints the stack now.
+
+**One claim was seen red once, and it was not this slice's.** `a hit's line travels with the path` — a
+§12 claim about pressing a `grep` hit — failed on one run of the harness and passed on the runs either
+side of it, with nothing in the tree changed in between; the detail line was lost to a `tail` on the way
+out, so what it said is not recorded. It is the same unreproduced class as the two CI flakes `HANDOFF.md`
+already carries, and it is written down rather than rerun-until-green because a claim that has been red
+once is a claim the next reader should re-run before believing: **93/93 held** on the runs that matter.
+
+| Claim | Where it was measured | What came back |
+|---|---|---|
+| Markdown is a name, not a guess | `scripts/web-view-test.js`, calling `isMarkdown` | `.md`, `.markdown`, `.mkd`, `.mdx` and an uppercase name are Markdown; `.txt`, `.png`, `a.md.txt`, `md` and a missing path are not |
+| Lines become blocks | the same harness, calling `markdownBlocks` | headings at their level (a closing `##` run dropped), paragraphs joined, a bulleted list with a nested list inside its second item, a numbered list as its own kind, a quote whose lines join, a rule, and a fence with its info string and its body verbatim |
+| A list ends where a reader would say it ends | the same harness | a change of marker kind starts a new list; a blank line between two items is one loose list; a blank line before prose ends it; a fence indented under an item belongs to the item |
+| A pipe table is a table | the same harness | head cells, two body rows, alignment `["", "right", "center"]` from the divider, and **a pipe with no divider under it stays a paragraph** |
+| What it does not know, it does not eat | the same harness | setext headings read; `<script>alert(1)</script>` and `<img src=x onerror=y>` are text; an unclosed fence is still a code block; indented text is a paragraph; an empty or missing body has no blocks |
+| Blocks become nodes, and every string arrives as text | the same harness, calling `paintMarkdown` | one node per block (`h1`, `p`, `ul`, `pre`, `table`), one `li` holding the nested `ul`, a fence as a `.lang` div plus `code`, a table with `thead`/`tbody` — and `**bold** and \`code\` stay as written`, which is the inline decision stated as a fact rather than a promise |
+| A Markdown file opens rendered, a line opens raw | the same harness, calling `previewView` | `.md` → rendered; `.md` at line 412 → source; `.txt` → source; `.png` → source; a missing path → source |
+| The switch is offered only where there is a choice | the same harness, calling `paintPreviewView` | the button un-hides and reads `source` with `aria-pressed="true"`, the note ends in `rendered` and the rendered container has the blocks; opened at a line the button reads `rendered`, the `pre` holds the bytes and the note says `line 412`; a `.txt` gets no button at all |
+| A refusal takes the switch away | the same harness, calling `paintPreviewRefusal` | the switch and the rendered container are hidden, the route's sentence is the text and `HTTP 404` is the note |
+| The page carries the reading and nothing else | `tests/web_view.rs::a_markdown_file_is_read_not_just_shown` | the rendered container ships `hidden`; `markdownBlocks` contains no `document.` (the reading is a function of its text); the painter builds through `el(` and names no markup assignment; `previewView` is the `isMarkdown(path) && !line` ternary; the switch flips the view and re-reads; a refusal takes both away |
+| A real browser draws the reading | `scripts/browser-controls-test.js`, against a live run | a `notes.md` path from the transcript draws `h1,p,ul,blockquote,table,pre`, the heading's text is `The notes`, one nested `ul`, two `td`, the fence's `const a = 1;`, and the button reads `source` |
+| A tag in the file is text on screen | the same harness | the paragraph's `textContent` contains `<b>tag</b>` and `` `code` left as written `` — read out of the *live* DOM, which is the only place this claim could be made |
+| The note says which reading is on screen | the same harness | the note ends in `rendered` and still carries the byte count |
+| `source` shows the bytes, `rendered` reads again | the same harness | the `pre`'s first line is `# The notes`, the rendered container is hidden, the button reads `rendered` and the note no longer says so; a second press reads it again |
+| A path that names a line opens the source | the same harness | pressing the transcript's own `notes.md:2` shows the `pre` with a note starting `line 2` and the button offering the reading |
+
+**What a person gives up by having this, said plainly.** A rendered view is *the page's* reading of the
+file, so a defect in it is a defect in what somebody is looking at — which is why the source is one press
+away, why the note names the mode, and why the dialect is written down here rather than described as "a
+Markdown renderer". Nothing about the file changes: `GET /file` still serves the same bytes, `/file` still
+refuses what it refused, and the reading exists only in the panel. §20's closing sentence — that the
+preview's contents are the file and not a transformation of it — is now true of *one* of two views rather
+than of the only one, and the toggle is the sentence.

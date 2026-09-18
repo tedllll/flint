@@ -32,12 +32,12 @@ reconstruct it:
 The gate as the last session left it — re-measured after the page slices at the top of
 `## What was just done`, on a tree with the untracked verification record held aside (that file and no
 other is the one thing `cargo test` disagrees with; see the paragraph after this one): `cargo test`
-**662 passing, 1 ignored** across the 14 suites (lib 368, bin 6, `agent_loop` 34, `balance` 7,
+**663 passing, 1 ignored** across the 14 suites (lib 368, bin 6, `agent_loop` 34, `balance` 7,
 `cli_output` 113, `json_output` 41, `say` 6, `search_tool` 4, `task` 17, `term_capture` 20 + 1 ignored,
-`tty_hangup` 0 and the doc-tests 0 — both empty by construction — `web_view` 36, `who` 10);
+`tty_hangup` 0 and the doc-tests 0 — both empty by construction — `web_view` 37, `who` 10);
 `cargo clippy --all-targets -- -D warnings` silent; the two headless Node harnesses green
 (`term-layout-test.js`, `web-view-test.js`) **and run by CI**; `examples/python/test_call.py` green; the
-browser harness run by hand at **87/87 claims held**, printing the list of drives and not-drives it is
+browser harness run by hand at **93/93 claims held**, printing the list of drives and not-drives it is
 bounded by. The release binary on `PATH` is the tree's (`flint --version` → `flint 0.1.0`, exit 0, and
 its SHA-256 is the one `target/release/flint.exe` was built with).
 
@@ -1770,7 +1770,8 @@ whose conversation it is and what the run is doing. Three slices, all built, all
 |---|---|
 | The preview panel draws a picture, and the click hands it to the machine | **built** (`3d385ba`) — `docs/web-mode.md` §21 |
 | The header keeps one door, and the run's controls move into a settings dialog | **built** (`39cde09`) — §22 |
-| The `/` trigger menu in the composer | **built** — §23 |
+| The `/` trigger menu in the composer | **built** (`96607bf`) — §23 |
+| Markdown in the preview, behind a raw/rendered toggle | **built** — §24 |
 
 **The picture slice is `GET /image`, and its one rule is that the type is the bytes rather than the
 name.** The route sniffs fifteen signatures (PNG, JPEG, GIF, WebP, BMP, ICO/CUR, TIFF both byte orders,
@@ -1810,23 +1811,40 @@ nothing printed to the transcript; an action, a selector and a destructive row c
 nothing. `Tab`-to-complete was refused from DSH's version on purpose: the composer's row holds `stop` and
 `send`, so `Tab` is the browser's focus key there and a menu that swallowed it would trap the keyboard.
 
-**Markdown in the preview panel is still an open question with a written answer, and the scope is a
-person's choice.** The user asked whether built-in `.md` support is too much complexity to take on;
-`docs/web-mode.md` §20 is the assessment — three scopes with their sizes (line-level styling ≈ 50 lines,
-block rendering ≈ 250 behind a raw/rendered toggle, inline emphasis and links +80), what the repository's
-own rules make cheap (the page never assigns markup, so a rendered file cannot inject HTML; the URL
-allowlist already exists), and what makes it expensive (a Markdown parser is a dialect claim, and "line
-412" has no meaning in a rendered view). The recommendation recorded there is the styling first, then
-block rendering behind a toggle, and the decision is the person's. It is the one item of this batch that
-was **not** built, and it is the only thing the last "do it all" instruction left open.
+**Markdown in the preview is built, and it is a reading with the file one press away.** The user asked
+whether built-in `.md` support is too much complexity; `docs/web-mode.md` §20 answered with three scopes
+(line-level styling ≈ 50 lines, block rendering ≈ 250 behind a raw/rendered toggle, inline emphasis and
+links +80) and recommended **B behind the toggle, C only if a link is ever missed**. Built as §24: a
+`.md`/`.markdown`/`.mdown`/`.mkd`/`.mdx` file read through `GET /file` is drawn by `markdownBlocks` (lines
+in, blocks out, **no DOM** — which is why the reading is checkable under Node) and `paintMarkdown` (blocks
+in, nodes out) into a new `#preview-md`, with the `pre` beside it keeping the file's own bytes and one
+head button switching between them. A (styling) was **folded into B rather than built first**, because
+A's loop would have been deleted by B's; **C was not built**, which is what §20 asked for — `**bold**`,
+`` `code` `` and `[text](url)` stay the characters the file holds, and the honest answer to "the renderer
+got it wrong" is the source, one press away. The dialect: ATX and setext headings, fenced code with its
+language, nested bulleted/numbered lists, blockquotes, thematic breaks, pipe tables with the alignment
+their divider asks for, and paragraphs whose wrapped lines join. Anything unrecognised is a *paragraph*,
+never a guess, and raw HTML is text because the page still never assigns markup. Two rules the panel
+already had decided the shape: **a line opens the source** (`previewView` — a `grep` hit names a line, and
+"line 412" has no meaning in a reading) and **the bytes are read, not kept** (the switch re-reads the
+route rather than holding a second copy — the same reason `reload` exists). The Node checks caught the one
+page defect (a list item lost its own words when it had a nested list) before a browser was opened, and
+two harness traps were recorded in §24: a `<script>` and a stray **backtick** inside a page-eval string,
+each of which makes the harness read prose as code.
 
-**The gate, as of this session's head.** `cargo test` **662 passed / 0 failed / 1 ignored** (the ignored
-one is `tests/term_capture.rs::measured_cost_of_streaming_an_answer`, deliberately ignored); `cargo
-clippy --all-targets -- -D warnings` silent; `node scripts/term-layout-test.js` all pass; `node
-scripts/web-view-test.js` all pass; `python examples/python/test_call.py`'s checks all pass; the browser
-harness run by hand at **87/87 claims held** (up from 61: the picture slice added five, the
-settings slice eight, and the `/` menu fourteen -- and it earned its keep twice, catching a leftover query in the
-composer and a stale reading behind the dialog that the stub DOM had passed). CI is green on both pushed commits.
+**The gate, as of this session's head.** `cargo test` **663 passed / 0 failed / 1 ignored** (the ignored
+one is `tests/term_capture.rs::measured_cost_of_streaming_an_answer`, deliberately ignored; `web_view` is
+37); `cargo clippy --all-targets -- -D warnings` silent; `node scripts/term-layout-test.js` all pass;
+`node scripts/web-view-test.js` all pass; `python examples/python/test_call.py`'s checks all pass; the
+browser harness run by hand at **93/93 claims held** (up from 61: the picture slice added five, the
+settings slice eight, the `/` menu fourteen, and the Markdown slice six — it earned its keep twice on the
+menu slice, catching a leftover query in the composer and a stale reading behind the dialog that the stub
+DOM had passed). **One existing claim was seen red once and green on the runs either side of it with
+nothing changed in between** — `a hit's line travels with the path` — and the detail line was lost to a
+`Select-Object -Last 14` on the way out, so what it said is not recorded; it is the same
+unreproduced-class flake as the two CI ones above, and it is written here rather than smoothed over
+because a harness that is red once is a harness somebody should re-run before believing a green.
+CI is green on the pushed heads.
 
 **The standing duty is done for both pushed heads.** `target\release\flint.exe` and
 `C:\Users\zhangzhuo\bin\flint.exe` are the same bytes (SHA-256

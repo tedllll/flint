@@ -512,6 +512,19 @@ async function main() {
     )
   );
   fs.writeFileSync(path.join(where.cwd, "not-a-picture.png"), "this is a note with a picture's name\n");
+  // A Markdown file for the rendered view, written here for the same reason the PNG is: its bytes are the
+  // fixture, and one of them is a tag that would run code if this page ever assigned markup. The heading,
+  // the list, the fence and the table are there so the claims below can read a *structure* rather than a
+  // string that happens to be on screen.
+  fs.writeFileSync(
+    path.join(where.cwd, "notes.md"),
+    "# The notes\n\n" +
+      "Some prose with a <b>tag</b> in it, and `code` left as written.\n\n" +
+      "- one\n- two\n  - nested\n\n" +
+      "> quoted words\n> on two lines\n\n" +
+      "| a | b |\n|---|---|\n| 1 | 2 |\n\n" +
+      "```js\nconst a = 1;\n```\n"
+  );
   // The turn's last answer, and the three shapes of address a claim below is made against: a web
   // address that must be a link, the absolute path of the file this run wrote that must open in the
   // preview, and a `javascript:` address that must stay the words it is. The last one is the reason
@@ -527,6 +540,7 @@ async function main() {
       `${path.join(where.cwd, "notes.txt")} for the file, ` +
       `${path.join(where.cwd, "cell.png")} for the picture, ` +
       `${path.join(where.cwd, "not-a-picture.png")} for the one that only looks like one, ` +
+      `${path.join(where.cwd, "notes.md")} for the notes, ` +
       "and javascript:alert(1) for the scheme that is not the web"
   );
   script[script.length - 1] = addresses;
@@ -1849,6 +1863,125 @@ async function main() {
       !!pictureClosed && pictureClosed.hidden === true && pictureClosed.text === false,
       `panel: ${JSON.stringify(pictureClosed)}`
     );
+    // ---- the rendered view of a Markdown file ------------------------------
+    // The one thing here the stub DOM cannot show: that a *real* browser lays out the nodes this page
+    // built -- an `h1` that is a heading, a `ul` that is a list, a `table` that is a table -- and that
+    // the switch between the reading and the file's own bytes changes what is on screen. What the
+    // parser produces is checked without a browser (`scripts/web-view-test.js`); what is checked here is
+    // that the reading is *drawn*, and that the honest half (the source) is one press away.
+    const pressedNotes = await pressProse("notes.md", "harness-notes");
+    const drawnNotes = pressedNotes
+      ? await page
+          .waitFor(
+            `(() => { const md = document.getElementById("preview-md");
+               if (!md || md.hidden) return null;
+               const kinds = Array.from(md.children).map((n) => n.tagName.toLowerCase());
+               const heading = md.querySelector("h1");
+               const nested = md.querySelectorAll("ul ul").length;
+               return { kinds: kinds,
+                        title: heading ? heading.textContent : "",
+                        nested: nested,
+                        // A tag in the file is *text*: this page never assigns markup, so an
+                        // angle-bracket tag in a document is four characters on screen, not bold words.
+                        // (No backticks in here: this whole expression is inside one, and an inner one
+                        // closes it -- which is how this cost a browser run to find.)
+                        prose: (md.querySelector("p") || {}).textContent || "",
+                        cells: md.querySelectorAll("td").length,
+                        code: (md.querySelector("pre code") || {}).textContent || "",
+                        note: document.getElementById("preview-note").textContent,
+                        button: document.getElementById("preview-render").textContent }; })()`,
+            "the Markdown file to be rendered",
+            25
+          )
+          .catch(() => null)
+      : null;
+    check(
+      "a Markdown path from the transcript is read rather than shown as its own source",
+      !!drawnNotes &&
+        drawnNotes.kinds.join(",") === "h1,p,ul,blockquote,table,pre" &&
+        drawnNotes.title === "The notes" &&
+        drawnNotes.nested === 1 &&
+        drawnNotes.cells === 2 &&
+        drawnNotes.code === "const a = 1;" &&
+        drawnNotes.button === "source",
+      `rendered: ${JSON.stringify(drawnNotes)}`
+    );
+    check(
+      "and a tag inside it is text, because this page never assigns markup",
+      !!drawnNotes && drawnNotes.prose.includes("<b>tag</b>") && drawnNotes.prose.includes("`code` left as written"),
+      `prose: ${JSON.stringify((drawnNotes || {}).prose)}`
+    );
+    check(
+      "the note says which reading is on screen",
+      !!drawnNotes && /rendered$/.test(String(drawnNotes.note).trim()) &&
+        /\bbytes\b/.test(String(drawnNotes.note)),
+      `note: ${JSON.stringify((drawnNotes || {}).note)}`
+    );
+
+    // The switch: one press, and the file's own bytes are what is on screen -- with the numbering a line
+    // would be found by, which is the whole reason a rendered view may not be the only view.
+    await page.click("#preview-render");
+    const source = await page
+      .waitFor(
+        `(() => { const text = document.getElementById("preview-text");
+           const md = document.getElementById("preview-md");
+           if (!text || text.hidden) return null;
+           return { first: (text.textContent || "").split("\\n")[0],
+                    rendered: md ? md.hidden : null,
+                    button: document.getElementById("preview-render").textContent,
+                    note: document.getElementById("preview-note").textContent }; })()`,
+        "the file's own bytes",
+        20
+      )
+      .catch(() => null);
+    check(
+      "the switch shows the source, and says how to get the reading back",
+      !!source && source.first === "# The notes" && source.rendered === true &&
+        source.button === "rendered" && !String(source.note).includes("rendered"),
+      `source: ${JSON.stringify(source)}`
+    );
+    await page.click("#preview-render");
+    const back = await page
+      .waitFor(`document.getElementById("preview-md").hidden === false ? "rendered" : null`,
+        "the reading again", 20)
+      .catch(() => null);
+    check("and pressing it again reads the file once more", back === "rendered", `view: ${JSON.stringify(back)}`);
+
+    // A path with a line on it opens raw: the line is why the panel was opened at all, and "line 412" has
+    // no meaning in a rendered view. The press is the transcript's own `notes.md:6`, from the grep the
+    // scripted turn ran over the file this harness wrote -- which is the shape a `grep` hit and a
+    // compiler error both have. The claim fails rather than vanishing when the button is not there: a
+    // skipped claim that reads as a pass is the one thing a harness may not do.
+    const lineButton = await page.js(
+      `(() => { const buttons = Array.from(document.querySelectorAll("details.tool button.path"));
+         const one = buttons.find((b) => /notes\\.md:\\d+$/.test(b.title));
+         if (!one) return null;
+         one.id = "harness-notes-line";
+         return one.title; })()`
+    );
+    if (typeof lineButton === "string") await page.click("#harness-notes-line");
+    const notesAtLine = typeof lineButton === "string"
+      ? await page
+          .waitFor(
+            `(() => { const text = document.getElementById("preview-text");
+               if (!text || text.hidden) return null;
+               return { note: document.getElementById("preview-note").textContent,
+                        rendered: document.getElementById("preview-md").hidden,
+                        button: document.getElementById("preview-render").textContent }; })()`,
+            "the file opened at a line",
+            20
+          )
+          .catch(() => null)
+      : null;
+    check(
+      "a path that names a line opens the source, not the reading",
+      typeof lineButton === "string" && /^notes\.md:\d+$/.test(lineButton) && !!notesAtLine &&
+        notesAtLine.rendered === true && notesAtLine.button === "rendered" &&
+        /^line \d+/.test(String(notesAtLine.note)),
+      `button: ${JSON.stringify(lineButton)}, at line: ${JSON.stringify(notesAtLine)}`
+    );
+    await page.js(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); true`);
+
     // ---- the `/` menu in the composer --------------------------------------
     // The one surface that needs a real browser *and* a real run: a menu drawn from the frame the
     // process sent, opened by a keystroke, driven by the arrow keys, and committed by Enter. The stub
@@ -2065,6 +2198,10 @@ async function main() {
 }
 
 main().catch((error) => {
+  // The stack as well as the message: a failure in a helper (`pressProse`, `click`, `waitFor`) is one
+  // this file's own line numbers answer, and a message alone has twice sent a reader looking in the
+  // wrong block.
   console.log(`harness failed: ${error.message}`);
+  if (error.stack) console.log(error.stack);
   process.exit(3);
 });

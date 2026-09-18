@@ -587,6 +587,41 @@
   #preview-image-button[hidden] { display: none; }
   #preview-image { display: block; max-width: 100%; max-height: 100%; object-fit: contain; }
   #preview-image-button:disabled { cursor: default; }
+  /* The rendered view of a Markdown file: the same bytes, read rather than looked at. A proportional
+     face and a measure, because the whole point is that a paragraph of `AGENTS.md` is not a 120-column
+     line of monospace; the panel is narrow, so the measure is a maximum rather than a width. Everything
+     here is styling -- the structure comes from `markdownBlocks`, and `#preview-md[hidden]` is the
+     raw/rendered switch. */
+  #preview-md {
+    flex: 1 1 auto; margin: 0; padding: 10px 14px 24px; overflow: auto;
+    font-size: 13.5px; line-height: 1.55; max-width: 78ch;
+  }
+  #preview-md[hidden] { display: none; }
+  #preview-md h1, #preview-md h2, #preview-md h3,
+  #preview-md h4, #preview-md h5, #preview-md h6 { line-height: 1.25; margin: 1.1em 0 .4em; }
+  #preview-md h1 { font-size: 1.5em; border-bottom: 1px solid var(--line); padding-bottom: .2em; }
+  #preview-md h2 { font-size: 1.28em; }
+  #preview-md h3 { font-size: 1.12em; }
+  #preview-md h4, #preview-md h5, #preview-md h6 { font-size: 1em; color: var(--dim); }
+  #preview-md p { margin: .6em 0; }
+  #preview-md ul, #preview-md ol { margin: .5em 0; padding-left: 1.4em; }
+  #preview-md li { margin: .18em 0; }
+  #preview-md blockquote {
+    margin: .6em 0; padding: 0 0 0 10px; border-left: 3px solid var(--line); color: var(--dim);
+  }
+  #preview-md hr { border: 0; border-top: 1px solid var(--line); margin: 1.1em 0; }
+  #preview-md pre {
+    margin: .6em 0; padding: 8px 10px; background: var(--bg); border: 1px solid var(--line);
+    border-radius: 6px; overflow-x: auto; font-size: 12.5px; white-space: pre;
+  }
+  #preview-md pre code { font: inherit; }
+  #preview-md .lang { color: var(--dim); font-size: 11.5px; margin: 0 0 3px; }
+  #preview-md table { border-collapse: collapse; margin: .7em 0; font-size: 12.5px; }
+  #preview-md th, #preview-md td { border: 1px solid var(--line); padding: 3px 7px; text-align: left; }
+  #preview-md th { background: var(--panel); }
+  /* The one thing the renderer deliberately does *not* do: parse inline syntax. So a paragraph shows
+     `code` and **bold** as they are written -- visible, never silently mis-set, and one press from the
+     file's own bytes. §20 of `docs/web-mode.md` is the reasoning, and its step C is what would add it. */
   #status {
     grid-column: 1 / -1;
     background: var(--panel); border-top: 1px solid var(--line);
@@ -748,10 +783,20 @@
       <span id="preview-path"></span>
       <span id="preview-note"></span>
       <button id="preview-open" type="button" title="open it where it lives">open</button>
+      <!-- The raw/rendered switch, and it is only drawn for a file whose name says Markdown was read as
+           text. The label says what pressing it *does* rather than which view is showing, like every
+           other control here, and the note beside the path says which view *is* showing -- which is the
+           half that keeps this honest when the renderer gets something wrong. -->
+      <button id="preview-render" type="button" hidden></button>
       <button id="preview-reload" type="button" title="read it again">reload</button>
       <button id="preview-close" type="button" title="close (Esc)">close</button>
     </div>
     <pre id="preview-text"></pre>
+    <!-- The rendered view of the same bytes. A `div` rather than the `pre` above, because a heading in a
+         `pre` is a heading in name only; the two are never shown at once, and the renderer builds nodes
+         and sets `textContent` (the page never assigns markup), so a file containing a script tag
+         renders as those characters. -->
+    <div class="md" id="preview-md" hidden></div>
     <!-- A picture, drawn by the browser rather than by this page's script: `src` is a blob URL made
          from the bytes `GET /image` served, so nothing here parses an image and the token stays out
          of every URL. Pressing it hands the file to the program this machine uses for it, which is
@@ -3086,7 +3131,7 @@ let preview = null;
 /// Open a path, or move the panel to another one. `line` of zero means the transcript named no
 /// line, which is the usual case.
 async function openPreview(path, line) {
-  preview = { path: path, line: line || 0 };
+  preview = { path: path, line: line || 0, view: previewView(path, line) };
   const panel = document.getElementById("preview");
   if (panel) panel.hidden = false;
   paintPreviewHead();
@@ -3256,9 +3301,16 @@ function showPicture(url, response) {
   const holder = document.getElementById("preview-image-button");
   const image = document.getElementById("preview-image");
   const text = document.getElementById("preview-text");
+  const rendered = document.getElementById("preview-md");
+  const switch_ = document.getElementById("preview-render");
   const note = document.getElementById("preview-note");
   releasePicture();
   if (!image || !holder) return;
+  // Either a picture is drawn or text is, never both, and the raw/rendered switch belongs to the text
+  // half: a picture is drawn by the browser and there is no reading of it to switch to. Hiding it here
+  // and letting `paintPreviewView` decide again is what keeps the two halves from disagreeing.
+  if (rendered) rendered.hidden = true;
+  if (switch_) switch_.hidden = true;
   if (!url) {
     holder.hidden = true;
     image.removeAttribute("src");
@@ -3349,17 +3401,32 @@ async function readText() {
   }
   const body = await response.text();
   if (!response.ok) {
-    // The route says *why* -- nothing there, a directory, not text -- and that sentence is the
-    // whole answer, so it is shown as it is rather than turned into a status code.
-    text.hidden = false;
-    text.textContent = body.trim();
-    note.textContent = "HTTP " + response.status;
+    paintPreviewRefusal(body, response.status);
     return;
   }
-  text.hidden = false;
-  text.textContent = body;
-  note.textContent = previewNote(response, body, preview.line);
-  scrollToLine(text, preview.line);
+  // Which of the two views draws it, and the note that says so. The body is the same bytes either way,
+  // and the view comes off the panel's own state rather than being decided again here.
+  paintPreviewView(body, response, preview.view, preview.path, preview.line);
+}
+
+/// A refusal, in the route's own words.
+///
+/// The route says *why* -- nothing there, a directory, not text -- and that sentence is the whole
+/// answer, so it is shown as it is rather than turned into a status code. A refusal is not a Markdown
+/// file either, so the raw/rendered switch goes away with the reading it belonged to: offering to render
+/// something that was not read would be offering a view of nothing.
+function paintPreviewRefusal(body, status) {
+  const text = document.getElementById("preview-text");
+  const note = document.getElementById("preview-note");
+  const rendered = document.getElementById("preview-md");
+  const button = document.getElementById("preview-render");
+  if (rendered) rendered.hidden = true;
+  if (button) button.hidden = true;
+  if (text) {
+    text.hidden = false;
+    text.textContent = String(body == null ? "" : body).trim();
+  }
+  if (note) note.textContent = "HTTP " + status;
 }
 
 /// What the header says beside the path: where the line is, and how much of the file is here.
@@ -3384,6 +3451,326 @@ function scrollToLine(text, line) {
   const height = parseFloat(getComputedStyle(text).lineHeight);
   const step = isNaN(height) ? 20 : height;
   text.scrollTop = Math.max(0, (line - 1) * step);
+}
+
+/// Whether a path's own name says Markdown.
+///
+/// By name, like the picture route, and for the same honest reason: the page has the bytes, but a
+/// `.md` that is really a log should read as a log -- and the switch is one press away in both
+/// directions, so a wrong guess costs a press rather than a wrong reading.
+function isMarkdown(path) {
+  return /\.(md|markdown|mdown|mkd|mdx)$/i.test(String(path || ""));
+}
+
+/// The top-level syntax this renderer knows, and nothing else.
+///
+/// Deliberately block-level only: headings, fenced code, lists (nested), blockquotes, thematic breaks,
+/// pipe tables and paragraphs. **Inline syntax is not parsed** -- `**bold**` and a backtick come out as
+/// written -- and that is a decision recorded in `docs/web-mode.md` §20 rather than an omission: the
+/// half of Markdown that is structure is the half that makes a file readable, the half that is inline is
+/// where a hand-written parser starts guessing, and a reader who wants the truth presses one button for
+/// the bytes. Raw HTML is not "refused" here either: the page never assigns markup, so `<script>` in a
+/// file is four characters, which is a property of the whole page rather than a rule of this function.
+///
+/// The result is data, not nodes, so `scripts/web-view-test.js` can check the reading without a DOM.
+const MD_FENCE = /^\s{0,3}(```+|~~~+)\s*(\S*)\s*$/;
+const MD_HEADING = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/;
+const MD_RULE = /^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/;
+const MD_ITEM = /^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/;
+const MD_QUOTE = /^\s{0,3}>\s?(.*)$/;
+const MD_TABLE_DIVIDER = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+
+/// Split one table row into its cells, with the pipes at either end dropped.
+function tableCells(line) {
+  let text = String(line).trim();
+  if (text.startsWith("|")) text = text.slice(1);
+  if (text.endsWith("|")) text = text.slice(0, -1);
+  return text.split("|").map((cell) => cell.trim());
+}
+
+/// The alignment a divider cell asks for, which is the one thing a table's second line says.
+function tableAlign(cell) {
+  const text = String(cell).trim();
+  const left = text.startsWith(":");
+  const right = text.endsWith(":");
+  if (left && right) return "center";
+  if (right) return "right";
+  if (left) return "left";
+  return "";
+}
+
+/// Whether two list markers are the *same kind*, so a numbered list inside a bulleted one is a new
+/// list rather than more items.
+const orderedMarker = (marker) => /\d/.test(String(marker));
+
+/// Read a Markdown document into blocks. Lines in, blocks out, no DOM.
+///
+/// A block is one of: `{kind:"heading", level, text}`, `{kind:"code", info, lines}`,
+/// `{kind:"list", ordered, items:[{text, children}]}`, `{kind:"quote", blocks}`,
+/// `{kind:"table", head, align, rows}`, `{kind:"rule"}`, `{kind:"paragraph", text}`.
+///
+/// Two decisions are worth keeping. Consecutive lines of a paragraph are **joined with a space**, which
+/// is what Markdown does and what these files' own wrapped prose needs -- a renderer that kept the hard
+/// breaks would draw every wrapped sentence of a 100-column file as a ragged column. And a block that
+/// cannot be understood is a **paragraph**, never a guess: a line that looks like nothing else here
+/// becomes text, which is exactly what the raw view would have shown.
+function markdownBlocks(text) {
+  const lines = String(text == null ? "" : text).replace(/\r\n?/g, "\n").split("\n");
+  const blocks = [];
+  let at = 0;
+  while (at < lines.length) {
+    const line = lines[at];
+    if (!line.trim()) {
+      at += 1;
+      continue;
+    }
+    const fence = MD_FENCE.exec(line);
+    if (fence) {
+      const body = [];
+      at += 1;
+      while (at < lines.length && !MD_FENCE.exec(lines[at])) {
+        body.push(lines[at]);
+        at += 1;
+      }
+      if (at < lines.length) at += 1; // the closing fence, or the end of a file that never closed one
+      blocks.push({ kind: "code", info: fence[2] || "", lines: body });
+      continue;
+    }
+    const heading = MD_HEADING.exec(line);
+    if (heading) {
+      blocks.push({ kind: "heading", level: heading[1].length, text: heading[2] });
+      at += 1;
+      continue;
+    }
+    if (MD_RULE.test(line)) {
+      blocks.push({ kind: "rule" });
+      at += 1;
+      continue;
+    }
+    const quoted = MD_QUOTE.exec(line);
+    if (quoted) {
+      const inner = [];
+      while (at < lines.length) {
+        const one = MD_QUOTE.exec(lines[at]);
+        if (!one) break;
+        inner.push(one[1]);
+        at += 1;
+      }
+      blocks.push({ kind: "quote", blocks: markdownBlocks(inner.join("\n")) });
+      continue;
+    }
+    const item = MD_ITEM.exec(line);
+    if (item) {
+      const list = markdownList(lines, at);
+      blocks.push(list.block);
+      at = list.next;
+      continue;
+    }
+    if (line.includes("|") && at + 1 < lines.length && MD_TABLE_DIVIDER.test(lines[at + 1])) {
+      const head = tableCells(line).map((text) => ({ text }));
+      const align = tableCells(lines[at + 1]).map(tableAlign);
+      const rows = [];
+      at += 2;
+      while (at < lines.length && lines[at].includes("|") && lines[at].trim()) {
+        rows.push(tableCells(lines[at]));
+        at += 1;
+      }
+      blocks.push({ kind: "table", head, align, rows });
+      continue;
+    }
+    // A paragraph, and everything that continues it: a following line that is not blank and not the
+    // start of another block. A `===`/`---` line under it is a setext heading, which is the one piece
+    // of Markdown that is only visible *after* reading the line above.
+    const body = [];
+    let level = 0;
+    while (at < lines.length && lines[at].trim()) {
+      const next = lines[at];
+      const setext = body.length && /^\s{0,3}(=+|-+)\s*$/.test(next);
+      if (setext) {
+        level = next.trim().startsWith("=") ? 1 : 2;
+        at += 1;
+        break;
+      }
+      if (body.length && (MD_HEADING.test(next) || MD_FENCE.test(next) || MD_QUOTE.test(next) ||
+          MD_ITEM.test(next) || MD_RULE.test(next))) break;
+      body.push(next.trim());
+      at += 1;
+    }
+    if (level) blocks.push({ kind: "heading", level, text: body.join(" ") });
+    else blocks.push({ kind: "paragraph", text: body.join(" ") });
+  }
+  return blocks;
+}
+
+/// One list, from its first item to the end of the run.
+///
+/// Nesting is decided by indentation and by the *kind* of marker, which is the whole of what a reader
+/// can see: an indented item under a bullet is that bullet's own list, and a numbered item under a
+/// bulleted one starts a new list rather than continuing it. An item's continuation lines are the
+/// indented lines under it; they are re-read as blocks, so an item can hold a nested list, a fence or a
+/// second paragraph without any of that being a special case here.
+function markdownList(lines, at) {
+  const first = MD_ITEM.exec(lines[at]);
+  const base = first[1].length;
+  const ordered = orderedMarker(first[2]);
+  const items = [];
+  while (at < lines.length) {
+    const line = lines[at];
+    if (!line.trim()) {
+      // A blank line ends the list unless another item of the same list follows it (a "loose" list,
+      // which is the same list to a reader and must not become two).
+      const next = lines[at + 1] || "";
+      const skip = MD_ITEM.exec(next);
+      if (!skip || skip[1].length > base + 1 || orderedMarker(skip[2]) !== ordered) break;
+      at += 1;
+      continue;
+    }
+    const item = MD_ITEM.exec(line);
+    if (!item || item[1].length > base + 1 || orderedMarker(item[2]) !== ordered) break;
+    const indent = item[1].length;
+    const body = [item[3]];
+    at += 1;
+    while (at < lines.length) {
+      const next = lines[at];
+      if (!next.trim()) {
+        const after = lines[at + 1] || "";
+        const more = MD_ITEM.exec(after);
+        if (more && more[1].length <= indent + 1) break; // the next item, after one blank line
+        if (!after.trim()) break;
+        body.push("");
+        at += 1;
+        continue;
+      }
+      if (MD_ITEM.exec(next) && MD_ITEM.exec(next)[1].length <= indent + 1) break;
+      const lead = /^\s*/.exec(next)[0].length;
+      if (lead <= indent) break;
+      body.push(next.slice(Math.min(lead, indent + 2)));
+      at += 1;
+    }
+    const children = markdownBlocks(body.join("\n"));
+    // An item whose own text is a paragraph keeps that text *on the item* and everything after it as
+    // its children: an `li` with a nested list is a bullet with words and a list under it, not a bullet
+    // holding an empty paragraph. The first version pushed both into `children` and lost the words.
+    if (children.length > 0 && children[0].kind === "paragraph") {
+      items.push({ text: children[0].text, children: children.slice(1) });
+    } else {
+      items.push({ text: "", children: children });
+    }
+  }
+  return { block: { kind: "list", ordered: ordered, items: items }, next: at };
+}
+
+/// Draw blocks as nodes. Every string goes in through `textContent`; nothing here assigns markup.
+function paintMarkdown(holder, blocks) {
+  if (!holder) return;
+  while (holder.firstChild) holder.removeChild(holder.firstChild);
+  for (const block of blocks) holder.appendChild(markdownNode(block));
+  return holder;
+}
+
+/// One block as one node, and a list's items as their own nodes.
+function markdownNode(block) {
+  if (!block) return el("p", "", "");
+  if (block.kind === "heading") {
+    const level = Math.min(Math.max(block.level || 1, 1), 6);
+    return el("h" + level, "", block.text);
+  }
+  if (block.kind === "rule") {
+    const rule = el("hr", "", "");
+    rule.setAttribute("aria-hidden", "true");
+    return rule;
+  }
+  if (block.kind === "code") {
+    const box = el("pre", "code-block");
+    if (block.info) box.appendChild(el("div", "lang", block.info));
+    box.appendChild(el("code", "", (block.lines || []).join("\n")));
+    return box;
+  }
+  if (block.kind === "quote") {
+    const quote = el("blockquote", "");
+    for (const inner of block.blocks || []) quote.appendChild(markdownNode(inner));
+    return quote;
+  }
+  if (block.kind === "table") {
+    const table = el("table");
+    const head = el("thead");
+    const headRow = el("tr");
+    (block.head || []).forEach((cell, at) => {
+      const node = el("th", "", cell.text);
+      const align = (block.align || [])[at];
+      if (align) node.setAttribute("align", align);
+      headRow.appendChild(node);
+    });
+    head.appendChild(headRow);
+    table.appendChild(head);
+    const body = el("tbody");
+    for (const row of block.rows || []) {
+      const tr = el("tr");
+      row.forEach((cell, at) => {
+        const node = el("td", "", cell);
+        const align = (block.align || [])[at];
+        if (align) node.setAttribute("align", align);
+        tr.appendChild(node);
+      });
+      body.appendChild(tr);
+    }
+    table.appendChild(body);
+    return table;
+  }
+  if (block.kind === "list") {
+    const list = el(block.ordered ? "ol" : "ul");
+    for (const item of block.items || []) {
+      const node = el("li", "", item.text || "");
+      for (const inner of item.children || []) node.appendChild(markdownNode(inner));
+      list.appendChild(node);
+    }
+    return list;
+  }
+  return el("p", "", block.text || "");
+}
+
+/// Which view a path opens in. A pure function of the two things that decide it, so the rule can be
+/// checked without opening anything: a Markdown file opened **without** a line opens rendered, and
+/// everything else opens raw -- a line is why the panel was opened at all, and "line 412" has no meaning
+/// in a rendered view.
+function previewView(path, line) {
+  return isMarkdown(path) && !line ? "rendered" : "source";
+}
+
+/// Which view the panel is showing, and whether there is a choice to make.
+///
+/// A function of the body and of the view rather than a reader of the panel's own state, so that what it
+/// draws depends only on what it was handed -- which is what lets the Node harness check both views of
+/// one body without a route, a run or a browser.
+function paintPreviewView(body, response, view, path, line) {
+  const text = document.getElementById("preview-text");
+  const rendered = document.getElementById("preview-md");
+  const note = document.getElementById("preview-note");
+  const button = document.getElementById("preview-render");
+  const markdown = isMarkdown(path);
+  const showing = view === "rendered" && markdown;
+  if (text) text.hidden = showing;
+  if (rendered) rendered.hidden = !showing;
+  if (button) {
+    button.hidden = !markdown;
+    button.textContent = showing ? "source" : "rendered";
+    button.title = showing
+      ? "show the file's own bytes instead"
+      : "read it as Markdown rather than as text";
+    button.setAttribute("aria-pressed", showing ? "true" : "false");
+  }
+  if (showing) {
+    paintMarkdown(rendered, markdownBlocks(body));
+    // The mode is in the note as well as on the button, because that is the sentence a reader checks
+    // when the rendering looks wrong: what is on screen is a *reading* of the file, and which reading.
+    if (note) note.textContent = previewNote(response, body, 0) + " · rendered";
+    return;
+  }
+  if (text) {
+    text.textContent = body;
+    scrollToLine(text, line);
+  }
+  if (note) note.textContent = previewNote(response, body, line);
 }
 
 // ---------------------------------------------------------------------------
@@ -3992,6 +4379,14 @@ if (typeof document !== "undefined" && document.getElementById) {
   // says there what it cannot do.
   document.getElementById("preview-close").addEventListener("click", closePreview);
   document.getElementById("preview-reload").addEventListener("click", () => readPreview());
+  // The raw/rendered switch: it flips the view and reads the file again rather than keeping the last
+  // body around. A second copy of the bytes in the page is exactly the derived state this project does
+  // not keep, and the route is one round trip away -- the same reason `reload` exists as a control.
+  document.getElementById("preview-render").addEventListener("click", () => {
+    if (!preview) return;
+    preview.view = preview.view === "rendered" ? "source" : "rendered";
+    readPreview();
+  });
   // The one control on this page that starts a program. See `openOutside` for why it is not the
   // path itself -- and the picture, which is the same act through the same route: a press on the
   // image is a person asking to see the file at the size this machine can show it, which is what
@@ -4297,6 +4692,11 @@ if (typeof module !== "undefined" && module.exports) {
     // session file. Neither half needs a browser to be checked.
     menuQuery, menuScore, menuRows, menuOpen, showMenu, hideMenu, menuStep, takeMenuRow, menuDispatch,
     setComposerText,
+    // The Markdown reading. `markdownBlocks` is lines in and blocks out with no DOM at all -- which is
+    // what makes a renderer checkable without a browser -- and `paintMarkdown` is the half that builds
+    // nodes, so a check can read the structure it drew without a screenshot.
+    isMarkdown, markdownBlocks, markdownList, tableCells, tableAlign, paintMarkdown,
+    previewView, paintPreviewView, paintPreviewRefusal,
     jobsFrom, durationLabel, jobWhen, jobIsLive, jobIsStoppable, paintJobs, titleWords,
     // The position this tab was reading from: exported so the Node harness can check the three cases
     // -- a gap, a different conversation, and a position past the end -- against the real functions

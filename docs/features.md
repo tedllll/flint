@@ -770,6 +770,9 @@ controls is a header that takes the reading column's width for furniture, which 
 | preview | — | which route is tried is decided by the path's **name** (the extension set), because the page cannot sniff bytes it has not fetched: `/image` first for a name that looks like a picture, then `/file`. So a `.png` that is really a note reads as the note, and a `.svg`/`.heic`/`.tiff` that the browser will not draw offers the OS instead. The note is the route's own `Content-Type` and `Content-Length`, never the extension |
 | preview | `open` | hands the panel's path to the program this machine uses for it (`POST /open`): a file opens in whatever its type is registered to, a directory in the file manager. The one control on this page that starts a process, so it is a **deliberate second press** and never the path itself. Disabled when the run is `readonly`, with the reason in its tooltip; the route refuses it there anyway. The answer — or the route's refusal — appears in the hint under the composer |
 | preview | — | a refusal is shown in the route's own words with its status beside it, never as an empty panel |
+| preview | `source`, `rendered` (`button#preview-render`) | switches a `.md`/`.markdown`/`.mdown`/`.mkd`/`.mdx` file between the page's **reading** of it and the file's own bytes. Only drawn for a file whose name says Markdown that was read as text; the label names the view a press would show, `aria-pressed` names the one in force, and the note beside the path ends in `· rendered` when a reading is on screen. A press **re-reads the route** rather than keeping a copy of the bytes (§24 of `docs/web-mode.md`) |
+| preview | — | the reading is block-level only: headings (ATX and setext), fenced code with its language, nested bulleted/numbered lists, blockquotes, thematic breaks, pipe tables with the alignment their divider asks for, and paragraphs (their wrapped lines joined with a space). **Inline syntax is not parsed** — `**bold**`, `` `code` `` and `[text](url)` are the characters the file holds — and raw HTML is text, because this page never assigns markup. Anything the reader does not recognise is a paragraph, never a guess |
+| preview | — | a `.md` file **without** a line opens rendered, and **with** a line opens raw (`previewView`): a `grep` hit or a compiler error names a line, and "line 412" has no meaning in a reading. A file with any other extension is text, and a picture is neither |
 | layout | the two grip handles | drag to resize the sidebar and the reading column; `ArrowLeft`/`ArrowRight` move the boundary by 16 px (48 with Shift); a **double-click puts the width back to the stylesheet's**. Neither width is persisted |
 | anywhere | `Escape` | puts away **one** thing, front to back: the `/` menu first (it lives in the composer, where the keyboard already is), then the settings dialog, then the preview panel, then the jobs list. One press per thing, and the order is a function rather than three listeners, so "which one does this close?" has an answer that can be read (`dismissTopmost`). With nothing open it does nothing |
 
@@ -801,19 +804,23 @@ that understood JavaScript would be a second parser to be wrong about.
 
 ### 12.5 Measured, and honestly not
 
-- **Driven in a real browser**: `scripts/browser-controls-test.js`, **87 claims** held, each checked
+- **Driven in a real browser**: `scripts/browser-controls-test.js`, **93 claims** held, each checked
   against the run's own stdout. It prints what it drives before it presses anything, and its "not driven
   here" list is part of the output: a report asked for mid-turn (measured in `tests/cli_output.rs`), the
   `/prompt` row's send button, an OS open that *succeeds* (it would start a program on this machine; the
   command lines are held by `src/web.rs`), a paste, an IME, a screen reader, two tabs, touch, a phone
   viewport.
 - **Pure functions**: `scripts/web-view-test.js` (the splitter, the frames, the form composition, the
-  peer picker's text, and `POST /open`'s body and guard).
+  peer picker's text, the Markdown reading — `markdownBlocks` is lines in and blocks out with no DOM, so
+  a fence, a nested list and a pipe table are checked without a browser — and `POST /open`'s body and
+  guard).
 - **Two controls the current harness does not press**: `+ new` and the stop button were measured in
   earlier passes by other harnesses, and the `/say --to` picker is held by bytes and Node checks rather
   than by a browser press. All three are recorded as the narrower-but-true statement, not as coverage.
 - **Residues worth knowing before filing anything**: a file being *previewed* is plain text, so a URL
-  inside it is not pressable; a real OS-level launch is never performed by a test (the command lines are
+  inside it is not pressable — and a `.md` file is *also* shown as plain text when the person presses
+  `source`, or when it was opened at a line, so the reading is never the only thing the panel can show; a
+  real OS-level launch is never performed by a test (the command lines are
   asserted, the spawn is not driven); a
   native `<select>`'s open popup belongs to the operating system and no test can reach into it; the tab's
   own title is not updated (the exported page's is); and `POST /log` writes a line on every boot of a
@@ -1028,9 +1035,12 @@ Not bugs, and not to be filed as such. Each is a decision with a reason in the t
 - **No image or PDF *viewer* beyond what a browser draws**, and no client build step: the page asks
   `GET /image` for the bytes and hands them to an `<img>`, so the formats it can show are the browser's
   own — the route serves tiff and heic too and says so when the tab cannot draw one.
-- **No Markdown renderer in the page yet**, and no client build step: everything is
-  `textContent`, one file. (§20 of `docs/web-mode.md` is the assessment; the rendering itself is not
-  built.)
+- **No Markdown renderer *library*, and no client build step**: the page reads the block syntax itself
+  (`markdownBlocks`, ~120 lines) and everything it draws is `textContent` in one file. **Inline syntax is
+  deliberately not parsed** — `**bold**` and `` `code` `` come out as written, and a link in a previewed
+  document is not pressable — so a rendered view is a reading, never a claim to be a Markdown
+  implementation; `source` is one press away, and a file opened at a line opens raw (§20 of
+  `docs/web-mode.md` is the assessment and §24 the build).
 - **No history navigation in the input row** (`Up`/`Down`), and no tab completion.
 - **No TUI.** The terminal view is inline — a scroll region, an answer strip and a status
   row — not a full-screen application, and that was decided rather than unfinished.
@@ -1055,7 +1065,7 @@ tests name the behaviour they hold.
 | the mailbox and presence | `tests/say.rs`, `tests/who.rs` |
 | the page's policy | `tests/web_view.rs` |
 | the page's routes, including the launcher's command lines (`POST /open`) | `src/web.rs`'s tests |
-| the page's controls, driven in a real browser | `scripts/browser-controls-test.js` (87 claims) |
+| the page's controls, driven in a real browser | `scripts/browser-controls-test.js` (93 claims) |
 | the page's pure functions | `scripts/web-view-test.js` |
 | the Python and MCP callers | `examples/python/test_call.py`, `examples/mcp/test_mcp.py` |
 | the one suite that needs a real pty (Unix) | `tests/tty_hangup.rs` |
