@@ -1214,7 +1214,7 @@ fn the_runs_controls_live_in_a_dialog_and_the_header_keeps_one_door() {
             "the dialog is missing a way out through {needed} ({why}): {wiring}"
         );
     }
-    let order = from("function dismissTopmost()", 10);
+    let order = from("function dismissTopmost()", 16);
     let settings_at = order
         .find("settingsOpen()")
         .expect("the modal must be asked about first");
@@ -1241,6 +1241,146 @@ fn the_runs_controls_live_in_a_dialog_and_the_header_keeps_one_door() {
     assert!(
         unknown.contains("SETTINGS_PANES.some"),
         "a section the rail does not offer must leave the dialog as it was: {unknown}"
+    );
+}
+
+/// The `/` menu: a launcher in the composer, drawn from the frame, and honest about what it may do.
+///
+/// Three things are checked, and each is a decision rather than a feature. The menu exists only while
+/// the line *is* a command (`menuQuery`), so it cannot cover a sentence being written. Its rows are
+/// the frame's, so the page still holds no command name of its own. And what a row does is decided by
+/// its class -- with the one rule that matters held to the letter: a `form` row must never write the
+/// line, because the line is sent to the run and written into the session file, and a credential in
+/// the composer is a credential on disk.
+#[test]
+fn the_slash_menu_is_a_launcher_drawn_from_the_frame() {
+    // Somewhere to put it, and shut until there is something to offer: the composer owns it, so it is
+    // inside the form and moves with the box it annotates.
+    let html = view();
+    let composer = html
+        .find("id=\"composer\"")
+        .expect("the page must have a composer");
+    let menu_at = html.find("id=\"menu\"").expect("the composer has no menu");
+    let form_end = html[composer..]
+        .find("</form>")
+        .map(|at| composer + at)
+        .expect("the composer must be a form");
+    assert!(
+        composer < menu_at && menu_at < form_end,
+        "the menu is the composer's own furniture, so it belongs inside the form"
+    );
+    let markup = from("<div class=\"menu\" id=\"menu\"", 2);
+    assert!(
+        markup.contains("hidden") && markup.contains("role=\"listbox\""),
+        "the menu ships shut and says what it is: {markup}"
+    );
+
+    // Open only while the line is a command: a slash that starts the value, and no space yet. Both
+    // halves are asserted, because either one alone would be the defect -- a menu that opened
+    // mid-sentence, or one that stayed open over the line being written.
+    let query = from("function menuQuery(value)", 8);
+    assert!(
+        query.contains("startsWith(\"/\")"),
+        "the menu is for a line that starts with a slash: {query}"
+    );
+    assert!(
+        query.contains("/\\s/.test(rest) ? null") || query.contains("\\s"),
+        "and it must close as soon as the line has a space in it: {query}"
+    );
+
+    // Drawn from the frame, like the panel: the same `state.commands`, the same row fields, and the
+    // page's own group names as the only thing it knows by heart.
+    let rows = from("function menuRows(doc, query)", 16);
+    assert!(
+        rows.contains("state.commands"),
+        "the menu must be drawn from the frame rather than from a list of its own: {rows}"
+    );
+    let built = from("function menuButton(doc, row, at)", 14);
+    for (needed, why) in [
+        ("row.send", "the line the row stands for"),
+        ("row.label", "what the row says it is"),
+        ("row.help", "what the row says it does"),
+    ] {
+        assert!(
+            built.contains(needed),
+            "the menu's rows are not drawn from the frame's `{needed}` ({why}): {built}"
+        );
+    }
+    for leaked in ["/provider key", "/delete <n|id>", "/reload", "inspect the config"] {
+        assert!(
+            !html.contains(leaked),
+            "the menu carries `{leaked}` itself, so it can offer a command the terminal does not have"
+        );
+    }
+
+    // What a row commits to, and the rule: the `dialog` dispatch may not touch the line. The slice is
+    // taken from the dispatch branch's own marker to the branch after it, so a `setComposerText` that
+    // appeared anywhere inside it would be found -- which is the assertion, since a form row is
+    // exactly the case where writing the line would put a secret in the transcript.
+    let dispatch = from("function menuDispatch(row)", 14);
+    assert!(
+        dispatch.contains("=== \"form\") return \"dialog\"")
+            && dispatch.contains("=== \"panel\") return \"report\""),
+        "every class must have its own answer, and a form's is the dialog: {dispatch}"
+    );
+    // The one rule, held to the letter: the dialog branch may not *complete* the line. The composer's
+    // text is sent to the run and written into the session file, so a form command completed into the
+    // box would be a credential on disk. It clears the query it was taken from instead, and that
+    // distinction is the whole assertion -- a check for the mere absence of `setComposerText` was the
+    // first version of this test, and it passed while a real browser showed the query left behind and
+    // one Enter away from being sent.
+    let branch = from("if (dispatch === \"dialog\") {", 13);
+    assert!(
+        !branch.contains("setComposerText(send") && !branch.contains("setComposerText(row"),
+        "a form row must never complete the line: {branch}"
+    );
+    assert!(
+        branch.contains("setComposerText(\"\")"),
+        "and it must clear the query, or the next Enter sends the command the dialog was opened for: {branch}"
+    );
+    let report = from("if (dispatch === \"report\") {", 18);
+    assert!(
+        report.contains("setComposerText(\"\")") && !report.contains("setComposerText(send"),
+        "a report row clears the query for the same reason -- it was read, not sent: {report}"
+    );
+    let opens = report.find("openSettings()").expect("a report's reading is shown");
+    let asks = report.find("askReport(").expect("and asked for");
+    assert!(
+        opens < asks,
+        "the dialog is opened as the reading is asked for, not after it answers -- otherwise the \
+         reader watches the composer for a round trip with nothing saying anything is happening: {report}"
+    );
+    // Every other class completes the line and nothing more: a keystroke in a menu must not decide
+    // anything. So this function holds no `fetch` of its own -- the one thing it can send goes through
+    // `askReport`, which owns the `/report` route.
+    let take = from("async function takeMenuRow(doc, row)", 60);
+    let sends = sites(&take, "fetch(");
+    assert!(
+        sends.is_empty() && take.contains("askReport(doc, send)"),
+        "the menu may only send what a report row asks for, and only through the report's own \
+         function: {sends:?}"
+    );
+
+    // The arrows are the reason this is a menu, and `Escape` is the page's one order: the menu is in
+    // front of everything because it is where the keyboard already is.
+    let wiring = from("message.addEventListener(\"keydown\"", 14);
+    for (needed, why) in [
+        ("menuOpen()", "the menu only takes the keys while it is open"),
+        ("ArrowDown", "the arrow keys move the mark"),
+        ("ArrowUp", "both of them"),
+        ("takeMenuRow", "and Enter takes the row"),
+    ] {
+        assert!(
+            wiring.contains(needed),
+            "the composer's keys are not wired to the menu's `{needed}` ({why}): {wiring}"
+        );
+    }
+    let order = from("function dismissTopmost()", 12);
+    let menu_at = order.find("menuOpen()").expect("the menu must be asked about");
+    let settings_at = order.find("settingsOpen()").expect("so must the dialog");
+    assert!(
+        menu_at < settings_at,
+        "one Escape puts away the thing in front, and the menu is inside the composer: {order}"
     );
 }
 

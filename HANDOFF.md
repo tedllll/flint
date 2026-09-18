@@ -29,15 +29,15 @@ reconstruct it:
 | 12. `docs/sandbox.md` contradicts `## Not doing, and why` | **declined in writing, 2026-09-18**: asked whether to build a permission layer or keep the default, the answer was keep the default (all permissions). The `ROADMAP.md` bullet is unchanged, `docs/sandbox.md` now labels itself an argument that lost, and the contradiction is closed in favour of the plan of record. Nothing else in §11 waited on it, and nothing does now |
 | 13. the addresses in the page's text, pressable | **built 2026-09-18**, asked for directly: a web address is a link in a new tab, a path stays a button into the preview, and the scheme test is an allowlist. Its one named residue — no OS-level open — was **built one session later** as `POST /open` plus the panel's `open` control (see `## What was just done`) |
 
-The gate as this session left it — re-measured after the verification-pass fixes at the top of
+The gate as the last session left it — re-measured after the page slices at the top of
 `## What was just done`, on a tree with the untracked verification record held aside (that file and no
 other is the one thing `cargo test` disagrees with; see the paragraph after this one): `cargo test`
-**650 passing, 1 ignored** across the 14 suites (lib 360, bin 6, `agent_loop` 34, `balance` 7,
+**662 passing, 1 ignored** across the 14 suites (lib 368, bin 6, `agent_loop` 34, `balance` 7,
 `cli_output` 113, `json_output` 41, `say` 6, `search_tool` 4, `task` 17, `term_capture` 20 + 1 ignored,
-`tty_hangup` 0 and the doc-tests 0 — both empty by construction — `web_view` 32, `who` 10);
+`tty_hangup` 0 and the doc-tests 0 — both empty by construction — `web_view` 36, `who` 10);
 `cargo clippy --all-targets -- -D warnings` silent; the two headless Node harnesses green
 (`term-layout-test.js`, `web-view-test.js`) **and run by CI**; `examples/python/test_call.py` green; the
-browser harness run by hand at **61/61 claims held**, printing the list of drives and not-drives it is
+browser harness run by hand at **87/87 claims held**, printing the list of drives and not-drives it is
 bounded by. The release binary on `PATH` is the tree's (`flint --version` → `flint 0.1.0`, exit 0, and
 its SHA-256 is the one `target/release/flint.exe` was built with).
 
@@ -1759,19 +1759,96 @@ the block is drawn — then open the `commands` panel and read it against `/help
 
 ## What was just done
 
-**The page's header says whose conversation it is and what the run is doing, and the paths in a transcript
-are now the paths a reader can actually open.** Asked for directly (2026-09-18): first that the command
-surface should learn from DSH and move what belongs in *settings* off the page, and that the header should
-stop saying `flint` and show the conversation, the background jobs and the subagents; then, from using the
-result, four reports about paths — a printed path treated as a file, a path with a space broken in the
-middle, GitHub's `#L42` and `file://` lines unsupported, a line number missing from the button, and `~`
-paths leading nowhere. Two slices are built and pushed; the third is designed and not built:
+**The page stopped being a surface and became a window with a door: a picture in the preview, the
+run's controls behind a settings dialog, and a `/` menu in the composer.** Asked for directly
+(2026-09-18), in the order the user sent it: the preview panel should support the common image formats
+(and a press on the picture may as well go through the OS's own "open this file"), the command surface
+should learn from DSH and move what belongs in *settings* off the page, and the page's header should say
+whose conversation it is and what the run is doing. Three slices, all built, all pushed:
+
+| Slice | State |
+|---|---|
+| The preview panel draws a picture, and the click hands it to the machine | **built** (`3d385ba`) — `docs/web-mode.md` §21 |
+| The header keeps one door, and the run's controls move into a settings dialog | **built** (`39cde09`) — §22 |
+| The `/` trigger menu in the composer | **built** — §23 |
+
+**The picture slice is `GET /image`, and its one rule is that the type is the bytes rather than the
+name.** The route sniffs fifteen signatures (PNG, JPEG, GIF, WebP, BMP, ICO/CUR, TIFF both byte orders,
+AVIF/HEIC, and SVG by what it says) and refuses anything else with a sentence; the page decides which
+route to ask *by extension*, because it cannot sniff bytes it has not fetched, and a refusal falls
+through to `/file` — so a `.png` that is really a note reads as the note, and a picture this browser
+cannot decode says so and points at `open`. The bytes arrive with the page's own `authHeader` and are
+drawn from a `blob:` URL, so no token is ever in an image URL (the CSP gained `img-src blob:` and
+nothing else), and a press on the picture calls the same `openOutside()` the header's `open` button
+calls. The cap is 24 MB rather than `/file`'s 64: a text file can be cut at 512 KB and still be honest,
+while a picture has to arrive whole to be a picture.
+
+**The settings slice is one door in the header, and the line it draws is "state you are watching"
+versus "state you are changing".** The conversation's name and the jobs chips stayed (they are status);
+the pickers, the switches, the action buttons, the run's `cwd`/id/created line and the forty-row command
+list moved behind one `settings` button, into a `hidden`-toggled modal with a mask, two rail sections
+(`run`, `commands`) shown one at a time, and real focus (the keyboard moves to `close`, and back to the
+door). It is a `div` rather than `<dialog>`/`showModal` for the reason §10 already recorded — the Node
+harness's stub DOM cannot express `showModal`, and a control whose behaviour is only checkable in a
+browser is one most of whose behaviour goes unchecked. `Escape` stopped being two parallel listeners and
+became one ordered function, `dismissTopmost` (now menu → settings → preview → jobs): with a modal in the
+tree, one press closing both the panel and the list is no longer an honest answer. The geometry claim
+grew teeth: with the dialog open, the transcript, the pane and the composer have **identical**
+rectangles to the pixel and the centre of the send button belongs to the mask.
+
+**The `/` menu is the last piece of §19's plan, and two of its five class decisions are about the
+dialog.** Typing `/` as the first character opens the frame's own commands above the box; letters after
+the slash filter it (prefix, then subsequence of the name, then a substring of the help — a *fuzzy* help
+would let `/delete` answer to "remove one of them"); the arrows move the mark, `Enter` takes the row,
+`Escape` puts it away without touching the text, and a space closes it because at that point the person
+is writing an argument rather than choosing a command. What `Enter` does is the class's own answer, and
+the one rule that matters lives in a pure `menuDispatch`: **a `form` row may not complete the line** —
+the composer's text is sent to the run and written into the session file, so a credential completed into
+the box would be a credential on disk. A form row opens the dialog *at that row* instead; a report asks
+for its reading on `/report` and shows it in the dialog's commands section with nothing typed and
+nothing printed to the transcript; an action, a selector and a destructive row complete the line and send
+nothing. `Tab`-to-complete was refused from DSH's version on purpose: the composer's row holds `stop` and
+`send`, so `Tab` is the browser's focus key there and a menu that swallowed it would trap the keyboard.
+
+**Markdown in the preview panel is still an open question with a written answer, and the scope is a
+person's choice.** The user asked whether built-in `.md` support is too much complexity to take on;
+`docs/web-mode.md` §20 is the assessment — three scopes with their sizes (line-level styling ≈ 50 lines,
+block rendering ≈ 250 behind a raw/rendered toggle, inline emphasis and links +80), what the repository's
+own rules make cheap (the page never assigns markup, so a rendered file cannot inject HTML; the URL
+allowlist already exists), and what makes it expensive (a Markdown parser is a dialect claim, and "line
+412" has no meaning in a rendered view). The recommendation recorded there is the styling first, then
+block rendering behind a toggle, and the decision is the person's. It is the one item of this batch that
+was **not** built, and it is the only thing the last "do it all" instruction left open.
+
+**The gate, as of this session's head.** `cargo test` **662 passed / 0 failed / 1 ignored** (the ignored
+one is `tests/term_capture.rs::measured_cost_of_streaming_an_answer`, deliberately ignored); `cargo
+clippy --all-targets -- -D warnings` silent; `node scripts/term-layout-test.js` all pass; `node
+scripts/web-view-test.js` all pass; `python examples/python/test_call.py`'s checks all pass; the browser
+harness run by hand at **87/87 claims held** (up from 61: the picture slice added five, the
+settings slice eight, and the `/` menu fourteen -- and it earned its keep twice, catching a leftover query in the
+composer and a stale reading behind the dialog that the stub DOM had passed). CI is green on both pushed commits.
+
+**The standing duty is done for both pushed heads.** `target\release\flint.exe` and
+`C:\Users\zhangzhuo\bin\flint.exe` are the same bytes (SHA-256
+`D49EFAB4135A4ED55B8C38ADA0A5BE69D2B91E244A1D4F7B292AEFCC198DA33A` for `39cde09`) and `flint --version`
+prints `flint 0.1.0`, exit 0. The release step is the one command in this project that fails for a
+reason outside the tree: a running `flint` holds `bin\flint.exe` open, so a session left open is the
+whole failure and closing it the whole fix.
+
+**Before the three slices above — the page's header says whose conversation it is and what the run is
+doing, and the paths in a transcript are now the paths a reader can actually open.** Asked for directly
+(2026-09-18): first that the command surface should learn from DSH and move what belongs in *settings*
+off the page, and that the header should stop saying `flint` and show the conversation, the background
+jobs and the subagents; then, from using the result, four reports about paths — a printed path treated as
+a file, a path with a space broken in the middle, GitHub's `#L42` and `file://` lines unsupported, a line
+number missing from the button, and `~` paths leading nowhere. Those two slices are built and pushed, and
+the settings overlay they asked for is built too (the table at the top of this section):
 
 | Slice | State |
 |---|---|
 | The header: the conversation's name and the status chips | **built** (`7f5bfe0`) — `docs/web-mode.md` §17 |
 | The paths in a transcript, the line on the button, and where a `~` leads | **built** (`f6255f1`) — §18 |
-| The command surface: a **settings** overlay, and the commands behind a `/` trigger in the composer | **not built** — the plan of record is `docs/web-mode.md` §19, which is the first job of the next session |
+| The command surface: a **settings** overlay, and the commands behind a `/` trigger in the composer | **built** (`39cde09`, `docs/web-mode.md` §22 for the dialog and §23 for the menu) |
 
 The two built slices are worth one line each for a reader who will not open the docs. The header is now
 the session file's own newest name (falling back to the label `GET /sessions` chose, so an unnamed

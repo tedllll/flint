@@ -73,6 +73,10 @@ function fakeNode() {
     clientHeight: 0,
     handlers: {},
     focused: false,
+    // A real element always has one, and the composer's own `sizeComposer` writes a height into it on
+    // every keystroke: measured as `Cannot set properties of undefined (setting 'height')` the moment a
+    // check typed into the line through the page's own function rather than by assigning `value`.
+    style: {},
     // `focus` is a real browser fact this harness needed the moment the page grew a modal: what makes
     // a dialog a dialog rather than a panel is where the keyboard goes when it opens and where it
     // goes back to when it closes, and neither is visible in the page's own nodes.
@@ -1893,6 +1897,226 @@ check("one Escape closes the thing in front, and the dialog is in front of the p
 
   // Nothing open: Escape is not a control that pretends to work.
   eq(viewer.dismissTopmost(), false, "with nothing open, Escape is not an action");
+});
+
+console.log("the / menu in the composer");
+
+// A frame with one row of each class, so that every branch of the dispatch is reachable -- the menu's
+// whole job is to treat five classes differently, and a check with four of them would leave the one
+// that matters (a form, which must never fill the line) unexercised.
+const menuFrame = (page) => {
+  const d = page.newDoc();
+  page.applyState(d, JSON.stringify({
+    type: "state", provider: "stub", model: "m", providers: [{ name: "stub", models: ["m"] }],
+    toggles: [],
+    commands: [
+      { label: "/config", send: "/config", help: "show shell, steps, proxy", class: "panel" },
+      { label: "/reload", send: "/reload", help: "re-read the config file", class: "button" },
+      { label: "/provider <name>", send: "/provider", help: "switch endpoint", class: "selector",
+        values: ["stub", "other"] },
+      { label: "/resume <n|id>", send: "/resume", help: "switch to one of them", class: "selector" },
+      { label: "/provider key <key>", send: "/provider key", help: "save a key for one",
+        class: "form", fields: [{ field: "password" }] },
+      { label: "/delete <n|id>", send: "/delete", help: "delete one", class: "danger" },
+    ],
+  }));
+  return d;
+};
+
+// When the menu is open at all. The rule is strict on purpose: a slash in the middle of a sentence is
+// not a command, and a menu that stayed open through `/config set a b` would cover the line being
+// written.
+check("the menu opens on a slash that starts the line, and on nothing else", () => {
+  eq(viewer.menuQuery("/"), "", "a bare slash asks about everything");
+  eq(viewer.menuQuery("/pro"), "pro", "and letters after it are the query");
+  eq(viewer.menuQuery("  /skill"), "skill", "leading space is not part of the line yet");
+  eq(viewer.menuQuery("/config set"), null, "a space means the line is being written");
+  eq(viewer.menuQuery("see src/main.rs and/or docs"), null, "a slash mid-sentence is not a command");
+  eq(viewer.menuQuery("hello"), null, "and neither is text");
+  eq(viewer.menuQuery(""), null, "an empty box asks nothing");
+  eq(viewer.menuQuery(null), null, "and a missing value does not throw");
+});
+
+// The order, which is what makes a menu learnable: a prefix first, then a subsequence of the command
+// itself, then a word in its help -- and the frame's own order as the tie-break.
+check("the menu filters by prefix, then by subsequence, then by the help text", () => {
+  const page = loadViewer();
+  const d = menuFrame(page);
+  const names = (query) => page.menuRows(d, query).map((c) => c.send);
+
+  eq(names(""), ["/config", "/reload", "/provider", "/resume", "/provider key", "/delete"],
+     "a bare slash is the frame's own order");
+  eq(names("re")[0], "/reload", "a prefix beats everything: /re wins over /provider and /resume");
+  eq(names("pkey"), ["/provider key"], "a subsequence finds a two-word command");
+  eq(names("delete"), ["/delete"], "and an exact name is a match");
+  eq(names("proxy"), ["/config"], "the help text is the last chance: 'show shell, steps, proxy'");
+  eq(names("zzz"), [], "nothing matches nothing");
+  ok(names("p").includes("/provider") && names("p").includes("/provider key"),
+     "both commands a letter matches are offered: " + names("p").join(", "));
+  // A subsequence over the help would match almost anything a person types; that is why the help is a
+  // substring and the *name* is the subsequence. "rmv" is a subsequence of "remove one of them" and
+  // must not reach `/delete`.
+  eq(page.menuScore({ send: "/delete", help: "remove one of them" }, "rmv"), 0, "help is not fuzzy");
+  ok(page.menuScore({ send: "/delete", help: "remove one of them" }, "remove") > 0,
+     "but a substring of the help does match");
+});
+
+check("the menu draws the frame's rows, marked, and says when nothing matches", () => {
+  const page = loadViewer();
+  const d = menuFrame(page);
+  page.showMenu(d, "");
+  const box = page.__node("menu");
+  eq(box.hidden, false, "the menu is shown");
+  const headings = box.children.filter((c) => c.className === "group-name").map((c) => c.textContent);
+  eq(headings, ["reports", "actions", "selectors", "forms", "destructive"],
+     "the same reading order as the dialog's list");
+  const rows = box.children.filter((c) => String(c.className).includes("row"));
+  eq(rows.length, 6, "one row per command");
+  eq(rows[0].getAttribute("aria-selected"), "true", "the keyboard starts on the first row");
+  eq(rows[1].getAttribute("aria-selected"), "false", "and only one row is marked");
+
+  // The arrows move one row at a time and wrap, which is the whole reason this is a menu rather than a
+  // list of buttons: `menu.at` counts rows, so the group headings between them are skipped.
+  page.menuStep(d, 1);
+  eq(rows[1].getAttribute("aria-selected"), "true", "ArrowDown moves the mark");
+  page.menuStep(d, -1);
+  eq(rows[0].getAttribute("aria-selected"), "true", "ArrowUp moves it back");
+  page.menuStep(d, -1);
+  eq(rows[5].getAttribute("aria-selected"), "true", "and it wraps rather than sticking");
+
+  page.showMenu(d, "zzz");
+  eq(page.__node("menu").children[0].textContent, "no command matches /zzz",
+     "a query with no answer says so rather than drawing an empty box");
+  eq(page.menuOpen(), true, "and the menu stays open, so a backspace brings the list back");
+
+  page.showMenu(d, "");
+  page.hideMenu();
+  eq(page.__node("menu").hidden, true, "hiding it closes the box");
+  eq(page.menuOpen(), false, "and the page agrees it is closed");
+});
+
+// A page with no run has no commands, and a menu drawn from nothing is a promise the page cannot keep
+// -- the same rule the settings door follows.
+check("a page with no frame offers no menu", () => {
+  const page = loadViewer();
+  const d = page.newDoc();
+  page.showMenu(d, "");
+  eq(page.__node("menu").hidden, true, "no state, no menu");
+  eq(page.menuOpen(), false, "and nothing is open");
+});
+
+// The dispatch, one class at a time, and it is checked as a *decision* first: which of the five things
+// a row does is a function of the row's class, and the rule that matters lives here -- a `form` row
+// never completes the line, because the composer's text is sent to the run and written into the
+// session file. A credential typed there is a credential on disk.
+check("what a row commits to is decided by its class, and only its class", () => {
+  const page = loadViewer();
+  const d = menuFrame(page);
+  const dispatch = (query) => page.menuDispatch(page.menuRows(d, query)[0]);
+  eq(dispatch("config"), "report", "a report is read");
+  eq(dispatch("reload"), "line", "an action completes the line");
+  eq(dispatch("resume"), "line", "a selector whose list is elsewhere completes the line");
+  eq(dispatch("provider key"), "dialog", "a form opens the dialog and never the line");
+  eq(dispatch("delete"), "line", "a destructive row completes the line");
+  eq(page.menuDispatch({ class: "value", send: "3" }), "value", "and a value completes the line it was asked for");
+  eq(page.menuDispatch(null), "none", "nothing to take is not a dispatch");
+  const withValues = page.menuRows(d, "provider").find((c) => c.class === "selector" && c.values);
+  eq(page.menuDispatch(withValues), "values", "a selector the frame gave values for offers them");
+  // The order matters as much as the word: a form that also carried `values` must still be a dialog,
+  // because the class is what the process said the command *is*.
+  eq(page.menuDispatch({ class: "form", send: "/x", values: ["a"] }), "dialog",
+     "a form with values is still a form");
+});
+
+// The doing, and every observable half of it happens before the first `await` -- which is why this
+// check is synchronous and still sees the request on the wire, the dialog open and the line written.
+check("taking a row does exactly what its dispatch says", () => {
+  const page = loadViewer();
+  const d = menuFrame(page);
+  const take = (query, row) => page.takeMenuRow(d, row || page.menuRows(d, query)[0]);
+  // The composer starts empty, and saying so is not a formality: "a form row does not touch the line"
+  // is an assertion about the *absence* of a value, and a stub box whose `value` was never written is
+  // `undefined`, which would pass for the wrong reason.
+  page.setComposerText("");
+  eq(page.__node("message").value, "", "the line starts where the person left it");
+
+  // A report: the reading is drawn in the dialog's commands section, and the line is untouched. The
+  // *route* is not asserted here -- `canSend` is false in this stub, as it is for a dropped session
+  // file, so the page never gets as far as a fetch -- which is why `menuDispatch` above is the claim
+  // made here and a real listener is where the request is checked (`scripts/browser-controls-test.js`).
+  //
+  // The box is filled with the *query* first, because that is the state a real press happens in -- and
+  // it is what caught the defect in a real browser: the query was left behind, so the next Enter would
+  // have sent the very line the report route exists to keep out of the transcript.
+  page.setComposerText("/config");
+  page.showMenu(d, "config");
+  take("config");
+  eq(page.__node("message").value, "", "the query the menu was built from is cleared, not sent");
+  eq(page.settingsOpen(), true, "the reading is shown in the dialog");
+  eq(page.__node("pane-commands").hidden, false, "on the commands section");
+  page.closeSettings();
+
+  // An action: the line, completed, and nothing sent. A keystroke in a menu should not decide anything.
+  page.sent.length = 0;
+  page.showMenu(d, "reload");
+  take("reload");
+  eq(page.__node("message").value, "/reload", "an action completes the line");
+  eq(page.sent.length, 0, "and sends nothing");
+  eq(page.menuOpen(), false, "the menu closes behind it");
+
+  // A selector with values: the line so far, then the frame's own values as a second list.
+  page.showMenu(d, "provider");
+  take("provider", page.menuRows(d, "provider").find((c) => c.class === "selector" && c.values));
+  eq(page.__node("message").value, "/provider ", "a selector is completed with a space for its argument");
+  const values = page.__node("menu").children.filter((c) => c.getAttribute("data-row") !== null);
+  eq(values.map((r) => r.children[0].textContent), ["stub", "other"], "and the values are offered");
+  take(null, { class: "value", send: "other", label: "other" });
+  eq(page.__node("message").value, "/provider other", "taking one completes the whole line");
+  eq(page.sent.length, 0, "...and still sends nothing");
+
+  // A selector whose list lives elsewhere on the page: the line, with room for the argument.
+  page.showMenu(d, "resume");
+  take("resume");
+  eq(page.__node("message").value, "/resume ", "a selector with no values still leaves room");
+
+  // The form: the dialog, at the row, with the line left empty. Asserted as the *absence* of the
+  // credential rather than as the presence of a dialog, because the absence is the property -- and the
+  // box is filled with the query first, which is the state the press really happens in.
+  page.setComposerText("/provider key");
+  page.showMenu(d, "provider key");
+  const form = page.menuRows(d, "provider key")[0];
+  eq(form.class, "form", "the row under test is a form");
+  take(null, form);
+  eq(page.__node("message").value, "", "a form row leaves the line empty, not holding the query");
+  eq(page.settingsOpen(), true, "it opens the dialog");
+  eq(page.__node("pane-commands").hidden, false, "at the commands section");
+  const marked = page.__node("command-list").children
+    .flatMap((g) => g.children || [])
+    .filter((r) => String(r.className).includes("pointed"))
+    .map((r) => r.textContent);
+  eq(marked.length, 1, "and the row it was about is marked: " + JSON.stringify(marked));
+  page.closeSettings();
+
+  // A destructive row: the line, completed, one press short of doing anything.
+  page.sent.length = 0;
+  page.showMenu(d, "delete");
+  take("delete");
+  eq(page.__node("message").value, "/delete ", "a destructive row completes the line");
+  eq(page.sent.length, 0, "and sends nothing at all");
+});
+
+// One Escape, and the menu is in front of everything: it lives in the composer, which is where the
+// keyboard already is.
+check("Escape puts the menu away before anything else", () => {
+  const page = loadViewer();
+  const d = menuFrame(page);
+  page.showMenu(d, "");
+  page.openSettings();
+  eq(page.dismissTopmost(), true, "the press does something");
+  eq(page.menuOpen(), false, "the menu closed");
+  eq(page.settingsOpen(), true, "and the dialog behind it did not");
+  eq(page.dismissTopmost(), true, "the next press");
+  eq(page.settingsOpen(), false, "closes the dialog");
 });
 
 // An exported page carries its conversation in a JSON island, and this is the one function that reads

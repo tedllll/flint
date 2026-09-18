@@ -445,6 +445,30 @@
     border-top: 1px solid var(--line); background: var(--bg);
     display: flex; gap: 8px; align-items: flex-end; padding: 10px 18px;
   }
+  /* The `/` menu: a panel anchored above the box, drawn from the frame (`showMenu`), and bounded for
+     the reason the settings pane is -- forty rows must never be able to push the composer off the
+     screen, which is the defect §11 measured on the old panel. `left: 18px` is the composer's own
+     padding, so the menu starts where the text does. */
+  .menu {
+    position: absolute; left: 18px; right: 18px; bottom: calc(100% - 4px); z-index: 20;
+    max-height: 46vh; overflow-y: auto;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    box-shadow: 0 -10px 30px rgba(0, 0, 0, .45); padding: 6px 8px; font-size: 12.5px;
+  }
+  .menu[hidden] { display: none; }
+  .menu .group-name { color: var(--dim); font-size: 12px; margin: 6px 0 2px; }
+  .menu .row { display: flex; gap: 8px; align-items: baseline; }
+  .menu button.row {
+    font: inherit; text-align: left; width: 100%; background: none; border: 0; padding: 0;
+    color: inherit; cursor: pointer; border-radius: 4px;
+  }
+  .menu button.row code { color: var(--fg); white-space: nowrap; }
+  .menu button.row span { color: var(--dim); }
+  /* The row the keyboard is on. Colour rather than a moving box: what a person needs is to see which
+     line Enter will take, and the same row is where the pointer goes when it moves over the list. */
+  .menu button.row[aria-selected="true"] { background: rgba(255, 255, 255, .07); }
+  .menu button.row[aria-selected="true"] code { color: var(--user); }
+  .menu .empty { color: var(--dim); }
   #message {
     flex: 1; resize: none; font: inherit; color: var(--fg); background: var(--panel);
     border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px;
@@ -695,6 +719,13 @@
          here too -- `/resume 3` below is that and nothing more. Enter sends, Shift+Enter is a
          newline, because a pasted block is a message the same way it is in the terminal. -->
     <form id="composer" hidden>
+      <!-- The `/` menu: the run's own commands, offered where the line is being typed. It is the same
+           frame the settings dialog's list is drawn from (`state.commands`), so it cannot offer a
+           command the terminal does not take -- and it is a *menu* rather than a list: the arrow keys
+           move one row at a time and Enter takes it, which is the one thing a panel of forty rows
+           cannot do. Above the box rather than below it, because the box grows downward and a menu
+           under a growing box moves as you type. -->
+      <div class="menu" id="menu" role="listbox" aria-label="commands" hidden></div>
       <textarea id="message" rows="1" placeholder="say something to flint"></textarea>
       <!-- The interrupt, as the one word that means it. It is to the *left* of `send` on purpose:
            a control that appears under the pointer that was reaching for another one turns a steer
@@ -1771,8 +1802,342 @@ async function askReport(doc, input) {
   }
 }
 
-/// The run's actions, one button each: every command the frame marks as taking no argument.
+/// The `/` menu: what typing a slash in the composer offers, and what taking a row does.
 ///
+/// The list is the frame's -- the same `state.commands` the settings dialog draws, so this file still
+/// contains no command name and the menu cannot offer a line the terminal would refuse. What differs
+/// from the dialog is the *shape*: a dialog is a reference you read, and this is a launcher you drive
+/// from the keyboard while a line is half-typed. Arrow keys move one row at a time, Enter takes the
+/// row, Escape puts the menu away, and typing after the `/` filters.
+///
+/// The dispatch is per class, and each class is a different *amount* of commitment rather than a
+/// different feature. This is where the one rule that matters lives: **a form row never completes the
+/// line.** A form command that filled the composer would be a credential typed into a transcript --
+/// the session file is written by the run, and a secret in it is a secret in a file. So a form row
+/// opens the dialog at the row instead, where the field is masked and the value never touches the
+/// conversation.
+const MENU_ROWS_MAX = 40;
+
+/// What a value typed in the composer is asking the menu about: the text after a leading `/`, or
+/// `null` when the menu should not be open at all.
+///
+/// The strictness is the point. A menu that stayed open through `/config set key value` would be
+/// covering the line being written, and one that opened on a slash in the middle of a sentence
+/// (`see src/main.rs and/or docs`) would be offering `/or`. So: the value must *start* with the
+/// slash and contain no whitespace yet. Once there is a space the line is being written, and the
+/// menu has said what it knows.
+function menuQuery(value) {
+  if (typeof value !== "string") return null;
+  const text = value.trimStart();
+  if (!text.startsWith("/")) return null;
+  const rest = text.slice(1);
+  return /\s/.test(rest) ? null : rest;
+}
+
+/// How well a command answers a query typed after the `/`.
+///
+/// Subsequence rather than substring, and prefix before the rest: `/sk` finds `/skill`, `/pkey` finds
+/// `/pkey` finds a two-word command, and a bare `/` puts the frame's own order first. The score is
+/// what makes the list predictable -- exact prefix, then a subsequence of the command itself, then a
+/// word in its help -- because a menu whose order is "whatever the frame happened to send" is one a
+/// person cannot learn. Zero means no match.
+function menuScore(command, query) {
+  if (!command) return 0;
+  const name = String(command.send || "").toLowerCase();
+  const q = String(query || "").toLowerCase();
+  if (!q) return 1;
+  const bare = name.startsWith("/") ? name.slice(1) : name;
+  if (bare.startsWith(q)) return 100;
+  const at = bare.indexOf(q);
+  if (at >= 0) return 80 - at;
+  let cursor = 0;
+  let gap = 0;
+  for (const ch of q) {
+    const found = bare.indexOf(ch, cursor);
+    if (found < 0) {
+      // Not in the name: the help text is the last chance, and only as a substring. A subsequence
+      // over a whole sentence matches almost anything (`/delete` matches "the panel does").
+      const help = String(command.help || "").toLowerCase();
+      return help.includes(q) ? 20 : 0;
+    }
+    gap += found - cursor;
+    cursor = found + 1;
+  }
+  return 60 - Math.min(gap, 40);
+}
+
+/// The rows a query offers, in the order the menu draws them.
+///
+/// The frame's order, filtered and then stably sorted by score: the frame's order is a table's, and
+/// this list is a *reading* order (the same reason `COMMAND_GROUPS` exists). Ties keep the frame's
+/// order, which is what makes the list stable while a person types.
+function menuRows(doc, query) {
+  const commands = doc && doc.state && Array.isArray(doc.state.commands) ? doc.state.commands : [];
+  const scored = [];
+  commands.forEach((command, at) => {
+    if (!command || typeof command.label !== "string" || typeof command.send !== "string") return;
+    const score = menuScore(command, query);
+    if (score > 0) scored.push({ command, score, at });
+  });
+  scored.sort((a, b) => (b.score - a.score) || (a.at - b.at));
+  return scored.slice(0, MENU_ROWS_MAX).map((entry) => entry.command);
+}
+
+/// What the menu is showing: the rows, the row the keyboard is on, and (for a selector) the values
+/// the frame named for the row that was just taken. `null` when it is closed.
+let menu = null;
+
+function menuOpen() {
+  const box = document.getElementById("menu");
+  return !!box && box.hidden === false;
+}
+
+/// Draw the menu for a query, or put it away.
+///
+/// Rebuilt on every keystroke, which a panel of settings must not be (a `<select>` closing under the
+/// pointer) and a menu must be: the rows *are* the query's answer, and there is no control inside a
+/// row whose state could be lost.
+function showMenu(doc, query, values) {
+  const box = document.getElementById("menu");
+  if (!box) return;
+  const commands = doc && doc.state && Array.isArray(doc.state.commands) ? doc.state.commands : [];
+  // A page with no run behind it has no commands to offer, and a menu drawn from nothing is a promise
+  // this page cannot keep -- the same rule the settings door follows.
+  if (!values && commands.length === 0) {
+    hideMenu();
+    return;
+  }
+  const rows = values
+    ? values.map((value) => ({ label: String(value), send: String(value), help: "", class: "value" }))
+    : menuRows(doc, query);
+  menu = { query: query, rows: rows, at: rows.length ? 0 : -1, values: !!values, base: "" };
+  while (box.firstChild) box.removeChild(box.firstChild);
+  if (rows.length === 0) {
+    // Nothing to offer is said rather than drawn as an empty box: `/zzz` is a person asking, and
+    // "no command matches" is the answer. The menu stays open so a backspace brings the list back.
+    box.appendChild(el("div", "row empty", "no command matches /" + String(query || "")));
+    box.hidden = false;
+    return;
+  }
+  // Grouped by the class the frame gave, in this page's reading order -- the same headings the
+  // dialog's list uses, so the two surfaces read alike. A heading is not a row: the arrow keys skip
+  // it because `menu.at` counts rows, not children.
+  for (const [className, heading] of COMMAND_GROUPS) {
+    const inGroup = rows.filter((row) => row.class === className);
+    if (inGroup.length === 0) continue;
+    box.appendChild(el("div", "group-name", heading));
+    for (const row of inGroup) box.appendChild(menuButton(doc, row, rows.indexOf(row)));
+  }
+  // A value list is its own group: the values are strings rather than frame rows, so they carry no
+  // class, and the loop above would drop every one of them.
+  const valueRows = rows.filter((row) => row.class === "value");
+  if (valueRows.length) {
+    box.appendChild(el("div", "group-name", "arguments"));
+    for (const row of valueRows) box.appendChild(menuButton(doc, row, rows.indexOf(row)));
+  }
+  box.hidden = false;
+  paintMenu();
+}
+
+/// One pressable row of the menu, with the pointer and `Enter` wired to the same thing they do
+/// everywhere else on this page: a press takes the row, and hovering it moves the keyboard to it.
+///
+/// `at` is on the element as a `data-row` attribute rather than left implicit, because the mark has to
+/// be findable from the box alone (`paintMenu`) and the rows are interleaved with group headings --
+/// counting child nodes would count a heading as a row. The Node harness's stub DOM has no
+/// `querySelectorAll` on an element, and a page that needed one to mark its own row would be a page
+/// whose mark could not be checked without a browser.
+function menuButton(doc, row, at) {
+  const button = el("button", "row");
+  button.type = "button";
+  button.setAttribute("role", "option");
+  button.setAttribute("data-row", String(at));
+  if (typeof row.help === "string" && row.help) button.title = row.help;
+  button.appendChild(el("code", "", row.send));
+  button.appendChild(el("span", "", row.label));
+  if (typeof row.help === "string" && row.help) button.appendChild(el("span", "help", row.help));
+  button.addEventListener("click", () => takeMenuRow(doc, row));
+  button.addEventListener("mouseenter", () => menuAt(doc, row));
+  return button;
+}
+
+/// Mark the row the keyboard is on, and keep it in view. `row` names it by identity, which is how the
+/// pointer and the arrow keys stay the same fact.
+function paintMenu() {
+  const box = document.getElementById("menu");
+  if (!box || !menu) return;
+  const buttons = Array.from(box.children || []).filter(
+    (child) => child.getAttribute && child.getAttribute("data-row") !== null
+  );
+  buttons.forEach((button) => {
+    const at = Number(button.getAttribute("data-row"));
+    button.setAttribute("aria-selected", at === menu.at ? "true" : "false");
+  });
+  const current = buttons.find((button) => Number(button.getAttribute("data-row")) === menu.at);
+  if (current && typeof current.scrollIntoView === "function") {
+    current.scrollIntoView({ block: "nearest" });
+  }
+}
+
+/// Move the keyboard to a row: by number for the arrow keys, by identity for the pointer.
+function menuAt(doc, row) {
+  if (!menu) return;
+  const at = menu.rows.indexOf(row);
+  if (at >= 0) menu.at = at;
+  paintMenu();
+}
+
+/// Move by one row, wrapping at both ends. Wrapping rather than stopping: the list is short, and a
+/// key that does nothing at the last row reads as a broken key.
+function menuStep(doc, by) {
+  if (!menu || menu.rows.length === 0) return;
+  menu.at = (menu.at + by + menu.rows.length) % menu.rows.length;
+  paintMenu();
+}
+
+/// Put the menu away. The text is left exactly as it is: this closes a list, not the line.
+function hideMenu() {
+  const box = document.getElementById("menu");
+  if (box) box.hidden = true;
+  menu = null;
+}
+
+/// What taking a row does, as one word.
+///
+/// The decision is separated from the doing for the reason every other decision on this page is in a
+/// pure function: this is where the rule that matters lives -- a `form` row may not complete the line,
+/// because the composer's text goes to the run and into the session file -- and a rule inside an
+/// `async` function that fetches is a rule whose only witness is a browser.
+function menuDispatch(row) {
+  if (!row) return "none";
+  if (row.class === "value") return "value";
+  const command = row.command || row;
+  const className = command.class;
+  if (className === "panel") return "report";
+  if (className === "form") return "dialog";
+  const values = Array.isArray(command.values)
+    ? command.values.filter((value) => typeof value === "string" && value.trim())
+    : [];
+  if (values.length && className === "selector") return "values";
+  return "line";
+}
+
+/// Take a row: what a press or Enter does, per class.
+///
+/// The order of the checks is the order of commitment. A report is the only class this page *sends*
+/// from the menu, and it goes out on `/report` -- the route that keeps the answer off the terminal --
+/// with the reading landing in the settings dialog, which is where this page draws listings. An action
+/// or a selector completes the line and leaves the person to press Enter, because a menu keystroke
+/// should not decide anything. A selector that carries `values` reopens the menu on them. A form
+/// opens the dialog at the row; a destructive row completes the line and stops there.
+///
+/// Everything a caller can observe happens **before** the first `await`, so the page's own behaviour
+/// is checkable without a browser: the request is on the wire, the dialog is open, the line is written
+/// or untouched. What is left asynchronous is the reading's answer, which arrives on the feed.
+async function takeMenuRow(doc, row) {
+  if (!row) return false;
+  const command = row.command || row;
+  const dispatch = menuDispatch(row);
+  const send = String(row.send || "");
+  if (dispatch === "value") {
+    setComposerText((menu && menu.base ? menu.base + " " : "") + send);
+    hideMenu();
+    return true;
+  }
+  if (dispatch === "report") {
+    hideMenu();
+    // The text the menu was built from is a *query*, not a line: the person asked to read this command,
+    // and leaving `/help` in the box would mean the next Enter sends it into the transcript -- which is
+    // the exact thing the report route exists to avoid. Measured in a real browser: this claim failed
+    // with `box: "/help"` before the box was cleared here.
+    setComposerText("");
+    // The dialog is opened *as* the reading is asked for, not after it answers: `askReport` draws
+    // "reading…" where the listing will go, and a dialog that appeared only when the answer arrived
+    // would leave the reader looking at the composer for a round trip with nothing saying anything
+    // was happening.
+    openSettings();
+    showSettingsPane("commands");
+    return askReport(doc, send);
+  }
+  if (dispatch === "dialog") {
+    // Never the line: a form row would put a credential in the composer, and the composer's text is
+    // sent to the run and written into the session file. The dialog's own field is masked, emptied
+    // after a send, and never reaches the conversation.
+    hideMenu();
+    // Cleared for the report branch's reason and one more of its own: what was typed is a command name
+    // with no argument, and leaving it behind would put the credential's own line one Enter away.
+    setComposerText("");
+    openSettings();
+    showSettingsPane("commands");
+    markCommandRow(command);
+    return true;
+  }
+  if (dispatch === "values") {
+    // The line so far is kept in `base` so a value completes it rather than replacing it.
+    const values = command.values.filter((value) => typeof value === "string" && value.trim());
+    showMenu(doc, "", values);
+    if (menu) menu.base = send;
+    setComposerText(send + " ");
+    return true;
+  }
+  // An action, a selector whose list lives elsewhere on the page, or a destructive row: the line,
+  // completed, and no further. A destructive row stops one press short on purpose -- the control that
+  // actually sends it is the dialog's two-press row, which prints the line before it goes.
+  const wantsArgument = command.class === "danger" || command.class === "selector";
+  setComposerText(wantsArgument ? send + " " : send);
+  hideMenu();
+  return true;
+}
+
+/// Put a line in the composer and put the caret at its end, so the next keystroke continues the line
+/// rather than landing in the middle of it.
+function setComposerText(text) {
+  const box = document.getElementById("message");
+  if (!box) return;
+  box.value = text;
+  if (typeof box.focus === "function") box.focus();
+  if (typeof box.setSelectionRange === "function") {
+    try {
+      box.setSelectionRange(text.length, text.length);
+    } catch (e) {
+      // A `<textarea>` in the stub DOM has no selection; the value is what a check reads anyway.
+    }
+  }
+  if (typeof sizeComposer === "function") sizeComposer();
+}
+
+/// The text of a row, read from its own children rather than from `textContent`.
+///
+/// `textContent` aggregates a whole subtree in a browser and does not in the Node harness's stub DOM,
+/// and a mark that can only be found in a browser is a mark that is not checked. Every row this page
+/// draws is one level deep -- a `code` and a `span`, or a field and a `button.send` -- so reading the
+/// children is the same answer in both places.
+function rowText(row) {
+  return Array.from(row.children || [])
+    .map((child) => String(child.textContent || ""))
+    .join(" ");
+}
+
+/// Draw attention to one row of the dialog's command list -- how a `form` row taken from the menu is
+/// handed over. The mark is transient and the page's own: a class on the row, and a scroll to it.
+///
+/// Walked rather than queried (`querySelectorAll` on an element is not in the stub DOM), and the walk
+/// is the shape this page built: `#command-list` holds one `.group` per class, and the rows are its
+/// children.
+function markCommandRow(command) {
+  const list = document.getElementById("command-list");
+  if (!list || typeof command.send !== "string") return;
+  for (const group of Array.from(list.children || [])) {
+    for (const row of Array.from(group.children || [])) {
+      if (!rowText(row).includes(command.send)) continue;
+      row.className = String(row.className || "") + " pointed";
+      if (typeof row.scrollIntoView === "function") row.scrollIntoView({ block: "center" });
+      return;
+    }
+  }
+}
+
+/// The run's actions, one button each: every command the frame marks as taking no argument.
 /// The same rule as the switches -- the page sends the row's own `send` string, put together by the
 /// process, so there is no command name in this file to go stale -- and the same courtesy: a press
 /// that is refused puts the controls back to what is in force, because a control that quietly did
@@ -1916,11 +2281,22 @@ function openSettings() {
 /// The focus going back to the door is what makes this a dialog rather than a disappearing panel: a
 /// keyboard that opens settings, closes it and then has to hunt for its place is a keyboard that has
 /// been moved twice.
+///
+/// A **reading** is let go of here, and that is a decision rather than housekeeping. A report's answer
+/// is a temporary listing shown *inside* the dialog, and the dialog is the only place it can be read;
+/// keeping it past the close would mean the next open shows the answer to a question asked minutes ago
+/// with no rows to press. Measured in a real browser rather than reasoned: the `/` menu's form claim
+/// opened the dialog on the *previous* report's reading, so the row it wanted to point at was not on
+/// screen at all.
 function closeSettings() {
   const dialog = document.getElementById("settings");
   const mask = document.getElementById("settings-mask");
   if (dialog) dialog.hidden = true;
   if (mask) mask.hidden = true;
+  if (doc.reading) {
+    doc.reading = null;
+    showCommands(doc);
+  }
   const door = document.getElementById("settings-open");
   if (door && typeof door.focus === "function") door.focus();
 }
@@ -1932,6 +2308,13 @@ function closeSettings() {
 /// as one function rather than two listeners so that "which one does Escape close?" has an answer
 /// that can be read, and checked, in one place.
 function dismissTopmost() {
+  // The menu first, and before the dialog even: it is inside the composer, which is where the
+  // keyboard already is, so it is the thing in front of everything. A press that closed the dialog
+  // while a half-typed `/` was offering commands would be closing something nobody was looking at.
+  if (menuOpen()) {
+    hideMenu();
+    return true;
+  }
   if (settingsOpen()) {
     closeSettings();
     return true;
@@ -3737,8 +4120,34 @@ if (typeof document !== "undefined" && document.getElementById) {
     });
 
     const message = document.getElementById("message");
-    message.addEventListener("input", sizeComposer);
+    // The `/` menu follows what is typed, one keystroke at a time: `/` alone opens it on the frame's
+    // own order, letters filter it, a space closes it (the line is being written), and clearing the
+    // box closes it too. Nothing is cached: the rows come from the frame on every keystroke, which is
+    // the same rule as everywhere else here -- a list kept from a moment ago is a second copy of a
+    // fact the process owns.
+    message.addEventListener("input", () => {
+      sizeComposer();
+      const query = menuQuery(message.value);
+      if (query === null) hideMenu();
+      else showMenu(doc, query);
+    });
     message.addEventListener("keydown", (e) => {
+      // While the menu is open it takes the arrows and Enter: a menu that swallowed Enter into a send
+      // would send `/pro` -- a line nobody meant to type, and one the run would answer as an unknown
+      // command. The menu's own Escape is the document handler's (`dismissTopmost`), because that is
+      // the one place the order of the page's overlays is written down.
+      if (menuOpen()) {
+        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+          e.preventDefault();
+          menuStep(doc, e.key === "ArrowDown" ? 1 : -1);
+          return;
+        }
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          if (menu && menu.at >= 0) takeMenuRow(doc, menu.rows[menu.at]);
+          return;
+        }
+      }
       // Enter sends, Shift+Enter is a newline. The other way round is what a chat box does and
       // is wrong here: a prompt is a paragraph far more often than it is a line, and a pasted
       // block has to be able to arrive as one message.
@@ -3882,6 +4291,12 @@ if (typeof module !== "undefined" && module.exports) {
     // section is a name, and "what does Escape close" is a question the Node harness can ask without
     // a browser and without a modal on screen.
     SETTINGS_PANES, showSettingsPane, settingsOpen, openSettings, closeSettings, dismissTopmost,
+    // The `/` menu, exported for the same reason: what a query matches and what a row *does* are the
+    // two halves of a decision, and the second half is where the one rule that matters lives -- a form
+    // row must never complete the line, because a credential in the composer is a credential in the
+    // session file. Neither half needs a browser to be checked.
+    menuQuery, menuScore, menuRows, menuOpen, showMenu, hideMenu, menuStep, takeMenuRow, menuDispatch,
+    setComposerText,
     jobsFrom, durationLabel, jobWhen, jobIsLive, jobIsStoppable, paintJobs, titleWords,
     // The position this tab was reading from: exported so the Node harness can check the three cases
     // -- a gap, a different conversation, and a position past the end -- against the real functions

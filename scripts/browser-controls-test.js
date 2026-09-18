@@ -1129,6 +1129,7 @@ async function main() {
       `run printed: ${JSON.stringify(gained.slice(0, 200))} | transcript: ` +
         JSON.stringify(await page.js(`(document.getElementById("doc") || {}).textContent || ""`))
     );
+
     // ---- a path in the transcript ------------------------------------------
     // The turn here is scripted: a write, a read, a read of a file that is not there, and a grep
     // that prints a line number. Four tool blocks, therefore four shapes a path takes, and every
@@ -1848,6 +1849,196 @@ async function main() {
       !!pictureClosed && pictureClosed.hidden === true && pictureClosed.text === false,
       `panel: ${JSON.stringify(pictureClosed)}`
     );
+    // ---- the `/` menu in the composer --------------------------------------
+    // The one surface that needs a real browser *and* a real run: a menu drawn from the frame the
+    // process sent, opened by a keystroke, driven by the arrow keys, and committed by Enter. The stub
+    // DOM can check what a row *does* (and does); what it cannot check is that a real `keydown`
+    // reaches the handler at all, that the rows are the real binary's commands, or that Enter on a
+    // report goes out on the route that keeps it off the terminal.
+    const menuState = () =>
+      page.js(`(() => { const box = document.getElementById("menu");
+        const rows = box ? Array.from(box.querySelectorAll("button.row")) : [];
+        return { open: !!box && !box.hidden, count: rows.length,
+                 first: rows.length ? rows[0].textContent : "",
+                 marked: rows.filter((r) => r.getAttribute("aria-selected") === "true")
+                             .map((r) => r.textContent),
+                 text: document.getElementById("message").value,
+                 settings: !document.getElementById("settings").hidden }; })()`);
+
+    const typedMenu = async (text) => {
+      await page.js(`document.getElementById("message").focus(); true`);
+      await page.send("Input.insertText", { text });
+      await sleep(150);
+      return menuState();
+    };
+
+    // A bare slash opens it on the frame's own order. The names are the real binary's: `/config` and
+    // `/help` are the first two commands this build offers, which is a claim about *this* run rather
+    // than about the page -- exactly what a live check is for.
+    const bare = await typedMenu("/");
+    check(
+      "a slash in the composer offers the run's own commands",
+      bare.open && bare.count > 0 && /^\/\w/.test(bare.first),
+      `menu: ${JSON.stringify({ open: bare.open, count: bare.count, first: bare.first })}`
+    );
+    check(
+      "and the dialog is not what opened",
+      bare.settings === false,
+      `settings: ${JSON.stringify(bare.settings)}`
+    );
+    check(
+      "the keyboard starts on the first row",
+      bare.marked.length === 1 && bare.marked[0] === bare.first,
+      `marked: ${JSON.stringify(bare.marked)}`
+    );
+
+    // Typing after the slash filters, and a space closes it: the line is being written, and a menu
+    // over it would be covering the words. Both halves matter -- a menu that never closed would sit
+    // on top of a sentence.
+    const filtered = await typedMenu("usage");
+    check(
+      "letters after the slash narrow the list",
+      filtered.open && filtered.count >= 1 && filtered.first.startsWith("/usage"),
+      `menu: ${JSON.stringify({ count: filtered.count, first: filtered.first })}`
+    );
+    const spaced = await typedMenu(" now");
+    check(
+      "a space closes it, because the line is a line again",
+      spaced.open === false && spaced.text === "/usage now",
+      `menu: ${JSON.stringify({ open: spaced.open, text: spaced.text })}`
+    );
+
+    // The arrow keys move the mark, one row at a time, in a real browser: the stub can call
+    // `menuStep`, and only this can show that `preventDefault` on a real `keydown` keeps the caret
+    // from moving to the start of the line while the list is driven.
+    await page.js(`document.getElementById("message").value = ""; true`);
+    await typedMenu("/");
+    const beforeArrow = await menuState();
+    await page.key(`ArrowDown`, 40);
+    const afterArrow = await menuState();
+    check(
+      "ArrowDown moves the mark down one row, and the caret is not what moved",
+      afterArrow.marked.length === 1 &&
+        afterArrow.marked[0] !== beforeArrow.marked[0] &&
+        afterArrow.text === "/",
+      `before: ${JSON.stringify(beforeArrow.marked)}, after: ${JSON.stringify(afterArrow.marked)}, ` +
+        `box: ${JSON.stringify(afterArrow.text)}`
+    );
+    await page.key(`ArrowUp`, 38);
+    const backUp = await menuState();
+    check(
+      "ArrowUp brings it back",
+      backUp.marked[0] === beforeArrow.marked[0],
+      `marked: ${JSON.stringify(backUp.marked)}`
+    );
+
+    // Escape closes the menu and leaves the line alone: a list put away is not a line cleared.
+    await page.key(`Escape`, 27);
+    const escaped = await menuState();
+    check(
+      "Escape puts the menu away and keeps what was typed",
+      escaped.open === false && escaped.text === "/",
+      `menu: ${JSON.stringify({ open: escaped.open, text: escaped.text })}`
+    );
+
+    // Enter on a report row: the answer is a *reading*, drawn in the dialog's commands section, and
+    // nothing of it is typed or sent into the transcript. This is the claim the page's whole reason
+    // for the `/report` route rests on, made against a real run: the terminal must gain nothing.
+    const beforeSlashReport = before();
+    await page.js(`document.getElementById("message").value = ""; true`);
+    await typedMenu("/help");
+    const helpRow = await menuState();
+    // The *marked* row is what Enter takes, and the mark is where the keyboard is -- so the claim is
+    // that a filter's best answer is first and selected, not that `/help` is the only row whose help
+    // text mentions helping.
+    check(
+      "the filter puts the report row it matches first, and marks it",
+      helpRow.first.startsWith("/help") && helpRow.marked.length === 1 &&
+        helpRow.marked[0] === helpRow.first,
+      `menu: ${JSON.stringify({ count: helpRow.count, first: helpRow.first, marked: helpRow.marked })}`
+    );
+    await page.key(`Enter`, 13);
+    let slashReading = null;
+    for (let i = 0; i < 25 && !slashReading; i += 1) {
+      await sleep(200);
+      // The reading is drawn where the list was: a back button and the answer, which is the shape the
+      // panel uses for a report (a name from the question and the text from the process).
+      slashReading = await page.js(`(() => { const list = document.getElementById("command-list");
+        if (!list || document.getElementById("settings").hidden) return null;
+        const back = list.querySelector("button.back");
+        const text = (list.querySelector(".reading") || {}).textContent || "";
+        return back && text ? { answer: text.slice(0, 300) } : null; })()`);
+    }
+    check(
+      "Enter on a report row reads it in the dialog rather than sending it",
+      slashReading !== null && flint.text().slice(beforeSlashReport).length === 0,
+      `reading: ${JSON.stringify(slashReading)}, ` +
+        `terminal gained: ${JSON.stringify(flint.text().slice(beforeSlashReport).slice(0, 120))}`
+    );
+    check(
+      "and the line it came from was not sent either",
+      (await page.js(`document.getElementById("message").value`)) === "",
+      `box: ${JSON.stringify(await page.js(`document.getElementById("message").value`))}`
+    );
+    await page.key(`Escape`, 27);
+    const closedAgain = await menuState();
+    check(
+      "one Escape closes the dialog the reading was shown in",
+      closedAgain.settings === false,
+      `settings: ${JSON.stringify(closedAgain.settings)}`
+    );
+
+    // A form row: the dialog, at the row, and the line untouched. This is the claim that a credential
+    // cannot be typed into the transcript by a keystroke in a menu -- the value is not in the box, so
+    // it cannot be sent, and the masked field is the one that takes it.
+    await page.js(`document.getElementById("message").value = ""; true`);
+    await typedMenu("/name");
+    await page.key(`Enter`, 13);
+    let pointed = null;
+    for (let i = 0; i < 20 && !pointed; i += 1) {
+      await sleep(200);
+      pointed = await page.js(`(() => { const list = document.getElementById("command-list");
+        if (!list || document.getElementById("settings").hidden) return null;
+        const marks = Array.from(list.querySelectorAll(".pointed"));
+        return marks.length ? { marks: marks.length, text: marks[0].textContent } : null; })()`);
+    }
+    check(
+      "Enter on a form row opens the dialog at that row and writes nothing into the line",
+      pointed !== null && pointed.marks === 1 &&
+        (await page.js(`document.getElementById("message").value`)) === "",
+      `pointed: ${JSON.stringify(pointed)}, ` +
+        `box: ${JSON.stringify(await page.js(`document.getElementById("message").value`))}`
+    );
+    await page.key(`Escape`, 27);
+
+    // An action row completes the line and sends nothing: a keystroke in a menu must not decide
+    // anything, and the person's own Enter on the *line* is what sends it. `/reload` is the action
+    // here because its answer is one line the terminal prints either way.
+    const beforeSlashAction = before();
+    await page.js(`document.getElementById("message").value = ""; true`);
+    await typedMenu("/reload");
+    await page.key(`Enter`, 13);
+    await sleep(300);
+    const completed = await menuState();
+    check(
+      "Enter on an action row completes the line and sends nothing",
+      completed.text === "/reload" && completed.open === false &&
+        flint.text().slice(beforeSlashAction).length === 0,
+      `box: ${JSON.stringify(completed.text)}, open: ${JSON.stringify(completed.open)}, ` +
+        `terminal gained: ${JSON.stringify(flint.text().slice(beforeSlashAction).slice(0, 120))}`
+    );
+    await page.click("#send");
+    let slashReloaded = "";
+    for (let i = 0; i < 25 && !slashReloaded; i += 1) {
+      await sleep(200);
+      slashReloaded = flint.text().slice(beforeSlashAction);
+    }
+    check(
+      "and the person's own Enter on that line is what sends it",
+      slashReloaded.length > 0 && (await page.js(`document.getElementById("message").value`)) === "",
+      `terminal gained: ${JSON.stringify(slashReloaded.slice(0, 160))}`
+    );
+
   } finally {
     page.close();
     chrome.child.kill();

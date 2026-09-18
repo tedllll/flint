@@ -1788,12 +1788,12 @@ with a Save button is a second source of truth for state the run already holds).
 destructive row inside it (`/archive`, `/delete` of a conversation) keeps the two-press rule and names the
 object it is about to destroy.
 
-**The `/` menu, in the composer.** DSH has no command palette — this was looked for and is not there — and
-what it has instead is a **trigger menu** in the composer: typing `/` opens a list of the commands, each
-row an icon, a title, the raw name as an alias and one line of description, with `Tab` to complete and
-`Enter` to take. flint's version is drawn from the same `state` frame the `commands` panel is drawn from
-today, so the page still contains no command name of its own, and it keeps the frame's own five classes
-because those already say what a press would do:
+**The `/` menu, in the composer — built, and §23 is the record.** DSH has no command palette — this was
+looked for and is not there — and what it has instead is a **trigger menu** in the composer: typing `/`
+opens a list of the commands, each row an icon, a title, the raw name as an alias and one line of
+description, with `Tab` to complete and `Enter` to take. flint's version is drawn from the same `state`
+frame the `commands` panel is drawn from today, so the page still contains no command name of its own,
+and it keeps the frame's own five classes because those already say what a press would do:
 
 | Class | What `Enter` does | Why |
 |---|---|---|
@@ -1805,7 +1805,9 @@ because those already say what a press would do:
 
 Matching is subsequence-with-priorities (prefix first), filtered as you type after the `/`, closed by
 `Escape`, and the list is drawn from the frame's `label`/`send`/`help` fields, which is what the panel
-uses today. What this deletes: `details#commands` and its whole group renderer.
+uses today. What this deletes: `details#commands` and its whole group renderer — which the settings slice
+had already done, so in the end this slice deleted nothing: it added a second *reader* of the same
+frame, and the panel it once meant to replace is where a report's answer is drawn.
 
 **Tests this plan already knows it needs**, because each is where this kind of change goes wrong: the
 settings overlay opens and closes by all three doors and returns focus (§10's harness can call the
@@ -1912,7 +1914,7 @@ there is nothing in a text panel to press that would mean *this file*.
 | The sniffing table, format by format | `src/web.rs::image_kind_knows_the_formats_a_browser_draws` | fifteen signatures answer with their type; text, an empty file, a RIFF that is sound, an `ftypmp42` video and a short PNG answer with none |
 | The panel asks for a picture by name and lets go of the last one | `scripts/web-view-test.js`, calling `imageExt`/`imageRoute`/`showPicture` | the extension set both ways, the route's encoding, the blob URL drawn, the note from the route's headers, and `revokeObjectURL` called exactly once per replaced picture |
 | A token never appears in a URL | `tests/web_view.rs::a_picture_is_read_with_the_pages_own_auth_and_never_a_token_in_a_url` | the fetch carries `authHeader()`, the `<img>` gets a blob URL, and `&token=`/`?token=` appear nowhere but `/`'s own address |
-| A real picture decodes in a real browser | `scripts/browser-controls-test.js` against a live run | **66/66 claims held**, including a 1×1 PNG with `naturalWidth === 1`, the note `image/png · 68 bytes`, the misnamed note falling through to text, and Escape releasing the picture |
+| A real picture decodes in a real browser | `scripts/browser-controls-test.js` against a live run | every claim in that block held, including a 1×1 PNG with `naturalWidth === 1`, the note `image/png · 68 bytes`, the misnamed note falling through to text, and Escape releasing the picture (the harness's own total is printed by the run rather than quoted here, because it grows with each slice) |
 
 **What was refused.** Base64 in a JSON body (`data:` URLs are already allowed by the CSP) — refused
 because it inflates a photograph by a third and makes the page's own script decode what the browser's
@@ -1995,7 +1997,91 @@ gained a *better* needle: the pane, rather than a window wide enough to span two
 | One `Escape` puts away the thing in front | `scripts/web-view-test.js` | with the dialog and the panel both open, the first press closes the dialog and leaves the panel; the second closes the panel; with nothing open it does nothing |
 | The controls are really behind the door, and the page is untouched | `scripts/browser-controls-test.js` against a live run | the door ships hidden then visible, the dialog opens with the mask and the focus, `#controls` is asserted to be *inside* it, one section shows at a time — and the geometry of the page behind is identical to the pixel |
 
-**Not built, and named where it is.** The `/` trigger menu §19 plans is still a plan: the command list
-lives in the dialog, and the composer has no palette. §19's table is the design that has not moved, and
-the `form` rows are already in the right place for it — a secret typed into a *dialog* is not typed into
-the transcript, which is the property that decision was made for.
+**Not built, and named where it is.** Nothing else from §19's plan is missing: the `/` trigger menu it
+designed is built and recorded in §23, and the `form` rows are already in the right place for it — a
+secret typed into a *dialog* is not typed into the transcript, which is the property that decision was
+made for.
+
+## 23. The `/` menu: a launcher in the composer — **built**
+
+The last piece of §19's plan, and the one that had to be written *after* the settings dialog rather than
+before it, because two of its five class decisions are about the dialog: a `form` row opens it at the
+row, and a report's reading is drawn in it.
+
+**What it is, in one sentence.** Typing `/` as the first character of the composer opens a list of the
+run's own commands above the box; letters after the slash filter it, the arrow keys move the mark,
+`Enter` takes the row, `Escape` puts it away, and what `Enter` *does* is decided by the class the frame
+gave the command — which is the same table §19 wrote, now held to by a test per class.
+
+**Why it goes above the box.** The composer grows downward as a person types (up to `30vh`) and the
+menu has to be anchored to something that does not move. Above the box, `left`/`right` set to the
+composer's own padding, so the menu starts where the text does; the box's growth takes space from the
+transcript rather than pushing the menu around under the pointer.
+
+**The trigger rule is strict, and that is the design.** The menu is open only while the value *starts*
+with a slash and has **no whitespace yet**. Three defects are refused by that one rule: a menu covering
+the line it is helping with (`/config set key value`), a menu opened by a slash inside a sentence
+(`see src/main.rs and/or docs` offering `/or`), and a menu that has to be dismissed before a line can be
+sent. The cost is that the menu is gone the moment an argument begins — which is correct, because at that
+point the person is writing the argument, not choosing a command.
+
+**Filtering is scored, not `includes`.** A prefix of the command name scores highest, an appearance
+inside it next, a subsequence of it after that (so a two-word command is reachable by its initials),
+and a **substring of the help text** last. The help is deliberately *not* fuzzy: a subsequence over a
+sentence matches nearly anything a person types, and `/delete` answering to "remove one of them" would
+be a list that cannot be learned. Ties keep the frame's order, so the list does not reshuffle as
+somebody types.
+
+**The dispatch is one pure function and one `async` one, on purpose.** `menuDispatch(row)` answers with
+one word (`report`/`dialog`/`values`/`line`/`value`/`none`) and `takeMenuRow` does it — because the rule
+that matters lives in the decision and would otherwise be checkable only in a browser: **a `form` row
+may not complete the line.** The composer's text is what gets sent to the run and written into the
+session file, so a `/provider key` completed into the box would be a credential on disk. The form row
+opens the dialog at the row instead, where the field is masked, emptied after a send, and never reaches
+the conversation. A policy test slices the branch and asserts there is no `setComposerText` in it, and
+the Node harness asserts the line is unchanged after the row is taken.
+
+**Everything observable happens before the first `await`.** The report branch opens the dialog *as* it
+asks for the reading (the panel already draws "reading…" where the listing will go) rather than after
+the answer arrives, which is both better behaviour — a round trip with nothing on screen is the one way
+this could look broken — and the reason the Node harness can check the whole dispatch synchronously in a
+stub DOM with no network.
+
+**The first browser run found the bug this slice would have shipped, and the stub could not have.** Two
+of the new claims came back red with `box: "/help"` and `box: "/name"`: taking a report or a form row put
+the dialog up and left the *query* in the composer. That is not untidiness — the query is a command name,
+so the next `Enter` would have sent `/help` (or a form's own line) into the transcript, which is the
+exact thing the report route and the masked field exist to prevent. The fix is two `setComposerText("")`
+calls, and the reason the Node harness had passed is worth keeping: its check took the row while the box
+was already empty, so "the line is untouched" was true and meaningless. Both checks now fill the box with
+the query first, which is the state a real press happens in — a claim about an abs*ence* has to establish
+what it is the absence of.
+
+**Two things were refused from DSH's version.** `Tab` to complete: the composer's row has `stop` and
+`send` in it, so `Tab` is the browser's focus key here and a menu that swallowed it would trap the
+keyboard in a list. And a completion that *rewrites* the line as you move the mark: flint's page lets a
+keystroke in a menu decide nothing that can be undone by typing again, which is why only the report
+class sends anything at all.
+
+**One `Escape` order gained a step.** `dismissTopmost` now asks about the menu first, before the
+settings dialog: the menu lives inside the composer, where the keyboard already is, so it is the thing
+in front of everything. That is a change to a claim `docs/features.md` already carried (the order was
+settings → preview → jobs), and it is recorded there with the new count of keys the page handles itself.
+
+| Claim | Where it was measured | What came back |
+|---|---|---|
+| It opens on a slash and on nothing else | `scripts/web-view-test.js`, calling `menuQuery` | `/` → the empty query, `/pro` → `pro`, a leading space is allowed, a space after the command is not, a slash mid-sentence is not, and a missing value does not throw |
+| Prefix beats subsequence beats help | `scripts/web-view-test.js`, calling `menuScore`/`menuRows` | `/re` finds `/reload` first, `pkey` finds a two-word command, `proxy` finds the row whose help says proxy, `zzz` finds nothing, ties keep the frame's order, and a subsequence of a *help* string does not match |
+| The rows are the frame's, marked one at a time | `scripts/web-view-test.js`, calling `showMenu`/`menuStep` | the group headings are the page's own and the rows are the frame's; the mark starts on the first row, moves one row at a time past the headings, and wraps; `zzz` says `no command matches /zzz` and leaves the menu open for a backspace |
+| A page with no run offers no menu | `scripts/web-view-test.js` | with no `state` frame, `showMenu` leaves the box hidden |
+| What a row commits to is its class's answer | `scripts/web-view-test.js`, calling `menuDispatch` | report → `report`, action → `line`, selector → `line` or `values`, form → `dialog` **even when the row also carries values**, destructive → `line`, and nothing → `none` |
+| A form row never touches the line | `scripts/web-view-test.js` and `tests/web_view.rs` | taking it clears the query it was built from, opens the dialog on the commands section, and marks that one row; the branch itself contains no `setComposerText` *completion* — the one call in it is the clearing one, which is why the Node check fills the box first |
+| The menu page carries no command name | `tests/web_view.rs::the_slash_menu_is_a_launcher_drawn_from_the_frame` | the menu is inside the composer form and ships `hidden` with `role="listbox"`; its rows are built from `row.send`/`label`/`help`; and the four strings that would be a leaked list (`/provider key`, `/delete <n\|id>`, `/reload`, `inspect the config`) appear nowhere in the page — twice over, since the list test already checked them |
+| The menu never sends anything but a report | the same test | `takeMenuRow` holds no `fetch` of its own; the one request it can cause goes through `askReport`, and the dialog is opened before that call |
+| One `Escape`, and the menu is in front | `scripts/web-view-test.js` | with the menu and the dialog both open, the first press closes the menu and leaves the dialog; the next closes the dialog |
+| A real keystroke opens it, filters it, and a space closes it | `scripts/browser-controls-test.js` against a live run | `/` opens it on the real binary's own command list with one row marked; `usage` narrows it to `/usage` first; ` now` closes it and the box still holds `/usage now` |
+| The arrows move the mark, and not the caret | the same harness | `ArrowDown` moves the mark one row down while the box still reads `/` (which is what `preventDefault` buys), and `ArrowUp` brings it back |
+| `Escape` keeps what was typed | the same harness | the menu is shut and the box still holds `/` |
+| `Enter` on a report row reads it instead of sending it | the same harness | the reading is drawn where the list was (a `‹ commands` button and the answer), the box is empty, and **the terminal gained nothing** — the claim the `/report` route exists for |
+| `Enter` on a form row writes nothing | the same harness | the dialog opens on the commands section with exactly one row marked, and the box is still empty |
+| `Enter` on an action row completes the line and sends nothing | the same harness | the box reads `/reload`, the menu is shut, the terminal gained nothing — and the person's own press of `send` is what makes it print |

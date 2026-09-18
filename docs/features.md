@@ -756,6 +756,10 @@ controls is a header that takes the reading column's width for furniture, which 
 | sidebar | a conversation row | sends `/resume <n>` — the current row does nothing |
 | sidebar | a row's `⋯` menu | that conversation's destructive rows (`/archive <n>`, `/delete <n>`), each behind the same two-press rule, and — on the current row only — a `/name` field |
 | composer | the textarea + `#send` | sends the text; `Enter` sends, `Shift+Enter` is a newline. The box clears only on success, and only if it still holds what was sent |
+| composer | typing `/` as the first character | opens the **`/` menu** above the box — the frame's own `state.commands`, drawn like the settings list (a heading per class, a row per command with the line, its label and its help), and **closed on a page with no run**. It filters as you type after the slash (a prefix first, then a subsequence of the command name, then a word in its help, the frame's order breaking ties), and it closes the moment the line has a space in it — a menu over a sentence being written is covering the words |
+| composer | `ArrowDown` / `ArrowUp` in the menu | moves the mark one row at a time, wrapping at both ends; the marked row is the one `Enter` takes, and hovering a row with the pointer moves the mark to it. A query with no match says `no command matches /<q>` rather than drawing an empty box |
+| composer | `Enter` in the menu | exactly what the marked row's **class** allows and no more. A **report** asks for its reading (`POST /report`) and shows it in the settings dialog's commands section: the query is **cleared** rather than left in the box (a report is read, and a leftover `/help` would send on the next `Enter` the very line the route exists to keep out of the transcript), the dialog opens as the reading is asked for, and nothing reaches the transcript. An **action** completes the line and sends nothing. A **selector** completes the line and, when the frame named values, offers them as a second list where taking one finishes the line. A **form** opens settings *at that row* and leaves the box **empty** — a credential typed into the composer is sent to the run and written into the session file, which is the whole reason that class has a dialog. A **destructive** row completes the line and stops there |
+| composer | `Escape` in the menu | puts the menu away and leaves the text exactly as it was — a list closed is not a line cleared |
 | composer | the stop button | shown only while a turn runs; sends `/stop`, so a half-written message in the box survives |
 | transcript | a tool block | a `<details>`: the summary is the verb and the arguments, the body is the arguments and the output |
 | transcript | a `button.path` | opens the preview panel at that file, and at that line when the token named one. The button **reads what the token said** — `src/web.rs:412`, `src/web.rs#L412`, `C:/x.js:42` — so a `grep` hit keeps the line it is worth reading for; a `file://` prefix is dropped on the way, since the scheme is the one part of the token the panel does not need (§18 of `docs/web-mode.md`) |
@@ -767,11 +771,11 @@ controls is a header that takes the reading column's width for furniture, which 
 | preview | `open` | hands the panel's path to the program this machine uses for it (`POST /open`): a file opens in whatever its type is registered to, a directory in the file manager. The one control on this page that starts a process, so it is a **deliberate second press** and never the path itself. Disabled when the run is `readonly`, with the reason in its tooltip; the route refuses it there anyway. The answer — or the route's refusal — appears in the hint under the composer |
 | preview | — | a refusal is shown in the route's own words with its status beside it, never as an empty panel |
 | layout | the two grip handles | drag to resize the sidebar and the reading column; `ArrowLeft`/`ArrowRight` move the boundary by 16 px (48 with Shift); a **double-click puts the width back to the stylesheet's**. Neither width is persisted |
-| anywhere | `Escape` | puts away **one** thing, front to back: the settings dialog first, then the preview panel, then the jobs list. One press per thing, and the order is a function rather than three listeners, so "which one does this close?" has an answer that can be read (`dismissTopmost`). With nothing open it does nothing |
+| anywhere | `Escape` | puts away **one** thing, front to back: the `/` menu first (it lives in the composer, where the keyboard already is), then the settings dialog, then the preview panel, then the jobs list. One press per thing, and the order is a function rather than three listeners, so "which one does this close?" has an answer that can be read (`dismissTopmost`). With nothing open it does nothing |
 
-The page handles exactly four keys itself: `Enter` in the textarea, the two arrows on a focused grip, and
-that one `Escape` order. Everything else — a `<summary>` opening, a `<select>`, `Tab`, typing — is
-the browser's own behaviour.
+The page handles exactly six keys itself: `Enter` in the textarea (and in the `/` menu, where the two
+arrows move the mark), the two arrows on a focused grip, and that one `Escape` order. Everything else —
+a `<summary>` opening, a `<select>`, `Tab`, typing — is the browser's own behaviour.
 
 ### 12.4 What the page deliberately cannot do
 
@@ -797,7 +801,7 @@ that understood JavaScript would be a second parser to be wrong about.
 
 ### 12.5 Measured, and honestly not
 
-- **Driven in a real browser**: `scripts/browser-controls-test.js`, **72 claims** held, each checked
+- **Driven in a real browser**: `scripts/browser-controls-test.js`, **87 claims** held, each checked
   against the run's own stdout. It prints what it drives before it presses anything, and its "not driven
   here" list is part of the output: a report asked for mid-turn (measured in `tests/cli_output.rs`), the
   `/prompt` row's send button, an OS open that *succeeds* (it would start a program on this machine; the
@@ -1051,7 +1055,7 @@ tests name the behaviour they hold.
 | the mailbox and presence | `tests/say.rs`, `tests/who.rs` |
 | the page's policy | `tests/web_view.rs` |
 | the page's routes, including the launcher's command lines (`POST /open`) | `src/web.rs`'s tests |
-| the page's controls, driven in a real browser | `scripts/browser-controls-test.js` (72 claims) |
+| the page's controls, driven in a real browser | `scripts/browser-controls-test.js` (87 claims) |
 | the page's pure functions | `scripts/web-view-test.js` |
 | the Python and MCP callers | `examples/python/test_call.py`, `examples/mcp/test_mcp.py` |
 | the one suite that needs a real pty (Unix) | `tests/tty_hangup.rs` |
