@@ -703,9 +703,10 @@ is also the more honest of the two positions in one place: the author says outri
 ground is theatre, because an agent that can read files, run code and reach the network cannot be
 contained by asking it politely -- and names the residual risk himself ("it can use `curl` or read
 files from disk, both of which provide ample surface area for prompt injection attacks"). Flint has
-the same stance and no page about the alternative. Whatever `docs/sandbox.md` decides about grants, a
-short note on running flint inside a container or a VM is the honest complement to a README that says
-there is no boundary -- a page of prose rather than a feature.
+the same stance and no page about the alternative. `docs/sandbox.md` weighs grants against modes, and
+that alternative was **declined on 2026-09-18** — so the "something rather than nothing" here is not a
+permission layer but a short note on running flint inside a container or a VM: the honest complement to
+a README that says there is no boundary, and a page of prose rather than a feature.
 
 There is one more thing worth copying in the same area, because flint is in a better position than Pi
 and has not said so. Pi needs a trust step before a project's own extensions may run, because a

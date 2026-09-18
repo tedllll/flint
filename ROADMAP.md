@@ -2059,14 +2059,21 @@ where prose and tree disagree is item 3.**
     was seen and judged not worth a round on its own.
 
 12. **The largest item, and the only one that is a decision rather than a task: the one place the plan
-    of record contradicts a plan document.** `## Not doing, and why` refuses a permission layer, and
-    `docs/sandbox.md` — "Status: a plan. Nothing in this file is built." — argues for grants instead of
-    modes, kept beside the decision it contradicts on purpose, with adopting any stage meaning the
-    bullet is edited in the same commit. It is last because it is the size of a project, not because it
-    is small: either take a first stage and edit the bullet, or decline it in writing. What puts it on
-    this list at all is that it is the only place where reading the repository can give two opposite
-    answers, which is the thing this project refuses to have — and the sandbox document is also the
-    reason the `readonly` half is honest about being all-or-nothing rather than half a boundary.
+    of record contradicts a plan document — *decided 2026-09-18, and declined*.** `## Not doing, and why`
+    refuses a permission layer, and `docs/sandbox.md` argued for grants instead of modes — a full plan,
+    with stages, sizes and a specification — kept beside the decision of record rather than folded into
+    it, on the rule that adopting any stage would mean editing the bullet in the same commit. It went
+    last because it is the size of a project, not because it is small, and it was the only place where
+    reading the repository could give two opposite answers — which is the thing this project refuses to
+    have. **The answer, in
+    the words of the person whose repository it is: "不要了吧，先不要权限功能了，就保持默认全部权限"** —
+    keep the default, which is all permissions, and do not build the permission feature. So no stage of
+    the plan is taken, the `## Not doing, and why` bullet stands unedited, and `docs/sandbox.md` is
+    relabelled from *a plan* to *an argument that lost* — kept, because half of its value was never the
+    proposal: it is the reason the `readonly` half is honest about being all-or-nothing rather than half
+    a boundary, and the record of what was read and weighed before saying no. The contradiction is
+    therefore resolved in the direction of the plan of record rather than by deleting the document, and
+    the entries that pointed at this item as open now point at it as decided.
 
 13. **The addresses in a page's text, pressable — *built 2026-09-18*, and the one item here that was
     asked for rather than found by a sweep.** Everything the page rendered was text: a URL in a model's
@@ -2147,9 +2154,10 @@ this reading, and was not proposed, for a reason worth keeping rather than redis
   the operating system, not a gap in the guard, and the guard's comment already says which cases it is
   for (the interrupt and the timeout, not a command that deliberately detached).
 - **A graded permission setting narrower than `readonly`.** Refused in `docs/decisions.md` —
-  "`readonly` is all-or-nothing. There is no middle setting" — and the reason survives the survey: a
-  middle setting that is not airtight is the thing `docs/sandbox.md` exists to argue about properly, so
-  inventing one quietly here would answer the fork above by accident.
+  "`readonly` is all-or-nothing. There is no middle setting" — and the reason survives the survey, and
+  survives the decline above: a middle setting that is not airtight is exactly what `docs/sandbox.md`
+  argues about at length, and the answer to that argument was no, so inventing a rung quietly here would
+  be answering it again by accident.
 
 ## Small, agreed, unscheduled
 
@@ -2454,6 +2462,12 @@ were invisible in the source, and both are held by the harness that found them.
   deliberately beside the decision it contradicts rather than folded into it. Nothing in it is
   adopted; adopting any stage means editing this bullet in the same commit, because a plan of
   record that contradicts a plan document is how a repository starts lying to itself.
+  **Declined in writing on 2026-09-18**: asked directly, after this session's feature work, whether to
+  build the permission layer or keep the default, the answer was *keep the default — all permissions*.
+  So no stage is taken, this bullet is unchanged, and `docs/sandbox.md` now labels itself an argument
+  that lost rather than a plan that is waiting. The entry stays first in this list because the answer to
+  "why is there no approval prompt" has to remain one sentence a reader can find, and because the
+  document beside it is still the honest account of what the alternative would have cost.
 - **Subagents** — the original decision: flint is one conversation and one context window.
   Splitting it invents coordination, budgets and merge problems that a rescue tool does not
   need. **Adopted in the narrow form on 2026-09-16, and the reason above survives it**: a

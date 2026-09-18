@@ -7,7 +7,8 @@ of it.
 ## Where things stand
 
 **The build phase is closed out: every open half in `ROADMAP.md` §11 is now built, answered or bounded,
-and the two items left are the ones that were never mine to finish.** The phase's purpose was to stop
+and the only decision the list carried has since been made — what is left is one cosmetic item.** The
+phase's purpose was to stop
 adding features and consolidate, so the order was: §9's and §10's named-but-unfinished work first, then
 the guards and documentation §11 lists. §11's own line-by-line state, so a reader does not have to
 reconstruct it:
@@ -25,10 +26,10 @@ reconstruct it:
 | 9. three gaps the code named about itself | **all three closed** — the paste enable is tested (and moved into the run's own sink), `/say --to` is a page picker, the report-whitelist comment is true |
 | 10. `/export` from inside a conversation | **built** |
 | 11. the page's panel groups are classes, not tasks | seen and judged **not worth a round on its own** — cosmetic, no behaviour, recorded so nobody re-derives it |
-| 12. `docs/sandbox.md` contradicts `## Not doing, and why` | **a decision for the person**: take a first stage and edit the bullet, or decline it in writing. Nothing else in §11 waits on it |
+| 12. `docs/sandbox.md` contradicts `## Not doing, and why` | **declined in writing, 2026-09-18**: asked whether to build a permission layer or keep the default, the answer was keep the default (all permissions). The `ROADMAP.md` bullet is unchanged, `docs/sandbox.md` now labels itself an argument that lost, and the contradiction is closed in favour of the plan of record. Nothing else in §11 waited on it, and nothing does now |
 | 13. the addresses in the page's text, pressable | **built 2026-09-18**, asked for directly: a web address is a link in a new tab, a path stays a button into the preview, and the scheme test is an allowlist. Its one named residue — no OS-level open — was **built one session later** as `POST /open` plus the panel's `open` control (see `## What was just done`) |
 
-The gate as this session left it — measured on `31313ba`, after the two commits below: `cargo test`
+The gate as this session left it — measured on `31313ba`, after this session's commits: `cargo test`
 **642 passing, 1 ignored** across the 14 suites (lib 356, bin 6, `agent_loop` 34, `balance` 7,
 `cli_output` 109, `json_output` 41, `say` 6, `search_tool` 4, `task` 17, `term_capture` 20 + 1 ignored,
 `tty_hangup` 0 and the doc-tests 0 — both empty by construction — `web_view` 32, `who` 10);
@@ -302,7 +303,8 @@ tested only by whoever remembers); four stale sentences found by checking claims
 plus `turn.completed` plus `error` and exit 65); a job that cannot say it is `stopping`; the page's own
 cursor across a restart; three small gaps the code names about itself; `/export` from inside a running
 conversation; one cosmetic item recorded rather than recommended; and last — because it is the size of a
-project — the permission-layer fork, which is the only decision on the list. What the sweeps looked at
+project — the permission-layer fork, which was the only decision on the list and **has since been
+answered: no permission layer, keep the default of all permissions**. What the sweeps looked at
 and refused is listed with it, in the same section, because a survey that only adds is not a survey; so
 is the finding that there is **no `TODO`, `FIXME`, `unimplemented!` or `todo!(` anywhere in the tree and
 exactly one `#[ignore]`d test**, which is why the work that is left is prose rather than markers.
@@ -1760,6 +1762,21 @@ mutations were watched red and reverted: `if readonly` → `if false`, and the W
 honest residues are in `docs/web-mode.md` §16: a *successful* launch is never driven by a test — it would
 start a viewer on the machine running the harness, which is why the browser press is made against a path
 that is not there — and the preview panel's own contents are still plain text.
+
+**And §11's last open item is answered: no permission layer, and the default stays all permissions.**
+Asked directly whether to build one — after this session's feature work — the answer was *"不要了吧，
+先不要权限功能了，就保持默认全部权限"*. That resolves the one place in the repository where reading it
+could give two opposite answers: `ROADMAP.md`'s `## Not doing, and why` refuses a permission layer, and
+`docs/sandbox.md` argued for grants instead of modes, and §11 item 12 recorded the fork as a decision for
+the person rather than a task. Nothing was built — the `ROADMAP.md` bullet stands unedited on purpose —
+and what changed is the *status* of the document beside it: `docs/sandbox.md` now opens with "an argument
+that was declined", its stage instructions are written in the conditional, and its header says plainly
+that nothing in it will be built. It stays in the tree because roughly half its value was never the
+proposal: it is the record of what a boundary would cost to be airtight on each platform, and it is why
+`readonly` is described everywhere as all-or-nothing rather than as half a boundary. The trailing session
+in the §11 table is therefore empty of decisions: the one item left (§11 item 11, the page's command-panel
+groups being classes rather than tasks) is cosmetic, has no behaviour, and was recorded so nobody
+re-derives it.
 
 **A written inventory of every door, because the person doing the checking was reading source.** The
 ask was blunt — *"write a complete feature description for QA: what can be operated, how, and what

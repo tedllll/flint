@@ -1,16 +1,24 @@
-# Sandbox: a development plan
+# Sandbox: an argument that was declined
 
 What flint's permission model is today, why the industry's "read-only / workspace-write /
 full-access" ladder is the wrong shape for the tasks people actually give an agent, what a
-model built out of *grants* instead of *modes* would look like, and the order to build it in.
+model built out of *grants* instead of *modes* would look like, and the order it would have been built
+in.
 
-**Status: a plan. Nothing in this file is built.** It contradicts
-[`ROADMAP.md`](../ROADMAP.md)'s "Not doing, and why" entry on the permission layer
-(`ROADMAP.md:1503`) on purpose; adopting any stage below means editing that entry in the same
-commit, because a plan that leaves the plan of record contradicting it is how a repository
-starts lying to itself.
+**Status: declined on 2026-09-18. Nothing in this file is built, and nothing in it will be.** What it
+argued for is the opposite of [`ROADMAP.md`](../ROADMAP.md)'s "Not doing, and why" entry, the bullet
+named **"A permission layer"** — which is the position of record, and is named rather than pointed at by
+line number because this file used to cite `ROADMAP.md:1503` and that bullet has since moved. This file
+stays in the tree because a decision is worth more when the thing it refused can still be read. Asked
+directly whether to build a permission layer or keep the default, the person whose repository it is
+answered *keep the default — all permissions* (`ROADMAP.md`'s §11 item 12 records the answer, and the
+bullet carries the date). So: not a plan, not a queue item, and no stage below is a thing to start on a
+quiet afternoon. What still earns its place here is the reading — the prior art in §2, the reason the
+ladder is the wrong shape, and the accounting of what a boundary would cost to be *airtight* on each
+platform — which is also why `readonly` is described elsewhere as all-or-nothing rather than as half a
+boundary. Read it as the record of an alternative that was weighed and refused.
 
-## The plan in one page
+## The plan in one page, for the record
 
 flint has one switch: `readonly`, on or off for the whole session. Tasks do not come in two
 sizes. A download needs the network **and** a writable directory outside the project; a sibling
@@ -31,17 +39,17 @@ nothing that works today stops working.
 | **4** | the Linux and macOS boundaries | the same on the other two platforms | 700–1,400 | high |
 | **5** | egress, only as a proxy | reach one allowlisted host and nothing else | — | — |
 
-**Stages 0 and 1 are the centre of gravity.** They are cross-platform, need no OS support, and
-every humane property in §1.4 comes from them. Stages 3–5 are the expensive half; each is a
-project on its own platform, and the platform decides whether it can be verified at all. Do 0,
-then 1, then decide. Nothing here requires all six.
+**Stages 0 and 1 were the centre of gravity.** They are cross-platform and need no OS support, which is
+why they are the only two that were ever serious candidates — and why the decline is a decision about
+*those*, not a verdict on stages 3–5, which are the expensive half: each is a project on its own
+platform, and the platform decides whether it can be verified at all. Had stage 0 been taken it would
+have come first, then stage 1, then the decision again.
 
-**Start with Stage 0, and its section in §5 is the specification** — the config syntax, the
-decision function, every place in flint it has to reach, the five tests that must fail first and
-the gate that must stay green. If you are here to build, read §5 beside §4.2 (`deny` and
-specificity), §4.3 (one decision, one sentence) and §4.6 (what is enforced and what is only
-promised). §1 and §3 are the argument and the prior art: they are why the plan is shaped this
-way, and they read fine afterwards.
+**Had it been built, Stage 0 would have started here, and its section in §5 is the specification** —
+the config syntax, the decision function, every place in flint it would have had to reach, the five
+tests that must fail first and the gate that must stay green. That is the part of this file with the
+longest shelf life: it is a worked example of what a boundary inside flint would touch, written against
+the tree as it is. §1 and §3 are the argument and the prior art, and they read on their own.
 
 ## How to read the labels
 
@@ -626,18 +634,19 @@ denied: write C:\work\other-repo\out.txt is outside this run's write scope
 
 ### 4.4 Why `ask` is now defensible
 
-`ROADMAP.md:1503` refuses approval prompts because "an approval dialog in an emergency is
-friction at the worst moment". That objection is to a prompt on the **happy path** — a system
-that interrupts ordinary work. A grant-based model has a different property: **`ask` is only
-ever reached where `deny` was the alternative.** Nothing that is already allowed becomes a
-question. The interruption is the price of a widening the user did not pre-authorise, and the
-alternative at that exact moment is not "it just works" — it is "it fails".
+The "A permission layer" bullet in `ROADMAP.md`'s `## Not doing, and why` refuses approval prompts
+because "an approval dialog in an emergency is friction at the worst moment". That objection is to a
+prompt on the **happy path** — a system that interrupts ordinary work. A grant-based model has a
+different property: **`ask` is only ever reached where `deny` was the alternative.** Nothing that is
+already allowed becomes a question. The interruption is the price of a widening the user did not
+pre-authorise, and the alternative at that exact moment is not "it just works" — it is "it fails".
 
-That is the whole argument, and it should be written into `ROADMAP.md` when this is adopted,
-because it is a change of position, not a detail. What makes it more than a preference is the
-measured half of §3.6: prompts are answered badly in bulk (17% attention, 3% comprehension), so
-the design goal is not fewer permissions but fewer *decisions* — and "only where the alternative
-is denial" is the smallest number of decisions that still grants anything narrow.
+That is the whole argument, and it would have been written into `ROADMAP.md` had this been adopted,
+because it is a change of position rather than a detail — and it was not adopted: the answer was no.
+What makes it more than a preference is the measured half of §3.6: prompts are answered badly in bulk
+(17% attention, 3% comprehension), so the design goal is not fewer permissions but fewer *decisions* —
+and "only where the alternative is denial" is the smallest number of decisions that still grants
+anything narrow.
 
 ### 4.5 Widening by exactly the missing amount
 

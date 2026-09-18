@@ -2,7 +2,9 @@
 
 Research input for [`docs/sandbox.md`](sandbox.md) §3.4 / Stage 1 and Stage 2. Nothing here is
 proposed for the tree; it is the reading that `sandbox.md` §7 lists as "not incorporated".
-Delete or fold in as wanted.
+Delete or fold in as wanted. The plan this was read for was **declined on 2026-09-18** — `sandbox.md`
+now opens by saying so — which makes this a record of prior art rather than an input to a decision
+still ahead.
 
 Every quote below was read on the cited page. Markers:
 

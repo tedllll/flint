@@ -937,9 +937,11 @@ Not bugs, and not to be filed as such. Each is a decision with a reason in the t
 
 - **No permission layer.** No approval prompts, no sandbox, no allow-list, no undo. A
   command the model asks for runs as your user, immediately. `readonly` is the only switch
-  and it is all-or-nothing (§7.6). `docs/sandbox.md` is a *plan* that argues for replacing
-  this, and it is not built; `ROADMAP.md`'s "Not doing, and why" is the position of record.
-  The contradiction between the two is a recorded open item, not a to-do.
+  and it is all-or-nothing (§7.6). `docs/sandbox.md` argues for replacing this; it is **not built and
+  not queued**, and `ROADMAP.md`'s "Not doing, and why" is the position of record. That alternative was
+  offered to the author and **declined in writing on 2026-09-18** — keep the default, which is all
+  permissions — so the one contradiction this inventory used to record as an open item is closed in
+  favour of the plan of record, and the plan document now labels itself an argument that lost.
 - **One switch, not a ladder.** A narrower permission setting than `readonly` is refused in
   `docs/decisions.md`.
 - **No OS-level open without a press.** A file preview is the page's own panel (`GET /file`), and a
