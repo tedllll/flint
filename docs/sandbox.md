@@ -990,9 +990,12 @@ Then the work:
 - Fail closed, with DSH's sentence as the model, or fail open with Claude Code's warning — pick
   one, in writing, because the two vendors chose opposite defaults (§3.4).
 - **Done when:** a child that tries to write one directory outside its roots fails, and the same
-  child writing inside succeeds — as two tests on a real machine. Windows CI currently "checks
-  nothing on push" (`ROADMAP.md:1495`), so this stage needs that fixed first or it cannot be
-  verified honestly.
+  child writing inside succeeds — as two tests on a real machine. This used to end "Windows CI currently
+  checks nothing on push, so this stage needs that fixed first or it cannot be verified honestly", and
+  that stopped being true on 2026-09-18: `.github/workflows/ci.yml` runs `cargo test` and `cargo clippy`
+  on `windows-latest` and `ubuntu-latest` on every push, plus the two headless Node harnesses. What the
+  stage still needs is for the boundary itself to be testable *there* — a question about the boundary
+  rather than about CI.
 - **Not in this stage:** Linux, macOS, and egress control. A boundary that exists on one platform
   and is labelled as one-platform in the prompt is still worth having, and it is the only way to
   find out what the other two will cost.

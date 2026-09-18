@@ -1770,9 +1770,13 @@ Two findings from checking rather than assuming:
   because a caller's pipe is not a private channel. A `--steer` flag was rejected: the Python caller
   relies on `/stop` for its timeout, and an opt-in reader would silently downgrade that to a kill with
   the half-answer lost.
-- Nothing stops a flint from starting another flint, and nothing bounds how deep that goes: tools are
-  not restricted by choice, so a nested call is a spend that recurses. Recording it rather than
-  proposing a guard — the honest place for a limit here is the caller that started the first one.
+- Nothing stops a flint from starting another flint, and what bounds how deep that goes is
+  `MAX_TASK_DEPTH` (`src/tools.rs`, 2) *plus* `FLINT_DEPTH`, which only the `task` tool writes for its
+  child (`src/tools.rs`: "a bound a model can edit is not a bound"). This entry used to say "nothing
+  bounds how deep that goes", which stopped being true when the bound was built; it is recorded here
+  rather than proposed as a new guard, because the honest place for another limit is still the caller
+  that started the first one. The nested spend itself remains a spend that recurses, and it is bounded
+  rather than free.
 
 **What the MCP wrapper deliberately does about token cost.** Asked directly ("MCP is a settled
 protocol, but it spends too many tokens for what it returns — can it be improved?"). The cost is not
@@ -1877,21 +1881,24 @@ where prose and tree disagree are items 2, 3 and 9(iii).**
    already there and a second job would spend minutes to add a minute. Nothing is installed: Node is on
    both runners. `browser-controls-test.js` stays by hand — it needs a real browser — and `AGENTS.md`
    still says so where the three are listed.
-2. **Stale sentences, found by checking claims instead of reading them — one fixed in this commit.**
+2. **Stale sentences, found by checking claims instead of reading them — all four now corrected
+   (2026-09-18).**
    This is a class, not an incident, and it is the finding that says the most about the repository: four
    passages state something the tree stopped being true of, and **nothing in the gate can catch prose**.
    The four: (i) `HANDOFF.md`'s cold-start section says a `/config edit` page form "would need a
    `/config set <key> <value>` the terminal does not have" — the terminal has had it since 11:36 on the
    same day that section is dated from (`bb9e07c`; the help row is `src/main.rs:2876`), and the sentence
-   is corrected in this commit; (ii) `docs/sandbox.md` records that "CI checks nothing on push", which
-   was true when it was written and is not now (`.github/workflows/ci.yml` runs the tests and clippy on
-   Linux and Windows); (iii) `ROADMAP.md`'s §2 says of recursive spawning that "nothing bounds how deep
-   that goes", superseded by `FLINT_DEPTH` (maximum 2, set by the tool and by nothing else, §"Not doing"
-   above); (iv) `HANDOFF.md`'s cold-start section lists "adding a provider from the page" as left open,
-   which §8 records as closed on 2026-09-17. The fix for (i) is in this commit because a survey that
-   points at a wrong sentence and leaves it there has made the problem worse. The other three want the
-   same treatment, and the general one — a snapshot section that says when it was true instead of
-   sounding like state — is now stated at the top of that section.
+   was corrected in that commit; (ii) `docs/sandbox.md` recorded that "CI checks nothing on push", which
+   was true when it was written and is not now — the paragraph now says what the workflow does and
+   separates that from what stage 3 actually still needs; (iii) `ROADMAP.md`'s §2 said of recursive
+   spawning that "nothing bounds how deep that goes", superseded by `MAX_TASK_DEPTH` and `FLINT_DEPTH`
+   (maximum 2, set by the tool and by nothing else), which the entry now states while keeping the
+   reason it is recorded rather than guarded further; (iv) `HANDOFF.md`'s cold-start section listed
+   "adding a provider from the page" as left open, which §8 records as closed on 2026-09-17 — the
+   paragraph now says what closed it and why the shape §11 refused for `/config edit` is the right one
+   here. All four were fixed rather than only the first, because a survey that points at a wrong
+   sentence and leaves it there has made the problem worse. The general one — a snapshot section that
+   says when it was true instead of sounding like state — is stated at the top of that section.
 3. **What the page claims and what the harness holds are not the same set.** `HANDOFF.md` records it in
    its own words — "the mid-turn report wait is unasserted (`docs/web-mode.md` §11)" — and §11 does
    claim the behaviour: a report is accepted at `/report` **mid-turn**, and the turn is then stopped (a

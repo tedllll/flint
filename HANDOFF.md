@@ -112,6 +112,16 @@ two surfaces whose defects are invisible in the source, and both already had a h
 installed, because Node is on both runners; `browser-controls-test.js` stays by hand, because it needs a
 real browser.
 
+**And §11 item 2 is done: the last three stale sentences are corrected, so all four of that item's
+passages now say what the tree does.** `docs/sandbox.md`'s stage 3 no longer claims CI "checks nothing on
+push" and instead separates what the workflow does from what that stage still needs; `ROADMAP.md`'s §2 no
+longer says "nothing bounds how deep that goes", because `MAX_TASK_DEPTH` (2) and `FLINT_DEPTH` do, and
+says why the bound is an environment variable rather than a flag; and the cold-start list no longer has
+"adding a provider from the page" under *left open*, with the paragraph explaining what closed it and why
+the multi-field form §11 refused for `/config edit` is right for `/provider add`. The class itself is
+worth the note: **nothing in the gate can catch prose**, so a claim is corrected by reading it against
+the tree, which is how all four were found.
+
 **What is left on §11 item 9 is its two test-and-comment halves**: a regression test for the paste fix
 (which `tests/cli_output.rs` says of itself is not covered there) and the stale comment on where the
 report whitelist lives. §10's two holes that
@@ -2266,15 +2276,17 @@ reader cannot resolve; `page_help` substitutes the name, and `tests/cli_output.r
 help to be the table's sentence or that sentence with the name filled in — never a second description
 that can drift from `/help`.
 
-**Left open, deliberately**: adding a provider from the page. `/provider add` asks four questions one at
-a time, and a page form can send exactly one value, so doing it from the browser needs a
-non-interactive `/provider add <name> <base_url>` *and* a frame row carrying several fields — the
-second is the same shape §11 refused for `/config edit`. The panel's grouping is also §8's classes
-rather than a task, so "set a key" means switching provider in one group and filling a masked box in
-another. Both are the next round's question — and the masked box half is **measured in a browser since
-2026-09-17**: the `/provider key` field is `type=password`, a key typed into it reaches the run
-(`key saved`), the field is emptied, the secret is nowhere in the page's markup, and `config.toml`
-really did receive it, which is what stops the other three claims passing on a command that never ran.
+**Closed since 2026-09-17, and this paragraph used to say "left open, deliberately": adding a provider
+from the page.** It needed two things, and both arrived. `/provider add` is non-interactive when given
+arguments (`/provider add <name> <base_url> [model]`), and a frame row can carry several answers, which
+is the *same* shape §11 refused for `/config edit` — refused there because that wizard is a sequence of
+decisions, and adopted here because these three are one command's fields. The page draws it as a form
+with a masked box for the key, and the second half of the old worry — "set a key means switching provider
+in one group and filling a masked box in another" — is answered by the panel's own grouping coming from
+§8's classes rather than from a task. The masked box is **measured in a browser since 2026-09-17**: the
+`/provider key` field is `type=password`, a key typed into it reaches the run (`key saved`), the field is
+emptied, the secret is nowhere in the page's markup, and `config.toml` really did receive it, which is
+what stops the other three claims passing on a command that never ran.
 
 ### A conversation's row carries its own actions
 
