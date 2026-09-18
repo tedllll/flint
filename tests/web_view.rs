@@ -624,10 +624,10 @@ fn the_composer_can_stop_the_turn_it_is_watching() {
 ///   silence. That failure would look exactly like the feature not being built.
 #[test]
 fn the_pickers_offer_the_runs_own_commands() {
-    let markup = from("<div class=\"controls\" id=\"controls\" hidden>", 5);
+    let markup = from("<div class=\"controls\" id=\"controls\" hidden>", 6);
     assert!(
         markup.contains("id=\"pick-provider\"") && markup.contains("id=\"pick-model\""),
-        "the header has no pickers to draw into: {markup}"
+        "the settings dialog has no pickers to draw into: {markup}"
     );
 
     for (id, command) in [("pick-provider", "/provider "), ("pick-model", "/model ")] {
@@ -669,10 +669,10 @@ fn the_pickers_offer_the_runs_own_commands() {
 #[test]
 fn the_toggles_are_switches_that_show_their_value() {
     // The markup has to have somewhere to put them, inside the controls a state frame reveals.
-    let controls = from("<div class=\"controls\" id=\"controls\" hidden>", 8);
+    let controls = from("<div class=\"controls\" id=\"controls\" hidden>", 10);
     assert!(
         controls.contains("id=\"toggles\""),
-        "the header has nowhere to draw the switches: {controls}"
+        "the settings dialog has nowhere to draw the switches: {controls}"
     );
 
     // Built from the frame, not from a table in the page.
@@ -747,13 +747,15 @@ fn a_command_answer_is_a_block_with_the_line_that_asked_for_it() {
 /// job is to say what there is.
 #[test]
 fn the_command_panel_is_drawn_from_the_frame() {
-    // Somewhere to put it, in the header a state frame reveals. The window runs past the controls
-    // div: the panel is a sibling of it rather than a child, because `.controls` is a flex row and
-    // a panel belongs on its own line.
-    let controls = from("<div class=\"controls\" id=\"controls\" hidden>", 20);
+    // Somewhere to put it: the commands have a pane of their own inside the settings dialog, and the
+    // list is a child of it. The needle is the pane rather than the controls row, because the panel
+    // is no longer a sibling of the controls -- it moved to the other section when the header's raw
+    // controls became a dialog, and a window wide enough to span both would pass for the wrong
+    // reason if the pane were ever dropped.
+    let pane = from("<section class=\"pane\" id=\"pane-commands\" hidden>", 8);
     assert!(
-        controls.contains("id=\"commands\"") && controls.contains("id=\"command-list\""),
-        "the header has nowhere to draw the command panel: {controls}"
+        pane.contains("id=\"commands\"") && pane.contains("id=\"command-list\""),
+        "the dialog has nowhere to draw the command panel: {pane}"
     );
 
     // Built from the frame: every field of a row comes from the frame's own entry.
@@ -1119,6 +1121,126 @@ fn a_row_the_panel_cannot_press_says_where_its_control_is() {
     assert!(
         drawn.contains("COMMAND_HOMES[className]"),
         "and it must take its explanation from the class the frame gave: {drawn}"
+    );
+}
+
+/// The run's settings live in a dialog, and the header keeps one door onto them.
+///
+/// Asked for after using the page: *the controls are laid out raw on the surface, and they should be
+/// in settings* — modelled on DSH, where a settings seat holds what changes the run and the header
+/// holds what identifies it. The reason this is a *policy* test rather than a drawing check is that
+/// the failure mode is a slow one: a row added straight back into the header, or a control left
+/// behind outside the dialog, is invisible in a diff and only shows up as a header that has grown
+/// back into the reading column. So the header's own slice of the markup is asserted to hold the
+/// name, the work, and the door — and nothing else.
+#[test]
+fn the_runs_controls_live_in_a_dialog_and_the_header_keeps_one_door() {
+    let html = view();
+    // The header's top line, as bytes: from the name to the end of its own div.
+    let head = from("<div class=\"head-line\">", 40);
+    let head = head.split("<!-- The settings dialog").next().unwrap_or(&head);
+    for needed in ["id=\"title\"", "id=\"jobs\"", "id=\"settings-open\""] {
+        assert!(
+            head.contains(needed),
+            "the header's line must still carry {needed}: {head}"
+        );
+    }
+    for moved in [
+        "id=\"pick-provider\"",
+        "id=\"pick-model\"",
+        "id=\"toggles\"",
+        "id=\"actions\"",
+        "id=\"meta\"",
+        "id=\"command-list\"",
+    ] {
+        assert!(
+            !head.contains(moved),
+            "{moved} is back in the header's line, which is the surface this change emptied: {head}"
+        );
+    }
+
+    // The door is a door, and it is shut until the page has a run to describe -- the same rule the
+    // controls themselves followed, because a dialog with nothing in it is worse than no dialog.
+    let door = from("id=\"settings-open\"", 1);
+    assert!(
+        door.contains("aria-haspopup=\"dialog\""),
+        "the door must say what it opens: {door}"
+    );
+    assert!(
+        door.contains("hidden"),
+        "the door ships closed, like the controls it replaced: {door}"
+    );
+    let shown = from("const door = document.getElementById(\"settings-open\");", 2);
+    assert!(
+        shown.contains("door.hidden = !state"),
+        "the door is offered exactly when the frame describes a run: {shown}"
+    );
+
+    // The dialog says what it is -- the two attributes are the difference between a modal and a panel
+    // that happens to be on screen -- and everything that changes state is *inside* it.
+    let dialog = from("id=\"settings\" role=\"dialog\"", 1);
+    assert!(
+        dialog.contains("aria-modal=\"true\"") && dialog.contains("aria-label=\"settings\""),
+        "the dialog must be a labelled modal: {dialog}"
+    );
+    let dialog_at = html
+        .find("id=\"settings\" role=\"dialog\"")
+        .expect("the dialog is in the page");
+    for inside in [
+        "id=\"controls\"",
+        "id=\"command-list\"",
+        "id=\"settings-close\"",
+        "id=\"settings-nav\"",
+    ] {
+        let at = html
+            .find(inside)
+            .unwrap_or_else(|| panic!("the page never draws {inside}"));
+        assert!(
+            at > dialog_at,
+            "{inside} is outside the dialog, so it is still on the surface"
+        );
+    }
+
+    // Three doors, because a modal with one way out is a trap: its own button, the mask, and Escape.
+    let wiring = from("The settings dialog's three doors", 24);
+    for (needed, why) in [
+        ("settingsDoor.addEventListener(\"click\"", "the door opens it"),
+        ("settingsClose.addEventListener(\"click\"", "its own button closes it"),
+        ("settingsMask.addEventListener(\"click\"", "a press outside closes it"),
+        ("dismissTopmost()", "and Escape follows one order rather than three listeners"),
+    ] {
+        assert!(
+            wiring.contains(needed),
+            "the dialog is missing a way out through {needed} ({why}): {wiring}"
+        );
+    }
+    let order = from("function dismissTopmost()", 10);
+    let settings_at = order
+        .find("settingsOpen()")
+        .expect("the modal must be asked about first");
+    let preview_at = order.find("preview").expect("the panel is next");
+    assert!(
+        settings_at < preview_at,
+        "the modal is over the panel, so one Escape must close it and leave the panel alone: {order}"
+    );
+
+    // One section at a time, and a section is the page's own word for a *place it put things* -- not a
+    // command name, which is the frame's. The check is that the rail's list is the only list: a second
+    // hard-coded section somewhere would be a pane nothing can reach.
+    let rail = from("const SETTINGS_PANES = [", 6);
+    assert!(
+        rail.contains("[\"run\"") && rail.contains("[\"commands\""),
+        "the rail must offer the two kinds of thing behind the door: {rail}"
+    );
+    let panes = from("function showSettingsPane(name)", 14);
+    assert!(
+        panes.contains("pane.hidden = known !== name"),
+        "opening one section must shut the others -- a column of every setting is what this replaced: {panes}"
+    );
+    let unknown = from("function showSettingsPane(name)", 2);
+    assert!(
+        unknown.contains("SETTINGS_PANES.some"),
+        "a section the rail does not offer must leave the dialog as it was: {unknown}"
     );
 }
 

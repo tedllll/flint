@@ -731,17 +731,26 @@ name, no toggle name and no provider list of its own, so a control that appears 
 really has. That is a policy (`tests/web_view.rs`), not a style: a second reader of the same state can
 disagree with the process.
 
+The header keeps **one** control — a door — and everything that changes the run is behind it, in a
+settings dialog: the two pickers, the switches, the run's own action buttons, and the command list
+(§22 of `docs/web-mode.md` is the reasoning and the measured record). A header holding the raw
+controls is a header that takes the reading column's width for furniture, which is what this replaced.
+
 | Area | Control | What pressing it does |
 |---|---|---|
 | header | the conversation's name, above everything | not a control: the session file's own newest `title` event, else the label `GET /sessions` chose (the newest name, else the first thing said, else `(empty)`). Clipped with the whole of it in the tooltip |
 | header | the status chips | not controls either: `N running` (or `N stopping`), `N subagent(s)`, `N failed`, `N done`, counted from `GET /jobs` by kind. The whole line is **hidden when there is no work**, and a failure is never folded into `done` |
-| header | `#pick-provider`, `#pick-model` | sends `/provider <name>` / `/model <name>`; a refusal reverts the picker from the frame |
-| header | one `<select>` per toggle | sends `/<toggle> <value>` — `verbose`, `detail`, `readonly`, `hear-peers`, `thinking` |
-| header | an action button | sends the frame's own line, e.g. `/reload`, `/new` |
-| header | the commands panel, in five groups — `reports`, `actions`, `selectors`, `forms`, `destructive` | a **panel** row sends nothing: it asks for a *reading* (`POST /report`) and shows the answer in the panel, with a `‹ commands` button back. Any other row sends the line the frame gives it |
-| header | a **destructive** row | first press opens its choices and sends nothing; the second press sends `<send> <value>`. The choices are the list the frame names: conversations (the sidebar's numbers), providers (their names), or jobs (the pids the jobs panel is showing). With nothing to choose from it says `nothing to choose from` |
-| header | a **form** row (`/provider add`, `/provider key`, `/config set`, `/import`, `/export`, `/name`, `/queue`) | one field per argument the frame declares; a `password` field is drawn masked and emptied after a send; an answer the frame does not mark optional must be filled or the line is not sent |
-| header | `/say`'s `--to` picker | the options are the live runs sharing this directory, fetched from `GET /peers`: `(everyone here)` first, then `pid N · <model> · <read-only> · here now` — or, with nobody here, the fact that it waits in the file |
+| header | `#settings-open` | the one door: opens the settings dialog, and is **hidden when no `state` frame has arrived** — a page opened from a dropped file has no run to describe |
+| settings | `#settings-close`, the mask, `Escape` | three ways out of the same dialog: its own `close` button, a press anywhere on the mask, and `Escape`. Closing returns the keyboard to `#settings-open`, and opening moves it to `#settings-close` |
+| settings | the rail (`run`, `commands`) | one section at a time; the one in force is marked `aria-current="true"`. A section is the page's own word for *a place it put things* — what is inside it still comes from the frame |
+| settings | `#pick-provider`, `#pick-model` | sends `/provider <name>` / `/model <name>`; a refusal reverts the picker from the frame |
+| settings | one `<select>` per toggle | sends `/<toggle> <value>` — `verbose`, `detail`, `readonly`, `hear-peers`, `thinking` |
+| settings | an action button | sends the frame's own line, e.g. `/reload`, `/new` |
+| settings | the run's `cwd`, session id and creation time | not controls: the `meta` line the header used to carry, in the run's own section |
+| settings | the command list, in five groups — `reports`, `actions`, `selectors`, `forms`, `destructive` | a **report** row sends nothing: it asks for a *reading* (`POST /report`) and shows the answer in place of the list, with a `‹ commands` button back. Any other row sends the line the frame gives it |
+| settings | a **destructive** row | first press opens its choices and sends nothing; the second press sends `<send> <value>`. The choices are the list the frame names: conversations (the sidebar's numbers), providers (their names), or jobs (the pids the jobs panel is showing). With nothing to choose from it says `nothing to choose from` |
+| settings | a **form** row (`/provider add`, `/provider key`, `/config set`, `/import`, `/export`, `/name`, `/queue`) | one field per argument the frame declares; a `password` field is drawn masked and emptied after a send; an answer the frame does not mark optional must be filled or the line is not sent |
+| settings | `/say`'s `--to` picker | the options are the live runs sharing this directory, fetched from `GET /peers`: `(everyone here)` first, then `pid N · <model> · <read-only> · here now` — or, with nobody here, the fact that it waits in the file |
 | header | the jobs panel | the chips above it are its summary; the panel itself is one row per job this run started: kind, what was asked, how long it has been going (ticking once a second), and its exit code in words once it ends. Pressing a row opens its log or the child's own conversation in the preview. A job that has been asked to stop counts as `running`/`stopping` — it is still spending time — and is not offered in the `/jobs stop` menu a second time |
 | sidebar | `+ new` | sends `/new`; disabled for the round trip so one click cannot start two conversations |
 | sidebar | a conversation row | sends `/resume <n>` — the current row does nothing |
@@ -758,10 +767,10 @@ disagree with the process.
 | preview | `open` | hands the panel's path to the program this machine uses for it (`POST /open`): a file opens in whatever its type is registered to, a directory in the file manager. The one control on this page that starts a process, so it is a **deliberate second press** and never the path itself. Disabled when the run is `readonly`, with the reason in its tooltip; the route refuses it there anyway. The answer — or the route's refusal — appears in the hint under the composer |
 | preview | — | a refusal is shown in the route's own words with its status beside it, never as an empty panel |
 | layout | the two grip handles | drag to resize the sidebar and the reading column; `ArrowLeft`/`ArrowRight` move the boundary by 16 px (48 with Shift); a **double-click puts the width back to the stylesheet's**. Neither width is persisted |
-| anywhere | `Escape` | closes the preview; one `Escape` press also closes the jobs list when both are open (two handlers, neither stops the other). It does **not** close the commands panel |
+| anywhere | `Escape` | puts away **one** thing, front to back: the settings dialog first, then the preview panel, then the jobs list. One press per thing, and the order is a function rather than three listeners, so "which one does this close?" has an answer that can be read (`dismissTopmost`). With nothing open it does nothing |
 
 The page handles exactly four keys itself: `Enter` in the textarea, the two arrows on a focused grip, and
-those two `Escape` handlers. Everything else — a `<summary>` opening, a `<select>`, `Tab`, typing — is
+that one `Escape` order. Everything else — a `<summary>` opening, a `<select>`, `Tab`, typing — is
 the browser's own behaviour.
 
 ### 12.4 What the page deliberately cannot do
@@ -783,12 +792,12 @@ that understood JavaScript would be a second parser to be wrong about.
   reading position, in `sessionStorage`.
 - **Presence is read through `GET /peers`**, never derived from files by the page (`scan_in(` is
   forbidden).
-- **A row the page cannot press says where its control is** (`this one is a button in the header`,
+- **A row the page cannot press says where its control is** (`this one is a button in settings`,
   `typed in the terminal`, …) rather than offering a control that would be refused.
 
 ### 12.5 Measured, and honestly not
 
-- **Driven in a real browser**: `scripts/browser-controls-test.js`, **61 claims** held, each checked
+- **Driven in a real browser**: `scripts/browser-controls-test.js`, **72 claims** held, each checked
   against the run's own stdout. It prints what it drives before it presses anything, and its "not driven
   here" list is part of the output: a report asked for mid-turn (measured in `tests/cli_output.rs`), the
   `/prompt` row's send button, an OS open that *succeeds* (it would start a program on this machine; the
@@ -1042,7 +1051,7 @@ tests name the behaviour they hold.
 | the mailbox and presence | `tests/say.rs`, `tests/who.rs` |
 | the page's policy | `tests/web_view.rs` |
 | the page's routes, including the launcher's command lines (`POST /open`) | `src/web.rs`'s tests |
-| the page's controls, driven in a real browser | `scripts/browser-controls-test.js` (61 claims) |
+| the page's controls, driven in a real browser | `scripts/browser-controls-test.js` (72 claims) |
 | the page's pure functions | `scripts/web-view-test.js` |
 | the Python and MCP callers | `examples/python/test_call.py`, `examples/mcp/test_mcp.py` |
 | the one suite that needs a real pty (Unix) | `tests/tty_hangup.rs` |

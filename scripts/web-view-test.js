@@ -72,6 +72,11 @@ function fakeNode() {
     scrollHeight: 0,
     clientHeight: 0,
     handlers: {},
+    focused: false,
+    // `focus` is a real browser fact this harness needed the moment the page grew a modal: what makes
+    // a dialog a dialog rather than a panel is where the keyboard goes when it opens and where it
+    // goes back to when it closes, and neither is visible in the page's own nodes.
+    focus() { node.focused = true; },
     classList: { add() {}, remove() {} },
     get firstChild() { return node.children[0] || null; },
     appendChild(child) { child.parentNode = node; node.children.push(child); return child; },
@@ -97,6 +102,7 @@ function fakeNode() {
     // preview learned to draw a picture and the sandbox threw `removeAttribute is not a function`:
     // the page was right and the stub was incomplete, which is the failure a stub has to be read for.
     setAttribute(name, value) { node[name] = value; },
+    getAttribute(name) { return node[name] === undefined ? null : node[name]; },
     removeAttribute(name) { delete node[name]; },
     click() {},
   };
@@ -107,6 +113,19 @@ function loadViewer() {
   const start = html.indexOf("<script>");
   const end = html.lastIndexOf("</script>");
   if (start < 0 || end < 0) throw new Error("web/view.html has no inline script");
+
+  // The ids the document marks `hidden`, read off the real markup.
+  //
+  // A stub that starts every node visible is a stub that cannot tell a dialog which ships closed from
+  // one which ships open -- and the difference is the whole point of the settings overlay, the jobs
+  // panel, the preview and the sidebar. This is not a parser: it is the one attribute the page's
+  // behaviour depends on at load, matched in the tag that carries the id. A page whose `hidden`
+  // attribute is wrong is then wrong here too, which is the honest failure.
+  const startsHidden = new Set();
+  for (const tag of html.match(/<[a-z]+[^>]*>/g) || []) {
+    const id = tag.match(/\sid="([^"]+)"/);
+    if (id && /\shidden[\s>]/.test(tag)) startsHidden.add(id[1]);
+  }
 
   const nodes = new Map();
   // What the page sent, in order. The page's whole job is a POST to one of two routes, and which
@@ -139,7 +158,11 @@ function loadViewer() {
     },
     document: {
       getElementById(id) {
-        if (!nodes.has(id)) nodes.set(id, fakeNode());
+        if (!nodes.has(id)) {
+          const node = fakeNode();
+          if (startsHidden.has(id)) node.hidden = true;
+          nodes.set(id, node);
+        }
         return nodes.get(id);
       },
       // The tag is kept because a check sometimes has to ask what kind of node was drawn -- a report
@@ -1001,7 +1024,7 @@ check("a row the panel cannot press says where its control is", () => {
   // mistaken for the control it is not -- and saying, on hover, where that control actually is.
   eq(actions[0].tag, "div", "an action is not pressable in the panel");
   eq(actions[0].className, "row reference", "it is marked as reference");
-  eq(actions[0].title, "this one is a button in the header", "and says where its control is");
+  eq(actions[0].title, "this one is a button in settings", "and says where its control is");
   eq(forms[0].title, "this one is typed in the terminal -- it asks questions", "a form without a field is the terminal's");
   eq(forms[0].children.map((n) => n.textContent), ["/provider add", "set up a new provider"], "and it still reads like a row");
 });
@@ -1788,6 +1811,88 @@ check("a picture is asked for by name, and let go of when it is replaced", () =>
     "blob:http://127.0.0.1:7777/1,blob:http://127.0.0.1:7777/2",
     "and closing lets go of the last one"
   );
+});
+
+console.log("the settings dialog");
+
+// The dialog is the one overlay on this page that is *modal*, and everything asserted here is the
+// difference between a modal and a panel that happens to be on screen: it says it is one, it takes
+// the keyboard when it opens, it gives the keyboard back when it closes, one section shows at a time,
+// and one Escape closes the thing in front rather than everything at once.
+check("the dialog opens and closes as a dialog, and the keyboard goes with it", () => {
+  const settings = viewer.__node("settings");
+  const mask = viewer.__node("settings-mask");
+  const close = viewer.__node("settings-close");
+  const door = viewer.__node("settings-open");
+
+  // As the document ships it: shut, with nothing behind it. A dialog that is open on load is a page
+  // that greets you with its settings.
+  eq(settings.hidden, true, "settings start closed");
+  eq(mask.hidden, true, "and so does the mask");
+  eq(viewer.settingsOpen(), false, "the page agrees it is closed");
+
+  viewer.openSettings();
+  eq(settings.hidden, false, "one press opens it");
+  eq(mask.hidden, false, "and the mask behind it, so a press outside can close it");
+  eq(viewer.settingsOpen(), true, "the page agrees it is open");
+  eq(close.focused, true, "the keyboard lands on the way out, not on the page underneath");
+
+  close.focused = false;
+  door.focused = false;
+  viewer.closeSettings();
+  eq(settings.hidden, true, "closing hides it");
+  eq(mask.hidden, true, "and the mask");
+  eq(door.focused, true, "and the keyboard goes back to the door it came from");
+  eq(viewer.settingsOpen(), false, "the page agrees again");
+});
+
+// One section at a time, and the rail is where the choice is made. The names are the page's own --
+// a pane is a place this page put things -- while what is *inside* a pane still comes from the frame.
+check("the rail shows one section at a time, and only a section it offers", () => {
+  const rail = viewer.__node("settings-nav");
+  const names = viewer.SETTINGS_PANES.map(([name]) => name);
+  ok(names.includes("run") && names.includes("commands"), "the panes: " + names.join(", "));
+
+  viewer.openSettings();
+  eq(rail.children.length, viewer.SETTINGS_PANES.length, "one button per section");
+  eq(viewer.__node("pane-run").hidden, false, "the first section is the one shown");
+  eq(viewer.__node("pane-commands").hidden, true, "and the other is not");
+
+  viewer.showSettingsPane("commands");
+  eq(viewer.__node("pane-commands").hidden, false, "the second section opens");
+  eq(viewer.__node("pane-run").hidden, true, "and the first closes -- one at a time, not a column");
+  eq(rail.children[1].getAttribute("aria-current"), "true", "the rail marks the one in force");
+  eq(rail.children[0].getAttribute("aria-current"), "false", "and unmarks the one that was");
+
+  // A name the rail does not offer leaves the dialog as it was: showing nothing at all would be a
+  // blank settings pane, which reads as a page that has lost its settings.
+  viewer.showSettingsPane("a-section-this-page-never-offered");
+  eq(viewer.__node("pane-commands").hidden, false, "an unknown section changes nothing");
+  viewer.closeSettings();
+});
+
+// The Escape order, which is the one thing a second overlay made ambiguous: with the dialog over the
+// preview, one press must put away the dialog and leave the panel alone.
+check("one Escape closes the thing in front, and the dialog is in front of the panel", () => {
+  const settings = viewer.__node("settings");
+  const preview = viewer.__node("preview");
+
+  // Both open: the dialog is the one being used, so it is the one that goes. The panel is opened the
+  // way the page opens it -- `openPreview` sets its path and unhides it before it awaits the route,
+  // which is all this check needs from it.
+  viewer.openSettings();
+  viewer.openPreview("C:\\notes.txt", 0);
+  eq(preview.hidden, false, "the panel is open to begin with");
+  eq(viewer.dismissTopmost(), true, "a press with something open does something");
+  eq(settings.hidden, true, "the dialog closed");
+  eq(preview.hidden, false, "and the panel behind it did not");
+
+  // Now the panel is the only thing left, and the next press takes it.
+  eq(viewer.dismissTopmost(), true, "the press still does something");
+  eq(preview.hidden, true, "the panel closed on its own press");
+
+  // Nothing open: Escape is not a control that pretends to work.
+  eq(viewer.dismissTopmost(), false, "with nothing open, Escape is not an action");
 });
 
 // An exported page carries its conversation in a JSON island, and this is the one function that reads

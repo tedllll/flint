@@ -1926,3 +1926,76 @@ picture, so that number is what this process and the tab hold in memory at once.
 **The one CSP widening this needed**, said out loud because a policy is not a detail: `img-src` gained
 `blob:`. The page makes that URL itself, from bytes it fetched with a header, so it is not a second way
 in — and the alternative that needed no widening (`data:`) was refused above for a reason of its own.
+
+## 22. The settings dialog: the header keeps a door — **built**
+
+The second half of the same request §17 and §18 came from, and the half that was a complaint rather than
+a request: *the page is weak, the controls are laid out raw on the surface, and some of it should be in
+settings* — with DSH named as the model. It is the three-word version of a real fault: a header that
+holds a picker per provider, a switch per toggle, a button per action and a reference panel of forty
+commands has stopped being a header and become the top of the reading column. The reading is what the
+page is for; everything else is furniture.
+
+**What moved, and what stayed.** The header's line is now the conversation's name, the jobs chips, and
+one `settings` button. Behind the button: the two pickers, the five switches, the run's own action
+buttons, its `cwd`/id/creation line, and the command list. The chips stayed because they are *status* —
+"2 running" is what the header is for — and the name stayed because it is the one thing that says whose
+conversation this is. The line between the two is not "important versus unimportant": it is **state you
+are watching** versus **state you are changing**, and only the second half belongs behind a door.
+
+**Panes, not a pile.** The dialog has a rail with two sections — `run` and `commands` — and one is shown
+at a time. Two, rather than one long scroll, because the two kinds of thing behind the door are genuinely
+different: what this run *is* (endpoint, switches, actions, its own facts) and what this run *takes*
+(the frame's commands, with their forms and their two-press destructive rows). A section name is the
+page's own word for a place it put things, like a group heading; nothing inside a pane is named by the
+page, so §8's rule still holds exactly as it did.
+
+**`hidden`, not `<dialog>`/`showModal`.** §10 already recorded why the page has no `<dialog>`: the stub
+DOM the Node harness runs cannot express `showModal`, and a control whose behaviour is only checkable in
+a browser is a control most of whose behaviour goes unchecked. The dialog is a `hidden`-toggled div with
+`role="dialog" aria-modal="true"` and a sibling mask, so the *three* doors a modal needs — its own close
+button, a press on the mask, `Escape` — are three ordinary handlers that the Node harness can call and
+the browser harness can press.
+
+**Focus is the whole difference between a modal and a panel that happens to be on screen.** Opening moves
+the keyboard to the close button, and closing puts it back on the door it came from. Neither is visible
+in the page's own nodes, which is why the Node stub grew a `focus()` that records where the keyboard
+went: an assertion that a dialog "opened" without one would pass for a div that merely became visible.
+
+**One `Escape`, and an order.** Before this, `Escape` was two anonymous listeners on the document, one
+for the preview and one for the jobs list, and `docs/features.md` recorded the consequence as a feature:
+one press closed both. With a modal in the tree that is no longer an honest answer — a dialog over the
+page is the thing being used, so a press must close it and *nothing else* — and the two listeners became
+one function, `dismissTopmost`, ordered settings → preview → jobs list. The ordering is the design; the
+fact that it is one function is what makes "which one does this close?" a question with a readable
+answer.
+
+**The page's controls got a measurement they did not have.** The old claim was that the reading
+column's geometry was right with the reference panel open and shut. The new one is stronger and is the
+reason the dialog is an overlay: with the dialog open, the transcript, the pane and the composer have
+**identical** rectangles to the pixel, and the point at the centre of the send button belongs to the
+mask — an overlay that moved the page would be the very defect §11 found in the status line, and one
+that did *not* cover the page would let a stray press reach a control behind it. Both halves are asserted
+in a real browser.
+
+**What this cost, and where.** One `hidden` id-aware stub change: the Node harness now reads the
+document's own `hidden` attributes at load, because a stub that starts every node visible cannot tell a
+dialog that ships closed from one that ships open — and every overlay on this page (the sidebar, the
+jobs panel, the preview, the dialog, the mask) ships closed. Three policy tests that grepped the old
+header markup were retargeted at the panes they now live in, and one of them (`the_command_panel...`)
+gained a *better* needle: the pane, rather than a window wide enough to span two siblings.
+
+| Claim | Where it was measured | What came back |
+|---|---|---|
+| The header keeps a door and nothing else | `tests/web_view.rs::the_runs_controls_live_in_a_dialog_and_the_header_keeps_one_door` | the header's own bytes carry the name, the jobs panel and the door; the pickers, switches, actions, `meta` and command list are asserted **absent** from it and **present** after the dialog opens |
+| It is a modal, and everything that changes state is inside it | the same test | `role="dialog"`, `aria-modal="true"`, a label, and the four controls asserted to be past the dialog's own offset in the file |
+| Three doors, and one Escape order | the same test | the close button, the mask and `dismissTopmost` are all wired, and the modal is asked about *before* the preview in that function |
+| One section at a time | the same test | the rail's list is `SETTINGS_PANES` and `showSettingsPane` shuts the others; a section the rail does not offer changes nothing |
+| The dialog opens and closes with the keyboard | `scripts/web-view-test.js` | shut on load, `openSettings` unhides it with the mask and focuses `close`, `closeSettings` refocuses the door |
+| One `Escape` puts away the thing in front | `scripts/web-view-test.js` | with the dialog and the panel both open, the first press closes the dialog and leaves the panel; the second closes the panel; with nothing open it does nothing |
+| The controls are really behind the door, and the page is untouched | `scripts/browser-controls-test.js` against a live run | the door ships hidden then visible, the dialog opens with the mask and the focus, `#controls` is asserted to be *inside* it, one section shows at a time — and the geometry of the page behind is identical to the pixel |
+
+**Not built, and named where it is.** The `/` trigger menu §19 plans is still a plan: the command list
+lives in the dialog, and the composer has no palette. §19's table is the design that has not moved, and
+the `form` rows are already in the right place for it — a secret typed into a *dialog* is not typed into
+the transcript, which is the property that decision was made for.

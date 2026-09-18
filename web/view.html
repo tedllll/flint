@@ -123,6 +123,10 @@
      than hidden -- it still says what is in force, which is the half that matters. */
   .controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 5px; }
   .controls[hidden] { display: none; }
+  /* A labelled picker: the word first, so a pane of settings reads down its left edge rather than
+     making a person guess which of two selects is the model. */
+  .controls .pick { display: inline-flex; align-items: baseline; gap: 6px; }
+  .controls .pick span { color: var(--dim); font-size: 12.5px; }
   .controls select {
     font: inherit; font-size: 12.5px; color: var(--fg); background: var(--panel);
     border: 1px solid var(--line); border-radius: 5px; padding: 2px 6px; max-width: 26ch;
@@ -130,7 +134,7 @@
   .controls select:hover:enabled { border-color: var(--user); }
   .controls select:disabled { color: var(--dim); cursor: default; }
   /* An action: no value to choose, just the command's own line to send. Styled with the selects so
-     the header reads as one row of controls rather than two kinds of thing. */
+     a pane of settings reads as one row of controls rather than two kinds of thing. */
   .controls button {
     font: inherit; font-size: 12.5px; color: var(--fg); background: var(--panel);
     border: 1px solid var(--line); border-radius: 5px; padding: 2px 8px; cursor: pointer;
@@ -235,6 +239,53 @@
   .panel .reading { white-space: pre-wrap; margin: 4px 0 0; }
   .meta { color: var(--dim); font-size: 12.5px; word-break: break-all; }
   .meta span { margin-right: 14px; white-space: nowrap; }
+  /* The settings dialog. Fixed and centred over the page, with a mask behind it, and `hidden` is what
+     toggles it -- not `<dialog>`/`showModal`, for the reason §10 already records: the stub DOM the
+     Node harness runs has neither, and a control whose behaviour can only be checked in a browser is
+     a control most of its behaviour is not checked on. The mask is a sibling rather than a `::before`
+     so a press on it can be a press on an element. */
+  .mask {
+    position: fixed; inset: 0; z-index: 30; background: rgba(0, 0, 0, .45);
+    backdrop-filter: blur(2px);
+  }
+  .mask[hidden] { display: none; }
+  .settings {
+    position: fixed; z-index: 31; top: 8vh; left: 50%; transform: translateX(-50%);
+    width: min(760px, 92vw); max-height: 84vh; display: flex; flex-direction: column;
+    background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 10px;
+    box-shadow: 0 18px 50px rgba(0, 0, 0, .5); overflow: hidden;
+  }
+  .settings[hidden] { display: none; }
+  .settings-head {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+    padding: 10px 14px; border-bottom: 1px solid var(--line);
+  }
+  .settings-head span { color: var(--dim); font-size: 12.5px; }
+  .settings-head button {
+    font: inherit; font-size: 12.5px; color: var(--dim); background: none; border: 0; padding: 0;
+    cursor: pointer;
+  }
+  .settings-head button:hover { color: var(--user); }
+  /* Two columns: the sections down the left, the one that is open on the right. `minmax(0, 1fr)` for
+     the reading column's own reason -- a long path in a settings row must not widen the dialog. */
+  .settings-body { display: grid; grid-template-columns: 132px minmax(0, 1fr); min-height: 0; }
+  .settings-nav { display: flex; flex-direction: column; gap: 2px; padding: 10px 8px; border-right: 1px solid var(--line); }
+  .settings-nav button {
+    font: inherit; font-size: 12.5px; text-align: left; color: var(--dim); background: none;
+    border: 0; border-radius: 5px; padding: 4px 8px; cursor: pointer;
+  }
+  .settings-nav button:hover { color: var(--fg); }
+  /* The open section, marked by weight and colour rather than by a box: the rail is a list of names,
+     and the one in force is the one in full ink. `aria-current` carries the same fact to a reader. */
+  .settings-nav button[aria-current="true"] { color: var(--fg); background: rgba(255, 255, 255, .06); font-weight: 600; }
+  .settings-panes { padding: 12px 14px; overflow: auto; min-height: 0; }
+  .pane[hidden] { display: none; }
+  .pane .meta { margin-top: 10px; }
+  /* The commands pane holds what the header's `commands` panel used to, with the same bound: a list
+     that grows without bound must never push the dialog's own controls off the screen. The measurement
+     behind that rule is on `.panel[open] .body`; this is the same list in a different host, so it gets
+     the same `max-height` rather than a new one. */
+  #commands .body { margin: 0; max-height: 62vh; overflow-y: auto; }
   /* Two columns: the conversations on the left, this one on the right. A grid rather than
      floats or flex, because the sidebar has to be a fixed width and the transcript has to be
      the rest -- and `minmax(0, 1fr)` is what stops a long unbroken line in the transcript from
@@ -566,29 +617,60 @@
           <summary id="jobs-summary">jobs</summary>
           <div class="body" id="job-list"></div>
         </details>
+        <!-- The one control the header keeps, and it is a door rather than a setting: everything that
+             changes state -- the endpoint, the switches, the run's own one-press actions and the
+             commands that take an argument -- lives behind it, in the dialog below. The header says
+             *whose* conversation this is and *what work is running*, and nothing else; §19 of
+             `docs/web-mode.md` is the reasoning, and the shape is DSH's: a settings seat, not a row
+             of raw controls taking the reading column's width. -->
+        <button id="settings-open" type="button" aria-haspopup="dialog" title="this run's settings" hidden>settings</button>
       </div>
-      <!-- The run's configuration, as the controls that change it. Drawn from the `state` frame,
-           which is the only read channel the page has: it may not read `config.toml` itself --
-           a second reader of the same state can disagree with the process, and the file says one
-           thing while a run does another whenever `--readonly` or `/readonly` is involved. -->
-      <div class="controls" id="controls" hidden>
-        <select id="pick-provider" title="the provider this run is using"></select>
-        <select id="pick-model" title="the model this run is using"></select>
-        <!-- Where the switches go, drawn from the frame: see `showToggles`. -->
-        <span id="toggles"></span>
-        <!-- Where the actions go -- one button each, no argument to ask for: see `showActions`. -->
-        <span id="actions"></span>
-      </div>
-      <!-- The commands the run offers, drawn from the frame as well: see `showCommands`. A panel
-           rather than a button each, because most of them are reports -- the page shows the listing
-           instead of sending `/sessions` and printing it into the terminal, where nobody asked for
-           it. Collapsed until somebody opens it, since it is a reference and not the conversation.
+      <!-- The settings dialog: a centred overlay with a mask rather than a row in the header.
+           `role="dialog"`/`aria-modal` because that is what it is -- while it is open the page behind
+           it is not the thing being used -- and it is closed by three doors (its own button, the mask,
+           Escape) because a modal with one way out is a trap.
       -->
-      <details class="panel" id="commands" hidden>
-        <summary>commands</summary>
-        <div class="body" id="command-list"></div>
-      </details>
-      <div class="meta" id="meta"></div>
+      <div class="mask" id="settings-mask" hidden></div>
+      <div class="settings" id="settings" role="dialog" aria-modal="true" aria-label="settings" hidden>
+        <div class="settings-head">
+          <span>settings</span>
+          <button id="settings-close" type="button" title="close (Esc)">close</button>
+        </div>
+        <div class="settings-body">
+          <nav class="settings-nav" id="settings-nav" aria-label="settings sections"></nav>
+          <div class="settings-panes">
+            <section class="pane" id="pane-run">
+              <!-- The controls as they were, in a pane instead of the header. The two selects and the
+                   switches are drawn from the `state` frame, which is the only read channel the page
+                   has: it may not read `config.toml` itself -- a second reader of the same state can
+                   disagree with the process, and the file says one thing while a run does another
+                   whenever `--readonly` or `/readonly` is involved. -->
+              <div class="controls" id="controls" hidden>
+                <label class="pick"><span>provider</span>
+                  <select id="pick-provider" title="the provider this run is using"></select>
+                </label>
+                <label class="pick"><span>model</span>
+                  <select id="pick-model" title="the model this run is using"></select>
+                </label>
+                <!-- Where the switches go, drawn from the frame: see `showToggles`. -->
+                <span id="toggles"></span>
+                <!-- Where the actions go -- one button each, no argument to ask for: see `showActions`. -->
+                <span id="actions"></span>
+              </div>
+              <div class="meta" id="meta"></div>
+            </section>
+            <section class="pane" id="pane-commands" hidden>
+              <!-- The commands the run offers, drawn from the frame as well: see `showCommands`. A list
+                   rather than a button each, because most of them are reports -- the page shows the
+                   listing instead of sending `/sessions` and printing it into the terminal, where
+                   nobody asked for it. -->
+              <div class="panel" id="commands" hidden>
+                <div class="body" id="command-list"></div>
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
     </header>
 
 <div class="drop" id="drop">
@@ -1442,7 +1524,7 @@ const COMMAND_GROUPS = [
 /// `values` never reaches here either -- it is a control, and this entry is for the one selector whose
 /// list lives somewhere else on the page (`/resume`'s, which is the sidebar).
 const COMMAND_HOMES = {
-  button: "a button in the header",
+  button: "a button in settings",
   selector: "a conversation on the left",
   form: "typed in the terminal -- it asks questions",
 };
@@ -1664,7 +1746,7 @@ function showCommands(doc) {
 /// and its answer belongs in the transcript; `/report` is a reader asking, and its answer comes back
 /// on the feed marked as a panel's.
 ///
-/// A refusal puts the panel back to the list and says so, the way a refused switch puts the header
+/// A refusal puts the panel back to the list and says so, the way a refused switch puts the controls
 /// back to what is in force: a panel left saying "reading..." for an answer that is not coming is
 /// the one way this could look like it worked.
 async function askReport(doc, input) {
@@ -1693,7 +1775,7 @@ async function askReport(doc, input) {
 ///
 /// The same rule as the switches -- the page sends the row's own `send` string, put together by the
 /// process, so there is no command name in this file to go stale -- and the same courtesy: a press
-/// that is refused puts the header back to what is in force, because a control that quietly did
+/// that is refused puts the controls back to what is in force, because a control that quietly did
 /// nothing is worse than one that says it could not. The answer comes back on the `command` line,
 /// into the transcript, which is where an action's one-line report belongs.
 ///
@@ -1719,7 +1801,7 @@ function showActions(doc) {
   }
 }
 
-/// Draw the header's controls from `doc.state`, or hide them when there is no state to draw.
+/// Draw the run's controls from `doc.state`, or hide them when there is no state to draw.
 ///
 /// Separate from applying a frame so that a refused send can put the controls back to what is in
 /// force without inventing a frame: `applyState` stores what the process said, and this is the
@@ -1729,6 +1811,13 @@ function showState(doc) {
   if (!controls) return;
   const state = doc.state;
   controls.hidden = !state;
+  // The door goes with what is behind it: a page opened from a dropped file has no run and therefore
+  // no settings, and a settings button that opens an empty dialog is a promise this page cannot keep.
+  const door = document.getElementById("settings-open");
+  if (door) door.hidden = !state;
+  // Closing a dialog whose run has gone away, because the dialog is now empty: the frame says the
+  // process has no state, and a modal over a page with nothing in it is worse than no modal.
+  if (!state && settingsOpen()) closeSettings();
   // Before the early return: a state that has gone away has to take its switches, its buttons and
   // its command panel with it, and leaving them behind would leave controls showing values nothing
   // reports any more.
@@ -1744,6 +1833,119 @@ function showState(doc) {
   const current = named.find((p) => p.name === state.provider) || {};
   fillSelect(document.getElementById("pick-provider"), named.map((p) => p.name), state.provider);
   fillSelect(document.getElementById("pick-model"), current.models || [], state.model);
+}
+
+/// The sections of the settings dialog, in the order they are offered.
+///
+/// This page's own list, and the one place it is allowed to name its own furniture: a *section* is a
+/// place this page put things, like a group heading, not a command -- what is inside each one still
+/// comes from the frame. Two, because there are two kinds of thing behind the door: the run's state
+/// (the endpoint, the switches, the one-press actions) and the commands that take an argument.
+const SETTINGS_PANES = [
+  ["run", "run"],
+  ["commands", "commands"],
+];
+
+/// Which section is open. The page's own state, like the preview's path: nothing outside reads it.
+let settingsPane = "run";
+
+function settingsOpen() {
+  const dialog = document.getElementById("settings");
+  return !!dialog && dialog.hidden === false;
+}
+
+/// The nav rail, drawn once from `SETTINGS_PANES`.
+///
+/// Rebuilt only when the dialog opens, which is the one moment the order could have changed: a rail
+/// redrawn on every state frame would take the focus off the section somebody is reading, and a
+/// settings rail does not depend on the frame at all.
+function showSettingsNav() {
+  const nav = document.getElementById("settings-nav");
+  if (!nav) return;
+  while (nav.firstChild) nav.removeChild(nav.firstChild);
+  for (const [name, label] of SETTINGS_PANES) {
+    const button = el("button", "section", label);
+    button.type = "button";
+    button.setAttribute("aria-current", name === settingsPane ? "true" : "false");
+    button.addEventListener("click", () => showSettingsPane(name));
+    nav.appendChild(button);
+  }
+}
+
+/// Open one section: the pane that matches it is shown and the others are not.
+///
+/// One at a time on purpose -- the alternative is a scrolling column of every setting a run has, which
+/// is the shape this dialog replaced. A name the rail does not offer leaves the dialog as it is,
+/// rather than showing nothing at all.
+function showSettingsPane(name) {
+  if (!SETTINGS_PANES.some(([known]) => known === name)) return;
+  settingsPane = name;
+  for (const [known] of SETTINGS_PANES) {
+    const pane = document.getElementById("pane-" + known);
+    if (pane) pane.hidden = known !== name;
+  }
+  const nav = document.getElementById("settings-nav");
+  const buttons = nav ? Array.from(nav.children || []) : [];
+  buttons.forEach((button, at) => {
+    const known = SETTINGS_PANES[at] ? SETTINGS_PANES[at][0] : "";
+    if (button.setAttribute) button.setAttribute("aria-current", known === name ? "true" : "false");
+  });
+}
+
+/// Open the dialog, which is one thing: the mask, the dialog, and the focus.
+///
+/// **Focus moves to the close button**, and that is the whole reason this is a function rather than
+/// two `hidden = false` lines: a modal that opens with the focus still in the transcript is a modal
+/// whose first keystroke goes to the page underneath it. `role="dialog"`/`aria-modal` are on the
+/// element itself; what a browser does with them plus a focused control is a dialog a keyboard can
+/// actually leave.
+function openSettings() {
+  const dialog = document.getElementById("settings");
+  const mask = document.getElementById("settings-mask");
+  if (!dialog) return;
+  showSettingsNav();
+  showSettingsPane(settingsPane);
+  dialog.hidden = false;
+  if (mask) mask.hidden = false;
+  const close = document.getElementById("settings-close");
+  if (close && typeof close.focus === "function") close.focus();
+}
+
+/// Close it, and put the focus back where it came from.
+///
+/// The focus going back to the door is what makes this a dialog rather than a disappearing panel: a
+/// keyboard that opens settings, closes it and then has to hunt for its place is a keyboard that has
+/// been moved twice.
+function closeSettings() {
+  const dialog = document.getElementById("settings");
+  const mask = document.getElementById("settings-mask");
+  if (dialog) dialog.hidden = true;
+  if (mask) mask.hidden = true;
+  const door = document.getElementById("settings-open");
+  if (door && typeof door.focus === "function") door.focus();
+}
+
+/// One `Escape`, and what it puts away.
+///
+/// The topmost thing first: the settings dialog is over the preview panel, so while it is open
+/// `Escape` closes it and leaves the panel alone -- one press for the thing in front of you. Written
+/// as one function rather than two listeners so that "which one does Escape close?" has an answer
+/// that can be read, and checked, in one place.
+function dismissTopmost() {
+  if (settingsOpen()) {
+    closeSettings();
+    return true;
+  }
+  if (preview) {
+    closePreview();
+    return true;
+  }
+  const jobs = document.getElementById("jobs");
+  if (jobs && jobs.open) {
+    jobs.open = false;
+    return true;
+  }
+  return false;
 }
 
 /// The run's configuration, as the frame named `state` describes it.
@@ -3414,21 +3616,31 @@ if (typeof document !== "undefined" && document.getElementById) {
   document.getElementById("preview-open").addEventListener("click", () => openOutside());
   const pictureButton = document.getElementById("preview-image-button");
   if (pictureButton) pictureButton.addEventListener("click", () => openOutside());
+
+  // The settings dialog's three doors, and the one Escape press that serves all three overlays.
+  //
+  // The listeners that used to sit here were two `keydown` handlers, one for the preview and one for
+  // the jobs list, and they both ran on the same press -- `docs/features.md` recorded that as a
+  // feature ("one `Escape` press also closes the jobs list when both are open"). With a *modal* that
+  // is no longer an honest answer: a dialog over the page is the thing being used, so Escape has to
+  // close it and nothing else. So there is one handler now, and `dismissTopmost` is the order.
+  const settingsDoor = document.getElementById("settings-open");
+  if (settingsDoor) settingsDoor.addEventListener("click", () => openSettings());
+  const settingsClose = document.getElementById("settings-close");
+  if (settingsClose) settingsClose.addEventListener("click", () => closeSettings());
+  const settingsMask = document.getElementById("settings-mask");
+  if (settingsMask) settingsMask.addEventListener("click", () => closeSettings());
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && preview) closePreview();
+    if (e.key === "Escape") dismissTopmost();
   });
 
   // The jobs panel, which is news rather than an answer: opening it repaints the running rows from
   // the clock, because the durations were last written when the list was read and a panel opened a
-  // minute later would show a minute-old number. Escape closes it for the same reason it closes the
-  // preview: one key means "put that away", wherever the pointer happens to be.
+  // minute later would show a minute-old number.
   const jobsPanel = document.getElementById("jobs");
   if (jobsPanel) {
     jobsPanel.addEventListener("toggle", () => {
       if (jobsPanel.open) tickJobs();
-    });
-    document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && jobsPanel.open) jobsPanel.open = false;
     });
   }
 
@@ -3661,6 +3873,15 @@ if (typeof module !== "undefined" && module.exports) {
     // browser, which is the only way the readonly case is checked without turning a live run's guard
     // on in the middle of a turn.
     openBody, readonlyOn,
+    // Opening a path is exported for one reason: the overlays now overlap, and "which one does Escape
+    // close" is only a question once two of them can be open at once. The panel's own drawing is
+    // checked in a browser; here it is a way to have one open.
+    openPreview,
+    // The settings dialog: the sections it offers, which one is open, and the one order Escape
+    // follows. Exported because all three are decisions rather than drawing -- a rail is a list, a
+    // section is a name, and "what does Escape close" is a question the Node harness can ask without
+    // a browser and without a modal on screen.
+    SETTINGS_PANES, showSettingsPane, settingsOpen, openSettings, closeSettings, dismissTopmost,
     jobsFrom, durationLabel, jobWhen, jobIsLive, jobIsStoppable, paintJobs, titleWords,
     // The position this tab was reading from: exported so the Node harness can check the three cases
     // -- a gap, a different conversation, and a position past the end -- against the real functions

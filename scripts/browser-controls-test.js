@@ -303,12 +303,19 @@ async function attach(target) {
   /// control that something else covers is reported as covered rather than as "the click did
   /// nothing". That distinction is the whole reason a real browser is worth the trouble -- a
   /// covering element is invisible in the source and in a stub DOM.
-  const click = async (selector) => {
+  /// `at` is an offset from the element's own top-left corner, for the one thing that has to be
+  /// pressed *off* its centre: the settings mask is a full-screen backdrop with the dialog over the
+  /// middle of it, so the only press that reaches the mask is one near an edge. Without it this
+  /// helper could only be satisfied by calling `.click()` on the element, which is not a pointer and
+  /// never asks what is on top.
+  const click = async (selector, at) => {
+    const x0 = at ? `r.left + ${at[0]}` : "r.left + r.width / 2";
+    const y0 = at ? `r.top + ${at[1]}` : "r.top + r.height / 2";
     const aimed = await js(
       `(() => { const el = document.querySelector(${JSON.stringify(selector)});
         if (!el) return null; el.scrollIntoView({ block: "center" });
         const r = el.getBoundingClientRect();
-        const x = r.left + r.width / 2, y = r.top + r.height / 2;
+        const x = ${x0}, y = ${y0};
         const top = document.elementFromPoint(x, y);
         const name = (n) => n ? n.tagName.toLowerCase() + (n.id ? "#" + n.id : "") +
           (n.className ? "." + String(n.className).split(" ").join(".") : "") : "nothing";
@@ -317,7 +324,11 @@ async function attach(target) {
       })()`
     );
     if (!aimed || typeof aimed !== "object" || typeof aimed.x !== "number") {
-      throw new Error(`no element to click: ${selector}`);
+      // The answer is printed and not just the question: this helper asks the page for a box, and the
+      // page answering `null` (no such element), `undefined` (the script threw before the box) and a
+      // box at 0,0 (the element is inside something hidden) are three different defects that read
+      // identically as "the click did nothing".
+      throw new Error(`no element to click: ${selector} -- the page answered ${JSON.stringify(aimed)}`);
     }
     if (!aimed.ours) {
       throw new Error(`${selector} is covered by ${aimed.onTopOf} at ${aimed.x},${aimed.y}`);
@@ -533,6 +544,83 @@ async function main() {
     await page.waitFor(`document.querySelectorAll("#toggles select").length > 0`, "the switches");
     await page.waitFor(`document.querySelectorAll("#command-list .row").length > 0`, "the command list");
 
+    // ---- the settings dialog -----------------------------------------------
+    // Everything that changes the run is behind one door in the header, so this file opens it the way
+    // a person does -- a press on the door, a press on the rail, a press on `close` -- and every claim
+    // below is made *inside* it. That is the claim this whole section exists for: a header that had
+    // kept the controls would pass each of those claims by accident, which is why the door is checked
+    // first, and why `#controls` is asserted to be inside the dialog rather than merely present.
+    const openSettings = async (section) => {
+      if (await page.js(`document.getElementById("settings").hidden`)) {
+        await page.click("#settings-open");
+        await page.waitFor(`document.getElementById("settings").hidden === false`, "the settings dialog", 20);
+      }
+      if (section) {
+        // One id per section rather than one shared tag: the rail is drawn once and stays, so a
+        // shared id would be left behind on the button pressed last time and `querySelector` would
+        // find *that* one in document order -- which measured as "the commands pane never opened"
+        // and a press landing on a hidden field at 0,0.
+        const id = "harness-section-" + section;
+        const tagged = await page.js(
+          `(() => { const b = Array.from(document.querySelectorAll("#settings-nav button"))
+                .find((x) => x.textContent.trim() === ${JSON.stringify(section)});
+              if (!b) return false; b.id = ${JSON.stringify(id)}; return true; })()`
+        );
+        if (tagged) await page.click("#" + id);
+        await sleep(150);
+      }
+    };
+    const closeSettings = async () => {
+      if ((await page.js(`document.getElementById("settings").hidden`)) === false) {
+        await page.click("#settings-close");
+        await page.waitFor(`document.getElementById("settings").hidden === true`, "the dialog shut", 20);
+      }
+    };
+
+    const door = await page.js(
+      `(() => ({ shown: !document.getElementById("settings-open").hidden,
+                 dialog: document.getElementById("settings").hidden,
+                 mask: document.getElementById("settings-mask").hidden,
+                 header: !!document.querySelector(".head-line #settings-open"),
+                 raw: !!document.querySelector(".head-line select, .head-line #toggles") }))()`
+    );
+    check(
+      "the header offers one door, and what is behind it starts shut",
+      !!door && door.shown === true && door.dialog === true && door.mask === true && door.header === true && door.raw === false,
+      `header: ${JSON.stringify(door)}`
+    );
+
+    await page.click("#settings-open");
+    const opened = await page
+      .waitFor(
+        `document.getElementById("settings").hidden === false
+           ? { mask: document.getElementById("settings-mask").hidden === false,
+               focused: document.activeElement ? document.activeElement.id : "",
+               run: document.getElementById("pane-run").hidden === false }
+           : null`,
+        "the settings dialog",
+        20
+      )
+      .catch(() => null);
+    check(
+      "one press opens it, with the mask and the keyboard inside it",
+      !!opened && opened.mask === true && opened.run === true && opened.focused === "settings-close",
+      `dialog: ${JSON.stringify(opened)}`
+    );
+
+    const inside = await page.js(
+      `(() => { const dialog = document.getElementById("settings");
+         const box = document.getElementById("controls");
+         const list = document.getElementById("command-list");
+         return { controls: dialog.contains(box), list: dialog.contains(list),
+                  drawn: box.hidden === false }; })()`
+    );
+    check(
+      "the run's controls are inside the dialog, and the frame has drawn them",
+      !!inside && inside.controls === true && inside.list === true && inside.drawn === true,
+      `controls: ${JSON.stringify(inside)}`
+    );
+
     // ---- the switches ------------------------------------------------------
     const names = await page.js(
       `Array.from(document.querySelectorAll("#toggles .toggle-name")).map((n) => n.textContent)`
@@ -567,28 +655,51 @@ async function main() {
         JSON.stringify(flint.text().slice(started).slice(0, 200))
     );
 
-    // ---- the command panel -------------------------------------------------
-    await page.click("#commands summary");
-    const opened = await page.js(`document.getElementById("commands").open`);
-    const listed = await page.js(`document.getElementById("command-list").textContent || ""`);
-    check("the panel opens with a real click", opened === true, `open: ${JSON.stringify(opened)}`);
-    // Named rows from four of the five classes, because "the list is there" is not the claim: the
-    // claim is that it is the *run's* list, drawn from the frame -- and a panel with rows in it
-    // that had lost a class would still look like a list. Read as the panel's text rather than as
-    // `code` elements, because a form row's own line is its submit button, not a label.
-    const wanted = ["/config", "/provider key", "/delete <n|id>", "/name", "/sessions"];
-    check(
-      "the panel lists the run's commands, across the classes",
-      wanted.every((line) => String(listed).includes(line)),
-      `missing: ${JSON.stringify(wanted.filter((line) => !String(listed).includes(line)))}`
-    );
+    // ---- the run's own actions ---------------------------------------------
+    // An action is a button, not a row in the list: it takes no argument, and the list is a
+    // reference. The two are the same `send` string either way, which is the point -- and this one
+    // is in the *run* section, which is where the claim has to be made before the rail moves away
+    // from it (a hidden button can be found but not pressed).
     const actions = await page.js(
       `Array.from(document.querySelectorAll("#actions button")).map((b) => b.textContent.trim())`
     );
     check(
-      "the run's actions are buttons in the header",
+      "the run's actions are buttons in its settings",
       Array.isArray(actions) && actions.includes("/reload") && actions.includes("/new"),
       `actions: ${JSON.stringify(actions)}`
+    );
+
+    // ---- the commands, in their own section of the dialog ------------------
+    // The rail is how a person reaches them, and one section at a time is the whole point of the
+    // split: the claim is that pressing `commands` shows the run's list *and* shuts the run's
+    // settings, which a page that merely stacked everything in one scrolling column would fail.
+    await openSettings("commands");
+    const section = await page
+      .waitFor(
+        `document.getElementById("pane-commands").hidden === false
+           ? { run: document.getElementById("pane-run").hidden,
+               marked: document.querySelectorAll("#settings-nav button[aria-current='true']").length,
+               rail: document.querySelectorAll("#settings-nav button").length }
+           : null`,
+        "the commands section",
+        20
+      )
+      .catch(() => null);
+    check(
+      "the rail shows one section at a time, and says which",
+      !!section && section.run === true && section.marked === 1 && section.rail === 2,
+      `sections: ${JSON.stringify(section)}`
+    );
+    const listed = await page.js(`document.getElementById("command-list").textContent || ""`);
+    // Named rows from four of the five classes, because "the list is there" is not the claim: the
+    // claim is that it is the *run's* list, drawn from the frame -- and a section with rows in it
+    // that had lost a class would still look like a list. Read as the section's text rather than as
+    // `code` elements, because a form row's own line is its submit button, not a label.
+    const wanted = ["/config", "/provider key", "/delete <n|id>", "/name", "/sessions"];
+    check(
+      "the commands section lists the run's commands, across the classes",
+      wanted.every((line) => String(listed).includes(line)),
+      `missing: ${JSON.stringify(wanted.filter((line) => !String(listed).includes(line)))}`
     );
 
     // A report is read *here*: its answer belongs in the panel, and the terminal did not ask.
@@ -619,8 +730,11 @@ async function main() {
     await sleep(300);
 
     // ---- an action button --------------------------------------------------
-    // An action is a button in the header, not a row in the panel: it takes no argument, and the
-    // panel is a reference. The two are the same `send` string either way, which is the point.
+    // An action is a button, not a row in the list: it takes no argument, and the list is a
+    // reference. The two are the same `send` string either way, which is the point. It sits in the
+    // *run* section, so the rail goes back there for this press -- a hidden button can be found by a
+    // selector and would then swallow the click, which is a failure this harness has already had once.
+    await openSettings("run");
     const beforeAction = before();
     await page.js(`(() => { const b = Array.from(document.querySelectorAll("#actions button"))
       .find((b) => b.textContent.trim() === "/reload");
@@ -638,6 +752,9 @@ async function main() {
       reloaded.includes("reloaded"),
       `terminal gained: ${JSON.stringify(reloaded.slice(0, 200))}`
     );
+    // The run answered, so a fresh state frame has been drawn; the rail goes back to the commands for
+    // everything below, which is read off the list.
+    await openSettings("commands");
 
     // ---- the masked credential field --------------------------------------
     const secret = "sk-not-a-real-key-0000";
@@ -707,6 +824,22 @@ async function main() {
       "and backing out deletes nothing",
       JSON.stringify(sessionsBefore) === JSON.stringify(sessionsAfter),
       `${JSON.stringify(sessionsBefore)} -> ${JSON.stringify(sessionsAfter)}`
+    );
+
+    // Shut again, and by the *second* door: the mask, which is the one a person who has stopped
+    // reading settings uses. Everything below is about the page itself -- the sidebar, the hands, the
+    // composer, the panel -- and a modal over them would make every press below land on the mask.
+    await page.click("#settings-mask", [4, 4]);
+    await page.waitFor(`document.getElementById("settings").hidden === true`, "the dialog shut", 20);
+    const shut = await page.js(
+      `({ dialog: document.getElementById("settings").hidden,
+          mask: document.getElementById("settings-mask").hidden,
+          focus: document.activeElement ? document.activeElement.id : "" })`
+    );
+    check(
+      "a press outside the dialog shuts it, and the keyboard goes back to the door",
+      shut.dialog === true && shut.mask === true && shut.focus === "settings-open",
+      `after the mask: ${JSON.stringify(shut)}`
     );
 
     // ---- the sidebar's own menu --------------------------------------------
@@ -889,11 +1022,14 @@ async function main() {
     );
 
     // ---- a picker, from the keyboard ---------------------------------------
-    // The header's two `<select>`s are drawn from the state frame. A native select's *open list*
-    // belongs to the operating system and no protocol can reach into it -- that is the residue §11
-    // keeps -- but the keyboard is the path a person takes through it, and it is drivable: focus,
-    // ArrowDown, and the value changes as a real input event. What matters is that the change is
-    // not merely painted: the run is told, and the model in force is the one pressed for.
+    // The two `<select>`s in the run's settings are drawn from the state frame. A native select's
+    // *open list* belongs to the operating system and no protocol can reach into it -- that is the
+    // residue §11 keeps -- but the keyboard is the path a person takes through it, and it is
+    // drivable: focus, ArrowDown, and the value changes as a real input event. What matters is that
+    // the change is not merely painted: the run is told, and the model in force is the one pressed
+    // for. The dialog is opened for it and shut after, because a picker behind a mask is a picker
+    // nobody can press -- which is the whole trade the dialog makes.
+    await openSettings("run");
     const pickerBefore = await page.js(
       `(() => { const s = document.getElementById("pick-model");
         return { value: s.value, options: Array.from(s.options).map((o) => o.value) }; })()`
@@ -920,12 +1056,19 @@ async function main() {
       `page: ${JSON.stringify(pickerBefore.value)} -> ${JSON.stringify(pickerAfter)}, ` +
         `terminal: ${JSON.stringify(switched.slice(-200))}`
     );
+    await closeSettings();
 
     // ---- the composer, and whether it is reachable -------------------------
     // The reading, the composer and the hint share the pane's grid rows, so a row whose content
     // outgrows its track paints over the next one. That is the shape of the defect this file's
     // §11 found once already, in the status line, and the way to see it again is to ask what is at
     // the send button's own point rather than to look at the layout and reason about it.
+    //
+    // The dialog is the *other* half of the same question, and it is the reason it is an overlay
+    // rather than a row in the header: opening it must not move the page behind it by a pixel, and
+    // while it is open it must cover the page -- that is what a modal is. Both are measured, because
+    // a dialog that pushed the reading down would be the very defect this file exists for, and a
+    // dialog that did *not* cover the page would let a stray press reach a control behind it.
     const geometryAt = () =>
       page.js(
         `(() => { const box = (id) => { const r = document.getElementById(id).getBoundingClientRect();
@@ -936,22 +1079,34 @@ async function main() {
                    pane: box("transcript").length && (() => { const r = document.querySelector(".pane").getBoundingClientRect();
                      return [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)]; })(),
                    reading: box("transcript"), composer: box("composer"), send: box("send"),
-                   panelOpen: document.getElementById("commands").open,
+                   dialog: document.getElementById("settings").hidden === false,
                    atSend: at ? at.tagName.toLowerCase() + (at.id ? "#" + at.id : "") : "nothing" }; })()`
       );
-    const openPanel = await geometryAt();
-    await page.click("#commands summary"); // close it: the panel is a reference, not the conversation
+    const beforeDialog = await geometryAt();
+    await page.click("#settings-open");
     await sleep(300);
-    const closedPanel = await geometryAt();
+    const withDialog = await geometryAt();
     check(
-      "the send button is reachable with the panel open",
-      openPanel.atSend === "button#send" || openPanel.atSend === "textarea#message",
-      `at the send button's point: ${JSON.stringify(openPanel)}`
+      "the dialog is an overlay: the page behind it does not move",
+      withDialog.dialog === true &&
+        JSON.stringify(withDialog.reading) === JSON.stringify(beforeDialog.reading) &&
+        JSON.stringify(withDialog.composer) === JSON.stringify(beforeDialog.composer) &&
+        JSON.stringify(withDialog.pane) === JSON.stringify(beforeDialog.pane),
+      `with: ${JSON.stringify(withDialog)}, without: ${JSON.stringify(beforeDialog)}`
     );
     check(
-      "and with it closed",
-      closedPanel.atSend === "button#send" || closedPanel.atSend === "textarea#message",
-      `at the send button's point: ${JSON.stringify(closedPanel)}`
+      "and it covers the page, which is what makes it modal",
+      withDialog.atSend === "div#settings-mask",
+      `at the send button's point: ${JSON.stringify(withDialog.atSend)}`
+    );
+    await page.click("#settings-mask", [4, 4]);
+    await sleep(250);
+    const closedDialog = await geometryAt();
+    check(
+      "and with it shut the send button is its own again",
+      closedDialog.dialog === false &&
+        (closedDialog.atSend === "button#send" || closedDialog.atSend === "textarea#message"),
+      `at the send button's point: ${JSON.stringify(closedDialog)}`
     );
 
     // ---- the composer, on the page rather than in a stub DOM ---------------
@@ -1447,9 +1602,10 @@ async function main() {
     // offers only jobs that are still running, the line that goes out names the pid of the job that
     // was still running, that job reads `killed` afterwards rather than `failed`, and the run says
     // what it did -- which is the only witness that a real process ended rather than a row repainted.
-    if ((await page.js(`document.getElementById("commands").open`)) !== true) {
-      await page.click("#commands summary");
-    }
+    // The stop's candidates are the pids the jobs panel is showing, and the row that sends is in the
+    // commands section of the dialog -- opened here the way a person would, since the dialog was shut
+    // after the geometry above.
+    await openSettings("commands");
     await page.waitFor(ROW("/jobs stop <pid>"), "the /jobs stop row");
     await page.click("#harness-target");
     const choice = await page
@@ -1503,20 +1659,38 @@ async function main() {
       /killed it, and it is gone/.test(said),
       `terminal gained: ${JSON.stringify(said)}`
     );
-    // Closed again, because the claim below is about the *jobs* list's own Escape and the command
-    // panel is another open thing on the page.
-    await page.click("#commands summary");
+    // Shut again, because the claim below is about the *jobs* list's own Escape: with a modal open,
+    // Escape closes the modal and nothing else (that order is checked in `scripts/web-view-test.js`).
+    await closeSettings();
 
-    // Escape, the same key as the preview's: the list is in the header and the panel is beside the
-    // reading, and one key puts away whichever is open.
+    // Escape, the same key as the preview's, and now with an *order* rather than "whichever is open".
+    // The page puts away one thing per press, front to back: the settings dialog, then the file panel,
+    // then the job list. The panel is open here -- a job's own output was just read in it -- so the
+    // first press is the panel's and the list stays open, which is the change the overlay made
+    // explicit (before it, one press closed both, because they were three listeners on one key). The
+    // dialog's place in that order is checked above, at the mask.
     await openList();
-    const listWasOpen = await page.js(`document.getElementById("jobs").open`);
+    const listWasOpen = await page.js(
+      `({ jobs: document.getElementById("jobs").open,
+          panel: document.getElementById("preview").hidden === false })`
+    );
+    await page.key("Escape", 27);
+    const afterOne = await page.js(
+      `({ jobs: document.getElementById("jobs").open,
+          panel: document.getElementById("preview").hidden === false })`
+    );
+    check(
+      "one Escape puts away what is in front, and the job list is behind the panel",
+      listWasOpen.jobs === true && listWasOpen.panel === true &&
+        afterOne.panel === false && afterOne.jobs === true,
+      `open: ${JSON.stringify(listWasOpen)} -> ${JSON.stringify(afterOne)}`
+    );
     await page.key("Escape", 27);
     const listNow = await page.js(`document.getElementById("jobs").open`);
     check(
-      "Escape closes the job list too",
-      listWasOpen === true && listNow === false,
-      `open: ${listWasOpen} -> ${listNow}`
+      "and the press that follows closes the job list",
+      listWasOpen.jobs === true && listNow === false,
+      `list open: ${listWasOpen.jobs} -> ${listNow}`
     );
 
     // ---- the addresses in the run's own words ------------------------------
