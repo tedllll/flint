@@ -6150,15 +6150,34 @@ async fn run_turn(
             // the file nowhere, and the command went on as if it had been asked. The window is
             // milliseconds wide in a real session, which is why it was found by accident and left
             // alone; polling here makes the order a fact rather than a race, whatever a fast typist or
-            // a browser does. The result is ignored on purpose: a turn that manages to finish inside
-            // this one poll has already been dealt with by the loop below, and an interrupt's own error
-            // is not news -- that is what `interrupted` means two lines further down.
-            let _ = std::future::poll_fn(|cx| {
-                let _ = std::future::Future::poll(turn.as_mut(), cx);
+            // a browser does.
+            //
+            // **And the result is kept**, which is the second half of the same fix and was missing for
+            // as long as the first half existed: a poll that returns `Ready` means the turn is *over*,
+            // and polling a finished future again is not a stall but a panic -- `` `async fn` resumed
+            // after completion``, at the async fn's own line. That is what CI saw as a `--web` run gone
+            // by exit 101. It takes a turn that finishes on its very first poll, which is rarer than it
+            // sounds (the first thing `Agent::run` awaits is the model) but is not a race when it
+            // happens: `max_steps = 0` is a number a person can write in `config.toml`, and an error
+            // returned before the first await ends the turn the same way. With the result in hand the
+            // loop below is skipped entirely, and the code after it -- which is where a finished turn
+            // is handled, queued line and all -- runs exactly as it does for any other ending.
+            // The turn's own first `poll`, and its result is kept rather than thrown away. `poll_fn`
+            // hands back what the closure's `Poll` wraps, so the finished turn is moved out through a
+            // local: `Ready` here means the turn is over, and there is a `Future` impl on `Poll` only
+            // for the outer marker.
+            let mut finished: Option<Result<()>> = None;
+            std::future::poll_fn(|cx| {
+                if let std::task::Poll::Ready(done) = std::future::Future::poll(turn.as_mut(), cx) {
+                    finished = Some(done);
+                }
                 std::task::Poll::Ready(())
             })
             .await;
-            loop {
+            if let Some(done) = finished {
+                result = Some(done);
+            }
+            while result.is_none() {
                 // Only a submitted line interrupts. `Quit` here means stdin ended
                 // (a one-shot run, or a script that closed the pipe) -- treating
                 // it as steering would abort the turn before it ever started,
@@ -7712,6 +7731,72 @@ mod tests {
             handed.line.as_deref(),
             Some("/model stub-other"),
             "the queued command was not handed back to the REPL, so it was executed as a steer"
+        );
+    }
+
+    /// A turn that is already over when the driver first polls it does not panic the driver.
+    ///
+    /// `run_turn` polls the turn once *before* it reads the channel (the ordering the test above is
+    /// about), and that poll's **result used to be thrown away**: the `select!` below then polled the
+    /// very same future, which is not a stall but a panic -- `` `async fn` resumed after completion`` --
+    /// whenever the turn was already finished. That is the crash CI saw on ubuntu: a run gone by exit
+    /// 101 with the panic attributed to `Agent::run`'s own line, in a `--web` test, with the question it
+    /// was being handed reported as a broken pipe because the process was already dead.
+    ///
+    /// `max_steps = 0` is the honest trigger rather than a mock: it is a number a person can write in
+    /// `config.toml`, and with it `Agent::run` reaches the end of its `for` loop on the first poll and
+    /// returns. Nothing is sent anywhere, so no model is needed. The claim is that the driver *reports*
+    /// such a turn instead of dying inside it.
+    #[tokio::test]
+    async fn a_turn_that_is_over_on_its_first_poll_does_not_panic() {
+        let cfg = config::Config {
+            max_steps: 0,
+            default_provider: "stub".to_string(),
+            providers: vec![config::ProviderConfig {
+                name: "stub".to_string(),
+                base_url: "http://127.0.0.1:1/v1".to_string(),
+                api_key: "test".to_string(),
+                model: "stub-model".to_string(),
+                models: vec!["stub-model".to_string()],
+                api_key_env: None,
+                start: None,
+                stop: None,
+                start_timeout_secs: 0,
+                proxy: None,
+                thinking_field: String::new(),
+            }],
+            ..config::Config::default()
+        };
+        let provider_cfg = cfg.providers[0].clone();
+
+        let term = Term::plain();
+        let printer = Printer::new(false, display::Verbosity::Off.level(), &term);
+        let provider = provider::Provider::new(provider_cfg.clone()).expect("a provider");
+        let mut agent = agent::Agent::new(&cfg, provider, false, std::env::temp_dir(), None);
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let handover = run_turn(
+            &mut agent,
+            &provider_cfg,
+            "the question",
+            &printer,
+            &mut rx,
+            true,
+            None,
+            None,
+        )
+        .await
+        .expect("a turn that ran out of steps is a finished turn, not a failure");
+        drop(tx);
+
+        assert_eq!(
+            handover.line, None,
+            "the turn answered nothing and left no line for the REPL"
+        );
+        assert!(
+            agent.ran_out_of_steps(),
+            "the run reached the end of its step budget, and the outcome has to say so rather than \
+             looking like an answer"
         );
     }
 }

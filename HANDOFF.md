@@ -32,7 +32,7 @@ reconstruct it:
 The gate as the last session left it — re-measured after the page slices at the top of
 `## What was just done`, on a tree with the untracked verification record held aside (that file and no
 other is the one thing `cargo test` disagrees with; see the paragraph after this one): `cargo test`
-**663 passing, 1 ignored** across the 14 suites (lib 368, bin 6, `agent_loop` 34, `balance` 7,
+**664 passing, 1 ignored** across the 14 suites (lib 368, bin 7, `agent_loop` 34, `balance` 7,
 `cli_output` 113, `json_output` 41, `say` 6, `search_tool` 4, `task` 17, `term_capture` 20 + 1 ignored,
 `tty_hangup` 0 and the doc-tests 0 — both empty by construction — `web_view` 37, `who` 10);
 `cargo clippy --all-targets -- -D warnings` silent; the two headless Node harnesses green
@@ -67,17 +67,19 @@ marker is not allowed to contain the marker, so it names it by code point.
 existed and was cut off.** `the_view_follows_the_conversation_through_a_switch` failed on ubuntu with the
 run gone by exit **101** — a flint panic, not an assertion — which is the class recorded below
 (*"One CI failure was seen, then a second of the same shape"*): a `--web` run ending before a test is
-finished with it, now on a third test-run and still unreproduced on this machine, with nothing in this
-session's changes anywhere near `--web`, `/resume` or `/model`. What is new is where the diagnosis went
+finished with it, now on a third test-run. **It was reproduced and fixed one session later** — see the
+paragraph below the two-flakes note: the panic is a finished `Agent::run` future being polled again by
+`run_turn`. What is new here is where the diagnosis went
 missing: the test's panic already carries the child's own stderr and transcript, and the CI step that
 turns a failure into an annotation was `head -20`, which the *other* failure on that run — a mojibake
 offender list thirteen lines long — had already spent. So the annotation stopped at the assertion line and
 the stderr never left the runner. The step now emits ten names, `grep -A 6`, and `head -80`: a cheap fix
 to a diagnostic that was written to be read and then truncated by the thing that was supposed to carry
-it out. The flake itself stays recorded rather than fixed, for the reason that paragraph gives.
+it out.
 
-**One CI failure was seen, then a second of the same shape, and neither was reproduced — so the tests
-that saw them now say more.** The push that added the two Node harnesses to CI (`fef238f`) came back with
+**One CI failure was seen, then a second of the same shape, and neither was reproduced at the time — so
+the tests that saw them now say more, and the first one has since been fixed.** The push that added the
+two Node harnesses to CI (`fef238f`) came back with
 `test (ubuntu-latest)` **red** — not at the new step, but in `tests/cli_output.rs`:
 `the_view_follows_the_conversation_through_a_switch` panicked with
 `failed to write stdin: Os { code: 32, kind: BrokenPipe }`. Every commit after it was green on the same
@@ -86,17 +88,30 @@ test: `a_background_command_is_a_job_the_page_can_watch_end`, "cannot connect to
 127.0.0.1:43443 for /jobs: Connection refused". Both are a run that is gone before the test is finished
 with it, and both messages said only the symptom.
 
-Neither flake is fixed, because neither has been reproduced and a guess at an unreproduced race is how a
-test loses the property it was holding. What is fixed is the diagnosis, which the file had already learned
-once for itself — "a run that is gone cannot answer, and saying so is worth more than the connection
-error: this is where the one unreadable failure of this test would have been read". The view-follows test
-now writes through `write_to_run`, and the jobs test reads through `get_or_say`: both carry the run's
-**status** and the two files that know (stderr and the transcript), and the jobs test no longer sends its
-stderr to `/dev/null`, which is exactly why it could not say why. The diagnostic was proved by killing a
-run and writing past the pipe, and the mutation reverted. The next ubuntu failure of either test will
-carry the reason in the check annotation; until then, "a `--web` run died mid-test on the Linux runner
-twice in one session" is recorded rather than explained, and the un-fixed class — the other `--web` tests
-that still discard stderr — is named here so the next person does not have to rediscover it.
+**One of those two flakes is now reproduced and fixed, and the fix is one line of reasoning.** The fourth
+outing of the class arrived on the push that added Markdown to the preview — a commit that touches no Rust
+at all — and this time the annotation carried the child's own panic instead of the symptom:
+``panicked at src/agent.rs:776:94: `async fn resumed after completion``. That line is `Agent::run`'s own
+signature, which is where rustc reports a future that was polled after it returned `Ready`. The only
+caller that can poll `Agent::run` twice is `run_turn`: it polls the turn **once** before reading the input
+channel (the ordering fix above), and that poll's *result was thrown away* — so if the turn was already
+over, the `select!` below polled the finished future and the process died. `max_steps = 0` reproduces it
+deterministically, because `Agent::run` then reaches the end of its `for` loop on the first poll and
+returns: the new test
+`a_turn_that_is_over_on_its_first_poll_does_not_panic` was **red with exactly CI's message and line**
+before the fix, and the fix keeps the first poll's result and skips the loop when there is nothing left to
+wait for. The window is narrow in a real run — the first thing `Agent::run` awaits is the model — which is
+why it took four sightings to catch, and it is not a race at all once it happens: a finished future polled
+again always panics. The other flake (`a_background_command_is_a_job_the_page_can_watch_end`, "Connection
+refused") is **not** fixed and is still unexplained; what is fixed is the diagnosis, which the file had
+already learned once for itself — "a run that is gone cannot answer, and saying so is worth more than the
+connection error: this is where the one unreadable failure of this test would have been read". The
+view-follows test now writes through `write_to_run`, and the jobs test reads through `get_or_say`: both
+carry the run's **status** and the two files that know (stderr and the transcript), and the jobs test no
+longer sends its stderr to `/dev/null`, which is exactly why it could not say why. The diagnostic was
+proved by killing a run and writing past the pipe, and the mutation reverted. The un-fixed class — the
+other `--web` tests that still discard stderr — is named here so the next person does not have to
+rediscover it.
 
 **And §11 item 13, asked for after this session's consolidation: an address in the page is pressable.**
 Everything the page rendered was text — a URL in a model's answer was a string to copy by hand, and a path
@@ -1772,6 +1787,7 @@ whose conversation it is and what the run is doing. Three slices, all built, all
 | The header keeps one door, and the run's controls move into a settings dialog | **built** (`39cde09`) — §22 |
 | The `/` trigger menu in the composer | **built** (`96607bf`) — §23 |
 | Markdown in the preview, behind a raw/rendered toggle | **built** — §24 |
+| The `--web` crash CI saw four times: a finished turn future polled twice | **fixed**, with the test that was red first |
 
 **The picture slice is `GET /image`, and its one rule is that the type is the bytes rather than the
 name.** The route sniffs fifteen signatures (PNG, JPEG, GIF, WebP, BMP, ICO/CUR, TIFF both byte orders,
@@ -1832,9 +1848,26 @@ page defect (a list item lost its own words when it had a nested list) before a 
 two harness traps were recorded in §24: a `<script>` and a stray **backtick** inside a page-eval string,
 each of which makes the harness read prose as code.
 
-**The gate, as of this session's head.** `cargo test` **663 passed / 0 failed / 1 ignored** (the ignored
+**And CI's four-times-seen `--web` crash was caught and fixed on the way out, because the Markdown push
+made it print its reason.** The push of the Markdown slice — which touches no Rust at all — came back red
+on `test (ubuntu-latest)` in `the_view_follows_the_conversation_through_a_switch`, and this time the
+annotation carried the child's own panic: ``panicked at src/agent.rs:776:94: `async fn resumed after
+completion``. That line is `Agent::run`'s signature, where rustc reports a future polled after it returned
+`Ready`; the only caller that can poll it twice is `run_turn`, whose once-before-the-channel poll
+**discarded its result** — so a turn that was already over left the `select!` below to poll the finished
+future and die. `max_steps = 0` (a number a person can write in `config.toml`) makes `Agent::run` return on
+its first poll, and the new bin test
+`a_turn_that_is_over_on_its_first_poll_does_not_panic` was **red with exactly CI's message and line**
+before the fix. The fix keeps the first poll's result and skips the loop when there is nothing left to
+wait for; the window is narrow in a real run (the first thing `Agent::run` awaits is the model), which is
+why it took four sightings — and it is not a race once it happens, because a finished future polled again
+always panics. This is the first of the two recorded CI flakes to be *explained* rather than merely
+tolerated; the other ("Connection refused" in the jobs test) is still open and still unexplained.
+
+**The gate, as of this session's head.** `cargo test` **664 passed / 0 failed / 1 ignored** (the ignored
 one is `tests/term_capture.rs::measured_cost_of_streaming_an_answer`, deliberately ignored; `web_view` is
-37); `cargo clippy --all-targets -- -D warnings` silent; `node scripts/term-layout-test.js` all pass;
+37 and the bin's own tests are 7 — the new one is the crash fix above); `cargo clippy --all-targets -- -D
+warnings` silent; `node scripts/term-layout-test.js` all pass;
 `node scripts/web-view-test.js` all pass; `python examples/python/test_call.py`'s checks all pass; the
 browser harness run by hand at **93/93 claims held** (up from 61: the picture slice added five, the
 settings slice eight, the `/` menu fourteen, and the Markdown slice six — it earned its keep twice on the
