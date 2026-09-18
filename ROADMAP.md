@@ -1773,6 +1773,177 @@ callbacks (a protocol to invent, against "no MCP and no subagents"), and `patter
 schema subset (a dependency and a rabbit hole — `enum` and the caller's own check are the substitute,
 and C6 is the note that the documentation has to say so).
 
+### 11. What a survey of the tree found, 2026-09-18 — **none of it started**
+
+Written because the queue above ran out. §5–§10 have all landed, the small unscheduled list below is
+empty, `## Known unfinished` opens with "No known defect is open", and the twelve items taken from the
+reading of Pi are built. A queue that has run out is not the same as nothing being left, so this section
+is what reading the tree — `src/`, `tests/`, `scripts/`, `docs/`, `HANDOFF.md`, this file — turned up
+that is worth having, cheapest-and-highest-value first. **Every item names the evidence it came from**,
+because the failure mode of a survey is a list of plausible-sounding features, and the failure mode of
+*this* repository is a feature that contradicts something it already decided. What the survey looked at
+and decided **not** to propose is at the end of the section, with the reason: a survey that only adds is
+not a survey.
+
+**Ordered, cheapest-and-highest-value first.** Two sweeps went into this: one over the documentation,
+one over `src/`, `tests/`, `scripts/` and `examples/` — and every item below was checked against the
+file it came from before it was written down, which is why three of the candidates a sweep proposed are
+in the "checked and left out" list at the end instead (they were deliberate decisions wearing the
+vocabulary of gaps). The sweeps also found no `TODO`, `FIXME`, `unimplemented!` or `todo!(` anywhere in
+the tree, and exactly one `#[ignore]`d test, which measures rather than asserts by its own comment. **So
+the work that is left is not marked in the code — it is prose that says a limit out loud, and the places
+where prose and tree disagree are items 2, 3 and 9(iii).**
+
+1. **Two of the three Node harnesses are headless and a push runs neither of them.** The highest-value
+   item here is not a feature — it is a **guard**. CI's job is `cargo test` and `cargo clippy` and
+   nothing else (`.github/workflows/ci.yml`: the `Test` step, the annotation step, then clippy), and
+   `HANDOFF.md` spells out what that leaves open in its own words: "`cargo test` does not run them, so a
+   machine without Node passes `cargo test` while the page's own renderer is untested".
+   `scripts/web-view-test.js` needs no browser at all — it runs the *embedded* viewer script under Node
+   against a stub DOM and asserts which line becomes which block — and `scripts/term-layout-test.js`
+   replays the escape sequences and checks the screen that comes out. Both surfaces are the ones whose
+   defects are invisible in the source, both harnesses exist and pass, and neither is run by anything
+   automatic. `browser-controls-test.js` is the one that stays by hand, on purpose and for a stated
+   reason (it needs a real browser, and CI does not have one — its own header says "deliberately **not**
+   part of CI"). So this item is one Node step in the CI job running the two headless harnesses, which
+   is exactly what `AGENTS.md`'s "Verifying a change" already tells a person to run.
+2. **Stale sentences, found by checking claims instead of reading them — one fixed in this commit.**
+   This is a class, not an incident, and it is the finding that says the most about the repository: four
+   passages state something the tree stopped being true of, and **nothing in the gate can catch prose**.
+   The four: (i) `HANDOFF.md`'s cold-start section says a `/config edit` page form "would need a
+   `/config set <key> <value>` the terminal does not have" — the terminal has had it since 11:36 on the
+   same day that section is dated from (`bb9e07c`; the help row is `src/main.rs:2876`), and the sentence
+   is corrected in this commit; (ii) `docs/sandbox.md` records that "CI checks nothing on push", which
+   was true when it was written and is not now (`.github/workflows/ci.yml` runs the tests and clippy on
+   Linux and Windows); (iii) `ROADMAP.md`'s §2 says of recursive spawning that "nothing bounds how deep
+   that goes", superseded by `FLINT_DEPTH` (maximum 2, set by the tool and by nothing else, §"Not doing"
+   above); (iv) `HANDOFF.md`'s cold-start section lists "adding a provider from the page" as left open,
+   which §8 records as closed on 2026-09-17. The fix for (i) is in this commit because a survey that
+   points at a wrong sentence and leaves it there has made the problem worse. The other three want the
+   same treatment, and the general one — a snapshot section that says when it was true instead of
+   sounding like state — is now stated at the top of that section.
+3. **What the page claims and what the harness holds are not the same set.** `HANDOFF.md` records it in
+   its own words — "the mid-turn report wait is unasserted (`docs/web-mode.md` §11)" — and §11 does
+   claim the behaviour: a report is accepted at `/report` **mid-turn**, and the turn is then stopped (a
+   real interrupt, `outcome: stopped`). Both the Rust suite (`tests/web_view.rs`, a report read in the
+   panel) and the browser harness (`scripts/browser-controls-test.js`, a report answered in the panel)
+   cover a report *between* turns and neither covers one *during* a turn — the case where the composer
+   is busy and the stop is being asked for through a different door than `/stop`. `docs/web-mode.md`
+   §12 says the same thing about itself: pressing the button there is "**not measured here**", and "the
+   press belongs to the harness in §11, which drives the page's controls and could be extended to these
+   two rows". One extension of the harness that already exists, or two claims softened — the honest
+   version of "the page's controls are driven in a real browser" is a list of which presses are, and the
+   harness is where that list should be.
+4. **Retry safety: nothing identifies a request.** `ROADMAP.md`'s §10 already states the hole — "A
+   caller that times out and retries may repeat the tools the first attempt already ran" — and it is
+   the one item in that section that is a design question rather than an interface one. A caller has no
+   idempotency key to send and flint has nowhere to remember one, so a retry after a timeout is a
+   second run of `rm`, `git push` or `apply_patch`. The options all cost something this repository
+   cares about (a key on the request is a second protocol; remembering keys on disk is state that
+   outlives the process; refusing retries puts the decision on the caller), which is exactly why it is
+   worth a round of thinking rather than a paragraph of guessing. Highest-value *design* item here.
+5. **`flint --version` — a released binary cannot be asked what it is.** Measured this round: `flint
+   --version` prints `flint: error: unknown flag '--version'. Try --help.` and `--help` has no version
+   line either. Checked where the number *does* appear, and it is two places, neither of them a caller's:
+   the REPL's banner line (`src/main.rs:1659`, `env!("CARGO_PKG_VERSION")`) and the `User-Agent` flint
+   sends when it fetches a URL (`src/fetch.rs:377`, `flint/0.1.0`) — so flint tells the *network* which
+   build it is and not the program that started it. Worse for a reader in a hurry: the `--json` stream
+   *does* carry a field called `version` (`src/main.rs:740`), and it is the **session file format's**
+   version, `1`, not the build's — a caller who takes the field that looks like the answer gets a
+   different number that is also true. The release workflow builds four targets by tag and the PATH copy
+   is refreshed after every round, so "which flint is this" is the first question a bug report asks. One
+   flag, one line in `--help`, one test that the number on the flag is the number on the banner.
+6. **One ending of a `--json` stream is deliberate, documented nowhere and untested.** §10 says it in
+   its own words: when a schema never matches, the stream carries `turn.completed` with
+   `outcome:"complete"` **and then** an `error`, and the process exits 65 — "deliberate, undocumented and
+   **untested** … It has to be written down and pinned by a test, or the next reader will 'fix' it in one
+   direction or the other." That is the cheapest item in this list after the guard: a paragraph in
+   `docs/` and two assertions in `tests/json_output.rs`, both of which already have the stub and the
+   harness for it.
+7. **A job cannot say it is stopping.** §9 records the limit: a `stopping` state "would need a flag on
+   the `Job` that nothing sets today". A stopped job reads as `running` until it is gone, so the
+   person's status row and the page's jobs panel cannot distinguish "asked to stop, not gone yet" from
+   "still working" — and after the process-group kill work in `docs/windows-tooling.md` §6.1, a stop
+   that takes a moment is a real window rather than a theoretical one. Small: set the flag where the
+   stop is written (`job_op`'s `stop`, the page's row, `/jobs stop`), report it in the same listing, and
+   one test that a stopped job says so before it ends.
+8. **The page cannot get back to a restarted flint by itself.** §9's cursor work made the *server* able
+   to answer a reconnect from a file position, and `HANDOFF.md` names the half that is left: "the new
+   process listens on a new port with a new token, so the page's stream has nowhere to go, and the page
+   keeps no cursor of its own." The honest shape is the page holding the position it has read to (and
+   the run it was reading from) somewhere it survives a reload, so that reopening the page after a
+   restart is a reconnect rather than a fresh view — which needs an answer to what a *stale* position
+   means before it needs any code.
+9. **Three small gaps that the code names about itself.** (i) `tests/cli_output.rs` says of itself that
+   the paste fix "is not covered here (see `HANDOFF.md`)", which by this repository's own rule — a
+   regression test that has never been red has not been shown to test anything — means a shipped fix
+   with nothing holding it; (ii) `/say` on the page has no `--to`, and `src/main.rs:2848` says why:
+   "Addressing is a terminal move until the page can offer a picker of live runs" — the picker is the
+   missing half, and the presence records it would read already exist; (iii) the comment that justifies
+   where the report whitelist lives says "the page has no confirmation step yet"
+   (`src/main.rs:3156`), while §8 records a second press as the confirmation for destructive rows — one
+   of the two is stale, and the whitelist's own reason is worth stating in the terms that are true.
+10. **`/export` from inside a running conversation.** §9 calls it "the obvious next door": the export
+    path exists and is tested for a finished conversation and for the command line, and what is missing
+    is the door from a live run — which needs its own answer to where the page goes while the terminal
+    owns stdout, because that is the whole reason `flint export` owns stdout when `--out` is absent.
+11. **One cosmetic thing, recorded because a survey should be honest about the tail.** §8's page groups
+    in the commands panel are still the *classes* the round that built them was working through rather
+    than a task a person would name. Low value, no behaviour; listed only so the next reader knows it
+    was seen and judged not worth a round on its own.
+
+12. **The largest item, and the only one that is a decision rather than a task: the one place the plan
+    of record contradicts a plan document.** `## Not doing, and why` refuses a permission layer, and
+    `docs/sandbox.md` — "Status: a plan. Nothing in this file is built." — argues for grants instead of
+    modes, kept beside the decision it contradicts on purpose, with adopting any stage meaning the
+    bullet is edited in the same commit. It is last because it is the size of a project, not because it
+    is small: either take a first stage and edit the bullet, or decline it in writing. What puts it on
+    this list at all is that it is the only place where reading the repository can give two opposite
+    answers, which is the thing this project refuses to have — and the sandbox document is also the
+    reason the `readonly` half is honest about being all-or-nothing rather than half a boundary.
+
+**Read, and deliberately left out of the queue** — each of these came up in one of the two sweeps or in
+this reading, and was not proposed, for a reason worth keeping rather than rediscovering:
+
+- **A job list that reaches a run this process did not start.** §9 records the limit and the reason in
+  one breath: a handle is what *this* process started, and a list derived from the files other runs
+  left behind is the derived state this repository does not do. `flint who` already answers the
+  question that limit is about, from records that exist on purpose, and it says honestly what it cannot
+  see. Not a gap.
+- **A kill control on the jobs panel.** Decided in §9, not deferred: a row is a door that opens the
+  log, and a second gesture on the same target is the ambiguity that made the browser harness press the
+  wrong row once. The person's stop is a command in the command panel, which is where commands live.
+- **A cost estimate in dollars.** Pi shows one, and the question will come back, so the answer belongs
+  somewhere. flint shows tokens, the cache hit rate and the split the endpoint reported
+  (`src/event.rs`'s usage), and it has those because the endpoint said them. A dollar figure needs a
+  per-model price table, which is data that goes stale silently and would be the only thing in the
+  repository that is true only until a vendor changes a page. Refused for the same reason
+  `flint doctor` and an index are refused: it is a second source of truth about somebody else's
+  machine.
+- **An MCP server inside flint.** Already recorded as deferred rather than refused in
+  `## Not doing, and why`, and nothing has changed since: being *callable* over MCP is built
+  (`examples/mcp/`), and nothing in the tree needs the other direction yet.
+- **A `/config edit` page form.** The `set` half is built and the `edit` half would need a text field
+  on the panel and a write path for a file a person may be looking at in another window. The command
+  line is one keystroke away on the page's own command panel, so the form buys convenience and costs
+  the one thing the page has kept: everything it can do is something the terminal can also say.
+- **The numbers that need somebody else's machine or somebody else's key.** `docs/deepseek-search.md` §6
+  is a section called "Still not measured" with six questions in it, including whether `max_uses` has
+  any effect at all; `HANDOFF.md` records that no endpoint's real rate has been measured because there is
+  no key on this machine and spending one would not be flint's call; and `docs/windows.md` has one
+  `UNVERIFIED` label left standing, on whether Windows Terminal and conhost differ in how they render VT
+  sequences. Each is one measurement away from being closed and none of them is closable from here, so
+  they are named rather than queued — a queue item nobody can start is a queue item that makes the queue
+  a lie.
+- **The Windows tree that outlives its shell.** `src/tools.rs` records the measurement: once the shell
+  has exited, `taskkill` reports "not found" (exit 128) with the tree still running. That is a fact about
+  the operating system, not a gap in the guard, and the guard's comment already says which cases it is
+  for (the interrupt and the timeout, not a command that deliberately detached).
+- **A graded permission setting narrower than `readonly`.** Refused in `docs/decisions.md` —
+  "`readonly` is all-or-nothing. There is no middle setting" — and the reason survives the survey: a
+  middle setting that is not airtight is the thing `docs/sandbox.md` exists to argue about properly, so
+  inventing one quietly here would answer the fork above by accident.
+
 ## Small, agreed, unscheduled
 
 - ~~`read`/`write`/`edit` taking `file_path`, with `path` kept as an alias so nothing breaks.~~

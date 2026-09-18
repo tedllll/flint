@@ -6,6 +6,27 @@ of it.
 
 ## Where things stand
 
+**The queue ran out, so this round was a survey rather than a feature, and §11 of `ROADMAP.md` is what
+it found.** The ordered queue (§5–§10) has landed, the small unscheduled list is empty, `## Known
+unfinished` opens with "No known defect is open", and the twelve items of the reading of Pi are built —
+which is a state, not an achievement, so the round was spent finding out what is actually left. Two
+sweeps went into it — one over the documentation, one over the code and the harnesses — and every item
+was checked against the file it came from before it was written down. **Twelve things are ordered there,
+cheapest-and-highest-value first**: a **guard rather than a feature** (two of the three Node harnesses
+need no browser and a push runs neither of them, so the page's renderer and the terminal's layout are
+tested only by whoever remembers); four stale sentences found by checking claims instead of reading them
+(one fixed on the spot — this file's cold-start section claimed the terminal has no `/config set <key>
+<value>`); what the page claims and the harness does not hold (the mid-turn report); retry safety
+(nothing identifies a request, so a caller's retry may repeat the tools the first attempt ran); `flint
+--version`; one `--json` ending that is deliberate, documented nowhere and untested (the schema-miss
+plus `turn.completed` plus `error` and exit 65); a job that cannot say it is `stopping`; the page's own
+cursor across a restart; three small gaps the code names about itself; `/export` from inside a running
+conversation; one cosmetic item recorded rather than recommended; and last — because it is the size of a
+project — the permission-layer fork, which is the only decision on the list. What the sweeps looked at
+and refused is listed with it, in the same section, because a survey that only adds is not a survey; so
+is the finding that there is **no `TODO`, `FIXME`, `unimplemented!` or `todo!(` anywhere in the tree and
+exactly one `#[ignore]`d test**, which is why the work that is left is prose rather than markers.
+
 **The twelfth and last of the items taken from the reading of Pi is built: every tool call of one
 assistant message now runs at once.** It was the last item on purpose and the smallest of the twelve,
 because it is the one that changes no interface: no command, no config key, no line in a session file.
@@ -1319,15 +1340,23 @@ Written for a cold start: a different machine, and possibly a session with no me
 one. The repository is the whole state — there is no index, no cache and no database anywhere in
 flint, on purpose — so cloning it and running the gate below is all that "catching up" means.
 
+**This section is a snapshot and nothing keeps it true.** Everything above it is written by the round
+that just ended and is true of the tree it left; this section describes one machine on one day, and a
+present-tense claim in it is a claim about *then*. One of them had already gone stale by the time
+anybody checked — the `/config set` sentence below — which is why the survey recorded in §11 of
+`ROADMAP.md` starts by saying how it was found: by checking the claims, not by reading them.
+
 **Where it was left.** `main` at the commit that gives the example and the REPL one rendering of a turn
 (`refactor: one rendering of a turn, shared with the example`), plus the documentation commit that
 carries this file, working tree clean, `origin/main` level with it. **§8 is finished** — all five
 controls are on the page, the destructive rows have a second home on the sidebar, the two switches are
 offered the names the run already knows, and the one hole the round left open (adding a provider) is
 closed — §9 has five entries, all closed, and the roadmap's small list is now **empty**: this was its
-last item. What remains is written down where it belongs: `/config edit` as a page form would need a
-`/config set <key> <value>` the terminal does not have, the panel's groups are still §8's classes
-rather than a task, and the mid-turn report wait is unasserted (`docs/web-mode.md` §11).
+last item. What remains is written down where it belongs: a `/config edit` **page form** (the
+`/config set <key> <value>` it would need is built — `src/main.rs:2876`, added at 11:36 the same day
+this snapshot is dated from — so what is missing is the form, not the command), the panel's groups are
+still §8's classes rather than a task, and the mid-turn report wait is unasserted
+(`docs/web-mode.md` §11).
 
 **The installed binary matches the tree as of 2026-09-17 15:24, and updating it while flint is running
 needs one extra step.** `flint` on this machine's PATH resolves to `C:\Users\zhangzhuo\bin\flint.exe`,
