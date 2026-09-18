@@ -243,16 +243,68 @@ fn the_jobs_panel_reads_the_route_and_a_row_stays_in_this_page() {
     );
 }
 
-/// The stop a person has on the page comes from the list the page is already showing.
+/// The header names the conversation, and says what the run is doing with it.
+///
+/// Two facts on one line, and neither is invented: the name is the session file's own newest `title`
+/// event with the label from `GET /sessions` behind it (the newest name, else the first thing that
+/// was said, else "(empty)" -- chosen in one place in `session::list`), and the work is the same
+/// `Job` record the jobs panel, the terminal's `/jobs` and `job_op` all answer from. What this
+/// guards against is a header that says `flint` while three subagents are working: the product's name
+/// where the conversation's belongs, and no sign that anything is running at all. DSH's session
+/// header carries the same two facts in the same place -- the session's display title, and a job
+/// badge that is a count of what is live, rendered not at all when nothing is.
+#[test]
+fn the_header_names_the_conversation_and_what_the_run_is_doing() {
+    let line = from("<div class=\"head-line\">", 14);
+    assert!(
+        line.contains("id=\"title\"") && line.contains("id=\"jobs\""),
+        "the name and the work are not on one line together:\n{line}"
+    );
+
+    // The name: the file's own title first, the list's label behind it, and the product's name only
+    // when a page has neither. The order matters and is asserted, because "flint" is always a
+    // *readable* answer and a page that fell back to it too early would look right and say nothing.
+    let words = from("function titleWords(doc, label)", 4);
+    assert!(
+        words.contains("doc.title") && words.contains("label"),
+        "the header's name is not read from the conversation:\n{words}"
+    );
+    let list = from("function paintSessions()", 12);
+    assert!(
+        list.contains("session.current") && list.contains("currentLabel") && list.contains("paintTitle(doc)"),
+        "the name behind the title is not the conversation the run is holding:\n{list}"
+    );
+
+    // The work: counts of kinds rather than one total, and a failure kept out of `done` -- a job that
+    // failed and one that finished are the same number in a total, and the row behind the chip is the
+    // only place the exit code is legible.
+    let chips = from("function paintJobs(list)", 34);
+    for (needed, why) in [
+        ("jobIsLive", "which jobs have not ended"),
+        ("job.kind === \"child\"", "how many of them are subagents"),
+        ("\"failed\"", "the ones that ended badly"),
+        ("\"killed\"", "including the ones this run ended itself"),
+        ("chip(", "the counts, drawn as the chips they are"),
+    ] {
+        assert!(
+            chips.contains(needed),
+            "the header's work chips do not read `{needed}` ({why}):\n{chips}"
+        );
+    }
+}
+
+
 ///
 /// A destructive row takes two presses, and the second one offers the *choices* -- which the page
 /// takes from a list it already holds rather than from the frame, because the frame is a menu of
 /// commands and a candidate is not a command. For `/jobs stop <pid>` that list is the jobs panel's
 /// own rows: the pids are already on screen, which is what makes the stop a thing a person can aim.
-/// Two rules come with it. Only the *live* jobs are offered -- a job that has ended cannot be
-/// stopped, and a choice whose only outcome is a sentence saying so is a choice that wastes a press.
-/// And the choice's label says *which* job, because two pids in a menu that are bare numbers are a
-/// menu nobody can use.
+/// Two rules come with it. Only the jobs a press can still *do* something about are offered -- a job
+/// that has ended cannot be stopped, and one that is already stopping has already been asked -- and
+/// the choice's label says *which* job, because two pids in a menu that are bare numbers are a menu
+/// nobody can use. That is `jobIsStoppable` rather than `jobIsLive`, which is the wider question the
+/// header's chips ask: a stopping job is still spending time, so it is counted and its clock keeps
+/// running, but it is not offered a second stop.
 #[test]
 fn the_page_stops_a_job_from_the_rows_it_is_already_showing() {
     let body = from("const choices =", 22);
@@ -265,8 +317,8 @@ fn the_page_stops_a_job_from_the_rows_it_is_already_showing() {
         "the candidates are the jobs panel's rows, not a second list:\n{body}"
     );
     assert!(
-        body.contains("jobIsLive(job)"),
-        "a job that has already ended is not something to stop:\n{body}"
+        body.contains("jobIsStoppable(job)"),
+        "a job that has already ended, or is already stopping, is not something to stop:\n{body}"
     );
     assert!(
         body.contains("String(job.pid)"),

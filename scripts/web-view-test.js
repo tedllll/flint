@@ -1585,6 +1585,57 @@ check("a job's line says whether it is still going, and how long for", () => {
   eq(viewer.jobIsLive({ status: "completed" }), false, "and nothing else is");
 });
 
+// What the header says while the run is working, which is not one number. Three questions get asked
+// of a run that has started something -- is any of it still moving, is any of it a *subagent* rather
+// than a command, and has anything already ended badly -- and a total answers none of them. The
+// failure chip is the one that matters most: a job that failed and a job that finished are the same
+// count in a total, and the row behind the chip is the only place the exit code is legible.
+check("the header's chips say what kind of work is running, and never fold a failure into done", () => {
+  const chips = () => (viewer.__node("jobs-summary").children || []);
+  const words = () => chips().map((c) => c.children[1].textContent);
+  const kinds = () => chips().map((c) => c.className);
+
+  viewer.paintJobs([
+    { pid: 1, kind: "command", label: "cargo build --release", status: "running", started: 1000, ended: 0 },
+    { pid: 2, kind: "child", label: "write a summary", status: "running", started: 1001, ended: 0 },
+    { pid: 3, kind: "child", label: "reading src", status: "running", started: 1002, ended: 0 },
+    { pid: 4, kind: "command", label: "the one that worked", status: "completed", started: 900, ended: 902 },
+    { pid: 5, kind: "child", label: "the one that did not", status: "failed", started: 800, ended: 801 },
+    { pid: 6, kind: "command", label: "stopped by the person", status: "killed", started: 700, ended: 701 },
+  ]);
+  eq(viewer.__node("jobs").hidden, false, "there is work, so the control is there");
+  eq(words().join(" · "), "3 running · 2 subagents · 2 failed · 1 done", "the kinds, and the failure kept out of done");
+  eq(kinds()[1], "chip child", "a subagent chip is its own kind, not a job count");
+  eq(kinds()[2], "chip failed", "and a failure is its own chip");
+  // The dot and the count are one control, and the sentence behind it is the long form: a chip is
+  // read at a glance, and "1 failed" is not enough to say what to do about it.
+  eq(chips()[2].title.indexOf("exit codes") >= 0, true, "the failed chip says where the reason is");
+
+  // All of it stopping is a different fact from all of it running, and the chip says which.
+  viewer.paintJobs([
+    { pid: 1, kind: "command", label: "cargo build", status: "stopping", started: 1000, ended: 0 },
+    { pid: 2, kind: "command", label: "the other one", status: "stopping", started: 1001, ended: 0 },
+  ]);
+  eq(words().join(" · "), "2 stopping", "nothing is running once everything is on its way out");
+
+  // Nothing left, and the control goes with it: a chip that says "0" is a control nobody presses.
+  viewer.paintJobs([]);
+  eq(viewer.__node("jobs").hidden, true, "no jobs, no control");
+  eq(words().length, 0, "and no chips behind it");
+});
+
+// The name in the header. Three sources and one order, and each of the three is a case a person will
+// actually meet: a conversation they named, one they did not (which should show its own opening words
+// rather than the product's name), and a page with nothing behind it at all.
+check("the header's name is the conversation's, not the product's", () => {
+  eq(viewer.titleWords({ title: "the crash in web.rs" }, "whatever the list said"), "the crash in web.rs",
+     "a name in force wins over the list");
+  eq(viewer.titleWords({}, "why does dsh fail to start"), "why does dsh fail to start",
+     "an unnamed conversation shows what it opened with, not `flint`");
+  eq(viewer.titleWords({}, ""), "flint", "and a page with neither says what it is");
+  eq(viewer.titleWords(null, null), "flint", "including one that has not been loaded yet");
+});
+
 // An exported page carries its conversation in a JSON island, and this is the one function that reads
 // it. The island is a list of the session file's own lines, so what comes out of it goes straight into
 // `applyText` -- which is why an export draws like a session somebody dropped on the page, and why

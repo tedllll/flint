@@ -77,6 +77,46 @@
     padding: 10px 18px 8px;
   }
   h1 { font-size: 15px; margin: 0 0 4px; font-weight: 600; }
+  /* The title line: whose conversation this is, and what the run is doing with it. One line rather
+     than two rows of a header, because the two are one fact about this run -- the name it is being
+     held under and the work it has going -- and the reading below is what the header is in the way
+     of. `flex-wrap` so a long name pushes the chips down instead of being clipped, and `baseline` so
+     a chip sits on the name's baseline rather than floating. */
+  .head-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; margin: 0 0 5px; }
+  .head-line h1 {
+    margin: 0; max-width: min(64ch, 70vw); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  /* The background work, as the chips the summary draws and a panel under them. The panel is a
+     dropdown rather than a block that grows the header: it is one row per job, and §8 measured what
+     an unbounded row of rows in the header does to the composer (it took 742px of an 800px pane and
+     the send button could not be clicked). Positioned, the reading never moves. */
+  #jobs { position: relative; margin: 0; font-size: 12.5px; }
+  #jobs .body {
+    position: absolute; top: 100%; left: 0; z-index: 3; margin: 4px 0 0; padding: 6px 8px;
+    min-width: 240px; max-width: min(70vw, 620px); max-height: 40vh; overflow-y: auto;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    box-shadow: 0 8px 22px rgba(0, 0, 0, .35);
+  }
+  #jobs-summary { display: flex; align-items: baseline; gap: 8px; cursor: pointer; }
+  /* One fact about the work, and it is a *count* rather than a colour: a person reads "2 running"
+     before they read a hue, and the dot is there to say which kind of thing it is. */
+  .chip {
+    display: inline-flex; align-items: baseline; gap: 5px; white-space: nowrap;
+    border: 1px solid var(--line); border-radius: 999px; padding: 0 8px; color: var(--dim);
+  }
+  .chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); }
+  .chip.live { color: var(--fg); }
+  .chip.live .dot { background: var(--warn); }
+  /* A job that is on its way out is not the same fact as one that is working, and the dot says so
+     without spending a second chip: DSH shares one "attention" colour between `stopping` and
+     `killed` for the same reason -- both ended on request rather than on their own. */
+  .chip.stopping .dot { background: var(--warn); opacity: .45; }
+  .chip.child .dot { background: var(--user); }
+  /* Settled work stays on the header until the run forgets it, and a failure is not folded into
+     "done": the row behind this chip carries the exit code, and that detail is the only place a
+     failed job is legible. */
+  .chip.failed .dot { background: var(--bad); }
+  .chip.done .dot { background: var(--ok); opacity: .8; }
   /* The run's own settings, as controls. Quiet by default and hidden until a `state` frame
      arrives: a page opened from a dropped file has no process behind it, and a picker with no
      options is a promise the page cannot keep. A picker with *one* option is disabled rather
@@ -495,7 +535,27 @@
        aria-label="resize the conversation list" aria-valuemin="160" aria-valuemax="900"></div>
   <div class="pane">
     <header>
-      <h1 id="title">flint</h1>
+      <!-- The conversation's identity and the work this run has going, on one line.
+           The name is not written here: `paintTitle` takes the file's own newest `title` event, and
+           falls back to the label `GET /sessions` chose -- the newest name, else the first thing that
+           was said, else "(empty)", decided in one place in `session::list` so the sidebar and this
+           line cannot describe the same conversation differently. DSH's session header shows the same
+           fact the same way: the session's display title, falling back to the directory, and never
+           the model. -->
+      <div class="head-line">
+        <h1 id="title">flint</h1>
+        <!-- The run's background work -- the `task` children and the background commands this process
+             started -- as chips, drawn from `GET /jobs`, which is the same record `job_op` and the
+             terminal's `/jobs` answer from rather than a second bookkeeping of its own. Hidden until
+             there is one: a run that has started nothing has nothing to show, and a control that says
+             "0" is a control nobody presses (DSH's job trigger renders nothing at all for the same
+             reason). The panel under the chips is a dropdown: §8 measured what an unbounded list in
+             the header does to the composer's own button. -->
+        <details class="panel" id="jobs" hidden>
+          <summary id="jobs-summary">jobs</summary>
+          <div class="body" id="job-list"></div>
+        </details>
+      </div>
       <!-- The run's configuration, as the controls that change it. Drawn from the `state` frame,
            which is the only read channel the page has: it may not read `config.toml` itself --
            a second reader of the same state can disagree with the process, and the file says one
@@ -516,15 +576,6 @@
       <details class="panel" id="commands" hidden>
         <summary>commands</summary>
         <div class="body" id="command-list"></div>
-      </details>
-      <!-- The run's background work -- the `task` children and the background commands this process
-           started -- drawn from `GET /jobs`. Hidden until there is one: a run that has started
-           nothing has nothing to show, and a control that says "0" is a control nobody presses.
-           DSH's page has the same thing in its session header; this is that row, read off the same
-           `Job` records `job_op` answers from rather than from a second bookkeeping of its own. -->
-      <details class="panel" id="jobs" hidden>
-        <summary id="jobs-summary">jobs</summary>
-        <div class="body" id="job-list"></div>
       </details>
       <div class="meta" id="meta"></div>
     </header>
@@ -1144,9 +1195,25 @@ function jobWhen(job, nowSecs) {
   return took ? "took " + took : job.status;
 }
 
-/// Whether a job is still going, which is the only thing that makes the page tick.
-function jobIsLive(job) {
+/// Whether a person can still usefully stop this job.
+///
+/// Narrower than `jobIsLive` on purpose, and the difference is one press. A job already on its way
+/// out is *live* -- it is still spending time, so the chips count it and the clock keeps it honest --
+/// but offering `stop` for it is a choice whose only outcome is the sentence it already has, which is
+/// the rule the stop menu states about a job that has ended.
+function jobIsStoppable(job) {
   return job.status === "running";
+}
+
+/// Whether a job is still in flight, which is wider than "the status word is `running`".
+///
+/// A job that has been asked to stop is **still spending time** until it does: the signal is out and
+/// the process is on its way out, and a page that filed it under "done" would show a run as finished
+/// while the editor it started was still holding a file. `stopping` is not a settled word either --
+/// the exit that completes it has not happened yet -- so it belongs on the live side of every
+/// question the page asks, and the chips say the word out loud rather than pretending it is running.
+function jobIsLive(job) {
+  return job.status === "running" || job.status === "stopping";
 }
 
 /// The token, out of the URL that `--web` printed.
@@ -1396,8 +1463,9 @@ function showCommands(doc) {
       // has been sent while it is open, so there is no countdown to get wrong and nothing to disarm
       // on a timer.
       //
-      // A job's candidates are only the *live* ones: a job that has ended cannot be stopped, and
-      // offering it would be a choice whose only outcome is the sentence saying so.
+      // A job's candidates are only the ones a stop can still *do* something about: a job that has
+      // ended cannot be stopped at all, and one that is already stopping is live but already
+      // answered, so offering it would be a choice whose only outcome is the sentence saying so.
       const choices =
         command.from === "sessions"
           ? sessions.map((s) => ({ value: String(s.n), label: s.label }))
@@ -1407,7 +1475,7 @@ function showCommands(doc) {
                 .map((p) => ({ value: p.name, label: p.name })))
             : command.from === "jobs"
               ? listedJobs
-                  .filter((job) => jobIsLive(job))
+                  .filter((job) => jobIsStoppable(job))
                   .map((job) => ({ value: String(job.pid), label: job.kind + " " + job.label }))
               : null;
       if (className === "danger" && choices) {
@@ -1699,6 +1767,20 @@ function el(tag, className, textContent) {
   return node;
 }
 
+/// One fact about the run's work, as the dot and the count the header draws.
+///
+/// A dot *and* a count rather than a colour alone: the hue says which kind of thing it is, and the
+/// number is what a person actually reads ("2 running" beats a yellow pill). The `title` carries the
+/// sentence the chip is short for, which is also where a screen reader gets it -- DSH's job badge is
+/// a whole sentence for the same reason and this is the same fact in less room.
+function chip(kind, text, sentence) {
+  const node = el("span", "chip " + kind);
+  if (sentence) node.title = sentence;
+  node.appendChild(el("span", "dot"));
+  node.appendChild(el("span", "", text));
+  return node;
+}
+
 /// One line describing a tool call, without interpreting its arguments.
 function toolSummary(block) {
   const parts = [];
@@ -1860,7 +1942,7 @@ let placeholder = null;
 let painted = [];
 
 function paint(doc) {
-  document.getElementById("title").textContent = doc.title || "flint";
+  paintTitle(doc);
   const meta = document.getElementById("meta");
   meta.textContent = "";
   const m = doc.meta || {};
@@ -1957,6 +2039,36 @@ const doc = newDoc();
 /// The conversations `/resume` can reach, as the process last described them.
 let sessions = [];
 
+/// What the conversation the run is holding is called, out of the last listing.
+///
+/// Empty until a listing arrives, which is the honest answer for a page opened from a dropped file:
+/// there is no process, so there is no list, and the header falls back to what the file itself says.
+let currentLabel = "";
+
+/// What the header should call this conversation.
+///
+/// Two sources, and the order between them is the decision. The session file's own newest `title`
+/// event arrives live on the stream and is what a rename moves first; the label comes with the
+/// conversation list, where `session::list` chose it in one place: the newest name, else the first
+/// thing that was said, else "(empty)". The label is the *fallback* even though it is the fuller
+/// answer -- a conversation nobody has named gets its opening words here instead of the product's
+/// name -- because `doc.title` is the fact this run is holding, and a page that replaced it with a
+/// list it read a moment ago would go backwards after a rename. `flint` is the last resort, for a
+/// page with neither: a dropped file that has no title in it yet.
+function titleWords(doc, label) {
+  return (doc && doc.title) || label || "flint";
+}
+
+/// Put that name above the conversation, and keep the whole of it in the tooltip: the line clips
+/// with an ellipsis when a name is long, and the tooltip is the copy that is not clipped.
+function paintTitle(doc) {
+  const title = document.getElementById("title");
+  if (!title) return;
+  const words = titleWords(doc, currentLabel);
+  title.textContent = words;
+  title.title = words;
+}
+
 /// Whether anything typed here can actually be sent. False for a page opened from disk, which
 /// has no listener to post to -- so the composer is simply not there rather than present and
 /// failing.
@@ -1974,6 +2086,12 @@ function paintSessions() {
   const list = document.getElementById("sessions");
   if (!list) return;
   list.textContent = "";
+  // Which conversation the run is holding, and what to call it in the header. Read before the empty
+  // return: a list that came back empty means this run is holding nothing, and the header has to
+  // stop claiming a name it no longer has.
+  const here = sessions.find((session) => session.current);
+  currentLabel = here ? here.label : "";
+  paintTitle(doc);
   if (!sessions.length) {
     list.appendChild(el("li", "none", "no conversations yet"));
     return;
@@ -2484,6 +2602,15 @@ async function readJobs() {
 ///
 /// The trigger is hidden when there is nothing: an empty panel in the header would be a control
 /// that opens onto nothing, and the count is the only reason to look.
+///
+/// The summary is *chips*, and they are counts of kinds rather than one total, because "3" cannot
+/// answer the question the header is being asked. A person watching a run wants to know whether the
+/// work is still moving (`2 running`), whether any of it is a **subagent** rather than a command
+/// (`1 subagent`), and whether anything has already ended badly (`1 failed`) -- and a failure is
+/// never folded into `done`, because the row behind the chip carries the exit code and that detail
+/// is the only place a failed job is legible. DSH draws the same three facts in its session header:
+/// a live count, a subagent count with its own dot, and settled rows kept visible rather than
+/// tidied away.
 function paintJobs(list) {
   listedJobs = list;
   const panel = document.getElementById("jobs");
@@ -2491,13 +2618,33 @@ function paintJobs(list) {
   const body = document.getElementById("job-list");
   if (!panel || !summary || !body) return;
   panel.hidden = listedJobs.length === 0;
-  body.textContent = "";
-  // The count, and a word when something is still going: a count alone cannot say whether the
-  // number is work in progress or a list of things that are done.
-  const live = listedJobs.filter(jobIsLive).length;
-  summary.textContent = listedJobs.length
-    ? "jobs (" + listedJobs.length + ")" + (live ? " · " + live + " running" : "")
-    : "jobs";
+  // Removed one by one rather than with `textContent = ""`, for the reason `fillSelect` gives: the
+  // one-liner is what a browser wants, and the stub DOM in `scripts/web-view-test.js` would leave
+  // the old chips in place -- which would make a check about the counts meaningless, and did.
+  while (body.firstChild) body.removeChild(body.firstChild);
+  while (summary.firstChild) summary.removeChild(summary.firstChild);
+  const live = listedJobs.filter(jobIsLive);
+  const stopping = live.filter((job) => job.status === "stopping").length;
+  const children = live.filter((job) => job.kind === "child").length;
+  const settled = listedJobs.filter((job) => !jobIsLive(job));
+  // `killed` counts as a failure here and not as a tidy end, which is the same reading the row's own
+  // dot takes: both are a job that stopped because somebody said so.
+  const failed = settled.filter((job) => job.status === "failed" || job.status === "killed").length;
+  const finished = settled.length - failed;
+  if (live.length) {
+    const word = stopping === live.length ? "stopping" : "running";
+    summary.appendChild(
+      chip("live", live.length + " " + word, live.length + " background job(s) " + word)
+    );
+  }
+  if (children) {
+    summary.appendChild(
+      chip("child", children + (children === 1 ? " subagent" : " subagents"),
+           children + (children === 1 ? " subagent" : " subagents") + " working in a run of its own")
+    );
+  }
+  if (failed) summary.appendChild(chip("failed", failed + " failed", failed + " ended badly; the rows have the exit codes"));
+  if (finished) summary.appendChild(chip("done", finished + " done", finished + " finished"));
   if (!listedJobs.length) {
     stopJobsClock();
     return;
@@ -3269,7 +3416,7 @@ if (typeof module !== "undefined" && module.exports) {
     // browser, which is the only way the readonly case is checked without turning a live run's guard
     // on in the middle of a turn.
     openBody, readonlyOn,
-    jobsFrom, durationLabel, jobWhen, jobIsLive,
+    jobsFrom, durationLabel, jobWhen, jobIsLive, jobIsStoppable, paintJobs, titleWords,
     // The position this tab was reading from: exported so the Node harness can check the three cases
     // -- a gap, a different conversation, and a position past the end -- against the real functions
     // rather than against the page's text.
