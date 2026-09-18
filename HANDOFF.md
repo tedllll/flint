@@ -1759,6 +1759,56 @@ the block is drawn — then open the `commands` panel and read it against `/help
 
 ## What was just done
 
+**The page's header says whose conversation it is and what the run is doing, and the paths in a transcript
+are now the paths a reader can actually open.** Asked for directly (2026-09-18): first that the command
+surface should learn from DSH and move what belongs in *settings* off the page, and that the header should
+stop saying `flint` and show the conversation, the background jobs and the subagents; then, from using the
+result, four reports about paths — a printed path treated as a file, a path with a space broken in the
+middle, GitHub's `#L42` and `file://` lines unsupported, a line number missing from the button, and `~`
+paths leading nowhere. Two slices are built and pushed; the third is designed and not built:
+
+| Slice | State |
+|---|---|
+| The header: the conversation's name and the status chips | **built** (`7f5bfe0`) — `docs/web-mode.md` §17 |
+| The paths in a transcript, the line on the button, and where a `~` leads | **built** (`f6255f1`) — §18 |
+| The command surface: a **settings** overlay, and the commands behind a `/` trigger in the composer | **not built** — the plan of record is `docs/web-mode.md` §19, which is the first job of the next session |
+
+The two built slices are worth one line each for a reader who will not open the docs. The header is now
+the session file's own newest name (falling back to the label `GET /sessions` chose, so an unnamed
+conversation shows its opening words rather than the product's), with counts beside it — `2 running` /
+`1 subagent` / `1 failed` / `3 done` — hidden when there is no work. Building the chips found a bug in
+what "live" meant: a job that had been asked to stop counted as `done`, so a run would have shown itself
+finished while an editor it started still held a file. The paths work is four fixes with one subject: flint's
+own `/stop`, `/jobs`, `/events` are no longer buttons onto files that do not exist; a quoted path survives
+its space and flint now quotes a spaced path where it *prints* one; the button prints the line the token
+named (`src/web.rs:412`, `#L412`, `file:///C:/x.js:42` → `C:/x.js:42`); and `~` is the home directory in
+one place, `config::resolve_path`, called by the model's tools, the page's two routes, a person's `@name`
+and a `skill_dirs` entry alike.
+
+**Markdown in the preview panel is an open question with a written answer, and the scope is a person's
+choice.** The user asked whether built-in `.md` support is too much complexity to take on; `docs/web-mode.md`
+§20 is the assessment — three scopes with their sizes (line-level styling ≈ 50 lines, block rendering
+≈ 250 behind a raw/rendered toggle, inline emphasis and links +80), what the repository's own rules make
+cheap (the page never assigns markup, so a rendered file cannot inject HTML; the URL allowlist already
+exists), and what makes it expensive (a Markdown parser is a dialect claim, and "line 412" has no meaning
+in a rendered view). The recommendation recorded there is the styling first, then block rendering behind a
+toggle, and the decision is the person's.
+
+**The gate, as of this session's head (`f6255f1`).** `cargo test` **655 passed / 0 failed / 1 ignored**
+(14 suites, up from 650; the ignored one is `tests/term_capture.rs::measured_cost_of_streaming_an_answer`
+and is deliberately ignored); `cargo clippy --all-targets -- -D warnings` silent; `node
+scripts/term-layout-test.js` all pass; `node scripts/web-view-test.js` all pass; `python
+examples/python/test_call.py`'s checks all pass. CI is green on both pushed commits — the run for `f6255f1`
+is 7/7 when it settles; the two before this session (`dffbf56`) were already green.
+
+**One step of the standing duty is blocked, and it is somebody else's process.** The release build for
+`f6255f1` is in `target/release/flint.exe` (SHA-256 `CA50BF52…`), but copying it over
+`C:\Users\zhangzhuo\bin\flint.exe` was refused by Windows: a plain interactive `flint` (pid 13272, started
+18:02) holds the file open, which is the trap `AGENTS.md` names. The copy is not run, nothing is broken,
+and `bin\flint.exe` is still the previous build (`96946B68…`, from `7fa67fa`). Closing that session and
+running `Copy-Item target\release\flint.exe C:\Users\zhangzhuo\bin\flint.exe -Force` is the whole fix;
+there is no need to rebuild.
+
 **The untracked verification record was worked through, and all ten of its findings were real: five in
 the code, four in the inventory, and the flaky test.** The user's question was narrow — "there is a test
 result in there, is it something to fix?" — and the answer was yes twice over: the file records one

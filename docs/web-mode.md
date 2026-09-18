@@ -1577,3 +1577,288 @@ added — a way for a `readonly` run to launch something — is the thing it ref
 carries the door-by-door version, and §15 of that file carries the "deliberately not built" line it
 replaces: the preview panel's own contents are still plain text, which remains the honest answer to a URL
 inside a file.
+
+## 17. The header says whose conversation this is, and what the run is doing
+
+Asked for directly, 2026-09-18: *the header is weak — the conversation's name should be up there, with
+the background jobs and the subagents*. Two complaints in one sentence, and both were true. The line
+above the conversation said `flint` — the product's name — for every conversation, named or not; and a
+run with three subagents and two background commands working showed a single collapsed panel reading
+`jobs (5) · 3 running`, which is a total that cannot answer any of the three questions a person watching
+work actually has: is it still moving, is any of it a *subagent* rather than a command, has anything
+already ended badly.
+
+The line is now the conversation's name with the counts beside it:
+
+    why does dsh fail to start   ● 2 running  ● 1 subagent  ● 1 failed  ● 3 done
+
+**The name is read, not invented, and the one decision in it is the order of two real sources.** The
+session file's own newest `title` event arrives on the stream and moves the moment a rename happens; the
+label comes with the conversation list, where `session::list` chose it: the newest name, else the first
+thing that was said, else `(empty)`. The title wins, and the label is the fallback rather than the first
+choice — even though the label is the *fuller* answer, because it is what makes an unnamed conversation
+show its own opening words instead of `flint`. The reason for that order is the reverse direction: a page
+that preferred a list it read a moment ago would go backwards after a rename, and `doc.title` is the fact
+this run is holding. `titleWords(doc, label)` is the whole rule as a pure function, and the tooltip
+carries the label unclipped because the line clips with an ellipsis at 64 characters.
+
+**The counts come from `GET /jobs`, counted by kind rather than summed**, and the wording is the
+vocabulary §13 already established (`running`/`stopping`/`completed`/`killed`/`failed`). Four rules are
+the design:
+
+- **A failure is never folded into `done`.** A job that failed and one that finished are the same number
+  in a total, and the row behind the chip is the only place an exit code is legible. `killed` counts as a
+  failure there, which is what the row's own dot already said.
+- **A subagent is its own chip**, because "2 running" and "2 subagents reading your code" are different
+  facts about where the money is going.
+- **The whole control is hidden when there is no work.** A chip that says `0` is a control nobody presses,
+  and it was DSH's own header that made the case: its job badge renders nothing at all rather than `0`.
+- **Settled work stays visible** (`3 done`), de-emphasised rather than tidied away, so a run that has just
+  finished five things does not look like a run that never started any.
+
+**The work found a bug in what "live" meant.** `jobIsLive` was `status === "running"`, so a job the run
+had asked to stop — `stopping`, the word §11.7 of `HANDOFF.md` added — fell on the settled side and was
+counted as `done`: a run would show itself finished while the editor it started was still holding a file.
+A stopping job has been *asked* to stop and has not stopped, so it is still spending time, and it now
+counts as live for the chips and for the clock that keeps a duration honest. It is *not* live for the
+`/jobs stop` menu, which asks the new `jobIsStoppable` instead: a job already on its way out is not
+something a second press can do anything about, and that menu's own rule is that a choice whose only
+outcome is the sentence it already has is a press wasted.
+
+**Measured, and how.**
+
+| Claim | Where it was measured | What came back |
+|---|---|---|
+| The name is the conversation's, in three cases | `scripts/web-view-test.js`, calling `titleWords` | `flint` only for a page with neither a title nor a list |
+| The chips are counted by kind | the same harness, calling `paintJobs` and reading the summary's children | `3 running · 2 subagents · 2 failed · 1 done` for six jobs, and `2 stopping` when everything is on its way out |
+| All of it goes away with the last job | the same | the control is `hidden` and the summary is empty |
+| The failure chip says where the reason is | the same | its tooltip names the exit codes |
+| The header's shape is a policy, not a style | `tests/web_view.rs::the_header_names_the_conversation_and_what_the_run_is_doing` | the name and the work are on one line, the name's order is read, and the chips read `jobIsLive`, the child kind, the failures and the kills |
+
+**The stub DOM found a real defect while this was being tested**, which is worth recording because it is
+the second time that harness has caught something the browser would not have. `summary.textContent = ""`
+clears the children in a browser and does *not* in the harness, so the chips of the previous paint were
+still there and the counts were wrong — `3 running … 2 done` for a list with one done job in it. The page
+now removes children one at a time, which is what `fillSelect` already did and says why.
+
+**What this deliberately does not do.** It does not show the model, the provider or the token — those are
+the *run's*, not the conversation's, and the controls that change them belong where the rest of the
+configuration is (the settings surface is §19). It does not animate anything while a turn is running: the
+header describes *work*, and a spinner for the main turn is the transcript's job, whose last block is
+already the answer being written. And it does not rename anything: `/name`, the sidebar's field and the
+file's own `title` event are the three doors onto one fact, and the header is a fourth reader of it, not a
+fourth writer.
+
+## 18. The paths in a transcript, and where a tilde leads
+
+Four reports from one real transcript, 2026-09-18, and they are one subject: what the page thinks a path
+is, what it shows of one, and where the path it shows actually leads.
+
+**1. Flint's own commands were files.** §11 states the rule for prose: a path is a token that is
+absolute, or that has an extension, or that has three segments. `Path` is absolute. So `/stop`, `/name`,
+`/jobs`, `/web`, `/events` — every one of them one segment with a slash in front — became a button onto a
+file that does not exist, and a press filled the preview panel with `nothing at /events: …`. A
+conversation *about flint* is full of those, which is how it was noticed.
+
+The rule now asks the shape only of a **slash-rooted** path: two segments deep, or an extension at the
+end. `/etc/hosts` passes, `/notes.md` passes on its extension, `/stop` and `/tmp` do not. `~`-rooted and
+drive-rooted paths are exempt, and the exemption is the point: the extra evidence exists to tell a
+one-segment `/word` apart from a command word, and no command word begins with `~` or a drive letter — so
+`~/notes` and `C:\notes` are paths on their own evidence. Dropping `/tmp` costs nothing, because a
+directory is the one thing `GET /file` refuses by its own rule.
+
+**2. A path with a space in it was cut in the middle.** `read C:\Program Files\flint\config.toml` is a
+path and a word, and which is which cannot be recovered from the line — so the scanner cut at the space
+and drew a link to `C:\Program`, a name that exists nowhere, with the rest of the path as plain text.
+Two halves, one rule:
+
+- the scanner reads a **quoted** run (`"…"`, `'…'`, `` `…` ``) as one candidate, and draws the link
+  *inside* the quotes rather than eating them;
+- flint **quotes a path with a space where it prints one** (`display::quote_if_spaced`), because the line
+  it writes is the input to both of this path's readers — a person, and this page. That is the one place
+  in this design where the *printer* had to change for the page's sake, and it is a change a person
+  wanted anyway: `read C:\Program Files\flint\config.toml` is ambiguous in a terminal too.
+
+The residue is stated rather than hidden: a *bare* path with a space, written by a model that did not
+quote it, stays split. The first fragment is no longer a wrong link (the new shape rule drops
+`C:\Program`), and nothing else can be done — no reader can tell `C:\Program Files\x` from a path and a
+word.
+
+While this was being fixed, one layer down, the shortening step moved in front of the read-range suffix.
+It used to find the path again by splitting the printed line at its **first space**, which is the same bug
+in the other direction: for the file above it handed the shortener `C:\Program`, and the range suffix
+ended up glued to the wrong half.
+
+**3. The line number was not on the button.** `asPath` has always turned `src/web.rs:412` into
+`{path, line}` — and the renderer drew `part.path`, so `:412` existed in the tooltip and nowhere else.
+The one detail a `grep` hit is worth reading for was invisible. The result is now
+`{path, line, written}`: `path` is what `GET /file` is asked for, `line` is where the panel scrolls to,
+and `written` is the token as the reader met it, which is what the button says.
+
+Two spellings came with it, both from the same report:
+
+| Written | Opens | Prints |
+|---|---|---|
+| `src/web.rs:412` | that file at line 412 | `src/web.rs:412` |
+| `src/web.rs:412:7` | line 412, column dropped | `src/web.rs:412:7` |
+| `src/web.rs#L412`, `#L412-L420` | line 412 (a range keeps its first) | as written |
+| `file:///C:/work/x.js:42` | `C:/work/x.js` at line 42 | `C:/work/x.js:42` |
+
+`file://` is deliberately a **path button and not a link**: no anchor in this page goes to a local file
+(§4's allowlist refuses the scheme, and a browser served over http would not follow one), while the file
+*is* the thing the reader pointed at and `GET /file` is the door that reads it. The scheme is dropped on
+the way to the button because it is the one part of the token the panel does not need to repeat; a `/`
+in front of a drive letter goes with it, since `file:///C:/x.js` is what a browser's own copy-link
+produces. `file://host/share/x` is another machine's path: it stays text.
+
+**4. A tilde means the home directory, in one place.** The page has accepted `~/…` since §11, and the
+route read the tilde literally — so the button opened nothing, because the path resolved against the
+working directory as `…/~/.flint/skills`. The rule is `config::expand_home`: `~` followed by a separator,
+and nothing else. `~user/x` is another user's home and `~notes.txt` is a file *named* that, and both stay
+as written so a reader reports what it looked for instead of reading a file that was not the one named; a
+machine that will not say where home is leaves the path alone rather than resolving it against whatever
+directory the process happens to be sitting in.
+
+`config::resolve_path` is that resolution applied at all four doors a path comes in through — a model's
+tool argument, the page's two routes, a person's `@name`, and a directory named in `config.toml` — because
+four copies of "absolute, else against the working directory" is how the tilde came to work in *none* of
+them and how they could have come to disagree about the rest. The page's own scanner states the same rule
+(`~` plus a separator, so `~notes.txt` is a word in prose and a relative name in a tool result), which is
+two readers and one definition.
+
+**Measured.**
+
+| Claim | Where it was measured | What came back |
+|---|---|---|
+| Flint's commands are not files | `scripts/web-view-test.js`, calling `asPath` | `/stop`, `/jobs`, `/events`, `/tmp` → null; `/etc/hosts`, `/notes.md` → paths |
+| A quoted path survives its space | the same, through `addressParts` | one path plus text either side, quotes intact |
+| The button prints the line | the same, through `linkNodes` | four tokens, four texts, four tooltips naming file and line |
+| `file://` is not a link | the same | no anchor whose href begins `file:`, one path button |
+| A tool line quotes the ambiguous path | `src/display.rs::a_path_with_a_space_in_it_is_quoted` | `"C:\Program Files\flint\config.toml"`, range outside the quotes |
+| The shortener sees the whole path | `src/display.rs::shortening_happens_before_the_range_is_appended` | the shortener's own marker around the whole path |
+| The tilde rule, and the two shapes that are not homes | `src/config.rs::a_leading_tilde_is_the_home_directory_and_nothing_else_is` | `~/x` expands, `~user/x`, `~notes.txt`, `a/~/b` and no-home do not |
+| A tool argument resolves the same way | `src/tools.rs::resolve_path_joins_relative_and_keeps_absolute` | `~/notes.txt` → the real home; `~notes.txt` → the working directory |
+
+**What this does not do.** It does not open a path that is not on this machine, and it does not expand
+anything else a shell would: `$VAR`, a glob, a `~` in the middle of a path and a `~user` all stay as
+written, because each would be a guess about what somebody meant and the refusal is a sentence that says
+what was looked for. And it does not touch the *tools'* own arguments beyond resolution: a `read` given
+`~/notes.txt` now reads the same file the page's button opens, which is the whole point — one name, one
+file, whether the model, the page or a person is doing the reading.
+
+## 19. The plan for the command surface: settings, and commands behind a `/` — **not built**
+
+Asked for directly, 2026-09-18, in the same breath as §17: *the page is too raw — put things in settings
+rather than spreading them across the page, and it can be redesigned*. DSH (the harness this session runs
+in) was named as the model, so its own surfaces were read rather than remembered, and this is the plan of
+record for the half of that request that is not built yet. It is written before the code, in the style of
+§9, so the decisions are reviewable on their own.
+
+**What is wrong now.** The header is a row of controls: two `<select>`s, five toggle `<select>`s, an action
+button each, a `commands` panel listing every command in five groups, and a jobs panel. Every one of them
+is a *setting* or a *command* wearing the same clothes, on the page, always. The concrete costs are that
+the reading column is pushed around by controls that are not part of the conversation, a settings change
+(`readonly`, `verbose`, the model) is drawn exactly like a command (`/new`, `/export`), and the command
+list is a wall rather than something you can ask a question of.
+
+**Where each thing goes.**
+
+| What is on the page now | Where it goes | Why |
+|---|---|---|
+| `#pick-provider`, `#pick-model` | **settings**, as rows that apply immediately | one endpoint per run is state, not an action; changing it is a decision about *this session*, and the answer is visible in the row |
+| the five toggle `<select>`s (`verbose`, `detail`, `readonly`, `hear-peers`, `thinking`) | **settings**, same | each is a standing property of the run, drawn from the state frame, sent as `/<toggle> <value>` exactly as now |
+| `form` rows (`/provider add`, `/provider key`, `/config set`, `/import`, `/export`, `/name`, `/queue`) | **settings** | they are fields, not sentences; `/provider key` is a *secret* and belongs in a masked field inside a dialog rather than in a row of the transcript |
+| `button` rows (`/new`, `/reload`) | **settings**, under a plain heading | one press, no argument, and a lifetime decision about the run |
+| the five command groups, `reports`/`actions`/`selectors`/`destructive` | the composer's **`/` menu**, kept in the same five classes | see below: a command is something you *type*, and the frame already says which is which |
+| the jobs panel | stays where §17 put it, chips in the header | it is not a command and not a setting: it is the run's work |
+| the sidebar, the preview, the composer and the transcript | unchanged | nothing here is a control that was in the way |
+
+**The settings surface.** A centered **overlay**: a fixed panel with a mask over the page, opened by one
+`settings` button that sits with the header's identity line, and closed by its own close button, a press on
+the mask, or `Escape`. It carries `role="dialog"` and `aria-modal="true"` with an accessible name, moves
+focus to the close button when it opens and back to the button that opened it when it closes, and only the
+active section is mounted (a nav rail of sections down the left, one detail pane on the right, DSH's own
+shape). The stub DOM in `scripts/web-view-test.js` has no `<dialog>` and no `showModal` — and
+`document.addEventListener` there is a no-op — so this is a `hidden`-toggled `div` whose close function
+the harness calls directly, which is the same constraint §10 hit and the same answer. Rows that are
+settings apply **immediately** (there is no Apply in DSH's General section either, and a settings dialog
+with a Save button is a second source of truth for state the run already holds). A section with a
+destructive row inside it (`/archive`, `/delete` of a conversation) keeps the two-press rule and names the
+object it is about to destroy.
+
+**The `/` menu, in the composer.** DSH has no command palette — this was looked for and is not there — and
+what it has instead is a **trigger menu** in the composer: typing `/` opens a list of the commands, each
+row an icon, a title, the raw name as an alias and one line of description, with `Tab` to complete and
+`Enter` to take. flint's version is drawn from the same `state` frame the `commands` panel is drawn from
+today, so the page still contains no command name of its own, and it keeps the frame's own five classes
+because those already say what a press would do:
+
+| Class | What `Enter` does | Why |
+|---|---|---|
+| `reports` | sends nothing: it asks for the **reading** and shows it where the list was | a report is read, not sent — flint's own rule, and the panel already does this |
+| `actions` | **completes the line** in the composer rather than sending it | `/new` mid-sentence is a decision, and one keystroke should not make it |
+| `selectors` | completes the line with the command, then offers its arguments | the frame knows the list (`providers`, `sessions`, `jobs`); the page does not |
+| `forms` | **opens settings at the row**, never types a secret into the transcript | a key typed into a conversation is a key in the session file |
+| `destructive` | completes the line and leaves it there | never one press from destroying something |
+
+Matching is subsequence-with-priorities (prefix first), filtered as you type after the `/`, closed by
+`Escape`, and the list is drawn from the frame's `label`/`send`/`help` fields, which is what the panel
+uses today. What this deletes: `details#commands` and its whole group renderer.
+
+**Tests this plan already knows it needs**, because each is where this kind of change goes wrong: the
+settings overlay opens and closes by all three doors and returns focus (§10's harness can call the
+page's own functions); a `form` row with a `password` field still never reaches the transcript; the `/`
+menu's filtered list is the frame's commands and nothing else; and `readonly` still cannot be turned on
+and off by a control that reaches a route rather than the run.
+
+## 20. Markdown in the preview panel: an answer, not a plan — **the scope is a person's choice**
+
+Asked 2026-09-18, with the honest worry attached: *the preview should understand Markdown, but is that too
+much complexity?* It is a real question, and the numbers are what answer it.
+
+**What is actually being asked for.** The panel already reads a file and draws it as text with line
+numbers, a scroll to a line, a byte count and a refusal of its own for each reason it cannot be shown
+(§12). A `.md` file drawn as its own source is legible but not *read*: `AGENTS.md`, `HANDOFF.md` and every
+`docs/*.md` in this repository are the files a person previews most, and they are the ones whose structure
+the raw text hides.
+
+**The three scopes, with what each costs.**
+
+| Scope | What it does | Size | Risk |
+|---|---|---|---|
+| **A. line-level styling** | headings, fences, list bullets and quotes get *style* — a proportional face, a measure, a bolder `#` line, a monospaced fence — with no parsing of inline syntax | ~50 lines of JS, 2–3 harness checks | low: a wrong style is a style |
+| **B. block rendering** | A plus real blocks: headings at their levels, fenced code, lists (nested), blockquotes, thematic breaks, paragraphs, and a **raw/rendered toggle** | ~250 lines + ~10 checks | medium: the failure mode is a wrong render, contained to the panel and one press from the truth |
+| **C. B plus inline** | B plus `**bold**`, `*italic*`, `` `code` ``, and `[text](url)` whose URL goes through the page's existing allowlist | +80 lines + 5 checks | medium: the parser is the new surface, and the link half is where a security rule already exists to reuse |
+
+**What makes it cheaper than it looks.** Three of flint's own rules do most of the work:
+
+- **the page never assigns markup** (`the_view_never_assigns_markup`, a policy test): a renderer here
+  *builds nodes* and sets `textContent`, so a file containing `<script>` or `<img onerror>` renders as
+  those characters. Raw HTML in Markdown is therefore not a decision to make — it is impossible by
+  construction, which is the one thing every hand-rolled Markdown implementation normally gets wrong;
+- **the URL allowlist already exists** (`asUrl`: `http`/`https` only), so `[x](javascript:…)` becomes
+  text without a second rule;
+- **there is no dependency to add**: the page is one hand-written file, and the parser would be too.
+
+**What makes it more expensive than it looks.** A Markdown parser is a dialect claim, and a half-parser is
+worse than raw text for a document that is a *source of truth*: tables, setext headings, reference links,
+task lists, footnotes, nested emphasis and HTML blocks are all things a reader will eventually type and
+this would render wrong, silently. Two interactions with what is already built also have to be answered
+rather than discovered:
+
+- **line numbers.** The panel scrolls to a line because a `grep` hit asked for one. In a rendered view,
+  "line 412" has no obvious meaning. The rule this plan proposes: a preview opened **at a line** opens
+  **raw** (the line is why it was opened at all), and rendering is what a file opened without one gets;
+- **the toggle is not optional.** Raw must stay one press away, and the panel's note must say which view
+  is showing, because the honest answer to "the renderer got it wrong" is the file's own bytes.
+
+**The recommendation.** A, then B only if A still feels thin — and B **behind the toggle**, with the
+dialect documented in this file as the subset it is, and C only when a link in a previewed document is
+actually missed. That order is not a compromise: A is where most of the readability is, B is where the
+parser starts, and the toggle is what keeps the parser's mistakes from being the *only* thing the panel
+can show. Doing all three at once would be the largest single piece of page-only logic in the tree
+(comparable to the whole jobs panel, §13) for a panel that is a side window — which is a fair thing to
+build, but it should be chosen rather than assumed.
+
+**Not built, and nothing else waits on it.** The preview's contents are plain text today, and that
+remains the honest answer to a URL inside a file (§16's closing sentence).

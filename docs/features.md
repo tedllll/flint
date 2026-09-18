@@ -415,6 +415,14 @@ prints the list this run would send, which is the honest way to check it.
 
 ### 6.2 Reading and writing files
 
+Every path argument in this table resolves the same way (`config::resolve_path`, and the same rule
+for the page's `GET /file`/`POST /open` and a person's `@name`): a leading `~/` or `~\` is the **home
+directory**, an absolute path is used as written, and anything else is relative to the run's working
+directory. Two shapes are deliberately *not* a home — `~user/x` is somebody else's, and `~notes.txt`
+is a file whose name begins with a tilde — so both stay as written and the reader reports what it
+looked for. A machine that will not say where home is leaves the path alone rather than resolving it
+against the process's own directory.
+
 | Tool | Arguments | What it does | Gating and limits |
 |---|---|---|---|
 | `read` | `file_path` (`path` is an alias), `offset` (1-based, default 1), `limit` (default 2000 lines) | the file with line numbers | a directory is not a file: the operating system's own refusal comes back wrapped as `cannot read <path>: …`; a large file is paged with `offset`/`limit` |
@@ -701,13 +709,13 @@ Four checks run before any route, in this order, and each refusal is a `403` wit
 | `GET /` | — | the page (`text/html`); 405 for any other method |
 | `GET /session` | — | the session file verbatim (`application/x-ndjson`), with `X-Flint-At` = the cursor **only when this run has a live feed *and* there is a file to point into** — a cursor is an offset in the session file, so a run whose conversation has not been written yet answers `200` with an empty body and no `X-Flint-At`, and the header appears the moment the first line does; `404` when the run keeps no conversation |
 | `GET /sessions` | — | `{"sessions":[{"n","id","label","current"}]}` |
-| `GET /file?path=<p>[:<line>]` | `path` required, percent-encoded; resolved against the run's `cwd`; the literal path is tried first, then the `:N`-stripped one | the file's bytes (`text/plain`, cut at 512 KB with `X-Flint-Cut`/`X-Flint-Size`), or the route's own refusal: a directory, a file over 64 MB, a non-UTF-8 file, or nothing there |
+| `GET /file?path=<p>[:<line>]` | `path` required, percent-encoded; resolved by `config::resolve_path` — a leading `~/`/`~\` is the home directory, an absolute path is used as written, anything else is against the run's `cwd`; the literal path is tried first, then the `:N`-stripped one | the file's bytes (`text/plain`, cut at 512 KB with `X-Flint-Cut`/`X-Flint-Size`), or the route's own refusal: a directory, a file over 64 MB, a non-UTF-8 file, or nothing there |
 | `GET /jobs` | — | `{"jobs":[…]}` — the same record `/jobs` and `job_op` read |
 | `GET /peers` | — | `{"peers":[{pid,cwd,provider,model,readonly,session,age_secs}]}` |
 | `GET /events?last=<cursor>&session=<file>` | the cursor may also arrive as `Last-Event-ID` | the SSE stream: unnamed frames for session lines, named `state`/`status`/`answer`/`reset`/`jobs`/`sessions`/`file`, `: ping` every 20 s. `404` when this run has no live feed |
 | `POST /message` | a JSON body `{"text":"…"}`, at most 1 MiB | `202 {"queued":true}`; the text is typed into the run **exactly as the terminal would receive it** — the REPL decides whether it is a command, a `!` escape or a prompt. `409` when there is no prompt to type into (a one-shot run) or the run is shutting down; `400` for a non-JSON body, a missing `text`, or an empty one |
 | `POST /report` | the same | the same, except the line is a **reading**: the page shows the answer and the terminal prints nothing |
-| `POST /open` | a JSON body `{"path":"…"}` | hands the path to the program this machine uses for it: `200 {"opened":"<path>","with":"explorer"|"open"|"xdg-open"}`. `409` in a **`readonly`** run (the guard is read from the run, not from a copy taken at bind time); `404 nothing at <path>: …` when there is nothing there; `500` when the launcher itself fails; `400` for a non-JSON body, a missing `path`, or an empty one. A relative path resolves against the run's `cwd`, exactly as `GET /file` does |
+| `POST /open` | a JSON body `{"path":"…"}` | hands the path to the program this machine uses for it: `200 {"opened":"<path>","with":"explorer"|"open"|"xdg-open"}`. `409` in a **`readonly`** run (the guard is read from the run, not from a copy taken at bind time); `404 nothing at <path>: …` when there is nothing there; `500` when the launcher itself fails; `400` for a non-JSON body, a missing `path`, or an empty one. The path resolves exactly as `GET /file` resolves it, `~` included |
 | `POST /log` | a plain line, not JSON | `200 logged`; writes `<FLINT_HOME>/web.log`, whitespace-collapsed, cut to 500 chars, capped at 1 MB |
 | anything else | — | `404 no such route` |
 
@@ -723,6 +731,8 @@ disagree with the process.
 
 | Area | Control | What pressing it does |
 |---|---|---|
+| header | the conversation's name, above everything | not a control: the session file's own newest `title` event, else the label `GET /sessions` chose (the newest name, else the first thing said, else `(empty)`). Clipped with the whole of it in the tooltip |
+| header | the status chips | not controls either: `N running` (or `N stopping`), `N subagent(s)`, `N failed`, `N done`, counted from `GET /jobs` by kind. The whole line is **hidden when there is no work**, and a failure is never folded into `done` |
 | header | `#pick-provider`, `#pick-model` | sends `/provider <name>` / `/model <name>`; a refusal reverts the picker from the frame |
 | header | one `<select>` per toggle | sends `/<toggle> <value>` — `verbose`, `detail`, `readonly`, `hear-peers`, `thinking` |
 | header | an action button | sends the frame's own line, e.g. `/reload`, `/new` |
@@ -730,14 +740,14 @@ disagree with the process.
 | header | a **destructive** row | first press opens its choices and sends nothing; the second press sends `<send> <value>`. The choices are the list the frame names: conversations (the sidebar's numbers), providers (their names), or jobs (the pids the jobs panel is showing). With nothing to choose from it says `nothing to choose from` |
 | header | a **form** row (`/provider add`, `/provider key`, `/config set`, `/import`, `/export`, `/name`, `/queue`) | one field per argument the frame declares; a `password` field is drawn masked and emptied after a send; an answer the frame does not mark optional must be filled or the line is not sent |
 | header | `/say`'s `--to` picker | the options are the live runs sharing this directory, fetched from `GET /peers`: `(everyone here)` first, then `pid N · <model> · <read-only> · here now` — or, with nobody here, the fact that it waits in the file |
-| header | the jobs panel | one row per job this run started: kind, what was asked, how long it has been going (ticking once a second), and its exit code in words once it ends. Pressing a row opens its log or the child's own conversation in the preview |
+| header | the jobs panel | the chips above it are its summary; the panel itself is one row per job this run started: kind, what was asked, how long it has been going (ticking once a second), and its exit code in words once it ends. Pressing a row opens its log or the child's own conversation in the preview. A job that has been asked to stop counts as `running`/`stopping` — it is still spending time — and is not offered in the `/jobs stop` menu a second time |
 | sidebar | `+ new` | sends `/new`; disabled for the round trip so one click cannot start two conversations |
 | sidebar | a conversation row | sends `/resume <n>` — the current row does nothing |
 | sidebar | a row's `⋯` menu | that conversation's destructive rows (`/archive <n>`, `/delete <n>`), each behind the same two-press rule, and — on the current row only — a `/name` field |
 | composer | the textarea + `#send` | sends the text; `Enter` sends, `Shift+Enter` is a newline. The box clears only on success, and only if it still holds what was sent |
 | composer | the stop button | shown only while a turn runs; sends `/stop`, so a half-written message in the box survives |
 | transcript | a tool block | a `<details>`: the summary is the verb and the arguments, the body is the arguments and the output |
-| transcript | a `button.path` | opens the preview panel at that file (and that line, when the path carried one) |
+| transcript | a `button.path` | opens the preview panel at that file, and at that line when the token named one. The button **reads what the token said** — `src/web.rs:412`, `src/web.rs#L412`, `C:/x.js:42` — so a `grep` hit keeps the line it is worth reading for; a `file://` prefix is dropped on the way, since the scheme is the one part of the token the panel does not need (§18 of `docs/web-mode.md`) |
 | transcript | a web address | a link in a **new tab** with `rel="noopener noreferrer"`; only `http`/`https` become links (§11 of `docs/web-mode.md`) |
 | transcript | `thinking`, `instructions` | `<details>` blocks, both closed to begin with |
 | preview | `reload`, `close` | re-reads `GET /file`; closing leaves the transcript and the reader's place alone |
