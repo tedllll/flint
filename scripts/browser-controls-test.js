@@ -1000,19 +1000,39 @@ async function main() {
       .waitFor(
         `(() => { const p = document.getElementById("jobs");
           if (!p || p.hidden) return null;
-          return { summary: document.getElementById("jobs-summary").textContent,
-                   open: p.open,
-                   rows: document.querySelectorAll("#job-list .row").length }; })()`,
+          const chips = Array.from(document.querySelectorAll("#jobs-summary .chip"))
+            .map((c) => c.textContent);
+          const rows = Array.from(document.querySelectorAll("#job-list .row")).map((r) => ({
+            kind: (r.querySelector(".kind") || {}).textContent || "",
+            status: r.className }));
+          return { chips: chips, open: p.open, rows: rows }; })()`,
         "the jobs panel",
         60
       )
       .catch(() => null);
-    // The number on the trigger and the rows under it are the same list, so they are one claim: a
-    // count that disagrees with what the panel shows is worse than no count at all.
-    const counted = panel ? Number((panel.summary.match(/\((\d+)\)/) || [])[1]) : NaN;
+    // The chips are counts of *kinds*, so the claim is not a fixed set of words -- which jobs exist
+    // at this instant is the scripted turn's business, not this test's -- but that the chips and the
+    // rows under them are the same list counted two ways. A count that disagrees with what the panel
+    // shows is worse than no count at all, which is the rule the old `jobs (N)` trigger was held to
+    // and this keeps: the three partition chips must add up to the rows, and the subagent chip is a
+    // cross-cut of the live ones rather than a fourth part.
+    const jobChips = panel ? panel.chips : [];
+    const numbers = (re) => jobChips.filter((c) => re.test(c)).map((c) => Number((c.match(/\d+/) || [])[0]));
+    const liveChip = numbers(/ (running|stopping)$/).reduce((a, b) => a + b, 0);
+    const failedChip = numbers(/ failed$/).reduce((a, b) => a + b, 0);
+    const doneChip = numbers(/ done$/).reduce((a, b) => a + b, 0);
+    const childChip = numbers(/ subagent/).reduce((a, b) => a + b, 0);
+    const jobRows = panel ? panel.rows : [];
+    const isLive = (r) => /(^|\s)(running|stopping)(\s|$)/.test(r.status);
     check(
-      "a run that started work shows it in the header, with the count of it",
-      !!panel && /^jobs \(\d+\)/.test(panel.summary) && counted === panel.rows && panel.rows >= 1,
+      "a run that started work shows it in the header, counted by kind",
+      !!panel &&
+        jobChips.length >= 1 &&
+        liveChip === jobRows.filter(isLive).length &&
+        failedChip === jobRows.filter((r) => /(^|\s)(failed|killed)(\s|$)/.test(r.status)).length &&
+        childChip === jobRows.filter((r) => isLive(r) && r.kind === "child").length &&
+        liveChip + failedChip + doneChip === jobRows.length &&
+        jobRows.length >= 1,
       `panel: ${JSON.stringify(panel)}`
     );
 
