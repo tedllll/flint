@@ -5918,10 +5918,34 @@ async fn a_reload_keeps_the_conversation() {
 ///
 /// `/session` serves the followed file **byte for byte**, which makes the assertion a sharp one:
 /// the line typed after the switch is in the new file and in no other.
-#[tokio::test]
-async fn the_view_follows_the_conversation_through_a_switch() {
+/// Write one line to a run's stdin, or say why the run could not take it.
+///
+/// The same lesson the check below was written for, applied one step earlier: this test failed once on
+/// the ubuntu runner with `failed to write stdin: Os { code: 32, kind: BrokenPipe }`, which says a pipe
+/// closed and nothing about *why the run is gone* -- the two files that would say were written to and
+/// never read. A run that is gone cannot answer, so both the status and the two files are carried out.
+fn write_to_run(
+    child: &mut std::process::Child,
+    line: &[u8],
+    errors: &std::path::Path,
+    log: &std::path::Path,
+) {
     use std::io::Write;
 
+    let stdin = child.stdin.as_mut().expect("no stdin handle");
+    if let Err(failed) = stdin.write_all(line) {
+        let status = child.try_wait().ok().flatten();
+        panic!(
+            "the run could not be given {line:?}: {failed} (status {status:?})\n  stderr: {}\n  \
+             transcript: {}",
+            std::fs::read_to_string(errors).unwrap_or_default().trim(),
+            std::fs::read_to_string(log).unwrap_or_default().trim()
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_view_follows_the_conversation_through_a_switch() {
     let server = MockServer::start().await;
     answer_once(&server).await;
     let home = test_home("view-follows", &server.uri());
@@ -5971,19 +5995,9 @@ async fn the_view_follows_the_conversation_through_a_switch() {
         .expect("failed to run flint");
 
     let (port, token) = port_and_token(&wait_for_url(&log));
-    {
-        let stdin = child.stdin.as_mut().expect("no stdin handle");
-        stdin
-            .write_all(b"/resume 111-1\nthe question in this run\n")
-            .expect("failed to write stdin");
-    }
+    write_to_run(&mut child, b"/resume 111-1\nthe question in this run\n", &errors, &log);
     wait_for_requests(&server, 1).await;
-    {
-        let stdin = child.stdin.as_mut().expect("no stdin handle");
-        stdin
-            .write_all(b"/model stub-other\nand now?\n")
-            .expect("failed to write stdin");
-    }
+    write_to_run(&mut child, b"/model stub-other\nand now?\n", &errors, &log);
     // The second request means the turn after the switch is under way, so the switch itself has
     // happened and the new file has the line in it.
     wait_for_requests(&server, 2).await;

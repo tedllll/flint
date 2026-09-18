@@ -6,11 +6,51 @@ of it.
 
 ## Where things stand
 
-**The build phase is being closed out: the plan of record's own open halves are being finished before
-any of the survey's new proposals, and the first one is built.** The purpose now is to stop adding
-features and consolidate, so the order changed: §9's and §10's named-but-unfinished work comes first
-(they are already agreed, not merely proposed), then the guards and documentation §11 lists. `ROADMAP.md`
-§11 opens with that list and marks each line as it lands.
+**The build phase is closed out: every open half in `ROADMAP.md` §11 is now built, answered or bounded,
+and the two items left are the ones that were never mine to finish.** The phase's purpose was to stop
+adding features and consolidate, so the order was: §9's and §10's named-but-unfinished work first, then
+the guards and documentation §11 lists. §11's own line-by-line state, so a reader does not have to
+reconstruct it:
+
+| §11 item | state |
+|---|---|
+| 1. the two headless Node harnesses in CI | **built** — one step in `.github/workflows/ci.yml`'s test job, on both runners |
+| 2. four stale sentences | **corrected** — all four, each now saying what the tree does |
+| 3. page claims vs what the harness holds | **bounded** — the browser harness prints what it drives; the two loose claims point at that list |
+| 4. retry safety (nothing identifies a request) | **answered in writing** in §10 — evidence, not a promise; no key, no heuristic |
+| 5. `flint --version` | **built**, with the `session`-`version` name collision stated where a reader meets it |
+| 6. one deliberate ending of a `--json` stream | **built** — documented and held by a test |
+| 7. a job can say it is stopping | **built** — `stopping` read only through `is_stopping` |
+| 8. the page's cursor across a restart | **answered**, and its client half **built** — a reload rebuilds, a stale position is reported |
+| 9. three gaps the code named about itself | **all three closed** — the paste enable is tested (and moved into the run's own sink), `/say --to` is a page picker, the report-whitelist comment is true |
+| 10. `/export` from inside a conversation | **built** |
+| 11. the page's panel groups are classes, not tasks | seen and judged **not worth a round on its own** — cosmetic, no behaviour, recorded so nobody re-derives it |
+| 12. `docs/sandbox.md` contradicts `## Not doing, and why` | **a decision for the person**: take a first stage and edit the bullet, or decline it in writing. Nothing else in §11 waits on it |
+
+The gate as this session left it: `cargo test` **634 passing, 1 ignored** across the 14 suites (lib 351,
+bin 6, `agent_loop` 34, `balance` 7, `cli_output` 109, `json_output` 41, `task` 17, `search_tool` 4, `who`
+17, `term_capture` 20 + 1 ignored, `web_view` 29, `say` 10, and the two empty-by-construction suites);
+`cargo clippy --all-targets -- -D warnings` silent; both headless Node harnesses green **and now run by
+CI**; the browser harness run by hand at **56/56 claims held**, printing the list of drives and
+not-drives it is bounded by. The release binary on `PATH` is the tree's (`flint --version` → `flint
+0.1.0`, exit 0).
+
+**One CI failure was seen and not reproduced, and the test that saw it now says more.** The push that
+added the two Node harnesses to CI (`fef238f`) came back with `test (ubuntu-latest)` **red** — not at the
+new step, but in `tests/cli_output.rs`: `the_view_follows_the_conversation_through_a_switch` panicked with
+`failed to write stdin: Os { code: 32, kind: BrokenPipe }`, and every commit after it was green on the same
+code. So it is a race in that test, not a defect it caught: a run that has already exited has a closed
+pipe, and the write reports that as a broken pipe with nothing about *why the run is gone*. The test had
+already learned this lesson once — there is a check a few lines later that panics with the run's status,
+stderr and transcript "because a run that is gone cannot answer, and saying so is worth more than the
+connection error" — and the write itself had not. It goes through `write_to_run` now, which panics with the
+status and both files; the diagnostic was proved by killing the run and writing past the pipe, which
+prints exactly that. The flake itself is un-fixed because it was not reproduced: what is fixed is that a
+repeat is readable instead of a bare `Broken pipe`.
+
+**The one promise this session kept in full, because it was the last feature the plan of record owed:**
+§11 item 9(ii), the page's `/say --to` picker of live runs. Paragraphs below keep the reasoning for each
+item in the order the round built them.
 
 **The first of them: a turn says how many times the provider was retried (`provider_retries`).** §10 B5
 had recorded the hole in its own words — "how many provider retries happened … is still only on stderr; a
