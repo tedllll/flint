@@ -41,8 +41,10 @@ run) serves *this process's* conversation on `127.0.0.1`. It is §12.
 The distinction a tester must keep straight throughout: **the answer** is what the model
 said; **the transcript** is everything the run drew — your line, each tool call and its
 result, notices, and the answer. On the terminal both go to **stdout**; the run's own
-errors and warnings go to **stderr** (`flint: error: …`, `flint: warning: …`). Under
-`--json`, stdout is *only* the NDJSON stream — see §3.4.
+errors and warnings go to **stderr** (`flint: error: …`, `flint: warning: …`). Notices that
+belong to the conversation are transcript lines on stdout even when they are about the run —
+`search: …` at startup and `warning: …` for a provider that could not be configured (§14.2).
+Under `--json`, stdout is *only* the NDJSON stream — see §3.4.
 
 ---
 
@@ -714,8 +716,11 @@ that understood JavaScript would be a second parser to be wrong about.
 
 - **No markup assignment**: `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write` and `eval(`
   are all forbidden, as is any Markdown renderer (`marked(`). Every string goes through `textContent`.
-- **Nothing external**: no `fetch("http…`, no `src="http…`, no `href="//`, no XHR, no font. The page
-  requests nothing off this machine — a *link the reader presses* is not the page reaching out.
+- **Nothing external**: no absolute URL anywhere (`http://`, `https://`, `//cdn`), no `<script src`,
+  no stylesheet link, and `XMLHttpRequest` — a *subresource* is the page itself reaching off the
+  machine. The link this build added brought two spellings of the same mistake with it, and both are
+  refused: `fetch("http`, `src="http`, `href="//`. A link the reader presses is not the page reaching
+  out.
 - **`window.open(` is forbidden**: an address opens in a new tab as a link, and a path opens in this
   page's own panel.
 - **The token is never stored**: no `localStorage`, no origin-wide store; the only stored thing is the
@@ -780,9 +785,9 @@ documentation says missing keys take their default. Inside a `[[providers]]` tab
 | per provider: `thinking_field` | `""` | the JSON field a reasoning level goes in; with none, nothing is sent | file only |
 | `[search]`: `enabled`, `provider`, `base_url`, `model`, `max_uses`, `api_key`, `api_key_env` | enabled, DeepSeek's Anthropic endpoint, `deepseek-flash`, 1 | the `search` tool | **file only** |
 
-The four keys that matter most to a tester are the ones with **no door**: `max_tool_output`,
-`max_request_chars`, `instructions` and `skill_dirs` can only be changed by editing the file, and
-`/reload` is what makes a hand edit take effect in a running session.
+The keys with **no door** are the ones marked file only above; of them `max_tool_output` and
+`max_request_chars` are the two a tester is most likely to want, and `/config` does not even print the
+first. `/reload` is what makes a hand edit take effect in a running session.
 
 ### 13.2 Environment variables
 
@@ -853,7 +858,9 @@ damage: the reader is line-oriented.
 
 ### 13.5 The `--json` stream, frame by frame
 
-One object per line on stdout, keys alphabetical, flushed per line. Fifteen types:
+One object per line on stdout, keys alphabetical, flushed per line. Fifteen types are in the
+vocabulary; fourteen can appear on a `--json` run's stdout, and the fifteenth (`command`) belongs to the
+page's stream:
 
 `session.started` (`session`, `cwd`, `model`) → `warning` (`message`) → `turn.started` (`prompt`, plus
 `attachments` when `@file` inlined something) → `message.delta` / `reasoning.delta` (`text`) →
@@ -881,13 +888,12 @@ See §14.1. Under `--json` the code and the last `turn.completed.outcome` always
 
 ## 14. Failure modes
 
-
 ### 14.1 Exit codes
 
 | Code | Name | Meaning |
 |---|---|---|
 | 0 | `EXIT_OK` | the run finished with an answer |
-| 1 | `EXIT_FAILURE` | a failure that is not yet classified — the honest answer while the classification is being built |
+| 1 | `EXIT_FAILURE` | the failure nothing else classifies: a session number that does not exist, a provider that could not be configured, `balance` when the endpoint's answer does not decide anything |
 | 2 | `EXIT_USAGE` | the command line is wrong; nothing was asked of the model |
 | 65 | `EXIT_DATAERR` | the answer is not usable as it stands: a schema that never matched, or a turn that stopped early (`--max-seconds`) |
 | 69 | `EXIT_UNAVAILABLE` | the provider cannot be used at all (no key, auth, insufficient balance); retrying changes nothing |
@@ -900,8 +906,10 @@ See §14.1. Under `--json` the code and the last `turn.completed.outcome` always
 
 | Prefix / shape | Where | Meaning |
 |---|---|---|
-| `flint: error: …` | stderr | the run could not start or could not continue |
+| `flint: error: …` | stderr | the run could not start or could not continue. A provider with no key is the common one, and it carries the fix: `error: provider '<name>' has no API key.` then `Fix it without leaving flint:` and three lines naming `/provider key`, `/provider add` and the environment variable to set. Exit 1 |
 | `flint: warning: …` | stderr | something was not recorded (a presence record, a spill file) and the run carries on |
+| `warning: …` | transcript | a provider that could not be configured, said once something can be read rather than taking the process down before the terminal existed. **Not** the same prefix as `flint: warning:` — this one is a line of the transcript |
+| `search: …` | transcript | why the `search` tool is not on offer this run, said once at startup; otherwise a `[search]` block missing its key is indistinguishable from a flint with no search at all |
 | `refused: <what was asked>` | transcript | a line the run would not take from the page's report route; the command is named |
 | `unknown command '<x>'. /help for the commands, /prompts for your saved prompts.` | transcript | a word that is neither a command nor a saved prompt |
 | `✗ <tool> …` | transcript | a tool failed; the failure's own words follow |
