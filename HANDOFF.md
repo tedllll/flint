@@ -43,15 +43,36 @@ its SHA-256 is the one `target/release/flint.exe` was built with).
 
 **`docs/features-verification.md` is untracked, is not part of any commit, and makes the suite red on
 its own.** It is an external verification pass over `docs/features.md`, left in the tree rather than
-committed, and `the_source_tree_contains_no_mojibake` refuses it: the guard lists `路` among its CP936
-artifacts (a middle dot mis-decoded), and Chinese prose about *paths* says `路径`, so a long Chinese
-document trips a check that is right about Rust sources and the page. Proven rather than assumed — with
+committed, and `the_source_tree_contains_no_mojibake` refuses it: the guard lists `U+8DEF` among its
+CP936 artifacts — the character a middle dot becomes when a UTF-8 file is read as CP936 — and that
+character is the second half of the Chinese word for a filesystem *path*, which is a word no Chinese
+document about this program can avoid. A long Chinese verification record therefore trips a check that is
+right about Rust sources and the page. Proven rather than assumed: with
 that one file moved aside the guard passes and the whole suite is the 643 above; with it present, 108 of
 `cli_output`'s 109 pass and the guard names only lines of that file. So a Chinese verification record
 cannot live in this tree as it stands. Two ways out, and the choice is a person's: keep the file outside
-the checkout (its evidence already lives under `%TEMP%\fv\`), or teach the guard that `路` is legitimate
-prose *inside a file declared to hold CJK* while staying a marker everywhere else — a change to a safety
-guard, which is why it was not made to make a red suite go green.
+the checkout (its evidence already lives under `%TEMP%\fv\`), or teach the guard that `U+8DEF` is
+legitimate prose *inside a file declared to hold CJK* while staying a marker everywhere else — a change
+to a safety guard, which is why it was not made to make a red suite go green.
+
+**That paragraph was first written with the character spelled out, and CI caught it** — the guard doing
+its job on a file (`HANDOFF.md`) that has been declared as holding Chinese since long before this
+session, which is the half of it a whitelist cannot do. Worth recording because it is the cheapest
+possible demonstration of the argument above: the one document in this tree that argues about a mojibake
+marker is not allowed to contain the marker, so it names it by code point.
+
+**The same run was also the third outing of the `--web`-run-died-mid-test class, and this time the reason
+existed and was cut off.** `the_view_follows_the_conversation_through_a_switch` failed on ubuntu with the
+run gone by exit **101** — a flint panic, not an assertion — which is the class recorded below
+(*"One CI failure was seen, then a second of the same shape"*): a `--web` run ending before a test is
+finished with it, now on a third test-run and still unreproduced on this machine, with nothing in this
+session's changes anywhere near `--web`, `/resume` or `/model`. What is new is where the diagnosis went
+missing: the test's panic already carries the child's own stderr and transcript, and the CI step that
+turns a failure into an annotation was `head -20`, which the *other* failure on that run — a mojibake
+offender list thirteen lines long — had already spent. So the annotation stopped at the assertion line and
+the stderr never left the runner. The step now emits ten names, `grep -A 6`, and `head -80`: a cheap fix
+to a diagnostic that was written to be read and then truncated by the thing that was supposed to carry
+it out. The flake itself stays recorded rather than fixed, for the reason that paragraph gives.
 
 **One CI failure was seen, then a second of the same shape, and neither was reproduced — so the tests
 that saw them now say more.** The push that added the two Node harnesses to CI (`fef238f`) came back with

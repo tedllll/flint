@@ -57,8 +57,13 @@ jobs:
       #
       # The test's name is not enough to act on: `thread ... panicked at tests/x.rs:711`
       # plus the assertion's own message is what says whether the test or the code is
-      # wrong, so both are carried out. Ten annotations are kept per step, which is why
-      # this is `head`ed rather than dumped.
+      # wrong, so both are carried out. Annotations are kept per step, which is why this is
+      # `head`ed rather than dumped -- and the heads are generous because the message is
+      # what the limit used to eat: measured on a run whose failures were one panic with a
+      # 13-line offender list and one panic whose *own* multi-line message (the child's
+      # stderr, in `the_view_follows_the_conversation_through_a_switch`) fell past a
+      # `head -20` that the first failure had already spent. The failing *names* are also
+      # emitted before the context, so the two heads cannot starve each other.
       #
       # Both greps are `|| true` on purpose: a grep that matches nothing exits 1, which
       # would turn this step red and add a second, unexplainable failure to the report.
@@ -69,8 +74,8 @@ jobs:
         shell: bash
         run: |
           [ -f target/test-output.txt ] || exit 0
-          grep -E '^test .* FAILED$' target/test-output.txt | head -5 | sed 's/^/::error::/' || true
-          grep -A 4 -E "^thread .* panicked at" target/test-output.txt | head -20 | sed 's/^/::error::/' || true
+          grep -E '^test .* FAILED$' target/test-output.txt | head -10 | sed 's/^/::error::/' || true
+          grep -A 6 -E "^thread .* panicked at" target/test-output.txt | head -80 | sed 's/^/::error::/' || true
 
       # Silent is the standard this repository holds itself to, so a warning is
       # the failure. `cargo test` builds the targets; this is what actually reads
