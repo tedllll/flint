@@ -250,17 +250,25 @@ impl Limit {
 /// also measure flint's own start-up and the caller's reading, and which a streaming caller cannot
 /// do at all. What it is *not* is a cost: see B5 in `ROADMAP.md`, where the money half of this row
 /// has no home because flint does not know what a token costs on the endpoint it was pointed at.
+///
+/// `provider_retries` is the other half of that question and always carried, unlike the two fields
+/// below: a turn that took three tries and a turn that was merely slow look the same from
+/// `duration_ms`, and a retry leaves no other mark on the stream -- it happens before anything has
+/// been drawn, which is exactly why it is invisible. Zero is a fact here rather than a silence, so
+/// the field is never absent and a caller never has to tell "no retries" from "nobody said".
 pub fn turn_completed(
     usage: Option<Usage>,
     outcome: Outcome,
     limit: Option<Limit>,
     duration_ms: u64,
+    provider_retries: u32,
 ) -> String {
     let mut body = json!({
         "prompt_tokens": usage.map_or(0, |u| u.prompt_tokens),
         "completion_tokens": usage.map_or(0, |u| u.completion_tokens),
         "outcome": outcome.as_str(),
         "duration_ms": duration_ms,
+        "provider_retries": provider_retries,
     });
     // Like the `usage` frame's own field, and for the same reason: present only when the endpoint
     // reported a split, so a reader never sees a zero it would have to disbelieve.
@@ -545,6 +553,7 @@ mod tests {
             Outcome::Complete,
             None,
             1234,
+            0,
         ))
         .unwrap();
         assert_eq!(usage["type"], "turn.completed");
@@ -552,6 +561,9 @@ mod tests {
         // How long the turn took is on every ending, including the ones that are not an answer: a
         // stopped turn is exactly when a caller asks whether waiting was worth it.
         assert_eq!(usage["duration_ms"], 1234);
+        // Always carried, and a zero here means the first attempt answered -- which is a fact, not a
+        // field the endpoint stayed quiet about.
+        assert_eq!(usage["provider_retries"], 0);
         // The outcome is a field on the end of the turn rather than a frame of its own: a consumer
         // that already reads this line for the token counts gets the answer's worth for free, and
         // there is no second thing to keep in step with the first.
@@ -566,20 +578,27 @@ mod tests {
             Outcome::Incomplete,
             Some(Limit::Steps),
             9,
+            2,
         ))
         .unwrap();
         assert_eq!(step_limited["reason"], "steps");
+        assert_eq!(
+            step_limited["provider_retries"], 2,
+            "an unfinished turn's retries are worth as much as a finished one's"
+        );
         let timed_out: Value = serde_json::from_str(&turn_completed(
             None,
             Outcome::Incomplete,
             Some(Limit::Seconds),
             9,
+            0,
         ))
         .unwrap();
         assert_eq!(timed_out["reason"], "seconds");
         let stopped: Value =
-            serde_json::from_str(&turn_completed(None, Outcome::Stopped, None, 9)).unwrap();
+            serde_json::from_str(&turn_completed(None, Outcome::Stopped, None, 9, 1)).unwrap();
         assert!(stopped.get("reason").is_none(), "{stopped}");
+        assert_eq!(stopped["provider_retries"], 1);
 
         let failed: Value = serde_json::from_str(&error("no model configured")).unwrap();
         assert_eq!(failed["type"], "error");

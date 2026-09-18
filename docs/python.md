@@ -187,6 +187,7 @@ thread as each one settles, which is how a caller draws progress without waiting
 | `stopped` | true when `timeout` ran out and the run was asked to stop rather than killed |
 | `outcome` | how the turn ended: `complete`, `incomplete` (the step limit), `stopped` |
 | `duration_ms` | how long the turn took, as flint measured it (from `turn.started`), not including flint's start-up or your own reading of the stream |
+| `provider_retries` | how many of the turn's requests had to be sent twice — the reason a turn can be slow without being stuck, which `duration_ms` raises and cannot answer |
 | `turns` | how many turns the run asked for (one, unless a schema needed repairs) |
 | `ok` | `returncode == 0 and error is None` — false for a stopped or unfinished run |
 | `complete` | `ok` and the outcome is not `incomplete`/`stopped`: the answer is whole |

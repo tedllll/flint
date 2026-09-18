@@ -1376,10 +1376,14 @@ decision, not a gap.
    proceed, that is the first question, and today it is answered by reading the whole event stream.
 5. **What it cost.** Token counts for the last turn are in `turn.completed`, and *done since*: the
    wall-clock duration is there too (`duration_ms`, measured from `turn.started`, on every ending
-   including a stopped one). What is still absent is the money — see the note under B5 above for why
-   that half is refused rather than pending — and how many provider retries happened, which is still
-   only on stderr; a retry is invisible in the stream and is the one part of "why was that slow" that
-   `duration_ms` can now raise without being able to answer.
+   including a stopped one), and so is the **retry count** (`provider_retries`, added 2026-09-18) —
+   how many of the turn's requests the provider had to send twice. Both halves were the same question
+   ("was that slow, or was it stuck") and neither was answerable from the stream: a retry happens
+   before anything has been drawn, so its only other trace was a notice on stderr, which a `--json`
+   caller does not read and a log cannot count. The field is always carried, unlike `cache_hit_tokens`
+   and `reason`, because flint always knows this number and `0` is the answer "the first attempt
+   worked" rather than a silence. What is still absent is the money — see the note under B5 above for
+   why that half is refused rather than pending.
 
 #### C. Holes
 
@@ -1784,6 +1788,19 @@ because the failure mode of a survey is a list of plausible-sounding features, a
 *this* repository is a feature that contradicts something it already decided. What the survey looked at
 and decided **not** to propose is at the end of the section, with the reason: a survey that only adds is
 not a survey.
+
+**Worked before the list below, because it was already agreed rather than merely proposed:** the halves
+§9 and §10 named as still open, which a survey should finish rather than replace. The order is that
+list's, not this one's, and each line is edited in the same commit as the code that closes it.
+
+- §10 B5's retry half — `provider_retries` on `turn.completed` — **built 2026-09-18**. The remaining
+  line in B5 is the money, which is refused with its reason rather than owed.
+- §9: `/export` from inside a running conversation ("the obvious next door"); a job that can say it is
+  `stopping`; and the page's own half of the reconnect cursor, which `HANDOFF.md` calls the part of the
+  item that stays open.
+- §8: the picker of live runs that the page's `/say --to` is waiting on.
+- §10 C3 and C5 — the two holes that need a decision rather than code: a request nothing identifies
+  (so a caller's retry may repeat tools), and a session carried into a second purpose by `--continue`.
 
 **Ordered, cheapest-and-highest-value first.** Two sweeps went into this: one over the documentation,
 one over `src/`, `tests/`, `scripts/` and `examples/` — and every item below was checked against the

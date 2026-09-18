@@ -296,7 +296,7 @@ done
 {"arguments":"{\"command\":\"dsh --version\"}","id":"call_1","name":"bash","type":"tool.args"}
 {"id":"call_1","name":"bash","ok":true,"output":"1.2.3","type":"tool.completed"}
 {"text":"Let me look. It is version 1.2.3.","type":"message.completed"}
-{"prompt_tokens":1204,"completion_tokens":88,"outcome":"complete","duration_ms":8123,"type":"turn.completed"}
+{"prompt_tokens":1204,"completion_tokens":88,"outcome":"complete","duration_ms":8123,"provider_retries":0,"type":"turn.completed"}
 ```
 
 The vocabulary is closed and small: `session.started`, `turn.started`, `message.delta`,
@@ -393,6 +393,13 @@ are worth knowing:
   exactly the question a caller has after waiting. What it is **not** is a price: flint does not know
   what a token costs on the endpoint it was pointed at, so the money half of that row is not here.
 
+- **And whether the slowness was a retry.** The same line carries `provider_retries`: how many of this
+  turn's requests the provider had to send twice. `duration_ms` can raise "that took eleven seconds"
+  and cannot answer it, because a retry happens *before* anything has been drawn — it leaves no mark on
+  the stream at all, only a notice on stderr, which a `--json` caller does not read and a log cannot
+  count. Unlike `cache_hit_tokens` the field is always present: flint always knows this number, and `0`
+  is the answer "the first attempt worked" rather than a silence.
+
 - **A failure names its cause when flint knows it.** The `error` line carries `code` and
   `retryable` — `{"type":"error","message":"…","code":"insufficient_balance","retryable":false}` —
   and omits both when nothing established a cause, rather than guessing at the edge. That last field
@@ -445,7 +452,7 @@ $ flint -p "when is the last trading day of 2026?" --json --schema trading-day.j
 {"text":"{\"trading_day\": \"2026-10-21\"}","type":"message.delta"}
 {"text":"{\"trading_day\": \"2026-10-21\"}","type":"message.completed"}
 {"json":{"trading_day":"2026-10-21"},"attempts":1,"type":"result"}
-{"prompt_tokens":1204,"completion_tokens":31,"outcome":"complete","duration_ms":2407,"type":"turn.completed"}
+{"prompt_tokens":1204,"completion_tokens":31,"outcome":"complete","duration_ms":2407,"provider_retries":0,"type":"turn.completed"}
 ```
 
 `--schema` takes a path, or the schema itself when the value starts with `{`. It needs

@@ -6,12 +6,40 @@ of it.
 
 ## Where things stand
 
-**The queue ran out, so this round was a survey rather than a feature, and §11 of `ROADMAP.md` is what
-it found.** The ordered queue (§5–§10) has landed, the small unscheduled list is empty, `## Known
-unfinished` opens with "No known defect is open", and the twelve items of the reading of Pi are built —
-which is a state, not an achievement, so the round was spent finding out what is actually left. Two
-sweeps went into it — one over the documentation, one over the code and the harnesses — and every item
-was checked against the file it came from before it was written down. **Twelve things are ordered there,
+**The build phase is being closed out: the plan of record's own open halves are being finished before
+any of the survey's new proposals, and the first one is built.** The purpose now is to stop adding
+features and consolidate, so the order changed: §9's and §10's named-but-unfinished work comes first
+(they are already agreed, not merely proposed), then the guards and documentation §11 lists. `ROADMAP.md`
+§11 opens with that list and marks each line as it lands.
+
+**The first of them: a turn says how many times the provider was retried (`provider_retries`).** §10 B5
+had recorded the hole in its own words — "how many provider retries happened … is still only on stderr; a
+retry is invisible in the stream and is the one part of 'why was that slow' that `duration_ms` can now
+raise without being able to answer." The retry ladder is free precisely because it happens before
+anything has been drawn, which is also why it leaves no mark on the stream: the only trace was a notice
+on stderr, and a `--json` caller does not read stderr and a log cannot count notices. `turn.completed`
+now carries `provider_retries`, always — unlike `cache_hit_tokens` and `reason`, which are present only
+when the endpoint said something, this one is always known and `0` is the fact "the first attempt
+worked". The count is per **turn**, not per run: `Agent::run` forgets it as a turn begins, so what a
+caller reads after waiting is about the turn it just waited for, and a `Provider` cloned by `/model`,
+`/provider` or `/reload` shares the counter rather than starting a run that appears never to have
+retried. The test that was written first fails on the old code ("the turn that needed two attempts
+reports one retry") and is backed by a second assertion in the plainest test there is, that a clean turn
+says `0`. The Python caller carries it in the same field `duration_ms` travels in, and `README.md`'s
+sample frames show it.
+
+**The line after it is the schema-miss ending, then `/export` from inside a run, a job that can say it is
+`stopping`, the page's own reconnect cursor, and the picker of live runs the page's `/say --to` waits
+on.** §10's two holes that need a decision rather than code — C3 (nothing identifies a request, so a
+caller's retry may repeat tools) and C5 (a session carried into a second purpose by `--continue`) — are
+on the same list, to be settled in writing rather than left as an itch.
+
+**The round before this one surveyed the tree, and §11 of `ROADMAP.md` is what it found.** The ordered
+queue (§5–§10) has landed, the small unscheduled list is empty, `## Known unfinished` opens with "No
+known defect is open", and the twelve items of the reading of Pi are built — which is a state, not an
+achievement, so that round was spent finding out what is actually left. Two sweeps went into it — one
+over the documentation, one over the code and the harnesses — and every item was checked against the
+file it came from before it was written down. **Twelve things are ordered there,
 cheapest-and-highest-value first**: a **guard rather than a feature** (two of the three Node harnesses
 need no browser and a push runs neither of them, so the page's renderer and the terminal's layout are
 tested only by whoever remembers); four stale sentences found by checking claims instead of reading them

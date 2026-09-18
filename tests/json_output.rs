@@ -248,6 +248,14 @@ async fn an_answer_arrives_as_a_stream_of_objects() {
 
     assert_eq!(line_of(&lines, "turn.started")["prompt"], "say hello");
     assert_eq!(line_of(&lines, "message.completed")["text"], "hello world");
+    // The retry count is always carried, so a caller never has to tell "no retries" from a
+    // field that is absent because the endpoint said nothing: flint always knows this one.
+    assert_eq!(
+        line_of(&lines, "turn.completed")["provider_retries"],
+        0,
+        "an answer that arrived on the first attempt claims a retry: {}",
+        line_of(&lines, "turn.completed")
+    );
     assert_eq!(line_of(&lines, "session.started")["model"], "stub-model");
     assert_eq!(
         line_of(&lines, "session.started")["cwd"],
@@ -1568,6 +1576,47 @@ mod exit_codes {
         assert!(
             took < std::time::Duration::from_secs(5),
             "the quota failure was retried: it took {took:?}"
+        );
+    }
+
+    /// A turn that needed two attempts says so, because that is the one part of "why was that slow"
+    /// that `duration_ms` can raise without being able to answer it.
+    ///
+    /// The retry itself is invisible to the model and to the answer: the first attempt failed before
+    /// anything had been drawn, so nothing of it reached the stream, and without a count the only
+    /// trace was a notice on stderr -- which a `--json` caller does not read, and which a log read
+    /// afterwards cannot count. The provider's own ladder is what is measured here: one 503, then the
+    /// answer, and the turn reports one retry rather than looking like a slow first attempt.
+    #[tokio::test]
+    async fn a_retried_attempt_is_counted_on_the_turn() {
+        let server = MockServer::start().await;
+        let cwd = cwd_for("code-retries");
+        std::fs::create_dir_all(&cwd).expect("working directory");
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("upstream is busy"))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(SseFixture {
+                body: answers_in_two_fragments(),
+            })
+            .with_priority(2)
+            .mount(&server)
+            .await;
+
+        let home = home_for("code-retries", &server.uri(), &cwd);
+        let (code, lines, stderr) = run_json(&home, &cwd, &["-p", "say hello", "--json"]);
+        let _ = std::fs::remove_dir_all(&home);
+
+        assert_eq!(code, 0, "the second attempt should have answered: {stderr}");
+        assert_eq!(line_of(&lines, "message.completed")["text"], "hello world");
+        assert_eq!(
+            line_of(&lines, "turn.completed")["provider_retries"],
+            1,
+            "the turn that needed two attempts reports one retry: {}",
+            line_of(&lines, "turn.completed")
         );
     }
 

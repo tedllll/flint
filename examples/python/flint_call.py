@@ -57,7 +57,7 @@ result           json, attempts           a schema run's checked answer, once it
     usage            prompt_tokens, completion_tokens, total_tokens
     status           text, restarted
     warning          message
-    turn.completed   prompt_tokens, completion_tokens, outcome, duration_ms
+    turn.completed   prompt_tokens, completion_tokens, outcome, duration_ms, provider_retries
                                               how the turn ended: complete | incomplete | stopped,
                                               and how long it took, from `turn.started` to here
                                               (so it is the wait, not the process: time your own
@@ -193,6 +193,12 @@ class Turn:
     # yourself, and it is the only clock available to a caller that streams the answer. `None` for a
     # run that never reached the end of a turn, and for an older flint.
     duration_ms: int | None = None
+    # How many of this turn's requests the provider had to send twice, from the same line. `None` for
+    # a run that never reached the end of a turn, and for an older flint. It is the half of that
+    # question `duration_ms` cannot answer: a retry happens before any text has been drawn, so it
+    # leaves no other mark on the stream at all, and a turn that took eleven seconds because the first
+    # attempt was refused looks exactly like one that was merely slow.
+    provider_retries: int | None = None
     # The checked answer, when the run was given a schema: the `result` line's object. `None` for a
     # run with no schema, and `None` for a schema run whose answer never matched -- flint emits no
     # `result` line at all in that case, which is the point: see `ask_json`, which raises instead.
@@ -372,6 +378,7 @@ def _absorb(turn: Turn, line: str) -> dict | None:
         # token counts live on the same line, so this branch is also where the usage goes.
         turn.outcome = event.get("outcome")
         turn.duration_ms = event.get("duration_ms")
+        turn.provider_retries = event.get("provider_retries")
         turn.usage = {
             "prompt_tokens": event.get("prompt_tokens", 0),
             "completion_tokens": event.get("completion_tokens", 0),

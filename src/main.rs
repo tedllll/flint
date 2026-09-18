@@ -5244,6 +5244,7 @@ async fn run_json_turn(
                     ndjson::Outcome::Incomplete,
                     Some(ndjson::Limit::Seconds),
                     ms(&turn_began),
+                    agent.provider_retries(),
                 ));
                 // Same terms as the stream, and the same meaning as a schema that never matched: an
                 // unfinished answer is not a usable one, so the code says so as well as the stream.
@@ -5265,6 +5266,7 @@ async fn run_json_turn(
                 ndjson::Outcome::Stopped,
                 None,
                 ms(&turn_began),
+                agent.provider_retries(),
             ));
             // The half-answer goes where the caller asked for it too, on the same terms as the
             // stream: the code (130) and the outcome say what it is worth, and a stopped run that
@@ -5308,6 +5310,7 @@ async fn run_json_turn(
                     outcome,
                     limit,
                     ms(&turn_began),
+                    agent.provider_retries(),
                 ));
                 // With no schema the answer *is* the text, and this is where it goes where the
                 // caller asked. With one, the answer is the validated object further down, and
@@ -5824,6 +5827,7 @@ fn turn_over(
             outcome,
             limit,
             ms(began),
+            agent.provider_retries(),
         ));
     }
 }

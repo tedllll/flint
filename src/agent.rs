@@ -555,6 +555,15 @@ impl Agent {
         self.last_usage
     }
 
+    /// How many of this turn's requests the provider had to send twice.
+    ///
+    /// Read by the turn's own report (`turn.completed`) and by nothing else: the notice between
+    /// attempts is for a person watching, and this is for the log read afterwards, where the only
+    /// other trace of a retry is a turn that took longer than it should have.
+    pub fn provider_retries(&self) -> u32 {
+        self.provider.retries()
+    }
+
     /// Carry the last reported counts into a *replacement* agent.
     ///
     /// Two paths replace the agent while keeping the conversation -- a resume that loaded the file,
@@ -772,6 +781,10 @@ impl Agent {
         // the session permanently unusable, not just the one turn.
         self.close_dangling_tool_calls();
         self.repeats.clear();
+        // A turn begins here, so the count of thrown-away attempts is about to be about *this*
+        // turn: a caller that reads it after the turn is asking why this answer took as long as it
+        // did, and a count carried over from the previous question would answer a different one.
+        self.provider.forget_retries();
         // A turn begins here, so the answer it ends with is a fresh question: the flag means "this
         // turn ran out of steps", not "some turn once did".
         self.ran_out_of_steps = false;

@@ -38,6 +38,15 @@ pub struct Provider {
     /// Here for `json_mode`'s reason: a level holds for every turn of a run, and `/thinking` changes
     /// it while the run is open, so it is state rather than an argument.
     thinking: Thinking,
+    /// How many attempts this run has thrown away and made again, over every turn it has taken.
+    ///
+    /// A count rather than a flag because the number is the useful part -- a turn that took three
+    /// tries is a different report from one that took two -- and shared (`Arc`) because a `Provider`
+    /// is cloned when a run replaces its agent (`/model`, `/provider`, `/reload`) and the replacement
+    /// must not look like a run that had never retried anything. The turn's own boundary is what
+    /// makes it per-turn: [`crate::agent::Agent::run`] forgets the count as a turn begins, so what a
+    /// caller reads afterwards is about the turn it just waited for.
+    retries: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 /// A reasoning level, and the JSON field to carry it in.
@@ -600,7 +609,22 @@ impl Provider {
             client,
             json_mode: false,
             thinking,
+            retries: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         })
+    }
+
+    /// How many attempts this run has thrown away and made again since the turn began.
+    pub fn retries(&self) -> u32 {
+        self.retries.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Start counting again, at the beginning of a turn.
+    ///
+    /// Called by the turn rather than by the retry, because a count that is never reset is a count of
+    /// the run and not of the turn -- and a caller asking why *this* answer was slow would be given a
+    /// number that includes a retry from ten minutes ago.
+    pub fn forget_retries(&self) {
+        self.retries.store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Ask for a JSON object instead of prose, or stop asking.
@@ -744,6 +768,11 @@ impl Provider {
                     // request loop, so it is always during a turn, and with the strip active a stray
                     // write to stderr lands inside the answer being drawn. The sink falls back to
                     // stderr for a run with no UI (`--json`, a test), where that is the right place.
+                    // Counted before the wait, because the count is about the request that was made
+                    // and not about the one that follows: a caller reading "one retry" is being told
+                    // this turn sent the same request twice, which is the fact it cannot otherwise
+                    // recover (`duration_ms` says the turn was slow; only this says why).
+                    self.retries.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     crate::tools::notice(&format!(
                         "{} -- retrying in {}s (attempt {}/{})",
                         first_line(&why),
