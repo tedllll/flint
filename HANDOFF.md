@@ -28,6 +28,15 @@ reports one retry") and is backed by a second assertion in the plainest test the
 says `0`. The Python caller carries it in the same field `duration_ms` travels in, and `README.md`'s
 sample frames show it.
 
+**And §11 item 5 is built: `flint --version` answers "which flint is this" without starting a run.** It
+was measured as an unknown flag, with the build's number living in two places a caller never reads (the
+banner and the `User-Agent` on a fetch). `-V`/`--version` prints `flint <CARGO_PKG_VERSION>` and exits 0
+before the config is loaded — no key, no terminal, nothing written — because the caller is a build
+script. The test reads the number off a real REPL banner and asserts the flag agrees, so the two cannot
+drift; and the documentation half of the item was real: the `version` field on `session.started` and in
+a session's `meta` line is the **file format's** version, not the build's, and `README.md` now says so
+where the flag is introduced.
+
 **And §10's two holes are settled, in writing, with the one half that can be tested now tested.** They
 were the last items in that section that needed a *decision* rather than code, and the decisions are
 both "flint cannot see this, so it must not pretend to": **C3** (retrying is not safe — nothing

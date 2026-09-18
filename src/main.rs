@@ -143,6 +143,12 @@ struct Args {
     /// something else. Nothing here sends anything or writes a session.
     debug: Option<Vec<String>>,
     help: bool,
+    /// `--version`: print the one line a script can check and exit, before anything else happens.
+    ///
+    /// It is not `--help`'s sibling in the parser for a reason worth keeping: `--help` opens the
+    /// interactive help table (or prints it), while this has to work with no config, no terminal and
+    /// no key, because the caller is a build script or an installer deciding which flags to use.
+    version: bool,
     cwd: Option<String>,
     /// A JSON Schema the answer must satisfy: a file path, or the schema itself when it starts with `{`.
     ///
@@ -576,6 +582,15 @@ async fn real_main(args: Args) -> Result<i32> {
 
     if args.help {
         print_help(color, &Term::plain());
+        return Ok(0);
+    }
+
+    // Before the help text rather than beside it: `--version` is the question a script asks ("is this
+    // the build I think it is?"), and the answer has to be one line that does not need parsing. The
+    // version is the crate's, which is also what the startup line prints -- one number in one place,
+    // so a `--version` that disagrees with the banner is not a thing that can happen.
+    if args.version {
+        println!("flint {}", env!("CARGO_PKG_VERSION"));
         return Ok(0);
     }
 
@@ -6433,6 +6448,7 @@ fn parse_args(argv: Vec<String>, stream_seen: &mut bool) -> Result<Args> {
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "-h" | "--help" => args.help = true,
+            "-V" | "--version" => args.version = true,
             "-p" | "--prompt" => {
                 args.prompt = Some(
                     iter.next()
@@ -6740,6 +6756,8 @@ fn print_help(color: bool, term: &Term) {
                       background command's log, under a name of its own in <FLINT_HOME>/spill/
   --no-color          disable ANSI colour (also honours NO_COLOR)
   -h, --help          this message
+  -V, --version       print the build's version and exit -- the same number the banner shows,
+                      so which flint this is, is answerable without starting a run
 
 {b}LOCAL ENGINES{r}
   A local model server is started and stopped as you switch providers.

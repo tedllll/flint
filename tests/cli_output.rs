@@ -3236,6 +3236,55 @@ fn an_imported_conversation_is_copied_in_and_its_source_is_left_alone() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// `--version` answers the first question a bug report asks, and it answers with the banner's number.
+///
+/// `ROADMAP.md` §11 item 5 measured the state this replaced: `flint --version` was an unknown flag, and
+/// the build's number appeared in exactly two places, neither of them a caller's -- the interactive
+/// banner and the `User-Agent` flint sends when it fetches a URL. So flint told the *network* which
+/// build it was and not the program that started it, while the `--json` stream carried a field called
+/// `version` that is the session file format's. The flag is one line and needs no config, no key and no
+/// terminal, which is the point: a build script or an installer asking which flint it is must not start
+/// a run to find out.
+#[test]
+fn the_version_flag_prints_the_build_the_banner_prints() {
+    let out = binary()
+        .arg("--version")
+        .output()
+        .expect("failed to run flint --version");
+    assert!(
+        out.status.success(),
+        "flint --version failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let said = String::from_utf8_lossy(&out.stdout);
+    let version = said.trim().to_string();
+    assert!(
+        version.starts_with("flint ") && version.len() > "flint ".len(),
+        "the flag does not print one line naming the build: {said:?}"
+    );
+
+    // The same number the banner shows, because two numbers for one build is how a bug report starts
+    // with the wrong one. The banner is read off a real run, which is where a person meets it.
+    let home = test_home("version-flag", "http://127.0.0.1:1/v1");
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("working directory");
+    let banner = repl_of(&home, &work, &["/exit"]);
+    let from_banner = banner
+        .split_whitespace()
+        .find(|word| {
+            word.strip_prefix('v')
+                .is_some_and(|rest| !rest.is_empty() && rest.starts_with(|c: char| c.is_ascii_digit()))
+        })
+        .unwrap_or_else(|| panic!("the banner carries no version: {banner:?}"));
+    assert_eq!(
+        version,
+        format!("flint {}", &from_banner[1..]),
+        "the flag and the banner disagree: {banner:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 /// `/export` writes the page `flint export` writes, for the conversation this run is holding.
 ///
 /// The artifact is the one thing that does not change between the two doors, and that is the point:

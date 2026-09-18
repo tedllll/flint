@@ -45,6 +45,11 @@ terminal — piped, redirected, run from a script — flint emits no escape code
 all, so `flint -p "..." | grep`, `flint exec` in a Makefile, and
 `flint --help | less` all behave like ordinary Unix programs.
 
+`flint --version` prints one line — the build's number, the same one the interactive banner shows —
+and exits without reading a config, needing a key or starting a run, so a script or an installer can
+ask which flint it is talking to. (Careful with the name: the `version` field on `session.started` and
+in a session's `meta` line is the **session file format's** version, not the build's.)
+
 ## Install
 
 Download the binary for your platform from Releases and put it on your PATH.

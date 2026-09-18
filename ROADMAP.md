@@ -1826,6 +1826,8 @@ list's, not this one's, and each line is edited in the same commit as the code t
   a job that can say it is `stopping` — **built 2026-09-18**; and the page's own half of the reconnect
   cursor, which `HANDOFF.md` calls the part of the item that stays open.
 - §8: the picker of live runs that the page's `/say --to` is waiting on.
+- §11 item 5: `flint --version` — **built 2026-09-18**, with the name collision it found (`session`'s
+  `version` is the file format's, not the build's) stated in `README.md` where a reader meets it.
 - §10 C3 and C5 — the two holes that needed a decision rather than code — **settled in writing
   2026-09-18**: C3 states the retry contract and tests the half that can be tested (the tool events
   precede the ending), C5 states why nothing is carried silently and where a caller checks.
@@ -1887,17 +1889,19 @@ where prose and tree disagree are items 2, 3 and 9(iii).**
    cares about (a key on the request is a second protocol; remembering keys on disk is state that
    outlives the process; refusing retries puts the decision on the caller), which is exactly why it is
    worth a round of thinking rather than a paragraph of guessing. Highest-value *design* item here.
-5. **`flint --version` — a released binary cannot be asked what it is.** Measured this round: `flint
-   --version` prints `flint: error: unknown flag '--version'. Try --help.` and `--help` has no version
-   line either. Checked where the number *does* appear, and it is two places, neither of them a caller's:
-   the REPL's banner line (`src/main.rs:1659`, `env!("CARGO_PKG_VERSION")`) and the `User-Agent` flint
-   sends when it fetches a URL (`src/fetch.rs:377`, `flint/0.1.0`) — so flint tells the *network* which
-   build it is and not the program that started it. Worse for a reader in a hurry: the `--json` stream
-   *does* carry a field called `version` (`src/main.rs:740`), and it is the **session file format's**
-   version, `1`, not the build's — a caller who takes the field that looks like the answer gets a
-   different number that is also true. The release workflow builds four targets by tag and the PATH copy
-   is refreshed after every round, so "which flint is this" is the first question a bug report asks. One
-   flag, one line in `--help`, one test that the number on the flag is the number on the banner.
+5. **`flint --version` — a released binary cannot be asked what it is — *built 2026-09-18*.** Measured
+   this round: `flint --version` printed `flint: error: unknown flag '--version'. Try --help.` and
+   `--help` had no version line either. Checked where the number *did* appear, and it was two places,
+   neither of them a caller's: the REPL's banner line (`signature: env!("CARGO_PKG_VERSION")`) and the
+   `User-Agent` flint sends when it fetches a URL — so flint told the *network* which build it was and
+   not the program that started it. Worse for a reader in a hurry: the `--json` stream carries a field
+   called `version`, and it is the **session file format's** version, `1`, not the build's — a caller
+   who takes the field that looks like the answer gets a different number that is also true. The flag is
+   `-V`/`--version`, one line of `--help`, and one test that the number on the flag is the number on the
+   banner (read off a real REPL run, so the two cannot drift): it prints `flint <CARGO_PKG_VERSION>` and
+   exits 0 before the config is read, needing no key and no terminal, because the caller is a build
+   script. `README.md` states the flag *and* the name collision beside it, which is the half of this
+   item that was really a documentation bug.
 6. **One ending of a `--json` stream is deliberate — and was documented nowhere and untested.** *Built
    2026-09-18.* §10 said it in its own words: when a schema never matches, the stream carries
    `turn.completed` with `outcome:"complete"` **and then** an `error`, and the process exits 65 — "the
