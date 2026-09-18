@@ -1797,9 +1797,9 @@ list's, not this one's, and each line is edited in the same commit as the code t
   line in B5 is the money, which is refused with its reason rather than owed.
 - §10's B-section: the schema-miss ending written down and pinned — **built 2026-09-18**, recorded in
   this section's own item 6 rather than twice.
-- §9: `/export` from inside a running conversation ("the obvious next door"); a job that can say it is
-  `stopping`; and the page's own half of the reconnect cursor, which `HANDOFF.md` calls the part of the
-  item that stays open.
+- §9: `/export` from inside a running conversation ("the obvious next door") — **built 2026-09-18**;
+  a job that can say it is `stopping`; and the page's own half of the reconnect cursor, which
+  `HANDOFF.md` calls the part of the item that stays open.
 - §8: the picker of live runs that the page's `/say --to` is waiting on.
 - §10 C3 and C5 — the two holes that need a decision rather than code: a request nothing identifies
   (so a caller's retry may repeat tools), and a session carried into a second purpose by `--continue`.
@@ -1907,10 +1907,15 @@ where prose and tree disagree are items 2, 3 and 9(iii).**
    where the report whitelist lives says "the page has no confirmation step yet"
    (`src/main.rs:3156`), while §8 records a second press as the confirmation for destructive rows — one
    of the two is stale, and the whitelist's own reason is worth stating in the terms that are true.
-10. **`/export` from inside a running conversation.** §9 calls it "the obvious next door": the export
-    path exists and is tested for a finished conversation and for the command line, and what is missing
-    is the door from a live run — which needs its own answer to where the page goes while the terminal
-    owns stdout, because that is the whole reason `flint export` owns stdout when `--out` is absent.
+10. **`/export` from inside a running conversation — *built 2026-09-18*.** §9 called it "the obvious
+    next door": the export path existed and was tested for a finished conversation and for the command
+    line, and what was missing was the door from a live run — which needed its own answer to where the
+    page goes while the terminal owns stdout. The answer is `/export <file>`: the person names the path,
+    a bare `/export` says so instead of guessing, and both doors build the page through one
+    `page_for_session` (a test exports one conversation twice and asserts the bytes are equal). A
+    `--no-session` run refuses it in the sentence every other door uses, a conversation nobody has
+    spoken in yet says there is nothing to export, and a write that fails is reported rather than
+    ending the run — the difference from `flint export`, which returns an error because it *is* the run.
 11. **One cosmetic thing, recorded because a survey should be honest about the tail.** §8's page groups
     in the commands panel are still the *classes* the round that built them was working through rather
     than a task a person would name. Low value, no behaviour; listed only so the next reader knows it
@@ -2088,9 +2093,13 @@ argument, the cost and what flint has today are in the document, §3.
   nothing is one nobody can tell from a page that failed to load. Verified in a real browser, offline
   from `file://`: the question, the answer, a tool call and its result are drawn, and a conversation
   containing `</script><script>document.body.setAttribute("data-pwned","1")</script>` does not run.
-  Not built with it, and worth naming because it is the obvious next door: `/export` from inside a
+  Not built with it then, and worth naming because it is the obvious next door: `/export` from inside a
   running conversation, which needs its own answer to where the page goes while the terminal owns
-  stdout.
+  stdout. **Built 2026-09-18**: `/export <file>` writes this conversation out through the same
+  `page_for_session` the CLI uses, and the answer to "where does the page go" is the person's word and
+  never a guess — a bare `/export` says what it needs rather than inventing a name in whatever directory
+  the run happens to be in. The two doors are held to the *same bytes* by a test that exports one
+  conversation both ways, which is the property worth having: one renderer, two ways to reach it.
 - **An entry id the page can resume from after a restart — built, 2026-09-17.** The cursor is no longer
   this process's frame number, which starts at 1 in every process and meant nothing in the next one.
   It is **a position in the session file** -- the file's length when the frame was pushed -- carried on

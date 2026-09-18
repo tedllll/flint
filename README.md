@@ -250,6 +250,7 @@ Inside the REPL:
 | `/sessions` | list past sessions, numbered |
 | `/resume <n\|id>` | switch to one of them, without restarting — it prints the conversation it moved to, as `--resume` does |
 | `/import <file>` | copy a conversation in from a session file you were given or hand-edited; the file you name is not written to |
+| `/export <file>` | write **this** conversation, as it stands, out as one self-contained HTML page — the same artifact `flint export` writes, and no model is asked for anything |
 | `/fork [n]` | start a new conversation cut at question `n` of this one, keeping what came before it (bare, it lists the questions) |
 | `/name [text]` | show or set a name for this conversation |
 | `/archive <n\|id>` | move a session into `sessions/archive/` |

@@ -2818,6 +2818,12 @@ const NAME_ARG: [PageArg; 1] = [PageArg::required("text", Field::Text)];
 /// Free text rather than a selector, and that is the command rather than a limitation of the row: what
 /// it takes is a path somebody handed you, which no list of this run's own conversations can offer.
 const IMPORT_ARG: [PageArg; 1] = [PageArg::required("file", Field::Text)];
+/// `/export`'s one answer: where the page goes.
+///
+/// A path rather than a `--to`-style list, for the reason the command gives when it is called with
+/// nothing: this terminal cannot be the destination, so the person says the one thing the run may not
+/// choose for them.
+const EXPORT_ARG: [PageArg; 1] = [PageArg::required("file", Field::Text)];
 const KEY_ARG: [PageArg; 1] = [PageArg::required("key", Field::Password)];
 /// `/provider add`'s three: everything a provider needs that is not a secret.
 ///
@@ -2946,6 +2952,11 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp::row("/resume <n|id>", "/resume", "switch to one of them", HelpSection::Commands, OnPage::Selector),
     CommandHelp::row("/fork [n]", "/fork", "start a new conversation cut at question n", HelpSection::Commands, OnPage::Selector),
     CommandHelp::field_row("/import <file>", "/import", "copy a conversation in from a session file", HelpSection::Commands, OnPage::Form, &IMPORT_ARG),
+    // The same artifact `flint export` writes, for the conversation this run is holding: a page for
+    // *this* one, where the CLI names any conversation on disk. On the page as a field rather than
+    // kept to the terminal, because the file it writes lands on the machine running flint -- which is
+    // the machine the browser is looking at.
+    CommandHelp::field_row("/export <file>", "/export", "write this conversation out as one HTML page", HelpSection::Commands, OnPage::Form, &EXPORT_ARG),
     CommandHelp::field_row("/name [text]", "/name", "name this conversation", HelpSection::Commands, OnPage::Form, &NAME_ARG),
     CommandHelp::destroying("/archive <n|id>", "/archive", "file one away, out of the list", ArgFrom::Sessions),
     CommandHelp::destroying("/delete <n|id>", "/delete", "delete one", ArgFrom::Sessions),
@@ -4464,6 +4475,54 @@ async fn handle_command(
             return Ok(Flow::NewAgent(new_agent, provider_cfg.clone()));
         }
 
+        "/export" => {
+            // The page for *this* conversation, written where the person says.
+            //
+            // The one thing this door has to answer that `flint export <n>` does not is where the
+            // page goes. The CLI's answer is stdout, and here stdout is the terminal: a page printed
+            // into a live viewport would be drawn over the work it describes. So the path is an
+            // argument and never a guess -- a name derived from the conversation would land in
+            // whatever directory the run happens to be in, and the file it landed on might be one
+            // somebody already had. Naming it is one word, and it is the word that says what the
+            // person expects to find afterwards.
+            //
+            // Nothing here asks a model for anything: it reads the file this run is writing and
+            // writes another one, which is why it can be used mid-conversation and costs nothing.
+            if agent.no_session() {
+                return Ok(keeps_no_conversation(cmd, printer));
+            }
+            if arg.is_empty() {
+                printer.term().line(format_args!(
+                    "usage: /export <file>  (the page is written there; stdout is this terminal)"
+                ));
+                return Ok(Flow::Continue);
+            }
+            let Some(mine) = agent.session_path() else {
+                printer.term().line(format_args!(
+                    "{yellow}nothing to export yet{reset} — this conversation has no file until \
+                     something is said in it"
+                ));
+                return Ok(Flow::Continue);
+            };
+            let out = PathBuf::from(arg);
+            // A refusal or a failed write is said here and the run carries on: a slash command that
+            // ended the conversation because a directory did not exist would be worse than the
+            // mistake it reported. `export_and_stop` may return an error because it *is* the run.
+            match page_for_session(&mine) {
+                Ok(html) => match std::fs::write(&out, html.as_bytes()) {
+                    Ok(()) => printer.term().line(format_args!(
+                        "wrote {} ({} bytes)",
+                        out.display(),
+                        html.len()
+                    )),
+                    Err(e) => printer
+                        .term()
+                        .line(format_args!("{yellow}cannot write {}{reset}: {e}", out.display())),
+                },
+                Err(e) => printer.term().line(format_args!("{yellow}{e}{reset}")),
+            }
+            return Ok(Flow::Continue);
+        }
         "/import" => {
             // Bring a conversation in from a file, as a conversation of this run's own.
             //
@@ -6836,7 +6895,32 @@ fn split_say(words: &[String]) -> SayWords {
 /// and the person who sent it would have no way to tell that from a page that failed to load.
 fn export_and_stop(target: &str, out: Option<PathBuf>) -> Result<i32> {
     let path = resolve_session(target)?;
-    let text = std::fs::read_to_string(&path)
+    let html = page_for_session(&path)?;
+    match out {
+        Some(path) => {
+            std::fs::write(&path, html.as_bytes())
+                .with_context(|| format!("writing {}", path.display()))?;
+            println!("wrote {} ({} bytes)", path.display(), html.len());
+        }
+        None => print!("{html}"),
+    }
+    Ok(0)
+}
+
+/// The page one conversation file makes: its own lines welded into the renderer, and the title.
+///
+/// One function rather than two callers doing it twice, because `flint export <n>` and `/export`
+/// inside a run are the same artifact and a second path that built the title (or counted the
+/// conversation) differently would be a second renderer in everything but name -- which is exactly
+/// what `web::export_html` exists to prevent (`docs/web-mode.md` §14).
+///
+/// The lines come off the **file**, not out of the run's memory, and that is the same rule rather
+/// than a shortcut: for a finished conversation there is nothing else, and for a live one the writer
+/// has already appended every message that is finished, so what the page holds is what the file
+/// holds. A turn that is still being drawn is therefore not in the page it exports, which is the
+/// honest reading of "the conversation as it stands" -- a half-written message is not a message.
+fn page_for_session(path: &std::path::Path) -> Result<String> {
+    let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading {}", path.display()))?;
     let lines: Vec<String> = text.lines().map(|line| line.to_string()).collect();
 
@@ -6878,16 +6962,7 @@ fn export_and_stop(target: &str, out: Option<PathBuf>) -> Result<i32> {
         })
         .unwrap_or_else(|| path.display().to_string());
 
-    let html = web::export_html(&lines, &title);
-    match out {
-        Some(path) => {
-            std::fs::write(&path, html.as_bytes())
-                .with_context(|| format!("writing {}", path.display()))?;
-            println!("wrote {} ({} bytes)", path.display(), html.len());
-        }
-        None => print!("{html}"),
-    }
-    Ok(0)
+    Ok(web::export_html(&lines, &title))
 }
 
 /// Leave a message in this directory's mailbox, and say where it went.

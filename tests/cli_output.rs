@@ -3236,6 +3236,169 @@ fn an_imported_conversation_is_copied_in_and_its_source_is_left_alone() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// `/export` writes the page `flint export` writes, for the conversation this run is holding.
+///
+/// The artifact is the one thing that does not change between the two doors, and that is the point:
+/// the page is built by one function out of the session's own lines, so a page written in the middle
+/// of a conversation and a page written after it are the same kind of file. What the door adds is the
+/// answer the CLI does not have to give -- where the page goes when stdout is a terminal -- and it is
+/// the person's word rather than a guess: the test writes to a path it named, and the line the run
+/// prints is the CLI's own sentence, so the two doors read the same afterwards.
+#[test]
+fn export_writes_this_conversations_page_where_it_is_told() {
+    let home = test_home("export-here", "http://127.0.0.1:1/v1");
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("working directory");
+    let given = home.join("given.jsonl");
+    let lines = [
+        r#"{"type":"chat","message":{"role":"user","content":"why does the socket close early"}}"#,
+        r#"{"type":"chat","message":{"role":"assistant","content":"because the peer half-closed it"}}"#,
+    ];
+    std::fs::write(&given, format!("{}\n", lines.join("\n"))).expect("write the given file");
+    let page = work.join("page.html");
+
+    let text = repl_of(
+        &home,
+        &work,
+        &[
+            &format!("/import {}", given.display()),
+            "/help",
+            &format!("/export {}", page.display()),
+            "/exit",
+        ],
+    );
+
+    assert!(
+        text.contains("/export <file>"),
+        "`/help` does not offer the command: {text:?}"
+    );
+    assert!(
+        text.contains(&format!("wrote {} (", page.display())),
+        "/export did not say where the page went: {text:?}"
+    );
+
+    let html = std::fs::read_to_string(&page).expect("the exported page");
+    // The island `web::export_html` hangs a conversation on, with the conversation in it: the page is
+    // the renderer the browser view uses, not a second one written for the file.
+    assert!(
+        html.contains(r#"<script id="session" type="application/json">"#),
+        "the exported file is not a page with a conversation island in it: {} bytes",
+        html.len()
+    );
+    assert!(
+        html.contains("why does the socket close early")
+            && html.contains("because the peer half-closed it"),
+        "the page does not hold the conversation: {html:.400}"
+    );
+
+    // And the same bytes `flint export` writes for this conversation: one renderer, two doors. The
+    // number resolves to the file the run is writing -- there is one conversation in this home and it
+    // is this one -- so a page that differed would mean the door had grown a renderer of its own.
+    let other = work.join("from-cli.html");
+    let cli = binary()
+        .current_dir(&work)
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .args(["export", "1", "--out"])
+        .arg(&other)
+        .output()
+        .expect("failed to run flint export");
+    assert!(
+        cli.status.success(),
+        "flint export failed: {}{}",
+        String::from_utf8_lossy(&cli.stdout),
+        String::from_utf8_lossy(&cli.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&other).expect("the CLI's page"),
+        html,
+        "the two doors wrote different pages for the same conversation"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// The two refusals, which are the two ways `/export` can have nothing to write.
+///
+/// With no argument the path is what is missing, and the run may not choose it: stdout is the
+/// terminal here, and a name derived from the conversation would land in whatever directory the run
+/// happens to be in. With `--no-session` there is no file to read, which is the sentence every door
+/// that would open a conversation gets.
+#[test]
+fn export_refuses_a_missing_path_and_a_run_with_no_conversation() {
+    let home = test_home("export-refusals", "http://127.0.0.1:1/v1");
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("working directory");
+
+    let bare = repl_of(&home, &work, &["/export", "/exit"]);
+    assert!(
+        bare.contains("usage: /export <file>"),
+        "a bare /export did not say what it needs: {bare:?}"
+    );
+
+    let none = repl_of_with(&home, &work, &["--no-session"], &["/export page.html", "/exit"]);
+    assert!(
+        none.contains("keeps no conversation"),
+        "a --no-session run did not refuse /export in the words the other doors use: {none:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A write that fails is reported, and the run carries on.
+///
+/// The difference from `flint export`, which returns an error because it *is* the run: a slash
+/// command that ended the conversation because a directory did not exist would be worse than the
+/// mistake it reported. The person is told which path could not be written, nothing is created, and
+/// the next line is still theirs.
+#[test]
+fn a_failed_export_is_reported_and_the_run_carries_on() {
+    let home = test_home("export-bad-path", "http://127.0.0.1:1/v1");
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("working directory");
+    let given = home.join("given.jsonl");
+    std::fs::write(
+        &given,
+        format!(
+            "{}\n",
+            r#"{"type":"chat","message":{"role":"user","content":"something to export"}}"#
+        ),
+    )
+    .expect("write the given file");
+    let missing = work.join("nope").join("page.html");
+
+    let text = repl_of(
+        &home,
+        &work,
+        &[
+            &format!("/import {}", given.display()),
+            &format!("/export {}", missing.display()),
+            "/help",
+            "/exit",
+        ],
+    );
+
+    assert!(
+        text.contains("cannot write"),
+        "a failed write was not reported: {text:?}"
+    );
+    // A short directory name, and the reason is in the output rather than in the test's taste: the
+    // report is printed into the viewport, which wraps a long Windows path *inside* a word, so a
+    // longer name would be split across two lines and asserting on it would be asserting on the
+    // terminal's width instead of on what flint said.
+    assert!(
+        text.contains("nope"),
+        "the report does not say which path failed: {text:?}"
+    );
+    assert!(!missing.exists(), "a failed export created something anyway");
+    assert!(
+        text.contains("/export <file>"),
+        "the run did not carry on after the failed write: {text:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 /// A file with no conversation in it is refused, and nothing is created for it.
 ///
 /// The hand-edited case has a second half worth holding: a file may parse perfectly and still hold

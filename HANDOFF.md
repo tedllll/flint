@@ -28,11 +28,23 @@ reports one retry") and is backed by a second assertion in the plainest test the
 says `0`. The Python caller carries it in the same field `duration_ms` travels in, and `README.md`'s
 sample frames show it.
 
-**The line after it is `/export` from inside a run, a job that can say it is `stopping`, the page's own
-reconnect cursor, and the picker of live runs the page's `/say --to` waits on.** §10's two holes that
+**The line after it is a job that can say it is `stopping`, the page's own reconnect cursor, and the
+picker of live runs the page's `/say --to` waits on.** §10's two holes that
 need a decision rather than code — C3 (nothing identifies a request, so a caller's retry may repeat
 tools) and C5 (a session carried into a second purpose by `--continue`) — are on the same list, to be
 settled in writing rather than left as an itch.
+
+**The third is built, and it is the one §9 called "the obvious next door": `/export <file>` writes this
+conversation out as the page the CLI writes.** The only thing the door had to decide that `flint export`
+does not is where the page goes when stdout is the terminal it is talking to, and the answer is the
+person's word: a bare `/export` says what it needs rather than inventing a name in whatever directory
+the run happens to be in, because the file it landed on might be one somebody already had. Both doors
+now build the page through one `page_for_session` — line reading, the "has a conversation" count and
+the title rule in one place — so a page exported mid-conversation and one exported afterwards cannot
+drift, and a test drives both for the same conversation and asserts the bytes are *equal*. Three
+refusals are held as well: `--no-session` (in the sentence every other door uses), a conversation nobody
+has spoken in yet, and a write that fails — which is reported and the run carries on, the difference
+from `flint export`, which returns an error because it *is* the run.
 
 **The second of them is built: the one `--json` ending that looked like a bug is now documented and
 pinned (§11 item 6).** When a `--schema` run's answers never match, the stream carries `turn.completed`
