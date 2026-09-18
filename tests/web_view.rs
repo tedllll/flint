@@ -1152,3 +1152,111 @@ fn the_page_offers_the_live_runs_a_message_can_address() {
         "the broadcast must stay offered as the default: {filler:?}"
     );
 }
+
+/// A path can be opened in the program this machine uses for it, and only deliberately.
+///
+/// The one control on this page that starts a program, which is why it is not the path itself. A
+/// path in the transcript stays what it has always been -- a button that reads the file into this
+/// page's own panel -- and opening it *outside* the page is a second, named press whose title says
+/// what will happen. Two reasons for the split, and neither is taste:
+///
+/// - The transcript's text is model-written. A plain click on it must never be the thing that
+///   launches a process, or reading an answer becomes a way to run what the answer names.
+/// - A person who wants to *look* at a file is already served by the panel. `open` is for the
+///   cases the panel cannot serve -- a directory, a file too large to preview, a PDF -- which is
+///   exactly what `GET /file`'s own refusals say to do.
+///
+/// What is held here is the wiring: one route, one body, never a navigation. The route's own
+/// decisions are held in `src/web.rs`, and the press is driven for real by
+/// `scripts/browser-controls-test.js`.
+#[test]
+fn a_path_opens_outside_the_page_only_through_the_route() {
+    let html = view();
+    for needle in [
+        "\"/open\"",
+        "function openBody(path)",
+        "function openOutside()",
+        "not opened: ",
+        "id=\"preview-open\"",
+        "open it where it lives",
+    ] {
+        assert!(
+            html.contains(needle),
+            "a path can no longer be opened where it lives: {needle:?} is gone"
+        );
+    }
+
+    // The body is JSON built by a function of its own, for the reason `fileRoute` is one: a path
+    // with a quote or a backslash in it has to arrive as itself, and a body assembled from a string
+    // concatenation is where a Windows path would become a broken one.
+    let body = from("function openBody(path)", 4);
+    assert!(
+        body.contains("JSON.stringify({") && body.contains("path: path"),
+        "the body must be JSON carrying the path: {body:?}"
+    );
+
+    // One press, one route: the panel's button is the only caller, and the transcript's path button
+    // still reads into the panel. The needle starts inside the quotes on purpose -- the page's own
+    // call is `getElementById("preview-open")`, and a needle carrying the function's name is a
+    // needle that breaks on the one letter it spells differently from this test's expectation.
+    let listeners = from("(\"preview-open\").addEventListener", 2);
+    assert!(
+        listeners.contains("openOutside()"),
+        "the open control must be the second press that opens outside: {listeners:?}"
+    );
+    assert!(
+        html.contains("openPreview(part.path, part.line)"),
+        "a click on a path must still be this page's own preview"
+    );
+
+    // And it never leaves the page to do it. A navigation would be a page that replaced itself with
+    // whatever the model wrote into the transcript.
+    forbidden(
+        "window.open(",
+        "opening a path must go through the route, not through a pop-up",
+    );
+    forbidden(
+        "location.href =",
+        "opening a path must not navigate the page away from the run it is showing",
+    );
+    forbidden(
+        "location.assign(",
+        "opening a path must not navigate the page away from the run it is showing",
+    );
+}
+
+/// A readonly run never offers the OS open, and the frame is where that is read.
+///
+/// `readonly` is all-or-nothing and it refuses to launch programs. That makes this control the one
+/// place a page could hand the model something the guard denies it: the model cannot run a program
+/// in a readonly run, and a button that launched one when a person clicked it -- on text the model
+/// wrote -- would be that program running anyway, one click removed.
+///
+/// So the page does not draw the control as available, and it does not decide that for itself: the
+/// toggle is in the state frame, printed by the terminal and drawn here from the same field. The
+/// route refuses regardless, because the page is not the authority -- but a live button that always
+/// bounced would be a worse answer than the one that says why before it is pressed.
+#[test]
+fn a_readonly_run_is_never_offered_an_os_open() {
+    let guard = from("function readonlyOn(state)", 10);
+    assert!(
+        guard.contains("toggles") && guard.contains("\"readonly\""),
+        "the guard must be read from the frame's own toggle: {guard:?}"
+    );
+
+    let head = from("function paintPreviewHead()", 20);
+    assert!(
+        head.contains("preview-open") && head.contains("disabled"),
+        "the panel's open control must be disabled when the run is readonly: {head:?}"
+    );
+    assert!(
+        head.contains("readonlyOn(doc"),
+        "and disabled from the frame's toggle rather than from a second opinion: {head:?}"
+    );
+    // A run with no page behind it -- a dropped session -- cannot open anything either: there is no
+    // route to ask. That is `canSend`, which is the same flag every other route on this page reads.
+    assert!(
+        head.contains("canSend"),
+        "a file-mode page has no run behind it and must not offer the route: {head:?}"
+    );
+}

@@ -177,6 +177,18 @@ pub struct State {
     /// chooses it; it does not `chdir`). A run's tools read and write relative to this, so a path
     /// served from some other directory would be a different file with the same name.
     cwd: std::path::PathBuf,
+    /// The run's write guard, as `POST /open` reads it.
+    ///
+    /// A mirror of `Agent::readonly`, and the one piece of this state that is *not* a fact about the
+    /// window: it is a fact about the run, which the window has to know because one route here
+    /// launches a program and `readonly` is the switch that refuses to launch programs.
+    ///
+    /// A shared cell rather than a copied `bool`, because `/readonly` can move it while a page is
+    /// open -- and it is a mirror rather than the truth, because the truth is the agent's. What
+    /// keeps the two from drifting is that every rebuild of the agent passes through one arm of the
+    /// REPL, which sets this from the new agent; a stale copy would be a page that launches a
+    /// program in a run whose own tools may not.
+    readonly: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// How much of a file the page will show.
@@ -883,6 +895,9 @@ fn origin_is_ours(origin: Option<&str>, port: u16) -> bool {
 // the response
 // ---------------------------------------------------------------------------
 
+/// Debug because a `Result<Plan, Response>` has to be unwrapped in a test, and the failure a
+/// person wants to read there is the refusal's own sentence rather than a status code.
+#[derive(Debug)]
 pub struct Response {
     status: u16,
     reason: &'static str,
@@ -1041,6 +1056,12 @@ pub fn respond(request: &Request, body: &str, state: &State) -> Answer {
         // program. The one route that reads a path from the wire: see `serve_file`, and §12 of
         // `docs/web-mode.md` for what it will and will not serve.
         ("GET", "/file") => serve_file(request, state),
+        // The other half of that answer: the same path handed to the program this machine uses for
+        // it, for the files and directories the panel above cannot show -- a directory, a file too
+        // large to preview, anything that is not text. The second route in this file that can make
+        // something *happen*, and the first that starts a process: see `serve_open`, and §16 of
+        // `docs/web-mode.md`.
+        ("POST", "/open") => serve_open(body, state),
         // The run's own background work: the `task` children and the background commands this
         // process started, and the only place a person sees them without asking the model. Read off
         // the same `Job` records `job_op` answers from, so the page and the tool cannot describe one
@@ -1536,6 +1557,167 @@ fn resolve(asked: &str, cwd: &std::path::Path) -> std::path::PathBuf {
     }
 }
 
+/// `POST /open`: hand a path to the program this machine uses for it.
+///
+/// The other half of `GET /file`, and the same path asked a different question. *Read it here* is
+/// answered for text the page can draw, and this is what is left: a directory, a file past the
+/// preview cap, a PDF, a spreadsheet, an image. The refusals in `refusal` already tell a reader to
+/// do this by hand ("open it where it lives"); this is the door.
+///
+/// **It starts a process**, which makes it the one route in this file that does, and that is the
+/// whole reason for the shape around it:
+///
+/// - `readonly` refuses it, judged by the same all-or-nothing switch the tools are judged by. In a
+///   readonly run the model cannot start a program, and a button that started one because a person
+///   clicked text the model had written would be that program running anyway, one click removed.
+/// - The decision is a pure function ([`open_plan`]) and the effect is one line. What is asserted
+///   by the tests is the command line that is handed to `Command::spawn`, never a launched window:
+///   a test that opened one would put a file manager on the screen of whoever ran it.
+/// - Nothing is interpreted. The path is the argument of one program, `Command` runs it without a
+///   shell of ours, and no part of the path is parsed for meaning -- the launcher decides, exactly
+///   as the operating system would if a person pasted the path into a run box.
+///
+/// What it is *not* is a privilege boundary, and the honest version of that sentence belongs here
+/// rather than in a document: in a run that is not readonly the model may run the same program
+/// itself, through `bash` or `exec`, without asking anybody. What this adds is a person's click.
+fn serve_open(body: &str, state: &State) -> Response {
+    let parsed: serde_json::Value = match serde_json::from_str(body) {
+        Ok(parsed) => parsed,
+        Err(e) => return Response::text(400, "Bad Request", format!("expected a JSON body: {e}\n")),
+    };
+    let Some(asked) = parsed.get("path").and_then(|p| p.as_str()) else {
+        return Response::text(400, "Bad Request", "expected {\"path\": \"...\"}\n");
+    };
+    if asked.trim().is_empty() {
+        return Response::text(400, "Bad Request", "which path? the body's \"path\" was empty\n");
+    }
+
+    let path = resolve(asked, &state.cwd);
+    let readonly = state
+        .readonly
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let plan = match open_plan(asked, &path, readonly, Platform::current()) {
+        Ok(plan) => plan,
+        Err(refusal) => return refusal,
+    };
+
+    // Detached, and never waited for here: a file manager or a viewer outlives this request by
+    // hours, and a route that waited would be a request that never answered. The reaper thread is
+    // not tidiness -- an unwaited child is a zombie on Unix until this process exits, and a page
+    // can press this button as often as it likes.
+    let mut child = match std::process::Command::new(plan.program)
+        .args(&plan.args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            return Response::text(500, "Internal Server Error", format!("cannot open {asked}: {e}\n"))
+        }
+    };
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+
+    Response::json(
+        200,
+        "OK",
+        serde_json::json!({ "opened": asked, "with": plan.with }).to_string(),
+    )
+}
+
+/// What opening a path would do: which program, which arguments, and what to call the program when
+/// saying so.
+#[derive(Debug)]
+struct Plan {
+    program: &'static str,
+    args: Vec<std::ffi::OsString>,
+    /// The launcher in the words the page shows a person ("opened with explorer"), which is the
+    /// program's own name on Unix and the shell that runs `start` on Windows.
+    with: &'static str,
+}
+
+/// Which launcher this operating system has, as a value rather than a `cfg!` at the call site.
+///
+/// A parameter of [`open_plan`] so that the three answers can be asserted on one machine: the
+/// alternative -- three `#[cfg]` bodies that only the matching platform ever compiles -- is three
+/// command lines of which at most one is ever checked by a test, and the other two would be written
+/// once and never run.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Platform {
+    Windows,
+    MacOs,
+    Other,
+}
+
+impl Platform {
+    fn current() -> Platform {
+        if cfg!(windows) {
+            Platform::Windows
+        } else if cfg!(target_os = "macos") {
+            Platform::MacOs
+        } else {
+            Platform::Other
+        }
+    }
+}
+
+/// The decision [`serve_open`] acts on, or the response that says why it will not.
+///
+/// Pure on purpose, and it is the whole of the route's thinking: the guard, whether there is
+/// anything at the path, and the launcher's own command line. Nothing here spawns, so every refusal
+/// and all three platforms are held by tests that run anywhere.
+fn open_plan(
+    asked: &str,
+    path: &std::path::Path,
+    readonly: bool,
+    platform: Platform,
+) -> Result<Plan, Response> {
+    // The guard first, and before the path is looked at: a readonly run says the same sentence
+    // whether or not there is anything at the path, because the answer is about the run rather
+    // than about the file -- and "nothing at ..." would be a true sentence that suggests trying
+    // another path.
+    if readonly {
+        return Err(Response::text(
+            409,
+            "Conflict",
+            "this run is readonly, and opening a path starts a program on this machine: \
+             /readonly off in the terminal, if that is what you want\n",
+        ));
+    }
+    if let Err(e) = std::fs::metadata(path) {
+        return Err(Response::text(404, "Not Found", format!("nothing at {asked}: {e}\n")));
+    }
+
+    // A directory is opened by the file manager and a file by whatever this machine has registered
+    // for it, and the two are the *same* command on all three systems: the launcher asks the
+    // operating system, which is the only thing that knows. That is deliberate -- a table of file
+    // types in flint would be a copy of the registry that goes wrong quietly.
+    let plan = match platform {
+        Platform::Windows => Plan {
+            program: "cmd",
+            // `start` is a `cmd` builtin, so the shell is the launcher and `""` is the window title
+            // it would otherwise take the quoted path for. The path is one argument of a program
+            // that was given an argument list, so nothing in it is parsed as shell syntax.
+            args: vec!["/C".into(), "start".into(), "".into(), path.into()],
+            with: "explorer",
+        },
+        Platform::MacOs => Plan {
+            program: "open",
+            args: vec![path.into()],
+            with: "open",
+        },
+        Platform::Other => Plan {
+            program: "xdg-open",
+            args: vec![path.into()],
+            with: "xdg-open",
+        },
+    };
+    Ok(plan)
+}
+
 /// A size in the words a person reads, for the one sentence that needs it.
 fn bytes_label(bytes: u64) -> String {
     const UNITS: [(&str, u64); 3] = [("GB", 1024 * 1024 * 1024), ("MB", 1024 * 1024), ("KB", 1024)];
@@ -1602,9 +1784,20 @@ impl Window {
         live: Option<Arc<Live>>,
     ) -> Result<Window> {
         // A window with no run behind it -- `debug`, a test -- has no working directory of its own,
-        // and the process's is the only answer that means anything for a relative path.
+        // and the process's is the only answer that means anything for a relative path. It has no
+        // write guard either, and `false` is the honest answer for something that is not a run:
+        // nothing is being written by a window, and `POST /open` refuses over the missing path
+        // rather than over a guard nobody set.
         let cwd = std::env::current_dir().unwrap_or_default();
-        Window::open_following(port, Arc::new(Mutex::new(session)), live, None, cwd).await
+        Window::open_following(
+            port,
+            Arc::new(Mutex::new(session)),
+            live,
+            None,
+            cwd,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .await
     }
 
     /// The same, for a caller whose session can change under it.
@@ -1613,13 +1806,16 @@ impl Window {
     /// the window still open, so the two of them share the path rather than the window
     /// taking a copy at bind time. It is also the caller that knows the working directory, which
     /// is a *different* fact from where the session file lives -- a conversation is filed under a
-    /// key derived from the directory it was held in.
+    /// key derived from the directory it was held in -- and the caller that owns the write guard,
+    /// which it shares for the same reason: `/readonly` moves it while the page is open. See
+    /// `State::readonly`.
     pub async fn open_following(
         port: u16,
         session: Arc<Mutex<Option<std::path::PathBuf>>>,
         live: Option<Arc<Live>>,
         input: Option<tokio::sync::mpsc::UnboundedSender<FromPage>>,
         cwd: std::path::PathBuf,
+        readonly: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<Window> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
             .await
@@ -1636,6 +1832,7 @@ impl Window {
             live,
             input,
             cwd,
+            readonly,
         });
         tokio::spawn(accept_loop(listener, state));
         Ok(Window { port, token })
@@ -1683,6 +1880,13 @@ pub struct Viewer {
     /// against. Held here rather than read from the listener's process, because the two are only
     /// the same by accident: the run's directory is `--cwd`'s answer. See `State::cwd`.
     cwd: std::path::PathBuf,
+    /// The run's write guard, shared with whichever listener is serving this view.
+    ///
+    /// Here rather than in the listener because the run is what owns it: `--readonly` decides it
+    /// before the page exists, and `/readonly` moves it afterwards. The page's copy is updated by
+    /// the REPL where the agent is rebuilt -- see `set_readonly` -- so the route that launches a
+    /// program and the tools that refuse to are never reading two different answers.
+    readonly: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Viewer {
@@ -1692,6 +1896,7 @@ impl Viewer {
         session: Option<std::path::PathBuf>,
         input: Option<tokio::sync::mpsc::UnboundedSender<FromPage>>,
         cwd: std::path::PathBuf,
+        readonly: bool,
     ) -> Viewer {
         let live = Live::new();
         // Told which conversation it is about before anything can ask: a cursor is answered
@@ -1705,6 +1910,7 @@ impl Viewer {
             port,
             input,
             cwd,
+            readonly: Arc::new(std::sync::atomic::AtomicBool::new(readonly)),
         }
     }
 
@@ -1729,11 +1935,23 @@ impl Viewer {
             Some(Arc::clone(&self.live)),
             self.input.clone(),
             self.cwd.clone(),
+            Arc::clone(&self.readonly),
         )
         .await?;
         let url = window.url();
         self.window = Some(window);
         Ok(url)
+    }
+
+    /// Tell the view what the run's write guard is now.
+    ///
+    /// Called from the one place the agent is rebuilt, so every command that can change the guard
+    /// -- `/readonly` today -- moves the page's answer with it, and every command that merely
+    /// replaces the tools around the same conversation re-states the value that was already there.
+    /// Costless when no window is open, which is the usual case.
+    pub fn set_readonly(&self, readonly: bool) {
+        self.readonly
+            .store(readonly, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Tell the sidebar its list is out of date.
@@ -2137,6 +2355,9 @@ mod tests {
             // A window with no run behind it: the process's own directory is the only answer, and
             // the `/file` tests that care build their own state over a scratch directory.
             cwd: std::env::temp_dir(),
+            // Not readonly, which is what a fixture without a run can honestly be: see
+            // `Window::open`. The `/open` guard tests build a readonly state of their own.
+            readonly: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -2670,6 +2891,146 @@ mod tests {
         out
     }
 
+    /// The three launchers, as command lines.
+    ///
+    /// All three on every machine, which is the reason `Platform` is a parameter rather than a
+    /// `cfg!`: two of these three are never compiled on the machine that runs the suite, so without
+    /// this they would be written once and never executed anywhere. What is asserted is the whole
+    /// command line -- program and arguments -- because that is exactly what is handed to
+    /// `Command::spawn` a few lines below, and it is the only part of the launch a test can hold
+    /// without opening a window on somebody's screen.
+    #[test]
+    fn each_platform_is_opened_by_the_program_it_has() {
+        let dir = scratch("open-platform");
+        let file = written(&dir, "notes.txt", "hello");
+
+        let plan = open_plan("notes.txt", &file, false, Platform::Windows).expect("windows opens it");
+        assert_eq!(plan.program, "cmd");
+        assert_eq!(
+            plan.args,
+            vec![
+                std::ffi::OsString::from("/C"),
+                std::ffi::OsString::from("start"),
+                // The empty title, without which `start` takes the quoted path for a window title
+                // and opens nothing at all.
+                std::ffi::OsString::from(""),
+                file.clone().into_os_string(),
+            ],
+            "the Windows launcher is `start`, and the path is one argument of it"
+        );
+        assert_eq!(plan.with, "explorer");
+
+        let plan = open_plan("notes.txt", &file, false, Platform::MacOs).expect("macos opens it");
+        assert_eq!((plan.program, plan.args), ("open", vec![file.clone().into_os_string()]));
+
+        let plan = open_plan("notes.txt", &file, false, Platform::Other).expect("linux opens it");
+        assert_eq!(
+            (plan.program, plan.args),
+            ("xdg-open", vec![file.clone().into_os_string()])
+        );
+
+        // A directory goes through the same command on all three: the launcher asks the operating
+        // system, which is the only thing that knows what a directory is opened by. A table of file
+        // types in flint would be a copy of the registry.
+        let plan = open_plan("open-platform", &dir, false, Platform::Other).expect("a directory opens");
+        assert_eq!(plan.args, vec![dir.clone().into_os_string()]);
+    }
+
+    /// The guard, and it comes before the path is looked at.
+    ///
+    /// Two things are being held, and the second is the one that would rot silently: that a
+    /// readonly run refuses, and that it refuses *the same way for a path that does not exist* --
+    /// "nothing at ..." would be a true sentence that suggests trying another path, when the answer
+    /// is about the run.
+    #[test]
+    fn a_readonly_run_refuses_to_open_a_path_at_all() {
+        let dir = scratch("open-guarded");
+        let file = written(&dir, "notes.txt", "hello");
+
+        for (what, path) in [("a file that is there", file.clone()), ("a path that is not", dir.join("gone.txt"))] {
+            let refused = open_plan("notes.txt", &path, true, Platform::Other)
+                .expect_err(&format!("{what} must be refused in a readonly run"));
+            assert_eq!(refused.status, 409, "{what}");
+            assert_eq!(
+                body(&refused),
+                "this run is readonly, and opening a path starts a program on this machine: \
+                 /readonly off in the terminal, if that is what you want\n",
+                "{what}"
+            );
+        }
+    }
+
+    /// And the route reads that guard from the state the REPL keeps moving, not from a copy taken
+    /// when the window was bound.
+    ///
+    /// The failure this exists for is a page that goes on launching programs after `/readonly on`
+    /// in the terminal, which is the model's own guard read backwards: the run refuses the tool and
+    /// the browser accepts the click.
+    #[test]
+    fn the_open_route_reads_the_guard_the_run_is_holding_now() {
+        let dir = scratch("open-state");
+        // A path that does not exist, so that nothing is ever launched whichever way this goes --
+        // every answer below is a refusal, and the one that differs is the guard's.
+        let gone = dir.join("gone.txt");
+        let json = format!(r#"{{"path":{}}}"#, serde_json::json!(gone.to_string_lossy()));
+
+        let guard = state().readonly.clone();
+        let mut state = working_in(&dir);
+        state.readonly = guard.clone();
+        let request = Request::parse(&post("/open", &json)).expect("fixture parses");
+        let response = respond(&request, &json, &state).once();
+        assert_eq!(response.status, 404, "an unguarded run asks the path: {}", body(&response));
+
+        // The same listener, told what `/readonly on` means, refuses the same request.
+        guard.store(true, std::sync::atomic::Ordering::Relaxed);
+        let response = respond(&request, &json, &state).once();
+        assert_eq!(response.status, 409, "{}", body(&response));
+        assert!(body(&response).contains("readonly"), "{}", body(&response));
+
+        // And `/readonly off` gives it back, so the mirror is a guard and not a one-way latch.
+        guard.store(false, std::sync::atomic::Ordering::Relaxed);
+        let response = respond(&request, &json, &state).once();
+        assert_eq!(response.status, 404, "{}", body(&response));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What the route says when it cannot even get to a path: no body, no path, an empty one.
+    #[test]
+    fn the_open_route_asks_for_a_path_in_the_bodys_own_words() {
+        for (json, status, said) in [
+            ("not json at all", 400, "expected a JSON body: "),
+            ("{}", 400, "expected {\"path\": \"...\"}\n"),
+            (r#"{"path":""}"#, 400, "which path? the body's \"path\" was empty\n"),
+            (r#"{"path":"   "}"#, 400, "which path? the body's \"path\" was empty\n"),
+        ] {
+            let request = Request::parse(&post("/open", json)).expect("fixture parses");
+            let response = respond(&request, json, &state()).once();
+            assert_eq!(response.status, status, "{json}: {}", body(&response));
+            assert!(
+                body(&response).starts_with(said),
+                "{json}: expected {said:?}, got {:?}",
+                body(&response)
+            );
+        }
+    }
+
+    /// A path that is not there is not a refusal of the *request*: it is a 404 with the operating
+    /// system's own words, the same shape `GET /file` uses -- and it is what proves the path is
+    /// looked at before anything is launched, since the only thing after that check is `spawn`.
+    #[test]
+    fn a_path_that_is_not_there_is_reported_before_anything_is_started() {
+        let dir = scratch("open-missing");
+        let json = r#"{"path":"nowhere/at/all.txt"}"#;
+        let request = Request::parse(&post("/open", json)).expect("fixture parses");
+        let response = respond(&request, json, &working_in(&dir)).once();
+        assert_eq!(response.status, 404, "{}", body(&response));
+        assert!(
+            body(&response).starts_with("nothing at nowhere/at/all.txt: "),
+            "the refusal names the path as it was asked for: {}",
+            body(&response)
+        );
+    }
+
     /// The list the page's jobs panel is drawn from, on the wire.
     ///
     /// The *contents* belong to `tools::tests` (a job is a job, and only that module can start one);
@@ -2897,6 +3258,11 @@ mod tests {
 mod socket_tests {
     use super::*;
 
+    /// A guard nobody has set: a window bound by a caller that is not a run. See `Window::open`.
+    fn unguarded() -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::new(std::sync::atomic::AtomicBool::new(false))
+    }
+
     /// A raw HTTP/1.1 GET, read to the end. `host` of `None` omits the header entirely.
     async fn get(port: u16, target: &str, host: Option<&str>, token: Option<&str>) -> String {
         let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
@@ -2950,6 +3316,7 @@ mod socket_tests {
             None,
             Some(tx),
             std::env::temp_dir(),
+            unguarded(),
         )
         .await
         .expect("bind");
@@ -2998,7 +3365,7 @@ mod socket_tests {
     #[tokio::test]
     async fn a_message_that_stops_arriving_is_refused() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<FromPage>();
-        let window = Window::open_following(0, Arc::new(Mutex::new(None)), None, Some(tx), std::env::temp_dir())
+        let window = Window::open_following(0, Arc::new(Mutex::new(None)), None, Some(tx), std::env::temp_dir(), unguarded())
             .await
             .expect("bind");
 
@@ -3021,7 +3388,7 @@ mod socket_tests {
     #[tokio::test]
     async fn a_message_over_the_ceiling_is_refused() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<FromPage>();
-        let window = Window::open_following(0, Arc::new(Mutex::new(None)), None, Some(tx), std::env::temp_dir())
+        let window = Window::open_following(0, Arc::new(Mutex::new(None)), None, Some(tx), std::env::temp_dir(), unguarded())
             .await
             .expect("bind");
 
@@ -3103,7 +3470,7 @@ mod socket_tests {
         std::fs::write(&first, "{\"type\":\"meta\",\"id\":\"first\"}\n").expect("write");
         std::fs::write(&second, "{\"type\":\"meta\",\"id\":\"second\"}\n").expect("write");
 
-        let mut viewer = Viewer::asked(0, Some(first.clone()), None, std::env::temp_dir());
+        let mut viewer = Viewer::asked(0, Some(first.clone()), None, std::env::temp_dir(), false);
         let url = viewer.open(0).await.expect("bind");
         let port: u16 = url
             .trim_start_matches("http://127.0.0.1:")
@@ -3257,7 +3624,7 @@ mod live_tests {
     /// disagree about which run they are watching.
     #[tokio::test]
     async fn asking_for_the_view_twice_opens_one_listener() {
-        let mut viewer = Viewer::asked(0, None, None, std::env::temp_dir());
+        let mut viewer = Viewer::asked(0, None, None, std::env::temp_dir(), false);
         let first = viewer.open(0).await.expect("bind");
         let second = viewer.open(0).await.expect("bind again");
         assert_eq!(first, second, "the second ask must report where it already is");
@@ -3266,7 +3633,7 @@ mod live_tests {
     /// And a viewer that was only *asked* for is not broken -- it is unbound.
     #[test]
     fn a_viewer_that_has_not_been_opened_has_no_window() {
-        let viewer = Viewer::asked(0, None, None, std::env::temp_dir());
+        let viewer = Viewer::asked(0, None, None, std::env::temp_dir(), false);
         assert!(viewer.window.is_none());
         // The feed exists anyway, which is the point of the split: a turn that starts while
         // the socket is still being bound does not lose its frames.

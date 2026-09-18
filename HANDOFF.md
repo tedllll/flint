@@ -26,7 +26,7 @@ reconstruct it:
 | 10. `/export` from inside a conversation | **built** |
 | 11. the page's panel groups are classes, not tasks | seen and judged **not worth a round on its own** — cosmetic, no behaviour, recorded so nobody re-derives it |
 | 12. `docs/sandbox.md` contradicts `## Not doing, and why` | **a decision for the person**: take a first stage and edit the bullet, or decline it in writing. Nothing else in §11 waits on it |
-| 13. the addresses in the page's text, pressable | **built 2026-09-18**, asked for directly: a web address is a link in a new tab, a path stays a button into the preview, and the scheme test is an allowlist |
+| 13. the addresses in the page's text, pressable | **built 2026-09-18**, asked for directly: a web address is a link in a new tab, a path stays a button into the preview, and the scheme test is an allowlist. Its one named residue — no OS-level open — was **built one session later** as `POST /open` plus the panel's `open` control (see `## What was just done`) |
 
 The gate as this session left it: `cargo test` **634 passing, 1 ignored** across the 14 suites (lib 351,
 bin 6, `agent_loop` 34, `balance` 7, `cli_output` 109, `json_output` 41, `task` 17, `search_tool` 4, `who`
@@ -81,7 +81,10 @@ calling it), the two policy tests, and three claims driven in a real browser —
 to **59/59**. The allowlist was proved to bite by widening it to "any scheme" and watching the check fail.
 Not done, and named so nobody assumes it: no OS-level open (a directory, or "open in Explorer", needs a new
 route that launches a program on the strength of text a model wrote — a decision of its own), and a file
-being *previewed* is still plain text, so a URL inside it is not pressable.
+being *previewed* is still plain text, so a URL inside it is not pressable. **The first of those two was
+taken up and built the next session** — `POST /open`, the panel's `open` control, and the `readonly` guard
+over both (§16 of `docs/web-mode.md`, and the first paragraph of `## What was just done`); the second
+residue stands.
 
 **The one promise this session kept in full, because it was the last feature the plan of record owed:** §11 item 9(ii), the page's `/say --to` picker of live runs. Paragraphs below keep the reasoning for each
 item in the order the round built them.
@@ -1714,6 +1717,47 @@ picker, type `/config` into the composer, and see whether the answer lands in th
 the block is drawn — then open the `commands` panel and read it against `/help` in the terminal.
 
 ## What was just done
+
+**Two tests that interrupted a run by counting milliseconds now wait for the frame that proves the
+state, because the gate's own command was failing on this machine.** `cargo test` came back with
+`json_output` **red**, one test of forty-one, and the panic named a missing frame rather than anything
+about the change being made — so it was chased before being believed. It reproduced four runs in four
+with the suite in parallel, passed with `--test-threads=1`, passed as a single test, and **failed the
+same way on the stashed, committed tree**, which is what settled that it was not this session's work.
+The cause is a premise written as a sleep: both tests stop a live run mid-turn, one needs "a tool has
+already run" (2,500 ms) and the other "a delta has already been drawn" (2,000 ms), and on a loaded
+machine those milliseconds expire before the state arrives. The fix is the same in both and makes the
+assertion stronger rather than weaker: stdout is drained into a shared buffer as it arrives (`draining`,
+bytes rather than a `String`, because a chunk boundary can fall inside a character) and the test
+**waits for the needle it is about** (`wait_for`, with the whole stream in the failure message) before
+sending `/stop`. The new premise was shown to bite: with the needle changed to a frame that never
+appears the panic is `the run never said "tool.completedZZZ" within 3s, so there is nothing to
+interrupt: {…}`, and the suite then ran four times in four green where it had been four in four red.
+
+**A path can be opened where it lives, and the guard that decides it is the run's own.** The previous
+session ended §11 item 13 by naming what it had deliberately not built: *"no OS-level open (a directory,
+or 'open in Explorer', needs a new route that launches a program on the strength of text a model wrote —
+a decision of its own)"*. The decision came one session later in four words — *"要做 os 级打开"* — and what
+it built is `POST /open` plus one control in the preview panel's head. Three things about it are the
+design rather than the implementation. **It is a second, deliberate press**: the path itself stays the
+in-page preview, because the text in a transcript is model-written and a plain click on it must not be
+what starts a process — the `open` button is beside `reload` and `close`, and its tooltip says what it
+will do. **The `readonly` run refuses it, at the route**, read from the agent through an
+`Arc<AtomicBool>` the page's state shares rather than a copy taken at bind time: in a readonly run the
+model may not launch a program, so a button that launched one on a person's click would be that program
+running anyway, one click removed. The mirror is refreshed in exactly one place — the `Flow::NewAgent`
+arm every `/readonly`, `/reload`, `/new` and `/resume` returns through — because a sync point per command
+is a sync point somebody forgets. **The launcher is the machine's own** (`cmd /C start "" <path>` with
+the empty title slot Windows needs, `open` on macOS, `xdg-open` elsewhere; a directory takes the same
+command as a file), and the choice is a pure function returning a `Plan`, so all three command lines are
+asserted on whichever machine runs the suite and no test opens a window. Seven claims hold it: five in
+`src/web.rs` (the three platforms, readonly-before-everything, the guard moving both ways, a missing path
+refused before the spawn, the four body refusals), one Node check (`openBody` escaping, `readonlyOn` over
+four frames), one browser press (the button offered and titled, and the route's refusal in the hint). Two
+mutations were watched red and reverted: `if readonly` → `if false`, and the Windows `with` label. The
+honest residues are in `docs/web-mode.md` §16: a *successful* launch is never driven by a test — it would
+start a viewer on the machine running the harness, which is why the browser press is made against a path
+that is not there — and the preview panel's own contents are still plain text.
 
 **A written inventory of every door, because the person doing the checking was reading source.** The
 ask was blunt — *"write a complete feature description for QA: what can be operated, how, and what

@@ -810,6 +810,17 @@ path is the path of the process that wrote it, so `src/web.rs` means the run's `
 nothing else; §12 of `docs/web-mode.md` has the rule for what in a line counts as a path and the
 measured record from a real browser.
 
+**And the panel can hand a path to your machine.** Some of what a transcript names is not text this
+page can show: a directory, a PDF, a log past the preview cap, an image. The panel's head has one more
+control for that — `open` — and it hands the path to whatever *your* computer uses for it: `explorer`,
+`open`, or `xdg-open`, so a directory opens in the file manager and a file in the program its type is
+registered to. It is a second, deliberate press rather than the path itself, because the text in a
+transcript is model-written and a plain click on it must not be what starts a process. It is refused
+outright in a `readonly` run — that guard means the model may not start a program, and a button that
+started one on a person's click would be the same program running anyway — and the page does not offer
+it there, reading that from the run's own state rather than deciding for itself. `POST /open`, with the
+command lines asserted per platform and never actually launched by a test: §16 of `docs/web-mode.md`.
+
 **A web address in the transcript is a link.** An `http` or `https` address in the run's own words —
 the answer that cites a page, a fetch result, a URL in a tool's output — opens in a new tab, with the
 opener severed, so the conversation you are reading stays where it is. It is the same splitter as the
@@ -817,7 +828,8 @@ paths, and the same rule about what a line may contain: only those two schemes e
 `javascript:` and `data:` stay the words they are. That is deliberate rather than incidental — the page
 holds the run's token, and an `href` taken from a model's words is script in *that* document if the
 scheme is not checked. A path stays a button rather than a link, because a file has no address a
-browser may open from a page served over http. §11 of `docs/web-mode.md` is the measured record.
+browser may open from a page served over http — and the door it does have is `POST /open`, a
+deliberate press in the panel (§16). §11 of `docs/web-mode.md` is the measured record.
 
 **The run's background work is in the header.** A `task` child, or a `bash`/`pwsh`/`exec` command
 started with `background: true`, appears in a **jobs** list — one row per job, badged with what it is,

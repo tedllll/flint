@@ -230,7 +230,7 @@ would disagree with.
 
 ## 6. The HTTP surface, small on purpose
 
-Eight routes. No cookies, no HTTP/2, no TLS, no keep-alive, no streaming request bodies.
+Nine routes. No cookies, no HTTP/2, no TLS, no keep-alive, no streaming request bodies.
 
 | Route | Returns |
 |---|---|
@@ -241,13 +241,14 @@ Eight routes. No cookies, no HTTP/2, no TLS, no keep-alive, no streaming request
 | `POST /report` | one command *read* from the browser: same channel, and its answer is captured with the terminal quiet (§11) |
 | `GET /sessions` | the conversations `/resume` can reach, numbered the way `/resume` numbers them |
 | `GET /file` | a file the transcript named, for the preview drawer (§12). `?path=` takes what the transcript says, including a trailing `:line` or `:line:column`; a relative path is resolved against the run's own working directory. `text/plain` with `X-Flint-Line` when a line was named, and `X-Flint-Cut`/`X-Flint-Size` when the file was longer than the preview cap |
+| `POST /open` | the *other* half of that answer: `{"path": "…"}` handed to the program this machine uses for it, for what the panel cannot show — a directory, a file past the cap, anything that is not text (§16). `{"opened": …, "with": …}`, or the refusal that says why not. The second route here that starts something, and the only one that starts a **process**: refused outright when the run is `readonly` |
 | `GET /jobs` | the `task` children and background commands this run started, as `{"jobs":[…]}` in the run's own order (running first, newest first) — for the header's jobs panel (§13). Each row carries `pid`, `kind`, what was asked, a status word, the exit code in words beside it, absolute epoch seconds for its start and end, and `path`: a child's conversation or a command's log |
 | *`event: sessions`* | not a route but its counterpart: the list has changed, re-read it |
 | *`event: jobs`* | the same for `GET /jobs`: a job started or ended, re-read it |
 | *`event: state`* | the run's own configuration: provider, model, what each provider offers, the toggles, and the command list with §8's class for each row — a row also carries `values` when the page may send that command with an argument the frame names (a *read* on a `panel` row, a line the page types for you on a `selector`), `fields` when the page may collect its answers (one entry per word the line wants, each with the input's kind, the argument's name, and whether the command works without it), and `from` when it destroys something and the argument is one of a list (§11) |
 | `type: command` | what a command answered, on the same stream as the turn's events: `input` and `text` — which is also what a header button's answer arrives on. Carries `panel: true` when the page asked to read it rather than typing it, and `input` is the command's own `send` rather than the line in the one case the line carries a credential (§11) |
 
-**All eight are implemented.** `/session` and `/events` read the session path and the event feed
+**All nine are implemented.** `/session` and `/events` read the session path and the event feed
 through a shared handle, which is what lets `/new` and `/resume` move an open window to the
 conversation the terminal moved to. `/sessions` is the sidebar's source and goes through
 `session::list` — the same function `resolve_session` uses — so the numbers in the page *are*
@@ -266,12 +267,20 @@ interpret the text, which is why it does not check *which* command a report name
 says a command is a report lives beside the dispatch, and the REPL refuses anything else. A whitelist
 in `web.rs` would be a second copy of that table in the one file that is proudest of not having one.
 
-It is also the only route that can make something *happen*, and that is worth stating plainly:
+`POST /message` is also the only route that can make the *agent* do something, and that is worth stating
+plainly:
 reachable at that port with that token, a caller can run the agent. What keeps it acceptable is
 unchanged from §4 — loopback only, the `Host` and `Origin` checks, and a token another origin's
 page cannot set, since a cross-origin form post cannot add a header and a `fetch` that could is
 refused by `Origin` before it arrives. The body is length-delimited, capped at a megabyte, and
 refused rather than half-read when it stops early.
+
+**`POST /open` is the one that starts a process**, which is a different kind of thing from running the
+agent — the agent runs *commands*, and this makes the operating system launch *a program* — and it is
+worth its own paragraph for the same reason. It asks the machine, through that machine's own launcher,
+to open one path; it refuses when the run is `readonly`, holding the same all-or-nothing switch the
+tools are held to; and the one thing that decides it is a pure function whose output is the command
+line, so a test can assert what would be run without running it. §16 is the record.
 
 - **SSE framing is the existing format.** Each event goes out as `data: <one ndjson line>`
   followed by a blank line, and each carries `id: <cursor>` — **a position in the session file**,
@@ -1049,11 +1058,11 @@ nothing off this machine", keeps every forbid it had, and gained sharper ones (`
 about paths, and the address half is asserted in its own test, with `window.open(` still forbidden because
 a link is the safer form.
 
-**Not done, and named so that nobody assumes it.** There is no OS-level open: a directory — or "show me
-this in Explorer" — would need a new route that launches a program on the strength of text a model wrote,
-which is a door worth a decision of its own rather than a side effect of this one. And the **preview
-panel's own contents are still plain text**, so a URL inside a file a person is reading is not pressable
-yet.
+**Not done then, and built one session later**: the OS-level open this section named rather than
+assumed. It got the decision of its own that this paragraph asked for — asked for directly, in those
+words — and §16 is the record: a `POST /open` route, the panel's fourth control, and the `readonly`
+guard over both. What is still true is the second half: the **preview panel's own contents are plain
+text**, so a URL inside a file a person is reading is not pressable yet.
 
 ---
 
@@ -1135,11 +1144,17 @@ which is four shapes of path:
 | A path that is not there is refused in the route's own words | pressing `gone.txt` | the panel holds `nothing at gone.txt: …` with `HTTP 404` beside it, rather than an empty panel |
 | Escape closes the panel and leaves the reading alone | a real `Escape` | hidden, with the transcript still there |
 
+The panel's head has a fourth control since §16 — `open` — and the two claims about it are made in the same
+run: the control is enabled and titled "open it where it lives" in a run that may, and pressing it against a
+path that is not there puts the *route's* refusal in the hint. The successful press is deliberately not
+driven: it would open a viewer on the machine running the harness.
+
 **Two residues, both deliberate.** A file that is not valid UTF-8 is refused rather than shown as
 replacement characters: a lossy conversion would print something no editor would show, and "this is not
 text this page can show" is a better answer than a screen of U+FFFD. And there is no highlight on the line a
 hit came from — the panel scrolls to it and says which line it is, and a highlight would be a second
-render path over the file's own text.
+render path over the file's own text. A third residue was named here for one session and is now built:
+the *directory* and the too-large file were refusals with nowhere to go, which is what §16 answers.
 
 ---
 
@@ -1487,3 +1502,78 @@ three wordings, and the refusal of the origin-wide store) and by three checks in
 `scripts/web-view-test.js` that call `notePosition` in the sandbox — the behavioural half, because a
 text assertion passes over an unreachable branch, which was measured: disabling the stale branch left
 the Rust test green and the harness check red.
+
+---
+
+## 16. A path opened where it lives, in the program this machine uses for it
+
+Asked for directly, and in the same breath as §11's addresses: *"addresses on the page should be
+hyperlinks to the real thing — a web page, or an address on this computer."* The web half was built; the
+address **on this computer** was left as a residue, with a sentence saying why rather than a promise:
+a route that launches a program on the strength of text a model wrote is a door worth a decision of its
+own. The decision came one session later, in four words — *"要做 os 级打开"* — and this is what it built.
+
+**What the panel could not do, and what the refusals already said.** `GET /file` (§12) serves *text*, and
+its own refusals name the three cases it cannot: a directory, a file past the 64 MB ceiling, a file that
+is not valid UTF-8. The second one already ended with the words *"open it where it lives"* — an
+instruction with no door behind it. So the shape was not invented here; it was the missing half of a
+sentence the page had been printing for a session.
+
+**A path is still a button, and this is a second, named press.** The control is in the preview panel's
+head, beside `reload` and `close`, and it is deliberately *not* the path itself. The text a transcript
+carries is model-written; a plain click on it must never be the thing that starts a process, or reading
+an answer becomes a way to run what the answer names. Two presses, two meanings: the path reads into this
+page's own panel, and `open` hands the path to the machine.
+
+**The platform answers, and they are three different programs on purpose.** `explorer`'s own launcher on
+Windows — `cmd /C start "" <path>`, where the empty title is what `start` needs so it does not take the
+quoted path for a window title — `open` on macOS, `xdg-open` elsewhere. A directory and a file take the
+**same** command on all three, because the launcher asks the operating system, which is the only thing
+that knows what a `.pdf` is registered to; a table of file types in flint would be a copy of the registry
+that goes wrong quietly. The decision is a **pure function** (`open_plan`) returning the program and its
+arguments, and the effect is one `Command::spawn` — so all three command lines are asserted on whichever
+machine runs the suite, and no test opens a window.
+
+**The guard, and it is the run's own.** A `readonly` run refuses `POST /open` with `409`, before the path
+is even looked at: in such a run the model may not start a program, and a button that started one because
+a *person* clicked text the model wrote would be that program running anyway, one click removed. The page
+does not offer the control there either, and it decides that from the state frame's own `readonly` toggle
+rather than from an opinion — the route refuses regardless, because the page is not the authority.
+
+The plumbing that keeps the two from drifting is one line, and its *place* is the point: the agent is
+rebuilt in exactly one arm of the REPL (`Flow::NewAgent`, which `/readonly`, `/model`, `/provider`,
+`/reload` and `/new` all return through), so the page's copy of the guard is set there from the new agent
+rather than in each command that might change it. A command cannot forget because it never has to
+remember.
+
+**What is honest about the capability.** In a run that is not `readonly`, the model can already run that
+same program itself through `bash`; what this adds is a *person's click*, not a reach. The residue is the
+one a click can never be rid of: a person who clicks a path whose name ends in something executable is
+the one deciding to run it. That is why the control is not the path, why its tooltip says what it will
+do, and why the guard is checked at the route.
+
+| Claim | How | Result |
+|---|---|---|
+| Each platform is opened by the program it has | `src/web.rs`, the pure `open_plan` over all three `Platform` values | `cmd /C start "" <path>` / `open <path>` / `xdg-open <path>`, and a directory takes the same one. Mutation-checked: changing the Windows `with` label fails it |
+| A readonly run refuses, whatever the path | the same function, twice: a file that exists and one that does not | the *same* `409` sentence both times — the answer is about the run, not about the file |
+| The route reads the guard the run is holding **now** | `respond` against one `State`, with the shared flag flipped on and back off | `404` (nothing there) → `409` (readonly) → `404`: a mirror that latches would fail the last step |
+| A path that is not there is refused before anything is spawned | `respond` with a missing path | `nothing at …` with the operating system's own words, and the launch is the only line after that check |
+| The body is asked for in its own words | four bodies: not JSON, no `path`, an empty one, spaces | the four sentences, each with its status |
+| The page posts the path as JSON | `scripts/web-view-test.js`, calling `openBody` | a Windows path keeps its backslashes, and a quote in a name arrives as itself |
+| The frame decides whether the button is offered | the same harness, calling `readonlyOn` with four frames | `on` → true, `off`/absent/`null` → false |
+| The panel offers it, and the route's refusal is what comes back | the browser harness, driving the control for real | the button is enabled and titled "open it where it lives"; the press puts `not opened: nothing at gone.txt: …` in the hint |
+
+**Not driven here, and where each is answered instead.** A press that *succeeds*: it would start a
+viewer or a file manager on the machine running the harness, so the harness presses the control against a
+path that is not there and the command lines are held by the Rust test instead. The harness prints that on
+its "not driven here" list, beside `src/web.rs::tests::each_platform_is_opened_by_the_program_it_has`.
+And a `readonly` run's page is not driven either: turning the guard on mid-turn would change the state
+every later claim in that run is made against, so the page's half is the Node check above and the route's
+half is the Rust one.
+
+**Where this leaves the boundary.** Not moved. §4's argument is that the token holder can already drive
+the agent; `POST /open` is a *narrower* door than `POST /message` is, and the one thing it could have
+added — a way for a `readonly` run to launch something — is the thing it refuses. `docs/features.md` §12
+carries the door-by-door version, and §15 of that file carries the "deliberately not built" line it
+replaces: the preview panel's own contents are still plain text, which remains the honest answer to a URL
+inside a file.

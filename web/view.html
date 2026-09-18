@@ -572,6 +572,7 @@
     <div class="preview-head">
       <span id="preview-path"></span>
       <span id="preview-note"></span>
+      <button id="preview-open" type="button" title="open it where it lives">open</button>
       <button id="preview-reload" type="button" title="read it again">reload</button>
       <button id="preview-close" type="button" title="close (Esc)">close</button>
     </div>
@@ -1568,6 +1569,9 @@ function showState(doc) {
   showToggles(doc);
   showActions(doc);
   showCommands(doc);
+  // The preview's open control reads the same frame -- a run whose guard just went on must not go
+  // on offering to start a program. Repainted only when a path is open, which is when it is drawn.
+  if (preview) paintPreviewHead();
   if (!state) return;
   const providers = Array.isArray(state.providers) ? state.providers : [];
   const named = providers.filter((p) => p && typeof p.name === "string");
@@ -2292,15 +2296,87 @@ function closePreview() {
 }
 
 /// The path, split so the file's own name stays in full ink while the directories give way.
+///
+/// The head's fourth control is decided here too, and it is decided from the frame: `open` hands
+/// the path to the program this machine uses for it, which is a launch, and a run whose own guard
+/// refuses to launch programs must not offer one. The route refuses as well -- the page is not the
+/// authority, and a hand-written request is not stopped by a disabled button -- but a control that
+/// was always there and always bounced would be a worse answer than one that says why.
 function paintPreviewHead() {
   const node = document.getElementById("preview-path");
   if (!node) return;
   node.textContent = "";
+  const open = document.getElementById("preview-open");
+  if (open) {
+    const held = !canSend || readonlyOn(doc && doc.state);
+    open.disabled = held;
+    open.title = !canSend
+      ? "this page has no flint behind it: opening a path is the run's own route"
+      : readonlyOn(doc && doc.state)
+        ? "this run is readonly, and opening a path starts a program on this machine"
+        : "open it where it lives, in whatever this machine uses for it";
+  }
   if (!preview) return;
   node.title = preview.line ? preview.path + ":" + preview.line : preview.path;
   const cut = Math.max(preview.path.lastIndexOf("/"), preview.path.lastIndexOf("\\"));
   if (cut > 0) node.appendChild(el("span", "dirs", preview.path.slice(0, cut + 1)));
   node.appendChild(el("span", "name", cut > 0 ? preview.path.slice(cut + 1) : preview.path));
+}
+
+/// Whether a state frame says the run's write guard is on.
+///
+/// A pure function of the frame, which is where the answer lives: the switch in the header and this
+/// are the same field, set by the terminal's own `/readonly` and handed to the page by the run. A
+/// page deciding for itself what the guard is would be a second opinion about a permission -- and a
+/// caller that takes the state as an argument is a caller the Node harness can ask about a guarded
+/// run without one being open.
+function readonlyOn(state) {
+  if (!state || !Array.isArray(state.toggles)) return false;
+  const toggle = state.toggles.find((t) => t && t.name === "readonly");
+  return !!toggle && toggle.value === "on";
+}
+
+/// The body `POST /open` wants.
+///
+/// A function of its own for the reason `fileRoute` is one: the path goes into JSON, and a path
+/// with a quote or a backslash in it has to arrive as itself. A body assembled by concatenation at
+/// the call site is where a Windows path becomes a broken request.
+function openBody(path) {
+  return JSON.stringify({ path: path });
+}
+
+/// Hand the panel's path to the program this machine uses for it.
+///
+/// The second press, and deliberately not the first: a path in the transcript is a button that
+/// reads the file into this panel, and this is the separate, named control beside it. The text the
+/// transcript carries is model-written, so a plain click on it must never be the thing that starts
+/// a process -- and the cases this is for are exactly the ones the panel cannot serve: a directory,
+/// a file past the preview cap, anything that is not text.
+///
+/// The route's answer is the whole of the feedback. It says what it opened with, or why it would
+/// not, in its own words, and the hint shows those rather than a status code.
+async function openOutside() {
+  if (!preview) return;
+  const body = openBody(preview.path);
+  let response;
+  try {
+    response = await fetch("/open", { method: "POST", headers: authHeader(), body: body });
+  } catch (e) {
+    setHint("cannot open it: " + describe(e), true);
+    return;
+  }
+  const text = (await response.text()).trim();
+  if (!response.ok) {
+    setHint("not opened: " + text, true);
+    return;
+  }
+  let said = {};
+  try {
+    said = JSON.parse(text);
+  } catch (e) {
+    said = {};
+  }
+  setHint("opened " + (said.opened || preview.path) + " with " + (said.with || "the system"), false);
 }
 
 /// The route one path is read through, encoded.
@@ -2948,6 +3024,9 @@ if (typeof document !== "undefined" && document.getElementById) {
   // says there what it cannot do.
   document.getElementById("preview-close").addEventListener("click", closePreview);
   document.getElementById("preview-reload").addEventListener("click", () => readPreview());
+  // The one control on this page that starts a program. See `openOutside` for why it is not the
+  // path itself.
+  document.getElementById("preview-open").addEventListener("click", () => openOutside());
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && preview) closePreview();
   });
@@ -3184,6 +3263,12 @@ if (typeof module !== "undefined" && module.exports) {
     paint, feedTrouble, tokenRefused, feedTrace, debugFeed, applyState, showState, fillSelect,
     showToggles, showCommands, showActions, sessionRow, formLine,
     addressParts, asUrl, asPath, bytesLabel, previewNote, linkNodes, renderBlock, fileRoute,
+    // `POST /open`'s half of the panel: the body the route takes, and the frame's own write guard,
+    // which is what decides whether the control is offered at all. Exported because both are pure --
+    // one takes a path, the other reads a frame -- so the Node harness can check them without a
+    // browser, which is the only way the readonly case is checked without turning a live run's guard
+    // on in the middle of a turn.
+    openBody, readonlyOn,
     jobsFrom, durationLabel, jobWhen, jobIsLive,
     // The position this tab was reading from: exported so the Node harness can check the three cases
     // -- a gap, a different conversation, and a position past the end -- against the real functions

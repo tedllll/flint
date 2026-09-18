@@ -1478,6 +1478,32 @@ check("a rendered tool block makes its paths buttons, and pressing one opens the
   );
 });
 
+check("the open control sends the run's own route, and the frame decides whether it is offered", () => {
+  // The body `POST /open` takes, which is a path in JSON -- and the reason it is a function rather
+  // than a string built at the call site: a Windows path is full of backslashes, and a quote in a
+  // name must not end the JSON string early. The route reads `path` and nothing else.
+  eq(viewer.openBody("src/main.rs"), '{"path":"src/main.rs"}', "a plain path");
+  eq(
+    viewer.openBody("C:\\work\\a b.txt"),
+    '{"path":"C:\\\\work\\\\a b.txt"}',
+    "a Windows path keeps its backslashes, escaped the way JSON escapes them"
+  );
+  eq(
+    JSON.parse(viewer.openBody('a"b.txt')).path,
+    'a"b.txt',
+    "a quote in a file's name arrives as itself"
+  );
+
+  // And the guard: the page does not launch anything in a run whose own tools may not. The frame is
+  // the source -- the same `readonly` toggle the header draws and the terminal prints -- so this is
+  // checked against frames rather than against a run with its guard turned on mid-turn.
+  const guard = (value) => ({ toggles: [{ name: "readonly", values: ["off", "on"], value }] });
+  eq(viewer.readonlyOn(guard("on")), true, "a run with the guard on");
+  eq(viewer.readonlyOn(guard("off")), false, "and one with it off");
+  eq(viewer.readonlyOn({ toggles: [] }), false, "a frame with no such toggle offers it");
+  eq(viewer.readonlyOn(null), false, "and so does a page with no state at all");
+});
+
 check("the preview says which line, and how much of a cut file is here", () => {
   // The two headers the route adds rather than the transport. Without them the panel would show
   // the first 512 KB of a 40 MB log and say nothing about the other 39.5 MB.

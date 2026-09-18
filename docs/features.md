@@ -668,6 +668,7 @@ Four checks run before any route, in this order, and each refusal is a `403` wit
 | `GET /events?last=<cursor>&session=<file>` | the cursor may also arrive as `Last-Event-ID` | the SSE stream: unnamed frames for session lines, named `state`/`status`/`answer`/`reset`/`jobs`/`sessions`/`file`, `: ping` every 20 s. `404` when this run has no live feed |
 | `POST /message` | a JSON body `{"text":"…"}`, at most 1 MiB | `202 {"queued":true}`; the text is typed into the run **exactly as the terminal would receive it** — the REPL decides whether it is a command, a `!` escape or a prompt. `409` when there is no prompt to type into (a one-shot run) or the run is shutting down; `400` for a non-JSON body, a missing `text`, or an empty one |
 | `POST /report` | the same | the same, except the line is a **reading**: the page shows the answer and the terminal prints nothing |
+| `POST /open` | a JSON body `{"path":"…"}` | hands the path to the program this machine uses for it: `200 {"opened":"<path>","with":"explorer"|"open"|"xdg-open"}`. `409` in a **`readonly`** run (the guard is read from the run, not from a copy taken at bind time); `404 nothing at <path>: …` when there is nothing there; `500` when the launcher itself fails; `400` for a non-JSON body, a missing `path`, or an empty one. A relative path resolves against the run's `cwd`, exactly as `GET /file` does |
 | `POST /log` | a plain line, not JSON | `200 logged`; writes `<FLINT_HOME>/web.log`, whitespace-collapsed, cut to 500 chars, capped at 1 MB |
 | anything else | — | `404 no such route` |
 
@@ -701,6 +702,7 @@ disagree with the process.
 | transcript | a web address | a link in a **new tab** with `rel="noopener noreferrer"`; only `http`/`https` become links (§11 of `docs/web-mode.md`) |
 | transcript | `thinking`, `instructions` | `<details>` blocks, both closed to begin with |
 | preview | `reload`, `close` | re-reads `GET /file`; closing leaves the transcript and the reader's place alone |
+| preview | `open` | hands the panel's path to the program this machine uses for it (`POST /open`): a file opens in whatever its type is registered to, a directory in the file manager. The one control on this page that starts a process, so it is a **deliberate second press** and never the path itself. Disabled when the run is `readonly`, with the reason in its tooltip; the route refuses it there anyway. The answer — or the route's refusal — appears in the hint under the composer |
 | preview | — | a refusal is shown in the route's own words with its status beside it, never as an empty panel |
 | layout | the two grip handles | drag to resize the sidebar and the reading column; `ArrowLeft`/`ArrowRight` move the boundary by 16 px (48 with Shift); a **double-click puts the width back to the stylesheet's**. Neither width is persisted |
 | anywhere | `Escape` | closes the preview; one `Escape` press also closes the jobs list when both are open (two handlers, neither stops the other). It does **not** close the commands panel |
@@ -722,7 +724,8 @@ that understood JavaScript would be a second parser to be wrong about.
   refused: `fetch("http`, `src="http`, `href="//`. A link the reader presses is not the page reaching
   out.
 - **`window.open(` is forbidden**: an address opens in a new tab as a link, and a path opens in this
-  page's own panel.
+  page's own panel. The one thing that leaves the page and starts a program is `POST /open`, pressed
+  deliberately (§12.3).
 - **The token is never stored**: no `localStorage`, no origin-wide store; the only stored thing is the
   reading position, in `sessionStorage`.
 - **Presence is read through `GET /peers`**, never derived from files by the page (`scan_in(` is
@@ -732,17 +735,20 @@ that understood JavaScript would be a second parser to be wrong about.
 
 ### 12.5 Measured, and honestly not
 
-- **Driven in a real browser**: `scripts/browser-controls-test.js`, **59 claims** held, each checked
+- **Driven in a real browser**: `scripts/browser-controls-test.js`, **61 claims** held, each checked
   against the run's own stdout. It prints what it drives before it presses anything, and its "not driven
   here" list is part of the output: a report asked for mid-turn (measured in `tests/cli_output.rs`), the
-  `/prompt` row's send button, a paste, an IME, a screen reader, two tabs, touch, a phone viewport.
+  `/prompt` row's send button, an OS open that *succeeds* (it would start a program on this machine; the
+  command lines are held by `src/web.rs`), a paste, an IME, a screen reader, two tabs, touch, a phone
+  viewport.
 - **Pure functions**: `scripts/web-view-test.js` (the splitter, the frames, the form composition, the
-  peer picker's text).
+  peer picker's text, and `POST /open`'s body and guard).
 - **Two controls the current harness does not press**: `+ new` and the stop button were measured in
   earlier passes by other harnesses, and the `/say --to` picker is held by bytes and Node checks rather
   than by a browser press. All three are recorded as the narrower-but-true statement, not as coverage.
-- **Residues worth knowing before filing anything**: there is no OS-level open (a directory is reported
-  as a directory, §15); a file being *previewed* is plain text, so a URL inside it is not pressable; a
+- **Residues worth knowing before filing anything**: a file being *previewed* is plain text, so a URL
+  inside it is not pressable; a real OS-level launch is never performed by a test (the command lines are
+  asserted, the spawn is not driven); a
   native `<select>`'s open popup belongs to the operating system and no test can reach into it; the tab's
   own title is not updated (the exported page's is); and `POST /log` writes a line on every boot of a
   served page, whether or not `?debug=1` is used.
@@ -936,10 +942,10 @@ Not bugs, and not to be filed as such. Each is a decision with a reason in the t
   The contradiction between the two is a recorded open item, not a to-do.
 - **One switch, not a ladder.** A narrower permission setting than `readonly` is refused in
   `docs/decisions.md`.
-- **No OS-level open from the page.** A file preview is the page's own panel (`GET /file`);
-  a directory is reported as a directory rather than opened in a file manager, and there is
-  no "open in Explorer" — that would be a route that launches a program on the strength of
-  text a model wrote.
+- **No OS-level open without a press.** A file preview is the page's own panel (`GET /file`), and a
+  path opens *outside* the page only through `POST /open` — a deliberate second press in the panel's
+  head (§12.3), refused outright in a `readonly` run, and never the plain click on a path. What the page
+  still does not do is open the preview panel's *contents* anywhere: text there is plain text.
 - **No Markdown renderer in the page**, and no client build step: everything is
   `textContent`, one file.
 - **No history navigation in the input row** (`Up`/`Down`), and no tab completion.
@@ -965,7 +971,8 @@ tests name the behaviour they hold.
 | children: argv, the child's stream, depth, profiles, background handles | `tests/task.rs` |
 | the mailbox and presence | `tests/say.rs`, `tests/who.rs` |
 | the page's policy | `tests/web_view.rs` |
-| the page's controls, driven in a real browser | `scripts/browser-controls-test.js` (59 claims) |
+| the page's routes, including the launcher's command lines (`POST /open`) | `src/web.rs`'s tests |
+| the page's controls, driven in a real browser | `scripts/browser-controls-test.js` (61 claims) |
 | the page's pure functions | `scripts/web-view-test.js` |
 | the Python and MCP callers | `examples/python/test_call.py`, `examples/mcp/test_mcp.py` |
 | the one suite that needs a real pty (Unix) | `tests/tty_hangup.rs` |
@@ -973,7 +980,7 @@ tests name the behaviour they hold.
 ## See also
 
 - `README.md` — the same product, told as a story, section by section.
-- `docs/web-mode.md` — §11–§15 are the measured record of the browser view.
+- `docs/web-mode.md` — §11–§16 are the measured record of the browser view, including §16's `POST /open`.
 - `docs/session-format.md` — the session file, event by event, for readers and hand-editors.
 - `docs/windows.md`, `docs/windows-tooling.md` — terminal and escaping field notes.
 - `ROADMAP.md` — what is built, what is queued, and what is deliberately refused.

@@ -31,14 +31,18 @@
 /// conversation row's menu, including naming the conversation being written; the sidebar's two drag
 /// handles, the arrow keys on the focused one and their double-click reset; the model picker from the
 /// keyboard; the composer's send button and a line the run answers; a tool block's path buttons; the
-/// preview panel (a grep hit's line, reload, Escape, and a refusal in the route's own words); and the
-/// jobs panel (a running job's clock, a finished row's exit code, a child's row opening its own
-/// conversation, output, and the stop's own two presses).
+/// preview panel (a grep hit's line, reload, Escape, a refusal in the route's own words, and the open
+/// control -- pressed against a path that is not there, because the press that works opens a viewer on
+/// the machine running this); and the jobs panel (a running job's clock, a finished row's exit code, a
+/// child's row opening its own conversation, output, and the stop's own two presses).
 ///
 /// Not driven here, with where each is answered instead: a report asked for *mid-turn* -- measured from
 /// outside the page by `tests/cli_output.rs::a_report_asked_for_mid_turn_waits_for_the_turn`, which is
 /// what `docs/web-mode.md` section 11 now says rather than claiming a press; the `/prompt` row's send
-/// button, which section 12 records as not measured; a paste into the composer, an IME, a screen reader,
+/// button, which section 12 records as not measured; an OS-level open that *succeeds* -- refused here on
+/// purpose, since it would start a program on this machine, and held instead by
+/// `src/web.rs::tests::each_platform_is_opened_by_the_program_it_has`, which asserts the command line
+/// without running it; a paste into the composer, an IME, a screen reader,
 /// two tabs on one run, touch, and any phone-sized viewport. None of those is refused or impossible --
 /// they are simply not measured, and the honest place to say so is the artifact that measures the rest.
 "use strict";
@@ -415,6 +419,7 @@ function announceScope() {
     "  the model picker from the keyboard",
     "  the composer's send button, and a line the run answers",
     "  a tool block's path buttons, and the preview panel: a grep hit, reload, Escape, a refusal",
+    "  the panel's open control: the route reached, and its refusal, without opening a window",
     "  the addresses in the run's own words: a web address, a path, and a scheme that is not the web",
     "  the jobs panel: a running clock, an exit code, a child's own conversation, output, a stop",
   ]) {
@@ -424,6 +429,7 @@ function announceScope() {
   for (const gap of [
     "  a report asked for mid-turn: measured from outside the page, tests/cli_output.rs",
     "  the /prompt row's send button: docs/web-mode.md section 12 says it is not measured",
+    "  an OS open that succeeds: src/web.rs asserts the command line without running it",
     "  a paste into the composer, an IME, a screen reader, two tabs, touch, a phone viewport",
   ]) {
     console.log(gap);
@@ -1203,6 +1209,40 @@ async function main() {
       "a path that is not there is refused in the route's own words, not with an empty panel",
       !!refused && /nothing at/.test(refused.body) && refused.body.includes("gone.txt"),
       `panel: ${JSON.stringify(refused)}`
+    );
+
+    // The panel's own route, pressed for real: `POST /open` hands the path to the program this
+    // machine uses for it, and this is the one press in the whole harness that is deliberately made
+    // against a path that does not exist -- a real one would open a viewer or a file manager on the
+    // machine running this, which is a side effect a test may not have. What it proves is the half
+    // that matters: the control is the panel's, it is enabled in a run that is not readonly, the
+    // route is reached, and the route's own sentence is what the page shows.
+    const openable = await page.js(
+      `({ disabled: document.getElementById("preview-open").disabled,
+          title: document.getElementById("preview-open").title })`
+    );
+    check(
+      "the panel offers to open the path where it lives, in a run that may",
+      !!openable && openable.disabled === false && /where it lives/.test(openable.title),
+      `the open control: ${JSON.stringify(openable)}`
+    );
+    await page.click("#preview-open");
+    const notOpened = await page
+      .waitFor(
+        `/not opened:/.test(document.getElementById("hint").textContent || "")
+           ? document.getElementById("hint").textContent
+           : null`,
+        "the route's refusal in the hint",
+        30
+      )
+      .catch(() => null);
+    check(
+      "pressing it asks the run, and a path that is not there comes back in the route's words",
+      typeof notOpened === "string" &&
+        notOpened.includes("not opened:") &&
+        notOpened.includes("nothing at") &&
+        notOpened.includes("gone.txt"),
+      `hint: ${JSON.stringify(notOpened)}`
     );
 
     // Escape, from wherever the reader is: the panel closes and the transcript is where it was.

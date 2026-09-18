@@ -1251,6 +1251,11 @@ async fn real_main(args: Args) -> Result<i32> {
             // The directory the run works in, so `/file` resolves a relative path in a tool result
             // the way the tool that printed it did.
             agent.cwd().clone(),
+            // The run's write guard, which the page's `POST /open` reads: opening a path starts a
+            // program, and a readonly run is the one that refuses to. Taken from the agent rather
+            // than from the flag, because `/readonly` may already have moved it. Later moves are
+            // handed over where the agent is rebuilt.
+            agent.readonly(),
         ))
     } else {
         None
@@ -1882,6 +1887,16 @@ async fn interactive(
                     // the one it just left. A no-op when the file is the same one.
                     if let Some(viewer) = viewer.as_mut() {
                         viewer.follow(new_agent.session_path());
+                    }
+                    // And the page's copy of the write guard, here for the same reason and in the
+                    // same place: every rebuild of the agent comes through this arm, so a command
+                    // that changes the guard -- `/readonly` today -- cannot forget to tell the
+                    // page, and one that merely replaces the tools around the same conversation
+                    // tells it the value it already had. The page's `POST /open` reads this, and a
+                    // stale copy would be a browser launching a program in a run whose own tools
+                    // may not.
+                    if let Some(viewer) = viewer.as_ref() {
+                        viewer.set_readonly(new_agent.readonly());
                     }
                     // The presence record follows the same move, for the same reason and at the same
                     // place: "which conversation is this run holding" has one answer, and the two
@@ -3488,7 +3503,13 @@ async fn handle_command(
             };
             let browser = browser_input(reader, true);
             let cwd = agent.cwd().clone();
-            let asked = viewer.get_or_insert_with(|| web::Viewer::asked(0, agent.session_path(), browser, cwd));
+            // The write guard comes with it, because this door can be the first one a page comes
+            // through: a run that turned the guard on and *then* asked for a view must not have
+            // `/open` available in it. Later moves go through the rebuild arm above.
+            let readonly = agent.readonly();
+            let asked = viewer.get_or_insert_with(|| {
+                web::Viewer::asked(0, agent.session_path(), browser, cwd, readonly)
+            });
             match asked.open(port).await {
                 Ok(url) => announce_view(printer, &url),
                 // Not fatal, unlike `--web`: there the view was the whole point of the run,
