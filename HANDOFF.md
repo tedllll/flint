@@ -28,6 +28,18 @@ reports one retry") and is backed by a second assertion in the plainest test the
 says `0`. The Python caller carries it in the same field `duration_ms` travels in, and `README.md`'s
 sample frames show it.
 
+**And §10's two holes are settled, in writing, with the one half that can be tested now tested.** They
+were the last items in that section that needed a *decision* rather than code, and the decisions are
+both "flint cannot see this, so it must not pretend to": **C3** (retrying is not safe — nothing
+identifies a request) is answered by handing the caller the evidence instead of a guarantee, because a
+retry really is a new turn and its tools really do run again; the contract is now in `docs/python.md`
+and `README.md`, and the testable half is a test — a turn stopped mid-work carries its
+`tool.started`/`tool.args`/`tool.completed` frames **before** the ending, so a caller keeping its own
+stream can see what a retry would repeat. **C5** (a session reused for a second purpose) is answered by
+silence being the thing flint can control: it cannot tell a follow-up from a new question, so it never
+continues anything that was not asked for, names the conversation on `session.started`, and leaves
+`--no-session` and `--fork` as the doors that carry nothing and carry into a new conversation.
+
 **The line after it is the page's own reconnect cursor and the picker of live runs the page's
 `/say --to` waits on.** §10's two holes that
 need a decision rather than code — C3 (nothing identifies a request, so a caller's retry may repeat

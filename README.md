@@ -170,6 +170,16 @@ which they did not before: a child is newer than the parent that started it, and
 is a session like any other — same format, readable, `--resume <path>` opens it — and its
 `meta` line names the conversation that asked for it. `mv` it up a level to adopt it.
 
+**A conversation carried in colours the answer, and nothing is ever carried silently.**
+`--continue` and `--resume <path>` put the earlier conversation into the request — which is the point
+of them, and also the one way a caller can cross purposes without meaning to: a conversation that held
+untrusted input colours the answer to a question about something else, and the run succeeds, so nothing
+announces it. flint cannot tell a follow-up from a new question, so it does not guess; what it does is
+never continue anything you did not ask for (a run with no continuation flag starts a new conversation,
+and the file is created by the first thing said in it), and name the conversation it is in on
+`session.started`, so a caller that must not mix purposes can check before it reads the answer. `--fork`
+is the door for carrying a prefix into a *new* conversation. `docs/python.md` has the reasoning.
+
 **A run can keep nothing at all.** `--no-session` writes no conversation: nothing to continue
 from later, nothing in any list, no file on disk. It is a property of the whole *run* rather than
 of one command, so it refuses `--continue`, `--resume`, `--fork` and `--name` on the command line,
@@ -423,6 +433,13 @@ are worth knowing:
   **answer**, which is not one a caller can use. A caller that branches should read it as: `outcome`
   says whether anything was cut short, `error`/`result` says whether what came back is trustworthy.
   `tests/json_output.rs` pins the order and the outcome together so neither "fix" can land by accident.
+- **Retrying is the caller's decision, and flint hands over the evidence.** Nothing identifies a
+  request — no id, no idempotency key — so a retry after a timeout is a new turn and its tools run
+  again: a file written, a commit made, a message sent may all happen twice, and only the caller knows
+  which of its prompts are side effects. What flint will not do is hide the half that happened: on a
+  turn that was cut short, the `tool.started`/`tool.completed` frames are on the stream **before** the
+  ending, so a caller that keeps its own stream can see exactly what a retry would repeat.
+  `docs/python.md` has the rest, and `tests/json_output.rs` holds the ordering.
 - **A silent run is not a dead one.** Between `tool.started` and `tool.completed` nothing happens
   for as long as the tool runs, and from a pipe that is the same thing as a crashed process. So a
   run that is working and not talking says so every five seconds:

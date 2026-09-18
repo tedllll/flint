@@ -335,6 +335,145 @@ async fn the_cache_split_reaches_a_program_and_never_as_a_zero() {
     );
 }
 
+/// A stopped turn still says what already happened, which is the whole of flint's retry safety.
+///
+/// `ROADMAP.md` section 10 C3 is blunt about it: nothing identifies a request, so a caller whose call
+/// times out and is retried may repeat whatever the first attempt already did. flint cannot fix that
+/// from inside -- it does not know which of its tool calls were side effects, and inventing an
+/// idempotency key for a `bash` command would be a claim no shell can honour. What it *can* do, and
+/// what this test holds, is refuse to be silent about the half that happened: the tool events are on
+/// the stream, **before** the ending, so a caller that reads its own stream can see what a retry would
+/// repeat instead of guessing. That is the contract `docs/python.md` states, and this is the case that
+/// makes it worth stating: a turn stopped in the middle of its work.
+///
+/// What the fixture runs is a `read`, deliberately: the assertion is about *reporting*, and a test that
+/// wrote a file to prove a write happened would be proving the filesystem works.
+#[tokio::test]
+async fn a_stopped_turn_says_which_tools_it_already_ran() {
+    struct Slow {
+        body: String,
+        delay: std::time::Duration,
+    }
+
+    impl Respond for Slow {
+        fn respond(&self, _req: &Request) -> ResponseTemplate {
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_delay(self.delay)
+                .set_body_string(self.body.clone())
+        }
+    }
+
+    let server = MockServer::start().await;
+    let cwd = cwd_for("stopped-tools");
+    let target = cwd.join("notes.txt");
+    std::fs::write(&target, "the file the model asked for\n").expect("fixture file");
+
+    // The tool round answers at once; the round after it stalls, which is the turn `/stop` cuts short.
+    Mock::given(method("POST"))
+        .respond_with(SseFixture {
+            body: asks_to_read("call_1", &target.to_string_lossy()),
+        })
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(Slow {
+            body: answers_in_two_fragments(),
+            delay: std::time::Duration::from_secs(10),
+        })
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let home = home_for("stopped-tools", &server.uri(), &cwd);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_flint"))
+        .args(["-p", "read the notes", "--json"])
+        .arg("--cwd")
+        .arg(&cwd)
+        .env("FLINT_HOME", &home)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to start flint");
+
+    let mut stdout = child.stdout.take().expect("a pipe");
+    let reader = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut text = String::new();
+        let _ = stdout.read_to_string(&mut text);
+        text
+    });
+
+    // Long enough for the tool to have run and the next request to be in flight, which the tool frames
+    // in the assertion below prove rather than this number.
+    std::thread::sleep(std::time::Duration::from_millis(2500));
+    {
+        use std::io::Write;
+        let mut stdin = child.stdin.take().expect("a pipe");
+        stdin.write_all(b"/stop\n").expect("writing to flint");
+        stdin.flush().expect("flushing");
+    }
+
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("waiting for flint") {
+            break status;
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(12),
+            "the stopped run never ended"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let text = reader.join().expect("the reader thread");
+    let lines: Vec<Value> = text
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+
+    assert_eq!(
+        status.code(),
+        Some(130),
+        "a stopped run must not exit 0: {:?}",
+        kinds(&lines)
+    );
+    assert_eq!(
+        line_of(&lines, "turn.completed")["outcome"],
+        "stopped",
+        "the turn was not reported as stopped: {}",
+        line_of(&lines, "turn.completed")
+    );
+
+    // What already happened, before the ending: the tool that ran is on the stream, by name, with the
+    // result it produced -- so a caller about to retry can see what a retry would do twice.
+    let completed = line_of(&lines, "tool.completed");
+    assert_eq!(
+        completed["name"], "read",
+        "the tool round is not named: {completed}"
+    );
+    assert_eq!(completed["ok"], true, "the tool did not complete: {completed}");
+    let position = |kind: &str| {
+        lines
+            .iter()
+            .position(|line| line["type"] == kind)
+            .unwrap_or_else(|| panic!("no {kind} frame in {:?}", kinds(&lines)))
+    };
+    assert!(
+        position("tool.started") < position("tool.completed"),
+        "the tool's result precedes the call that produced it: {:?}",
+        kinds(&lines)
+    );
+    assert!(
+        position("tool.completed") < position("turn.completed"),
+        "the turn ended before the stream said what it had already run, which is the one ordering a \
+         caller retrying needs: {:?}",
+        kinds(&lines)
+    );
+}
+
 /// A turn that runs a tool reports it by name, with the arguments and the result.
 ///
 /// The name is the point: the provider announces a call by id, and a stream that only ever

@@ -1402,14 +1402,35 @@ decision, not a gap.
    for four shapes of run, against a vocabulary list that lives in the test as well as the README --
    which it turned out the README had already drifted from, by two frame types (`status`, `command`).
 3. **Retrying is not safe** (A5), and a truncated turn makes it worse: the answer says nothing about
-   what already happened.
+   what already happened. — **Settled in writing 2026-09-18, with the testable half tested.** The
+   answer is that flint cannot make a retry safe and must not pretend to: nothing in a tool call tells
+   flint whether running it twice is safe, and an idempotency key flint invented would be a promise no
+   shell could keep — the same reason there is no permission layer, one step out. What flint owes a
+   caller is the *evidence*, and it already had it: the tool events precede the ending. So the contract
+   is now stated where a caller who retries will read it (`docs/python.md`, "Retrying: nothing
+   identifies a request", and a `README.md` bullet in the same words: a retry is a new turn, a retry
+   may repeat work, and a stopped or failed turn says what already happened), and the half that can be
+   tested is: a run stopped mid-turn carries `tool.started`/`tool.args`/`tool.completed` **before**
+   `turn.completed` (`outcome: "stopped"`, exit 130), so a caller can see what a retry would repeat
+   (`tests/json_output.rs::a_stopped_turn_says_which_tools_it_already_ran`). Shown red by taking the
+   stall out of the fixture, which fails at the `/stop` write because the turn is already over.
 4. **Injection is action injection.** flint has no permission layer by decision, and it reads data
    with tools — so data that a caller fed in can direct actions. `--readonly` is the only gate and it
    is global, which means "ask me a question" and "do something for me" cannot be separated by a
    caller that handles untrusted input.
 5. **A session reused for a second purpose.** `--continue` carries the earlier conversation into the
    new question. Data crosses purposes, and the answer is coloured by context the caller did not
-   intend — a silent fault, because the run succeeds.
+   intend — a silent fault, because the run succeeds. — **Settled in writing 2026-09-18.** flint cannot
+   see a purpose: it cannot tell a follow-up from a new question, and a heuristic ("this looks like a
+   different topic") would be exactly the inference §10 exists to remove — so the decision is about
+   *silence* rather than detection, and the honest part is that nothing is ever carried without being
+   asked for. A run with no continuation flag starts a new conversation (the file is created by the
+   first thing said in it), a continued run names its conversation on `session.started` — the path the
+   caller gave `--resume`, or the newest in that directory for `--continue` — so a caller that must not
+   mix purposes can check what it got before reading the answer, `--no-session` carries nothing at all,
+   and `--fork` is the door for carrying a prefix into a conversation of its own. Stated in
+   `docs/python.md` ("What a continued conversation carries") and in `README.md` beside the session
+   rules.
 6. **A schema that passes is not a value that is true.** The subset has no `pattern` and no `format`
    by decision (the reasons are in the code), which leaves dates, identifiers and enumerations to
    `enum` or to the caller. The documentation has to say this plainly, because a caller who reads
@@ -1805,8 +1826,9 @@ list's, not this one's, and each line is edited in the same commit as the code t
   a job that can say it is `stopping` — **built 2026-09-18**; and the page's own half of the reconnect
   cursor, which `HANDOFF.md` calls the part of the item that stays open.
 - §8: the picker of live runs that the page's `/say --to` is waiting on.
-- §10 C3 and C5 — the two holes that need a decision rather than code: a request nothing identifies
-  (so a caller's retry may repeat tools), and a session carried into a second purpose by `--continue`.
+- §10 C3 and C5 — the two holes that needed a decision rather than code — **settled in writing
+  2026-09-18**: C3 states the retry contract and tests the half that can be tested (the tool events
+  precede the ending), C5 states why nothing is carried silently and where a caller checks.
 
 **Ordered, cheapest-and-highest-value first.** Two sweeps went into this: one over the documentation,
 one over `src/`, `tests/`, `scripts/` and `examples/` — and every item below was checked against the

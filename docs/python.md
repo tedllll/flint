@@ -110,6 +110,55 @@ While a run is going, flint also says so every five seconds — `{"elapsed_secs"
 false,"text":"running bash","type":"status"}` — which is what makes a long run distinguishable from
 a hung one if you are reading the stream yourself rather than waiting for `ask()`.
 
+## Retrying: nothing identifies a request
+
+flint's stream is honest and its requests are anonymous. There is no request id, no idempotency key,
+and nothing in a `Turn` a caller can hand back to make a second call *the same* call: a retry after a
+timeout or a crash is a new turn, and the tools it asks for run again. That is not an oversight to be
+fixed from inside flint — nothing in a `bash` command line tells flint whether running it twice is
+safe, and a key flint invented would be a promise no shell could keep. So the rule belongs to the
+caller, and it has three parts:
+
+- **A retry may repeat work.** Anything a tool did on the first attempt — a file written, a commit
+  made, a message sent — may happen again. Only the caller knows which of its prompts are side
+  effects, so those are the ones to decide about; a prompt that only reads is safe to repeat.
+- **A stopped or failed turn says what already happened.** The tool events are on the stream *before*
+  the ending (`tool.started`, `tool.args`, `tool.completed`), so a caller that keeps its own stream can
+  see which tools ran before the turn was cut short and retry with that in hand rather than from
+  memory. `turn.completed` with `outcome == "stopped"` and exit `130` says the answer is a half; exit
+  `69` says the provider never answered, which is the case where nothing ran at all if no tool frame
+  preceded it.
+- **`--no-session` is not isolation from this.** It stops flint writing a conversation; the tools still
+  touch the world.
+
+`tests/json_output.rs` holds the middle part: a run whose second round stalls, stopped from stdin,
+whose stream carries the completed tool call **before** the ending.
+
+## What a continued conversation carries
+
+`--continue` and `--resume <path>` put the earlier conversation into the request, and that is the whole
+point of them: the new question is answered in the light of the old ones. It is also the one way a
+caller can cross purposes without meaning to. A conversation that held untrusted input — a scraped
+page, a customer record, a peer's message — colours the answer to a question about something else
+entirely, and the run succeeds, so nothing announces that it happened.
+
+flint does not guess at purposes. It cannot tell a follow-up from a new question, and a heuristic
+("this looks like a different topic") would be exactly the kind of inference this project refuses.
+What it does instead is make sure nothing is carried *silently*:
+
+- **A run with no continuation flag starts a new conversation.** The file is created by the first thing
+  said in it, so a fresh call cannot land in an old conversation by accident.
+- **A continued run says which conversation it is in.** `session.started` carries the path: the one the
+  caller named (`--resume`), or the newest conversation in that working directory (`--continue`). A
+  caller that must not mix purposes can check what it got before it reads the answer — and the way to
+  not mix them is to not pass the flag.
+- **`--no-session` writes nothing at all**, which is the door for a question that should leave no trace
+  and continue nothing; `--fork` is the door for carrying a prefix into a *new* conversation when the
+  point is to keep the branch separate from the one it came from.
+
+The decision is recorded in `ROADMAP.md` §10 C5, and the reason it is writing rather than code is the
+sentence above: a purpose is not a property flint can see.
+
 ## Many calls at once
 
 `map_calls` is the batch, and it exists because the naive version is wrong in three ways that are
