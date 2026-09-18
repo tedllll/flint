@@ -1864,3 +1864,65 @@ build, but it should be chosen rather than assumed.
 
 **Not built, and nothing else waits on it.** The preview's contents are plain text today, and that
 remains the honest answer to a URL inside a file (§16's closing sentence).
+
+## 21. A picture in the panel, and the two rules it had to respect
+
+Asked for directly, 2026-09-18, after §17 and §18: *the panel should probably support images too — the
+mainstream ones — and how is up to you; clicking it could also go through the system's own open.* It
+is the third answer to the same press §12 built, and it cost less than the two before it because the
+two rules it had to respect were already written down rather than invented here.
+
+**The route is new and the panel is not.** `GET /image?path=…` serves one file as **bytes** with the
+type its own first bytes declare, and the panel draws it. The alternative — teaching `GET /file` to
+answer with a picture — was refused on a fact rather than a preference: `Response`'s body is a
+`String`, every one of its twenty-four construction sites builds text, and fifty-eight assertions in
+`src/web.rs` read that text back. Turning the body into an enum to serve a photograph would have
+touched all of them. So `Answer` gained a third shape (`Raw { content_type, body, extra }`), the header
+block moved into one `head(…)` both shapes call — and the four security headers, which is where a
+second copy has already gone wrong once, are still written in exactly one place.
+
+**The type is the bytes, not the name.** A `Content-Type` is a claim a browser acts on: it hands the
+bytes to a decoder, and for `image/svg+xml` into a document context. So `serve_image` sniffs:
+PNG, JPEG, GIF (87a and 89a), WebP (`RIFF` **and** `WEBP` at 8), BMP, ICO/CUR, TIFF (both byte
+orders), AVIF and HEIC/HEIF (`ftyp` plus the brand), and SVG — which is text, so it is recognised by
+what it *says* (`<?xml`/`<svg` in the first kilobyte) rather than by how it starts. A JPEG named
+`photo.png` is served as `image/jpeg`; a note named `logo.png` is refused with a sentence that lists
+what this route would draw.
+
+**What the page may ask, and in which order.** The page cannot sniff bytes it has not fetched, so it
+decides from the *name* — one set of extensions — and asks `/image` first for a name that looks like a
+picture. A refusal is **not** shown: the panel falls through to `/file` and shows what that says. That
+one rule buys three behaviours a reader will actually meet: a `.png` that is really a note reads as the
+note; a directory or a missing file gets the text route's own sentence; and a picture whose route
+refused it cannot produce "not a picture this page can draw" as the *only* thing on screen.
+
+**The click goes through the system, which is what the person asked for.** Pressing the picture calls
+the same `openOutside()` the header's `open` button calls, so it is the same route (`POST /open`), the
+same `readonly` refusal, and the same two-press discipline that §16 built — the preview press opens the
+panel, and the second press hands the file to the OS. Text keeps its separate `open` button because
+there is nothing in a text panel to press that would mean *this file*.
+
+**Measured, and how.**
+
+| Claim | Where it was measured | What came back |
+|---|---|---|
+| A picture is served as its own bytes with the type they declare | `src/web.rs::an_image_is_served_as_its_own_bytes_with_the_type_they_declare` | the body equals the file, `Content-Type: image/png`, `Content-Length` right, and all four security headers present on a bytes body |
+| The name is not evidence | `src/web.rs::an_images_type_is_its_bytes_and_not_its_name` | a JPEG named `.png` → `image/jpeg`; a note named `.png` → the refusal, and `GET /file` reads it |
+| Every refusal has a sentence | `src/web.rs::a_missing_directory_and_oversized_image_each_say_what_they_are` | missing → 404, directory → 400, 24 MB + 1 → "too big to show here; open it where it lives", no path → 400, empty path → 400, **no token → 403** |
+| The sniffing table, format by format | `src/web.rs::image_kind_knows_the_formats_a_browser_draws` | fifteen signatures answer with their type; text, an empty file, a RIFF that is sound, an `ftypmp42` video and a short PNG answer with none |
+| The panel asks for a picture by name and lets go of the last one | `scripts/web-view-test.js`, calling `imageExt`/`imageRoute`/`showPicture` | the extension set both ways, the route's encoding, the blob URL drawn, the note from the route's headers, and `revokeObjectURL` called exactly once per replaced picture |
+| A token never appears in a URL | `tests/web_view.rs::a_picture_is_read_with_the_pages_own_auth_and_never_a_token_in_a_url` | the fetch carries `authHeader()`, the `<img>` gets a blob URL, and `&token=`/`?token=` appear nowhere but `/`'s own address |
+| A real picture decodes in a real browser | `scripts/browser-controls-test.js` against a live run | **66/66 claims held**, including a 1×1 PNG with `naturalWidth === 1`, the note `image/png · 68 bytes`, the misnamed note falling through to text, and Escape releasing the picture |
+
+**What was refused.** Base64 in a JSON body (`data:` URLs are already allowed by the CSP) — refused
+because it inflates a photograph by a third and makes the page's own script decode what the browser's
+decoder does better. A token in the image URL — refused because that is the rule §4 already states, and
+the fact that an `<img>` cannot send a header is exactly why the page fetches the bytes itself. A PDF
+renderer, an image *editor*, EXIF, thumbnails and a file tree — none of them were asked for, and a
+preview panel is a side window rather than a viewer. And the size cap is **24 MB** rather than `/file`'s
+64: a text file can be cut at 512 KB and still be honest, while a picture has to arrive whole to be a
+picture, so that number is what this process and the tab hold in memory at once.
+
+**The one CSP widening this needed**, said out loud because a policy is not a detail: `img-src` gained
+`blob:`. The page makes that URL itself, from bytes it fetched with a header, so it is not a second way
+in — and the alternative that needed no widening (`data:`) was refused above for a reason of its own.

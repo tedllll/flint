@@ -501,6 +501,17 @@
     flex: 1 1 auto; margin: 0; padding: 10px 12px; overflow: auto;
     white-space: pre-wrap; word-wrap: break-word; font-size: 13px;
   }
+  /* The picture and the control it sits in: a button with no chrome, because what a press does
+     (`POST /open`) is not the point of looking at it and a frame around a screenshot would be. The
+     image never grows past the column: `max-width`/`max-height` with `object-fit: contain` shows the
+     whole of it at the largest size that fits, which is what a preview is for. */
+  #preview-image-button {
+    flex: 1 1 auto; margin: 0; padding: 10px 12px; overflow: auto; background: none; border: 0;
+    cursor: zoom-in; display: block;
+  }
+  #preview-image-button[hidden] { display: none; }
+  #preview-image { display: block; max-width: 100%; max-height: 100%; object-fit: contain; }
+  #preview-image-button:disabled { cursor: default; }
   #status {
     grid-column: 1 / -1;
     background: var(--panel); border-top: 1px solid var(--line);
@@ -628,6 +639,11 @@
       <button id="preview-close" type="button" title="close (Esc)">close</button>
     </div>
     <pre id="preview-text"></pre>
+    <!-- A picture, drawn by the browser rather than by this page's script: `src` is a blob URL made
+         from the bytes `GET /image` served, so nothing here parses an image and the token stays out
+         of every URL. Pressing it hands the file to the program this machine uses for it, which is
+         what a person wants next after looking at a thumbnail. -->
+    <button id="preview-image-button" type="button" hidden><img id="preview-image" alt=""></button>
   </aside>
 </div>
 
@@ -2493,9 +2509,11 @@ async function openPreview(path, line) {
 }
 
 /// Close it. The transcript, the scroll position and the reader's place are untouched: this panel
-/// never owned any of them.
+/// never owned any of them. The picture's blob URL is let go of, which is the one thing here that is
+/// the page's own memory rather than the run's.
 function closePreview() {
   preview = null;
+  showPicture(null);
   const panel = document.getElementById("preview");
   if (panel) panel.hidden = true;
 }
@@ -2512,14 +2530,22 @@ function paintPreviewHead() {
   if (!node) return;
   node.textContent = "";
   const open = document.getElementById("preview-open");
+  // The same two facts for the picture, which is the *other* control that starts a program: pressing
+  // it hands the file to the OS. One decision, two places it is drawn, so it is worked out once.
+  const picture = document.getElementById("preview-image-button");
+  const held = !canSend || readonlyOn(doc && doc.state);
+  const why = !canSend
+    ? "this page has no flint behind it: opening a path is the run's own route"
+    : readonlyOn(doc && doc.state)
+      ? "this run is readonly, and opening a path starts a program on this machine"
+      : "open it where it lives, in whatever this machine uses for it";
   if (open) {
-    const held = !canSend || readonlyOn(doc && doc.state);
     open.disabled = held;
-    open.title = !canSend
-      ? "this page has no flint behind it: opening a path is the run's own route"
-      : readonlyOn(doc && doc.state)
-        ? "this run is readonly, and opening a path starts a program on this machine"
-        : "open it where it lives, in whatever this machine uses for it";
+    open.title = why;
+  }
+  if (picture) {
+    picture.disabled = held;
+    picture.title = held ? why : "press to " + why;
   }
   if (!preview) return;
   node.title = preview.line ? preview.path + ":" + preview.line : preview.path;
@@ -2594,20 +2620,141 @@ function fileRoute(path) {
   return "/file?path=" + encodeURIComponent(path);
 }
 
+/// The route a picture is read through, encoded: `GET /image` (§21 of `docs/web-mode.md`).
+///
+/// The same shape as `fileRoute` and a route of its own rather than a flag on that one, because the
+/// two answer with different *kinds* of body -- text a `<pre>` takes, and bytes a `<img>` takes -- and
+/// the route decides which of those a file is by looking at its first bytes rather than at its name.
+function imageRoute(path) {
+  return "/image?path=" + encodeURIComponent(path);
+}
+
+/// The extensions this page will **ask** `/image` about, because a name is all it has to go on.
+///
+/// The decision is a guess the route then confirms or refuses: the page cannot sniff bytes before it
+/// has fetched them, so it asks first and falls back to `/file` when the answer is a refusal. That is
+/// why an extension that is *not* here can still be a picture (it reads as text, which is wrong but
+/// honest) and one that is here but is really a note still reads as the note.
+function imageExt(path) {
+  const match = /\.([A-Za-z0-9]+)$/.exec(path || "");
+  if (!match) return false;
+  return IMAGE_EXTENSIONS.has(match[1].toLowerCase());
+}
+
+/// The formats a browser draws today, which is what "mainstream" means here. The route's sniffing
+/// table is the authority; this set decides only which route is asked first.
+const IMAGE_EXTENSIONS = new Set([
+  "png", "jpg", "jpeg", "jpe", "jfif",
+  "gif", "webp", "bmp", "ico", "cur",
+  "tif", "tiff", "avif", "heic", "heif", "svg",
+]);
+
+/// The blob URL on screen, so the one that was there before can be let go of.
+///
+/// A blob URL holds its bytes until it is revoked, and the number of pictures a reader opens in a
+/// session is unbounded -- so the release happens where the *next* picture replaces this one and where
+/// the panel closes, rather than relying on the tab going away.
+let pictureUrl = null;
+
+function releasePicture() {
+  if (pictureUrl && typeof URL !== "undefined" && URL.revokeObjectURL) URL.revokeObjectURL(pictureUrl);
+  pictureUrl = null;
+}
+
+/// Draw a picture, or clear the one that is there. `url` empty means "no picture".
+///
+/// The note is the route's own `Content-Type` and `Content-Length` rather than the extension, for the
+/// reason the route sniffs: a `.png` that is a JPEG should not be described as a PNG by the page
+/// either. A type this browser cannot draw -- TIFF and HEIC are served and not always drawable -- is
+/// answered by `onerror`, which says so in words and keeps the `open` control the next thing to hand.
+function showPicture(url, response) {
+  const holder = document.getElementById("preview-image-button");
+  const image = document.getElementById("preview-image");
+  const text = document.getElementById("preview-text");
+  const note = document.getElementById("preview-note");
+  releasePicture();
+  if (!image || !holder) return;
+  if (!url) {
+    holder.hidden = true;
+    image.removeAttribute("src");
+    if (text) text.hidden = false;
+    return;
+  }
+  pictureUrl = url;
+  const type = ((response && response.headers.get("Content-Type")) || "an image").split(";")[0];
+  const size = Number((response && response.headers.get("Content-Length")) || 0);
+  const said = type + (size ? " · " + bytesLabel(size) : "");
+  image.onerror = () => {
+    holder.hidden = true;
+    if (text) {
+      text.hidden = false;
+      text.textContent =
+        "this browser cannot draw this " + type + " -- press open to look at it where it lives";
+    }
+    if (note) note.textContent = said;
+  };
+  image.src = url;
+  holder.hidden = false;
+  if (text) text.hidden = true;
+  // The note is written here rather than by the caller: this is the only place that has both the
+  // route's headers and the fact that the picture is on screen, and two writers would be two chances
+  // to disagree about what is being looked at.
+  if (note) note.textContent = said;
+}
+
 /// Read it. A refusal is the route's own sentence, shown where the file would have been: a click
 /// that did nothing at all is the one answer a reader cannot act on.
+///
+/// Three answers to one press, decided by what the path's own name suggests and then by what the run
+/// says the bytes are: a picture through `GET /image`, text through `GET /file`, and a refusal in the
+/// words of whichever route answered. The order matters and is deliberate -- the picture is tried
+/// *first* for a name that looks like one, and its refusal is **not** shown: `/file` is asked instead,
+/// because a `.png` that is really a note should read as the note rather than fail twice.
 async function readPreview() {
   const text = document.getElementById("preview-text");
   const note = document.getElementById("preview-note");
   if (!text || !preview) return;
+  showPicture(null); // whatever picture was there is not this one; its URL is let go of here
   if (!canSend) {
+    text.hidden = false;
     text.textContent = "";
     note.textContent = "";
     text.textContent = "this page has no flint behind it: a file is read through the run that served it";
     return;
   }
+  text.hidden = false;
   text.textContent = "reading…";
   note.textContent = "";
+  if (imageExt(preview.path) && (await readPicture())) return;
+  await readText();
+}
+
+/// Ask `GET /image` for the path on screen, and draw it. `false` means "not a picture this route
+/// would serve" -- the caller then asks for text, which is the only other thing it could be.
+async function readPicture() {
+  if (!preview) return false;
+  let response;
+  try {
+    response = await fetch(imageRoute(preview.path), { headers: authHeader() });
+  } catch (e) {
+    return false; // the text route reports the same failure in its own words
+  }
+  if (!response.ok) return false;
+  let url = "";
+  try {
+    url = URL.createObjectURL(await response.blob());
+  } catch (e) {
+    return false; // no blobs (an old browser): text is the honest fallback
+  }
+  showPicture(url, response);
+  return true;
+}
+
+/// The text half of the same press: the route's bytes as they are, or its refusal as it is.
+async function readText() {
+  const text = document.getElementById("preview-text");
+  const note = document.getElementById("preview-note");
+  if (!text || !preview) return;
   let response;
   try {
     response = await fetch(fileRoute(preview.path), { headers: authHeader() });
@@ -2619,10 +2766,12 @@ async function readPreview() {
   if (!response.ok) {
     // The route says *why* -- nothing there, a directory, not text -- and that sentence is the
     // whole answer, so it is shown as it is rather than turned into a status code.
+    text.hidden = false;
     text.textContent = body.trim();
     note.textContent = "HTTP " + response.status;
     return;
   }
+  text.hidden = false;
   text.textContent = body;
   note.textContent = previewNote(response, body, preview.line);
   scrollToLine(text, preview.line);
@@ -3259,8 +3408,12 @@ if (typeof document !== "undefined" && document.getElementById) {
   document.getElementById("preview-close").addEventListener("click", closePreview);
   document.getElementById("preview-reload").addEventListener("click", () => readPreview());
   // The one control on this page that starts a program. See `openOutside` for why it is not the
-  // path itself.
+  // path itself -- and the picture, which is the same act through the same route: a press on the
+  // image is a person asking to see the file at the size this machine can show it, which is what
+  // `open` does, and the panel's own button is still there for anyone who reads the header instead.
   document.getElementById("preview-open").addEventListener("click", () => openOutside());
+  const pictureButton = document.getElementById("preview-image-button");
+  if (pictureButton) pictureButton.addEventListener("click", () => openOutside());
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && preview) closePreview();
   });
@@ -3497,6 +3650,11 @@ if (typeof module !== "undefined" && module.exports) {
     paint, feedTrouble, tokenRefused, feedTrace, debugFeed, applyState, showState, fillSelect,
     showToggles, showCommands, showActions, sessionRow, formLine,
     addressParts, asUrl, asPath, bytesLabel, previewNote, linkNodes, renderBlock, fileRoute,
+    // The picture half of the panel: which route is asked, which names make it worth asking, and the
+    // one piece of this page's own state that has to be let go of. Exported because all three are
+    // pure or nearly so -- a name in, a decision out -- so the Node harness can hold the extension
+    // list and the route's encoding without a browser and without a picture on disk.
+    imageRoute, imageExt, releasePicture, showPicture,
     // `POST /open`'s half of the panel: the body the route takes, and the frame's own write guard,
     // which is what decides whether the control is offered at all. Exported because both are pure --
     // one takes a path, the other reads a frame -- so the Node harness can check them without a

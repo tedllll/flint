@@ -484,6 +484,23 @@ async function main() {
   ];
   const model = await stubModel(script);
   const where = scratch(`http://127.0.0.1:${model.port}/v1`);
+  // A real picture for the panel to draw, and one that is *named* like a picture but is text.
+  //
+  // Written by this harness rather than by the scripted turn, because a tool call's arguments are
+  // JSON text and a PNG is not text: the `write` tool could not produce one. Both files are on disk
+  // in the run's own working directory before the page is opened, and the turn's prose names them, so
+  // the press is a press on a path in the transcript -- which is the whole point of the two claims.
+  //
+  // The bytes are a 1x1 transparent PNG, and it is *real* rather than a signature and filler: the
+  // claim is that the browser draws it, and `naturalWidth` is the browser's own word for that.
+  fs.writeFileSync(
+    path.join(where.cwd, "cell.png"),
+    Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      "base64"
+    )
+  );
+  fs.writeFileSync(path.join(where.cwd, "not-a-picture.png"), "this is a note with a picture's name\n");
   // The turn's last answer, and the three shapes of address a claim below is made against: a web
   // address that must be a link, the absolute path of the file this run wrote that must open in the
   // preview, and a `javascript:` address that must stay the words it is. The last one is the reason
@@ -497,6 +514,8 @@ async function main() {
   const addresses = prose(
     "all done -- see https://example.com/flint for the page, " +
       `${path.join(where.cwd, "notes.txt")} for the file, ` +
+      `${path.join(where.cwd, "cell.png")} for the picture, ` +
+      `${path.join(where.cwd, "not-a-picture.png")} for the one that only looks like one, ` +
       "and javascript:alert(1) for the scheme that is not the web"
   );
   script[script.length - 1] = addresses;
@@ -1161,6 +1180,7 @@ async function main() {
 
     // A file that changed under the reader: the reload button is the one control that re-reads it,
     // and what it must show is the new bytes rather than the ones the page already had.
+
     fs.writeFileSync(path.join(where.cwd, "notes.txt"), "four\nfive\n");
     await page.click("#preview-reload");
     const reread = await page
@@ -1555,6 +1575,104 @@ async function main() {
       "a path in the run's own words opens that file beside the conversation",
       taggedProse === true && !!readByProse && readByProse.body === "four\nfive\n",
       `tagged: ${taggedProse}, panel: ${JSON.stringify(readByProse)}`
+    );
+
+    // The picture half of the panel, pressed the same way and in the same prose: a real PNG this
+    // harness wrote into the run's working directory before the page opened, and a note that merely
+    // has a picture's name. What differs is which route answers -- `/image` hands over bytes with
+    // their own type, and a refusal falls through to `/file`, which reads the note as the note.
+    //
+    // `naturalWidth` is the browser's own word for "this decoded", which is the claim that matters: a
+    // route that served the wrong bytes, or a page that drew the blob URL wrong, would leave an image
+    // element with a `src` and no pixels -- and nothing read off the page's own nodes could tell that
+    // from a picture. The bytes are written by this harness rather than by the scripted turn because a
+    // tool call's arguments are JSON text and a PNG is not text.
+    const pressProse = async (name, id) => {
+      const full = path.join(where.cwd, name);
+      const tagged = await page.js(
+        `(() => { const row = Array.from(document.querySelectorAll(".turn.assistant"))
+              .filter((t) => t.textContent.includes("all done")).pop();
+            if (!row) return false;
+            const b = Array.from(row.querySelectorAll("button.path"))
+              .find((x) => x.textContent === ${JSON.stringify(full)});
+            if (!b) return false; b.id = ${JSON.stringify(id)}; return true; })()`
+      );
+      if (tagged) await page.click(`#${id}`);
+      return tagged === true;
+    };
+
+    const pressedPicture = await pressProse("cell.png", "harness-picture");
+    const picture = await page
+      .waitFor(
+        `(() => { const img = document.getElementById("preview-image");
+           if (!img || !img.naturalWidth) return null;
+           return { width: img.naturalWidth, height: img.naturalHeight,
+                    src: img.src.slice(0, 5),
+                    textHidden: document.getElementById("preview-text").hidden,
+                    controlShown: !document.getElementById("preview-image-button").hidden,
+                    note: document.getElementById("preview-note").textContent }; })()`,
+        "the picture in the panel",
+        30
+      )
+      .catch(() => null);
+    check(
+      "pressing a picture's path draws the picture, and the text pane gets out of its way",
+      pressedPicture &&
+        !!picture &&
+        picture.width === 1 &&
+        picture.height === 1 &&
+        picture.controlShown &&
+        picture.textHidden,
+      `picture: ${JSON.stringify(picture)}`
+    );
+    check(
+      "the picture is drawn from a blob URL the page made, not from a route carrying the token",
+      !!picture && picture.src === "blob:",
+      `src: ${JSON.stringify(picture && picture.src)}`
+    );
+    check(
+      "and the note names the type the route served, not the name the file has",
+      !!picture && /^image\/png · \d+ bytes$/.test(picture.note),
+      `note: ${JSON.stringify(picture && picture.note)}`
+    );
+
+    // The fall-through: the picture route refuses bytes that are not a picture, and the panel asks
+    // `/file` rather than failing twice -- which is why the answer a reader meets is the text route's
+    // own rather than "not a picture".
+    const pressedTheNote = await pressProse("not-a-picture.png", "harness-not-picture");
+    const fellThrough = await page
+      .waitFor(
+        `document.getElementById("preview-text").textContent.includes("with a picture's name")
+           ? { textHidden: document.getElementById("preview-text").hidden,
+               pictureHidden: document.getElementById("preview-image-button").hidden }
+           : null`,
+        "the note read as text",
+        30
+      )
+      .catch(() => null);
+    check(
+      "a file with a picture's name and a note's bytes reads as the note",
+      pressedTheNote && !!fellThrough && fellThrough.textHidden === false && fellThrough.pictureHidden === true,
+      `panel: ${JSON.stringify(fellThrough)}`
+    );
+
+    // And Escape closes it as it closes a file, picture and all: a hidden panel still holding an
+    // `<img src="blob:…">` would keep those bytes alive for the life of the tab.
+    await page.js(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); true`);
+    const pictureClosed = await page
+      .waitFor(
+        `document.getElementById("preview").hidden
+           ? { hidden: document.getElementById("preview-image-button").hidden,
+               text: document.getElementById("preview-text").hidden }
+           : null`,
+        "the panel closed with a picture in it",
+        20
+      )
+      .catch(() => null);
+    check(
+      "Escape closes a picture the same way it closes a file",
+      !!pictureClosed && pictureClosed.hidden === true && pictureClosed.text === false,
+      `panel: ${JSON.stringify(pictureClosed)}`
     );
   } finally {
     page.close();

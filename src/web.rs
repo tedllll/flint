@@ -954,25 +954,37 @@ impl Response {
     }
 
     fn render(&self) -> Vec<u8> {
-        let extra: String = self
-            .extra
-            .iter()
-            .map(|(name, value)| format!("{name}: {value}\r\n"))
-            .collect();
-        let mut out = format!(
-            "HTTP/1.1 {} {}\r\n\
-             Content-Type: {}\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\
-             {SECURITY_HEADERS}{extra}\r\n",
-            self.status,
-            self.reason,
-            self.content_type,
-            self.body.len()
-        );
+        let mut out = head(self.status, self.reason, self.content_type, self.body.len(), &self.extra);
         out.push_str(&self.body);
         out.into_bytes()
     }
+}
+
+/// The status line and the headers of a small, complete response: everything before the body.
+///
+/// Factored out when the second kind of body arrived (`Answer::Raw`, for a picture). The alternative
+/// was a second copy of this `format!`, and the four headers every response carries already proved
+/// what a second copy costs: the CSP line was missing from the stream's own copy for as long as it
+/// existed. `length` is passed rather than taken from a body, because one of the two callers has no
+/// `String` to ask.
+fn head(
+    status: u16,
+    reason: &'static str,
+    content_type: &str,
+    length: usize,
+    extra: &[(String, String)],
+) -> String {
+    let extra: String = extra
+        .iter()
+        .map(|(name, value)| format!("{name}: {value}\r\n"))
+        .collect();
+    format!(
+        "HTTP/1.1 {status} {reason}\r\n\
+         Content-Type: {content_type}\r\n\
+         Content-Length: {length}\r\n\
+         Connection: close\r\n\
+         {SECURITY_HEADERS}{extra}\r\n"
+    )
 }
 
 /// The four headers every response carries, in one place because there were two.
@@ -983,21 +995,37 @@ impl Response {
 /// only place it may connect -- was missing from the stream. `docs/features.md` §12.2 promises all
 /// four on **every** response, and a promise kept by two literals is kept by neither. The order is
 /// what the browser sees rather than what a test expects; `Cache-Control` first, as it always was.
+///
+/// `img-src` gained `blob:` when the preview learned to draw a picture (§21): the page fetches
+/// `/image` with its token in a **header** -- a URL is a token in a history and a log, which is why
+/// the query string is accepted on `/` alone -- and hands the bytes to an `<img>` as a blob URL. So
+/// the scheme is the page's own, made by the page, and the alternative (`data:`) is already allowed
+/// and was refused for a different reason: base64 in a JSON body inflates a photograph by a third
+/// and has to be decoded by the page's own script rather than by the browser's decoder.
 const SECURITY_HEADERS: &str = "\
 Cache-Control: no-store\r\n\
 X-Content-Type-Options: nosniff\r\n\
 Referrer-Policy: no-referrer\r\n\
-Content-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:\r\n";
+Content-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:\r\n";
 
 /// What a request turned into.
 ///
-/// Two shapes because one of them has no `Content-Length` and cannot be a `Response`: the
-/// event stream ends when the client goes away. Authorisation and routing still happen in
-/// one function either way -- a second place that decided who may connect would be a second
-/// place to get §4 wrong.
+/// Three shapes, for three things a response can be: one text response, one response whose body is
+/// bytes, and one that has no `Content-Length` at all because it ends when the client goes away.
+/// Authorisation and routing still happen in one function either way -- a second place that decided
+/// who may connect would be a second place to get §4 wrong.
 pub enum Answer {
     /// One response, then close.
     Once(Response),
+    /// One response whose body is not text: the image route (`GET /image`).
+    ///
+    /// A third shape rather than a `Vec<u8>` inside `Response`, because `Response` is text by
+    /// construction -- its body is a `String`, every one of its twenty-four construction sites
+    /// builds text, and fifty-eight assertions in this file read that text back. Turning the body
+    /// into an enum to serve a picture would have touched all of them for one route's sake. What
+    /// the two shapes *share* is the header block and [`SECURITY_HEADERS`], which is where the four
+    /// headers every response carries actually live, so a third copy of them is still not written.
+    Raw(Raw),
     /// The live feed, for a client that last saw `last`.
     Events {
         last: Option<u64>,
@@ -1005,16 +1033,47 @@ pub enum Answer {
     },
 }
 
+/// A response whose body is bytes: what a picture is served as.
+pub struct Raw {
+    content_type: &'static str,
+    body: Vec<u8>,
+    extra: Vec<(String, String)>,
+}
+
+/// The picture's type and size rather than its bytes.
+///
+/// `Debug` for `Response`'s reason -- an `expect_err` in a test prints the value it did not expect --
+/// and hand-written for one of its own: a derived one would paste several megabytes into a failure
+/// message, which is a failure message nobody reads.
+impl std::fmt::Debug for Raw {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Raw")
+            .field("content_type", &self.content_type)
+            .field("bytes", &self.body.len())
+            .finish()
+    }
+}
+
+impl Raw {
+    /// The same header block [`Response::render`] writes, then the bytes.
+    fn render(&self) -> Vec<u8> {
+        let mut bytes = head(200, "OK", self.content_type, self.body.len(), &self.extra).into_bytes();
+        bytes.extend_from_slice(&self.body);
+        bytes
+    }
+}
+
 impl Answer {
     /// The response, for the routes that have exactly one. Panics on a stream, which is a
     /// programming error rather than a client's.
     ///
-    /// Test-only: the server itself matches on the two shapes, because for one of them
+    /// Test-only: the server itself matches on the shapes, because for one of them
     /// there is nothing to return.
     #[cfg(test)]
     fn once(self) -> Response {
         match self {
             Answer::Once(response) => response,
+            Answer::Raw(_) => panic!("this route answers with bytes, not text"),
             Answer::Events { .. } => panic!("this route streams and has no single response"),
         }
     }
@@ -1065,6 +1124,14 @@ pub fn respond(request: &Request, body: &str, state: &State) -> Answer {
         // program. The one route that reads a path from the wire: see `serve_file`, and §12 of
         // `docs/web-mode.md` for what it will and will not serve.
         ("GET", "/file") => serve_file(request, state),
+        // The other half of the same question: a path the panel cannot draw as text. A picture is
+        // not a file too big or too strange to preview, it is a file this page can show *only* if
+        // it is handed the bytes with the type they really are -- see `serve_image`, and §21 of
+        // `docs/web-mode.md`.
+        //
+        // Returned rather than wrapped, because its body is not a `String`: it is the one route
+        // besides `/events` that answers with another shape.
+        ("GET", "/image") => return serve_image(request, state),
         // The other half of that answer: the same path handed to the program this machine uses for
         // it, for the files and directories the panel above cannot show -- a directory, a file too
         // large to preview, anything that is not text. The second route in this file that can make
@@ -1379,7 +1446,10 @@ const X_FLINT_SIZE: &str = "X-Flint-Size";
 /// `glob` all name files -- and until this route there was no way to look at one without leaving
 /// the page for another program. DSH's page solves the same problem by opening a file reference in
 /// a document preview beside the conversation; this copies the idea and none of the machinery: no
-/// file tree, no renderer registry, no Markdown or image or PDF support, one route and one panel.
+/// file tree, no renderer registry, no PDF support, one route and one panel. What the panel draws is
+/// text here, a picture through [`serve_image`], and a Markdown document through the page's own
+/// renderer (§20 of `docs/web-mode.md`) -- three answers to one press, each of them one route or one
+/// function rather than a plugin surface.
 ///
 /// **What it may serve, and why that is not a hole.** The token is the only credential, exactly as
 /// for every route, and whoever holds it can already `POST /message` -- that is, type a line into a
@@ -1554,6 +1624,180 @@ fn refusal(asked: &str, path: &std::path::Path) -> Response {
         ),
         Err(e) => Response::text(404, "Not Found", format!("nothing at {asked}: {e}\n")),
     }
+}
+
+/// The biggest picture this page will draw.
+///
+/// Smaller than [`FILE_REFUSE_ABOVE`] on purpose, and the difference is not tidiness: a text file is
+/// served as at most 512 KB and the rest is *cut*, while a picture has to arrive whole to be a
+/// picture -- so this number is the whole file in this process's memory and in the tab's. A phone
+/// photo is around 3 MB, a screenshot is under 1, a 12-bit scan can be 20; past 24 MB the honest
+/// answer is the one the refusal gives, which is to open it where it lives.
+const IMAGE_MAX: u64 = 24 * 1024 * 1024;
+
+/// `GET /image?path=…`: one picture, as the bytes it is.
+///
+/// The type is read off the **file's own first bytes**, not off its name. `Content-Type` is a claim
+/// a browser acts on -- it will hand the bytes to an image decoder and, for `image/svg+xml`, into a
+/// document context -- and a name is whatever somebody typed. So `logo.png` that is really a JPEG is
+/// served as `image/jpeg`, and `notes.txt` renamed to `logo.png` is refused with a sentence that says
+/// so rather than sent to a decoder to fail in the tab. The page decides the same question the other
+/// way round (by extension) because it has to pick a route before it can ask, and its fallback is
+/// this route's refusal followed by `GET /file`.
+///
+/// What it will *not* serve is the thing §6 cares about: a path is a parameter, exactly as in
+/// `/file`, so the route table stays literal and there is no traversal in a route.
+fn serve_image(request: &Request, state: &State) -> Answer {
+    let Some(raw) = request.query("path") else {
+        return Answer::Once(Response::text(
+            400,
+            "Bad Request",
+            "which image? this route takes ?path=<path>\n",
+        ));
+    };
+    let Some(asked) = percent_decode(raw) else {
+        return Answer::Once(Response::text(
+            400,
+            "Bad Request",
+            "that path is not percent-encoded properly\n",
+        ));
+    };
+    if asked.trim().is_empty() {
+        return Answer::Once(Response::text(400, "Bad Request", "which image? ?path= was empty\n"));
+    }
+    let path = resolve(&asked, &state.cwd);
+    match read_image(&path) {
+        Ok(raw) => Answer::Raw(raw),
+        Err(()) => Answer::Once(image_refusal(&asked, &path)),
+    }
+}
+
+/// One picture: its bytes and the type they are.
+fn read_image(path: &std::path::Path) -> Result<Raw, ()> {
+    let metadata = std::fs::metadata(path).map_err(|_| ())?;
+    if metadata.is_dir() || metadata.len() > IMAGE_MAX {
+        return Err(());
+    }
+    // Bounded by the cap rather than by the file, for `read_preview`'s reason: the byte past the cap
+    // is what tells this read there is more, and reading the rest of a 40 MB scan to find out is the
+    // cost the cap exists to avoid.
+    let mut file = std::fs::File::open(path).map_err(|_| ())?;
+    let mut bytes = Vec::new();
+    use std::io::Read as _;
+    std::io::Read::take(&mut file, IMAGE_MAX + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ())?;
+    if bytes.len() as u64 > IMAGE_MAX {
+        return Err(());
+    }
+    let content_type = image_kind(&bytes).ok_or(())?;
+    Ok(Raw { content_type, body: bytes, extra: Vec::new() })
+}
+
+/// The refusal for a path `/image` would not serve, in words that name what the file is.
+fn image_refusal(asked: &str, path: &std::path::Path) -> Response {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => Response::text(
+            400,
+            "Bad Request",
+            format!("{asked} is a directory, not an image\n"),
+        ),
+        Ok(metadata) if metadata.len() > IMAGE_MAX => Response::text(
+            400,
+            "Bad Request",
+            format!(
+                "{asked} is {} -- too big to show here; open it where it lives\n",
+                bytes_label(metadata.len())
+            ),
+        ),
+        // One sentence, and it names the formats in the sniffing table's own words so the two cannot
+        // drift: a reader who pressed a path that looked like a picture is owed what this route
+        // *would* draw. The page then asks `/file`, which is where a text file's own answer lives.
+        Ok(_) => Response::text(
+            400,
+            "Bad Request",
+            format!(
+                "{asked} is not a picture this page can draw ({})\n",
+                IMAGE_KINDS
+            ),
+        ),
+        Err(e) => Response::text(404, "Not Found", format!("nothing at {asked}: {e}\n")),
+    }
+}
+
+/// The picture formats this route knows, for the refusal's own sentence.
+const IMAGE_KINDS: &str = "png, jpeg, gif, webp, bmp, ico, tiff, avif, heic and svg are";
+
+/// What a file's first bytes say it is, or `None` when they say it is not a picture.
+///
+/// Magic bytes rather than an extension, for the reason `serve_image` gives. The list is what a
+/// browser draws today without a plugin, which is what "mainstream" means here: PNG, JPEG, GIF,
+/// WebP, BMP, ICO/CUR, TIFF, AVIF and HEIC/HEIF, and SVG -- which is text, so it is recognised by
+/// looking at what it says rather than at how it starts.
+///
+/// Two of these are worth a word. **TIFF and HEIC are served although a browser may refuse them**:
+/// the route's job is to say what the bytes are, and a tab that cannot decode one shows the panel's
+/// own "cannot draw it" sentence with the `open` control beside it, which is a better answer than
+/// this route guessing which browsers have which decoders. **SVG is served as `image/svg+xml`**, and
+/// that is safe *here* rather than in general: an `<img>` is an image context, so a script inside the
+/// file does not run -- and it is drawn from a blob URL, which is same-origin with the page but not
+/// with the file.
+fn image_kind(bytes: &[u8]) -> Option<&'static str> {
+    let starts = |sig: &[u8]| bytes.starts_with(sig);
+    if starts(b"\x89PNG\r\n\x1a\n") {
+        return Some("image/png");
+    }
+    if starts(&[0xff, 0xd8, 0xff]) {
+        return Some("image/jpeg");
+    }
+    if starts(b"GIF87a") || starts(b"GIF89a") {
+        return Some("image/gif");
+    }
+    // `RIFF` is four bytes of container; `WEBP` at offset 8 is what makes it a picture rather than a
+    // sound or an AVI.
+    if bytes.len() >= 12 && starts(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    if starts(b"BM") {
+        return Some("image/bmp");
+    }
+    // Icons and cursors are the same container with a different type field, and a browser draws both.
+    if starts(&[0, 0, 1, 0]) || starts(&[0, 0, 2, 0]) {
+        return Some("image/x-icon");
+    }
+    if starts(b"II\x2a\x00") || starts(b"MM\x00\x2a") {
+        return Some("image/tiff");
+    }
+    // ISO base media file format: `ftyp` at 4, then the brand. A phone's photo is `heic`, a newer
+    // one is `avif`, and both are the same container with different codecs inside.
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        match &bytes[8..12] {
+            b"avif" | b"avis" => return Some("image/avif"),
+            b"heic" | b"heix" | b"hevc" | b"heim" | b"heis" | b"mif1" | b"msf1" => {
+                return Some("image/heic")
+            }
+            _ => {}
+        }
+    }
+    if is_svg(bytes) {
+        return Some("image/svg+xml");
+    }
+    None
+}
+
+/// Whether bytes are an SVG document, which is text and so cannot be recognised by a signature.
+///
+/// Read only from the first kilobyte, because an SVG's root element is the first thing in it unless
+/// somebody put a licence comment there -- and this is a *routing* decision, not a validation: a file
+/// that starts with `<?xml` or `<svg` and mentions `<svg` is handed to the browser's SVG reader, which
+/// does its own parsing and shows nothing at all rather than something wrong.
+fn is_svg(bytes: &[u8]) -> bool {
+    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(1024)]);
+    let head = head.trim_start_matches('\u{feff}').trim_start();
+    if !head.starts_with("<?xml") && !head.starts_with("<svg") {
+        return false;
+    }
+    head.contains("<svg")
 }
 
 /// A relative path against the directory the run is working in; an absolute one as it is; and a
@@ -2057,6 +2301,9 @@ async fn serve(mut stream: TcpStream, state: &State) -> Result<()> {
     match respond(&request, &body, state) {
         Answer::Once(response) => {
             stream.write_all(&response.render()).await?;
+        }
+        Answer::Raw(raw) => {
+            stream.write_all(&raw.render()).await?;
         }
         Answer::Events { last, session } => {
             stream_events(stream, state, last, session).await?;
@@ -3212,6 +3459,167 @@ mod tests {
         assert_eq!(in_query.status, 403);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Ask `/image`, which answers with bytes rather than text. A helper of its own because
+    /// [`ask`] unwraps a `Response` and this route has none.
+    fn ask_image(target: &str, state: &State) -> std::result::Result<Raw, Response> {
+        let request = Request::parse(&ours(target)).unwrap_or_else(|| panic!("fixture must parse: {target:?}"));
+        match respond(&request, "", state) {
+            Answer::Raw(raw) => Ok(raw),
+            Answer::Once(response) => Err(response),
+            Answer::Events { .. } => panic!("`/image` does not stream"),
+        }
+    }
+
+    /// A picture is served as the bytes it is, with the type its own first bytes declare.
+    ///
+    /// The claim has three parts and each is a thing that could be got wrong: the body is the file
+    /// (not a description of it, not a truncation), the type is the sniffed one, and the four
+    /// security headers travel with a bytes body exactly as they do with a text one -- which is the
+    /// half a second response shape could quietly have lost.
+    #[test]
+    fn an_image_is_served_as_its_own_bytes_with_the_type_they_declare() {
+        let dir = scratch("image-serve");
+        // A PNG signature plus filler: the route's question is what the first bytes say, and the
+        // formats themselves are held by `image_kind_knows_the_formats_a_browser_draws` below.
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend_from_slice(&[0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x01, 0x02]);
+        std::fs::write(dir.join("cell.png"), &png).expect("scratch png");
+        let state = working_in(&dir);
+
+        let raw = ask_image(&format!("/image?path={}", encoded("cell.png")), &state).expect("a picture");
+        assert_eq!(raw.content_type, "image/png");
+        assert_eq!(raw.body, png, "the body is the file's own bytes");
+        let rendered = String::from_utf8_lossy(&raw.render()).to_string();
+        assert!(rendered.contains(&format!("Content-Length: {}", png.len())), "{rendered}");
+        for header in ["Content-Security-Policy", "X-Content-Type-Options", "Cache-Control", "Referrer-Policy"] {
+            assert!(rendered.contains(header), "the {header} header travels with bytes too: {rendered}");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The type is what the file **is**, not what it is called: a JPEG named `.png` is a JPEG, and a
+    /// text file named `.png` is refused rather than sent to a decoder.
+    #[test]
+    fn an_images_type_is_its_bytes_and_not_its_name() {
+        let dir = scratch("image-names");
+        let mut jpeg = vec![0xff, 0xd8, 0xff, 0xe0];
+        jpeg.extend_from_slice(b"JFIF filler");
+        std::fs::write(dir.join("photo.png"), &jpeg).expect("scratch jpeg");
+        written(&dir, "notes.png", "this is text, whatever the name says\n");
+        let state = working_in(&dir);
+
+        let misnamed = ask_image(&format!("/image?path={}", encoded("photo.png")), &state).expect("a picture");
+        assert_eq!(misnamed.content_type, "image/jpeg", "the name is not evidence");
+
+        let text = ask_image(&format!("/image?path={}", encoded("notes.png")), &state)
+            .expect_err("text is not a picture");
+        assert_eq!(text.status, 400, "{}", text.body);
+        assert!(text.body.contains("not a picture"), "{}", text.body);
+        assert!(text.body.contains("png, jpeg, gif"), "the sentence names what it would draw: {}", text.body);
+
+        // And the same text is what `/file` serves, which is the page's fallback: the two routes
+        // answer one press between them.
+        let as_text = ask(&ours(&format!("/file?path={}", encoded("notes.png"))), &state);
+        assert_eq!(as_text.status, 200, "{}", as_text.body);
+        assert!(as_text.body.contains("this is text"), "{}", as_text.body);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every way `/image` can fail has a sentence, for the reason `/file`'s refusals do.
+    #[test]
+    fn a_missing_directory_and_oversized_image_each_say_what_they_are() {
+        let dir = scratch("image-refusals");
+        std::fs::create_dir_all(dir.join("sub")).expect("scratch dir");
+        let state = working_in(&dir);
+
+        let missing = ask_image(&format!("/image?path={}", encoded("nope.png")), &state).expect_err("nothing there");
+        assert_eq!(missing.status, 404);
+        assert!(missing.body.contains("nope.png"), "{}", missing.body);
+
+        let directory = ask_image(&format!("/image?path={}", encoded("sub")), &state).expect_err("a directory");
+        assert_eq!(directory.status, 400, "{}", directory.body);
+        assert!(directory.body.contains("directory"), "{}", directory.body);
+
+        // Sparse rather than written out: `set_len` makes a file that *is* 24 MB without spending the
+        // seconds and the disk to fill it, and the route only ever reads its first 24 MB.
+        let huge = std::fs::File::create(dir.join("huge.png")).expect("scratch huge");
+        huge.set_len(IMAGE_MAX + 1).expect("sparse length");
+        drop(huge);
+        let oversized = ask_image(&format!("/image?path={}", encoded("huge.png")), &state).expect_err("too big");
+        assert_eq!(oversized.status, 400, "{}", oversized.body);
+        assert!(oversized.body.contains("too big"), "{}", oversized.body);
+        assert!(oversized.body.contains("open it where it lives"), "{}", oversized.body);
+
+        // Asked with no path, and with an empty one: questions answered, not missing routes.
+        let unsaid = ask_image("/image", &state).expect_err("no path");
+        assert_eq!(unsaid.status, 400);
+        assert!(unsaid.body.contains("path"), "{}", unsaid.body);
+        let empty = ask_image("/image?path=", &state).expect_err("empty path");
+        assert_eq!(empty.status, 400);
+        assert!(empty.body.contains("empty"), "{}", empty.body);
+
+        // No token, no picture: the shared guard is the only one, and it is in front of this route
+        // too -- asserted here rather than assumed, because a bytes response is a new shape and the
+        // one thing that shape could have bypassed is the check that runs before the match.
+        let untokened = respond(
+            &Request::parse(&format!(
+                "GET /image?path={} HTTP/1.1\r\nHost: 127.0.0.1:7777\r\n\r\n",
+                encoded("huge.png")
+            ))
+            .expect("fixture parses"),
+            "",
+            &state,
+        )
+        .once();
+        assert_eq!(untokened.status, 403, "{}", untokened.body);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The sniffing table, one real signature at a time, including the four cases that are *not* a
+    /// picture: text, an empty file, a RIFF container that is sound rather than a picture, and an
+    /// ISO media file whose brand is a video's.
+    #[test]
+    fn image_kind_knows_the_formats_a_browser_draws() {
+        let kinds: Vec<(&str, Vec<u8>)> = vec![
+            ("image/png", b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0d".to_vec()),
+            ("image/jpeg", vec![0xff, 0xd8, 0xff, 0xe1, 0x00, 0x18]),
+            ("image/gif", b"GIF87a\x01\x00\x01\x00".to_vec()),
+            ("image/gif", b"GIF89a\x01\x00\x01\x00".to_vec()),
+            ("image/webp", b"RIFF\x24\x00\x00\x00WEBPVP8 ".to_vec()),
+            ("image/bmp", b"BM\x36\x00\x00\x00".to_vec()),
+            ("image/x-icon", vec![0x00, 0x00, 0x01, 0x00, 0x01, 0x00]),
+            ("image/x-icon", vec![0x00, 0x00, 0x02, 0x00, 0x01, 0x00]),
+            ("image/tiff", b"II\x2a\x00\x08\x00\x00\x00".to_vec()),
+            ("image/tiff", b"MM\x00\x2a\x00\x00\x00\x08".to_vec()),
+            ("image/avif", b"\x00\x00\x00\x20ftypavif".to_vec()),
+            ("image/heic", b"\x00\x00\x00\x18ftypheic".to_vec()),
+            ("image/heic", b"\x00\x00\x00\x18ftypmif1".to_vec()),
+            ("image/svg+xml", b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>".to_vec()),
+            (
+                "image/svg+xml",
+                b"<?xml version=\"1.0\"?>\n<!-- a comment -->\n<svg width=\"1\"/>".to_vec(),
+            ),
+        ];
+        for (kind, bytes) in kinds {
+            assert_eq!(image_kind(&bytes), Some(kind), "for {kind}");
+        }
+
+        let not_pictures: Vec<(&str, Vec<u8>)> = vec![
+            ("plain text", b"hello, this is a note\n".to_vec()),
+            ("empty", Vec::new()),
+            ("a RIFF that is sound", b"RIFF\x24\x00\x00\x00WAVEfmt ".to_vec()),
+            ("a video", b"\x00\x00\x00\x18ftypmp42".to_vec()),
+            ("xml that is not svg", b"<?xml version=\"1.0\"?><rss/>".to_vec()),
+            ("a short file", b"\x89PNG".to_vec()),
+        ];
+        for (what, bytes) in not_pictures {
+            assert_eq!(image_kind(&bytes), None, "{what} is not a picture");
+        }
     }
 
     /// A path is never looked up on disk, so there is no traversal to get wrong (§6).

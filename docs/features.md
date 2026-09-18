@@ -702,7 +702,8 @@ Four checks run before any route, in this order, and each refusal is a `403` wit
    something takes it in a header.
 4. Every response carries `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`,
    `Referrer-Policy: no-referrer`, and a `Content-Security-Policy` of `default-src 'none'` with inline
-   script and style.
+   script and style, `connect-src 'self'`, and `img-src 'self' data: blob:` — the last of which is what
+   lets the preview draw a picture the page fetched with its own token (§21 of `docs/web-mode.md`).
 
 | Route | Body rules | Answer |
 |---|---|---|
@@ -710,6 +711,7 @@ Four checks run before any route, in this order, and each refusal is a `403` wit
 | `GET /session` | — | the session file verbatim (`application/x-ndjson`), with `X-Flint-At` = the cursor **only when this run has a live feed *and* there is a file to point into** — a cursor is an offset in the session file, so a run whose conversation has not been written yet answers `200` with an empty body and no `X-Flint-At`, and the header appears the moment the first line does; `404` when the run keeps no conversation |
 | `GET /sessions` | — | `{"sessions":[{"n","id","label","current"}]}` |
 | `GET /file?path=<p>[:<line>]` | `path` required, percent-encoded; resolved by `config::resolve_path` — a leading `~/`/`~\` is the home directory, an absolute path is used as written, anything else is against the run's `cwd`; the literal path is tried first, then the `:N`-stripped one | the file's bytes (`text/plain`, cut at 512 KB with `X-Flint-Cut`/`X-Flint-Size`), or the route's own refusal: a directory, a file over 64 MB, a non-UTF-8 file, or nothing there |
+| `GET /image?path=<p>` | `path` required, percent-encoded; resolved exactly as `GET /file` resolves it | the file's **bytes** with the type its own first bytes declare: `image/png`, `image/jpeg`, `image/gif`, `image/webp`, `image/bmp`, `image/x-icon`, `image/tiff`, `image/avif`, `image/heic`, `image/svg+xml`. The name is *not* evidence — a JPEG called `photo.png` is served as `image/jpeg`. Refusals: a directory, nothing there, bytes that are no picture at all (`<p> is not a picture this page can draw (png, jpeg, gif, webp, bmp, ico, tiff, avif, heic and svg are)`), and **over 24 MB** (`<p> is 41 MB -- too big to show here; open it where it lives`). The four security headers ride along; the body is bytes rather than text (the one route besides `/events` that is not a `Response`) |
 | `GET /jobs` | — | `{"jobs":[…]}` — the same record `/jobs` and `job_op` read |
 | `GET /peers` | — | `{"peers":[{pid,cwd,provider,model,readonly,session,age_secs}]}` |
 | `GET /events?last=<cursor>&session=<file>` | the cursor may also arrive as `Last-Event-ID` | the SSE stream: unnamed frames for session lines, named `state`/`status`/`answer`/`reset`/`jobs`/`sessions`/`file`, `: ping` every 20 s. `404` when this run has no live feed |
@@ -750,7 +752,9 @@ disagree with the process.
 | transcript | a `button.path` | opens the preview panel at that file, and at that line when the token named one. The button **reads what the token said** — `src/web.rs:412`, `src/web.rs#L412`, `C:/x.js:42` — so a `grep` hit keeps the line it is worth reading for; a `file://` prefix is dropped on the way, since the scheme is the one part of the token the panel does not need (§18 of `docs/web-mode.md`) |
 | transcript | a web address | a link in a **new tab** with `rel="noopener noreferrer"`; only `http`/`https` become links (§11 of `docs/web-mode.md`) |
 | transcript | `thinking`, `instructions` | `<details>` blocks, both closed to begin with |
-| preview | `reload`, `close` | re-reads `GET /file`; closing leaves the transcript and the reader's place alone |
+| preview | `reload`, `close` | re-reads the route that drew it — `GET /image` for a picture, `GET /file` for text; closing leaves the transcript and the reader's place alone, and lets go of the picture's blob URL |
+| preview | a picture (`button#preview-image-button` around `img#preview-image`) | drawn from the bytes `GET /image` served, as a blob URL the page made from them — never a URL carrying the token, which is why the page fetches it itself. `max-width`/`max-height` with `object-fit: contain`, so the whole picture fits the column. A **press opens it where it lives** (`POST /open`, the same act as the header's `open` button and refused in `readonly` the same way). A type this browser cannot decode says so in words and points at `open` |
+| preview | — | which route is tried is decided by the path's **name** (the extension set), because the page cannot sniff bytes it has not fetched: `/image` first for a name that looks like a picture, then `/file`. So a `.png` that is really a note reads as the note, and a `.svg`/`.heic`/`.tiff` that the browser will not draw offers the OS instead. The note is the route's own `Content-Type` and `Content-Length`, never the extension |
 | preview | `open` | hands the panel's path to the program this machine uses for it (`POST /open`): a file opens in whatever its type is registered to, a directory in the file manager. The one control on this page that starts a process, so it is a **deliberate second press** and never the path itself. Disabled when the run is `readonly`, with the reason in its tooltip; the route refuses it there anyway. The answer — or the route's refusal — appears in the hint under the composer |
 | preview | — | a refusal is shown in the route's own words with its status beside it, never as an empty panel |
 | layout | the two grip handles | drag to resize the sidebar and the reading column; `ArrowLeft`/`ArrowRight` move the boundary by 16 px (48 with Shift); a **double-click puts the width back to the stylesheet's**. Neither width is persisted |
@@ -1003,12 +1007,17 @@ Not bugs, and not to be filed as such. Each is a decision with a reason in the t
   favour of the plan of record, and the plan document now labels itself an argument that lost.
 - **One switch, not a ladder.** A narrower permission setting than `readonly` is refused in
   `docs/decisions.md`.
-- **No OS-level open without a press.** A file preview is the page's own panel (`GET /file`), and a
-  path opens *outside* the page only through `POST /open` — a deliberate second press in the panel's
-  head (§12.3), refused outright in a `readonly` run, and never the plain click on a path. What the page
-  still does not do is open the preview panel's *contents* anywhere: text there is plain text.
-- **No Markdown renderer in the page**, and no client build step: everything is
-  `textContent`, one file.
+- **No OS-level open without a press.** A file preview is the page's own panel (`GET /file` for text,
+  `GET /image` for a picture), and a path opens *outside* the page only through `POST /open` — a
+  deliberate second press in the panel's head (§12.3) or a press on the picture itself (§21), refused
+  outright in a `readonly` run, and never the plain click on a path. What the page still does not do is
+  open the preview panel's *contents* anywhere: text there is plain text.
+- **No image or PDF *viewer* beyond what a browser draws**, and no client build step: the page asks
+  `GET /image` for the bytes and hands them to an `<img>`, so the formats it can show are the browser's
+  own — the route serves tiff and heic too and says so when the tab cannot draw one.
+- **No Markdown renderer in the page yet**, and no client build step: everything is
+  `textContent`, one file. (§20 of `docs/web-mode.md` is the assessment; the rendering itself is not
+  built.)
 - **No history navigation in the input row** (`Up`/`Down`), and no tab completion.
 - **No TUI.** The terminal view is inline — a scroll region, an answer strip and a status
   row — not a full-screen application, and that was decided rather than unfinished.

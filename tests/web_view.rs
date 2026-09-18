@@ -161,6 +161,63 @@ fn a_path_opens_in_this_page_or_not_at_all() {
     );
 }
 
+/// A picture is read the same way a file is, and never by putting the token in a URL.
+///
+/// The picture half of the panel is the one place in this page where a *browser* fetches something
+/// rather than the page's own script doing it -- an `<img src="…">` is a request with no headers --
+/// so it is exactly where the obvious implementation would have appended `&token=…` and been done.
+/// That is refused for a reason that is already written down: the token is accepted in the query
+/// string on `/` alone, because a URL lands in a history, a log and a shared link, and the routes
+/// that can change something are not the place to accept that. So the page fetches the bytes itself
+/// with `authHeader()` and hands the browser a blob URL instead, and this test is what keeps the two
+/// halves in that order.
+///
+/// The other half is the same rule §12 has always had, applied to a second body shape: the picture is
+/// served by the run, not composed by the page -- no `data:` image built here, and no markup assigned
+/// anywhere.
+#[test]
+fn a_picture_is_read_with_the_pages_own_auth_and_never_a_token_in_a_url() {
+    let html = view();
+    assert!(
+        html.contains("function imageRoute(path)"),
+        "the picture route must be one function, for the same reason the text route is"
+    );
+    assert!(
+        html.contains("\"/image?path=\" + encodeURIComponent(path)"),
+        "the picture's path travels percent-encoded, exactly as the text one does"
+    );
+    assert!(
+        html.contains("fetch(imageRoute(preview.path), { headers: authHeader() })"),
+        "the page fetches the picture itself, with the header the route accepts"
+    );
+    assert!(
+        html.contains("URL.createObjectURL(await response.blob())"),
+        "and hands the browser a blob URL rather than a route with a token on it"
+    );
+    assert!(
+        html.contains("URL.revokeObjectURL(pictureUrl)"),
+        "a blob URL holds its bytes until it is let go of, and a session opens many pictures"
+    );
+    // The token in a URL would look like this, and it must appear nowhere: not in an `img`, not in a
+    // fetch. `authHeader` is the only way this page offers a token, and it is a header.
+    for needle in ["&token=", "?token=", "img.src = \"/image", "src=\"/image"] {
+        // `?token=` is accepted on `/` alone, which is the one place a person pastes a URL: the page
+        // itself only ever builds it there, in the address `--web` printed.
+        let sites = sites(html, needle);
+        assert!(
+            sites.is_empty() || (needle == "?token=" && sites.len() == 1),
+            "the token belongs in a header: {needle} appears at {sites:?}"
+        );
+    }
+    // And the picture's own frame is text like everything else: the alt text, the note and the
+    // title are set from the route's headers, not from anything that could carry markup.
+    let frame = from("function showPicture(url, response)", 40);
+    assert!(
+        !frame.contains("innerHTML") && !frame.contains("insertAdjacentHTML"),
+        "the picture is drawn by assignment, not by markup:\n{frame}"
+    );
+}
+
 /// An address on the web is a link out of this page, and it is the only thing that may be.
 ///
 /// This is a change of position, so it is written down as one. The page used to contain **no
@@ -343,9 +400,15 @@ fn the_page_stops_a_job_from_the_rows_it_is_already_showing() {
 /// The alternative -- an empty panel, or a spinner that stops -- is the failure this project keeps
 /// designing against: three different reasons look exactly the same. `serve_file` writes a
 /// sentence for each one (nothing there, a directory, not text, too big), and the page shows it.
+///
+/// The refusal lives in `readText` rather than in `readPreview`, because the preview now has two
+/// answers to one press and the text one is where every refusal is met: a picture's route refuses a
+/// file that is not a picture by *falling through* to this, so the sentence a reader sees is always
+/// the text route's own. That fall-through is asserted here too, since it is the reason the split
+/// exists at all.
 #[test]
 fn the_preview_shows_the_routes_own_refusal_rather_than_an_empty_panel() {
-    let body = from("async function readPreview()", 30);
+    let body = from("async function readText()", 30);
     assert!(
         body.contains("text.textContent = body.trim()"),
         "the refusal is shown as it was written:\n{body}"
@@ -353,6 +416,12 @@ fn the_preview_shows_the_routes_own_refusal_rather_than_an_empty_panel() {
     assert!(
         body.contains("HTTP \" + response.status"),
         "and the status beside it, for the reader who wants the code:\n{body}"
+    );
+    let chooser = from("async function readPreview()", 20);
+    assert!(
+        chooser.contains("if (imageExt(preview.path) && (await readPicture())) return;")
+            && chooser.contains("await readText();"),
+        "a picture is asked for first and a refusal falls through to the text route:\n{chooser}"
     );
 }
 

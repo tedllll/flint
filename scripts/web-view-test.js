@@ -92,6 +92,12 @@ function fakeNode() {
     addEventListener(type, fn) {
       (node.handlers[type] = node.handlers[type] || []).push(fn);
     },
+    // The attribute pair, because the page clears a picture by removing `src` rather than by
+    // assigning an empty one -- an empty `src` is a request for the page itself. Added when the
+    // preview learned to draw a picture and the sandbox threw `removeAttribute is not a function`:
+    // the page was right and the stub was incomplete, which is the failure a stub has to be read for.
+    setAttribute(name, value) { node[name] = value; },
+    removeAttribute(name) { delete node[name]; },
     click() {},
   };
   return node;
@@ -166,6 +172,27 @@ function loadViewer() {
         removeItem: (key) => store.delete(key),
       };
     })(),
+    // The two browser globals the picture half of the preview needs. `createObjectURL` is how the
+    // page hands `GET /image`'s bytes to an `<img>` without ever putting its token in a URL, and the
+    // *pair* is the reason this is stubbed rather than guarded away: a check has to be able to see
+    // that the URL was let go of, because a page that never revokes one holds every picture it has
+    // ever opened in memory for as long as the tab lives.
+    URL: {
+      made: [],
+      revoked: [],
+      createObjectURL(blob) {
+        const url = "blob:http://127.0.0.1:7777/" + (this.made.length + 1);
+        this.made.push({ url, size: blob && blob.size });
+        return url;
+      },
+      revokeObjectURL(url) {
+        this.revoked.push(url);
+      },
+    },
+    Blob: function Blob(parts, options) {
+      this.size = (parts || []).reduce((n, part) => n + (part && part.length ? part.length : 0), 0);
+      this.type = (options && options.type) || "";
+    },
   };
   vm.createContext(sandbox);
   vm.runInContext(html.slice(start + "<script>".length, end), sandbox, { filename: "view.html" });
@@ -189,6 +216,9 @@ function loadViewer() {
   // pair belongs to one tab in the browser, and a stub that could not be reset would make the second
   // check depend on the first.
   api.storage = sandbox.sessionStorage;
+  // The blob-URL stub, so a check can see that a picture's URL was *revoked* -- the one fact about
+  // the picture half that leaves no trace in the page's own nodes.
+  api.urls = sandbox.URL;
   api.fire = (node, type, event) => {
     const handlers = (node && node.handlers && node.handlers[type]) || [];
     for (const handler of handlers) handler(event || { preventDefault() {} });
@@ -1708,6 +1738,56 @@ check("the header's name is the conversation's, not the product's", () => {
      "an unnamed conversation shows what it opened with, not `flint`");
   eq(viewer.titleWords({}, ""), "flint", "and a page with neither says what it is");
   eq(viewer.titleWords(null, null), "flint", "including one that has not been loaded yet");
+});
+
+// The picture half of the preview panel. The route is a second read of the same path -- the bytes
+// instead of the text -- and the panel decides which to ask for from the name alone, because it
+// cannot sniff a file it has not fetched. So the two things worth holding here are that decision and
+// the drawing: which names make `/image` worth asking, and what the panel does with the answer.
+check("a picture is asked for by name, and let go of when it is replaced", () => {
+  // The extension decision: a guess the route then confirms or refuses, so the cost of being wrong in
+  // either direction is one wasted request rather than a wrong answer.
+  ["cell.png", "photo.JPEG", "anim.gif", "modern.webp", "old.bmp", "favicon.ico", "scan.tiff",
+   "phone.avif", "phone.heic", "logo.svg", "a/b/c/name.PNG"].forEach((name) => {
+    eq(viewer.imageExt(name), true, name + " is worth asking about");
+  });
+  ["notes.txt", "README.md", "main.rs", "no-extension", "archive.tar.gz", "", "dot."].forEach((name) => {
+    eq(viewer.imageExt(name), false, name + " is not a picture by its name");
+  });
+  eq(viewer.imageExt("~/shots/one.png"), true, "a tilde path's name is still its name");
+
+  // The route: the same encoding rule as the text one, because a path is a path.
+  eq(viewer.imageRoute("C:\\shots\\one two.png"), "/image?path=C%3A%5Cshots%5Cone%20two.png",
+     "the picture route encodes the path the way the route decodes it");
+
+  // Drawing it. The note is the *route's* type rather than the extension, for the reason the route
+  // sniffs: a `.png` that is really a JPEG must not be described as a PNG here either.
+  const response = { headers: { get: (name) => (name === "Content-Type" ? "image/png" : name === "Content-Length" ? "2411724" : null) } };
+  viewer.showPicture("blob:http://127.0.0.1:7777/1", response);
+  eq(viewer.__node("preview-image").src, "blob:http://127.0.0.1:7777/1", "the image is the blob URL");
+  eq(viewer.__node("preview-image-button").hidden, false, "the picture's own control is shown");
+  eq(viewer.__node("preview-text").hidden, true, "and the text pane steps out of its way");
+  eq(viewer.__node("preview-note").textContent, "image/png · 2 MB", "the note is the route's own type and size");
+
+  // Replaced: the URL that was on screen is revoked exactly once, which is the page's own memory
+  // rather than the run's -- and is the one thing here that would leak without being said out loud.
+  viewer.showPicture("blob:http://127.0.0.1:7777/2", response);
+  eq(viewer.__node("preview-image").src, "blob:http://127.0.0.1:7777/2", "the second picture is drawn");
+  eq(
+    viewer.urls.revoked.join(","),
+    "blob:http://127.0.0.1:7777/1",
+    "the first picture's URL was let go of when the second arrived"
+  );
+
+  // Cleared, which is what closing the panel does: no picture, no URL, and the text pane back.
+  viewer.showPicture(null);
+  eq(viewer.__node("preview-image-button").hidden, true, "no picture, no control");
+  eq(viewer.__node("preview-text").hidden, false, "the text pane is where a path reads again");
+  eq(
+    viewer.urls.revoked.join(","),
+    "blob:http://127.0.0.1:7777/1,blob:http://127.0.0.1:7777/2",
+    "and closing lets go of the last one"
+  );
 });
 
 // An exported page carries its conversation in a JSON island, and this is the one function that reads
