@@ -89,7 +89,24 @@ one outright. Held by `tests/web_view.rs` for the wiring and the policy, and by 
 -- a text assertion passes over an unreachable branch, which was measured. Adding them also found the
 sandbox had no `window`, so the page's `pagehide` hook was the first thing that needed one.
 
-**The line after it is the picker of live runs the page's `/say --to` waits on.** §10's two holes that
+**And §11 item 9(ii) is built, which was the last feature the plan of record still owed: the page's
+`/say --to` picker of live runs.** The code named its own reason — "Addressing is a terminal move until
+the page can offer a picker of live runs" — and the picker needed a read channel for presence. The shape
+was already in the tree: `ArgFrom` gained a fourth list (`Peers`) beside the conversations, the provider
+names and the job pids; `PageArg` gained the `flag` an answer follows (`--to`), which is also what lets an
+*optional* answer stand before a required one, because `--to 123` is a phrase and leaving it out leaves no
+hole; and the state frame carries both, so the page draws a `select` whose **value is the pid and whose
+label is who that pid is** (which is why it is not `fillSelect`: that helper makes the two the same
+string). The candidates come from `GET /peers`, answered by `live::peers_here` — moved out of `main.rs`
+into the library for this, because the terminal's `/say`, the audience sentence in its reply and the
+page's picker have to be one answer about who is in the room. Empty stays the default and it means the
+broadcast, which is what the row did before it could address one. Held by `tests/cli_output.rs` (the
+frame, `/help`, and the route answering a live run), `tests/web_view.rs`, and two checks in
+`scripts/web-view-test.js` that compose both lines and fill the picker through the page's own functions.
+
+**What is left on §11 item 9 is its two test-and-comment halves**: a regression test for the paste fix
+(which `tests/cli_output.rs` says of itself is not covered there) and the stale comment on where the
+report whitelist lives. §10's two holes that
 needed a decision rather than code — C3 (nothing identifies a request, so a caller's retry may repeat
 tools) and C5 (a session carried into a second purpose by `--continue`) — were settled in writing in the
 previous round, and the paragraph below records what was decided; this sentence is kept only so that the

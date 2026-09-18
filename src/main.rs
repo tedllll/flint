@@ -2615,6 +2615,14 @@ enum ArgFrom {
     /// had to be sent for it -- the panel is drawn from `GET /jobs`, which is the same record this
     /// command reads -- which is exactly the property the `from` field exists for.
     Jobs,
+    /// The other runs sharing this run's mailbox, by pid, from `GET /peers`.
+    ///
+    /// The fourth list and the first that is not something the page already draws: a page holds this
+    /// run's jobs and conversations, but *other* runs are a fact about the machine, so the route is
+    /// the read channel and the list is fetched when the picker is drawn. It is the same list the
+    /// terminal's `/say --to <pid>` addresses and the same one `/say`'s reply describes, from
+    /// `live::peers_here`, so the page cannot offer a pid the terminal would not.
+    Peers,
 }
 
 impl ArgFrom {
@@ -2623,6 +2631,7 @@ impl ArgFrom {
             ArgFrom::Sessions => "sessions",
             ArgFrom::Providers => "providers",
             ArgFrom::Jobs => "jobs",
+            ArgFrom::Peers => "peers",
         }
     }
 }
@@ -2677,8 +2686,19 @@ struct PageArg {
     /// True when the command works without this answer.
     ///
     /// A line cannot leave a hole in the middle -- the words are positions -- so an optional answer
-    /// has to be the last one, which is why `/provider add`'s model is the only one marked.
+    /// has to be the last one, which is why `/provider add`'s model is the only one marked -- *unless*
+    /// it carries a flag: `--to 123` is a whole phrase, so leaving it out leaves nothing behind, and
+    /// `/say` is the row that needed that (see `flag`).
     optional: bool,
+    /// The literal the answer follows on the line, when it is not positional: `--to` for `/say`.
+    ///
+    /// The page composes a command's line from the words of the row plus these answers, and before
+    /// this a row could only take positional ones -- which is why `/say` had no address on the page:
+    /// a pid typed into the text field would have been *prose*, and a message that quietly went to
+    /// whoever happened to be named in it is worse than one that reached everybody here.
+    flag: Option<&'static str>,
+    /// The list the page offers this answer from, when it should be a picker rather than a field.
+    from: Option<ArgFrom>,
 }
 
 impl PageArg {
@@ -2687,6 +2707,8 @@ impl PageArg {
             name,
             field,
             optional: false,
+            flag: None,
+            from: None,
         }
     }
 
@@ -2695,6 +2717,23 @@ impl PageArg {
             name,
             field,
             optional: true,
+            flag: None,
+            from: None,
+        }
+    }
+
+    /// An answer the page chooses from a list and writes after its flag: `/say --to <pid> <text>`.
+    ///
+    /// Optional by construction, and that is the point of a flag rather than a preference: the
+    /// address is what may be absent, and because `--to 123` is a phrase of its own, an absent one
+    /// leaves the line `/say <text>` with no hole in it.
+    const fn addressed(name: &'static str, flag: &'static str, from: ArgFrom) -> Self {
+        Self {
+            name,
+            field: Field::Text,
+            optional: true,
+            flag: Some(flag),
+            from: Some(from),
         }
     }
 }
@@ -2861,13 +2900,19 @@ const CONFIG_SET_ARGS: [PageArg; 2] = [
     PageArg::required("key", Field::Text),
     PageArg::optional("value", Field::Text),
 ];
-/// `/say`'s one answer: the words.
+/// `/say`'s two answers: who to address, and the words.
 ///
-/// One field and no `--to` on the page, deliberately. The field is free text and the page sends what
-/// the terminal would have received, so an addressee typed into the field would be *prose* -- and a
-/// message that quietly went to whoever happened to be named in it is worse than one that reached
-/// everybody here. Addressing is a terminal move until the page can offer a picker of live runs.
-const SAY_ARG: [PageArg; 1] = [PageArg::required("text", Field::Text)];
+/// The address is a **picker over the live runs** (`GET /peers`) rather than a text field, and that is
+/// the whole of what this row waited for: a pid typed into the field would have been *prose*, and the
+/// page would have had no way to tell an address from a sentence. The terminal has always taken
+/// `--to <pid>`; what was missing was a page that could offer the pids, which needed a read channel
+/// for presence -- `ArgFrom::Peers` and the route behind it. That both read the same
+/// `live::peers_here` is what stops the page offering a pid the terminal would not, and the text is
+/// the field it always was: what the page sends is the same line the terminal would have received.
+const SAY_ARG: [PageArg; 2] = [
+    PageArg::addressed("pid", "--to", ArgFrom::Peers),
+    PageArg::required("text", Field::Text),
+];
 /// `/queue`'s one answer: the words to send once the turn that is running has finished.
 ///
 /// A field rather than a picker, for `/say`'s reason: what it takes is a sentence, and the page
@@ -2930,7 +2975,7 @@ const COMMANDS: &[CommandHelp] = &[
         OnPage::Toggles,
     ),
     CommandHelp::field_row(
-        "/say <text>",
+        "/say [--to <pid>] <text>",
         "/say",
         "leave a message for whoever else is working in this directory",
         HelpSection::Commands,
@@ -3074,18 +3119,14 @@ fn sent_note(text: &str, path: Option<&std::path::Path>) -> String {
 
 /// The other runs that share this run's mailbox, which is who a message left here will reach.
 ///
+/// The answer itself is `live::peers_here` now, because the page's addressing picker needs the same
+/// list -- one answer to "who is here" for the terminal, the page, and the reply a person reads.
 /// Sharing the *mailbox* is the test rather than sharing the directory, because those are not the same
 /// question: a project that keeps a `.flint/` has one mailbox for the whole project, so a run in `src/`
 /// and a run at the root do reach each other, while two unrelated directories do not -- and the
 /// question a person asking `/say` has is exactly "who will read this".
 fn peers_here(cwd: &std::path::Path) -> Vec<live::Presence> {
-    let mine = live::mailbox_path(cwd);
-    let me = std::process::id();
-    live::scan_in(cwd)
-        .alive
-        .into_iter()
-        .filter(|other| other.pid != me && live::mailbox_path(&other.cwd) == mine)
-        .collect()
+    live::peers_here(cwd)
 }
 
 /// `/help`: the table, printed in the two blocks it has always been printed in.
@@ -5670,11 +5711,27 @@ fn page_commands(
                 json["fields"] = serde_json::json!(row
                     .args
                     .iter()
-                    .map(|arg| serde_json::json!({
-                        "field": arg.field.word(),
-                        "name": arg.name,
-                        "optional": arg.optional,
-                    }))
+                    .map(|arg| {
+                        let mut field = serde_json::json!({
+                            "field": arg.field.word(),
+                            "name": arg.name,
+                            "optional": arg.optional,
+                        });
+                        // The literal the answer follows, when it is not positional: `/say --to`.
+                        // Carried beside the answer rather than folded into `send`, because the page
+                        // has to be able to leave the answer out and still compose a line the
+                        // terminal accepts.
+                        if let Some(flag) = arg.flag {
+                            field["flag"] = serde_json::json!(flag);
+                        }
+                        // The list to offer, when the answer is a choice rather than free text. The
+                        // page fetches the ones it does not already hold -- see `ArgFrom::Peers` --
+                        // and draws a picker, so a pid can never be typed as prose.
+                        if let Some(from) = arg.from {
+                            field["from"] = serde_json::json!(from.word());
+                        }
+                        field
+                    })
                     .collect::<Vec<_>>());
             }
             // And for a destructive row, which list its argument comes from. The page has to draw

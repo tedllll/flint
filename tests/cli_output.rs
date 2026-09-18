@@ -6756,6 +6756,80 @@ fn commands_in(frame: &str) -> Vec<(String, String, String, String)> {
     Vec::new()
 }
 
+/// The page is told that `/say` takes an address, and where the addresses come from.
+///
+/// `ROADMAP.md` §11 item 9(ii): the page's `/say` had no `--to` because a pid typed into a text field
+/// would have been *prose*, and the page had no way to tell an address from a sentence. The frame now
+/// says which answer follows a **flag** and which **list** its choices come from, and `GET /peers`
+/// answers that list from the same `live::peers_here` the terminal's own `/say` addresses and its
+/// reply describes -- so a page cannot offer a pid the terminal would not. The route is asserted to be
+/// a listing rather than an exact body on purpose: this test runs in the repository directory, where
+/// other tests' runs share this directory's mailbox, and "nobody else is here" would be a coin flip.
+#[tokio::test]
+async fn the_page_is_told_that_say_takes_an_address_and_where_addresses_come_from() {
+    let home = test_home("say-picker", "http://127.0.0.1:9/v1");
+    let log = home.join("transcript.txt");
+    let mut child = binary()
+        .arg("--web")
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::fs::File::create(&log).expect("transcript file"))
+        .stderr(std::fs::File::create(home.join("stderr.txt")).expect("stderr file"))
+        .spawn()
+        .expect("failed to run flint");
+
+    let (port, token) = port_and_token(&wait_for_url(&log));
+    let mut watching = http_stream(port, "/events", &token);
+    let opening = read_until(&mut watching, "\"type\":\"state\"}\n\n", 20);
+    // The route the picker reads, asked while the run is up. It is the page's own request -- the same
+    // headers, the same route -- so a page that could not read it would fail here rather than in a
+    // browser nobody runs in CI.
+    let mut peers = http_stream(port, "/peers", &token);
+    let listing = read_until(&mut peers, "\"peers\":[", 20);
+    post_message(port, &token, "/help");
+    read_until(&mut watching, "\"input\":\"/help\"", 20);
+
+    drop(peers);
+    drop(watching);
+    drop(child.stdin.take());
+    let exited = wait_for_exit(&mut child, 20);
+    let transcript = std::fs::read_to_string(&log).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit");
+    assert!(
+        listing.contains("200") && listing.contains("\"peers\":["),
+        "the page cannot read who is here, so `/say --to` has nothing to offer: {listing:?}"
+    );
+    // Each entry is a run, and the pid is what an address is made of: without it the picker would
+    // offer names that cannot be sent.
+    for entry in listing.split("\"pid\"").skip(1) {
+        assert!(
+            entry.contains(':'),
+            "a peer entry carries no pid, which is the one field the command takes: {entry:?}"
+        );
+    }
+    // The frame says which answer follows a flag, and that its choices come from a list. serde writes
+    // keys in alphabetical order, and both are read here rather than a shape this test made up.
+    assert!(
+        opening.contains(
+            "\"fields\":[{\"field\":\"text\",\"flag\":\"--to\",\"from\":\"peers\",\"name\":\"pid\",\
+             \"optional\":true},{\"field\":\"text\",\"name\":\"text\",\"optional\":false}]"
+        ),
+        "the page is not told that `/say` takes an address or where to get one: {opening:?}"
+    );
+    assert!(
+        opening.contains("\"label\":\"/say [--to <pid>] <text>\",\"send\":\"/say\""),
+        "the row the page draws does not name the address it takes: {opening:?}"
+    );
+    // And the terminal's own help says the same thing, because the two are one table.
+    assert!(
+        transcript.contains("/say [--to <pid>] <text>"),
+        "`/help` does not offer the address the page now does: {transcript:?}"
+    );
+}
+
 /// The page is handed the command list, and it is the same list `/help` prints.
 ///
 /// §8's read channel, second half: a picker needs the values a setting takes, and a menu needs the
@@ -7533,9 +7607,22 @@ async fn a_destructive_row_says_where_its_argument_comes_from() {
     // command that reads, and the count is what says the mark is a decision rather than a default.
     // The fourth arrived with `/jobs stop`, and the count moved deliberately rather than by making
     // the assertion a `>=`: a fifth mark added without thinking about it should fail here.
+    //
+    // The count is of *rows*, not of the string: `/say`'s address now carries a `from` of its own
+    // inside its field object (`ArgFrom::Peers`, the list the picker offers), which is a different
+    // question asked in the same word -- "which list does this argument come from" rather than "is this
+    // row destructive". Counting occurrences would have made the two indistinguishable, so the rows are
+    // parsed and the field-level keys are not counted.
+    let marked = opening
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .filter_map(|value| value.get("commands").and_then(|c| c.as_array()).cloned())
+        .flatten()
+        .filter(|row| row.get("from").is_some())
+        .count();
     assert_eq!(
-        opening.matches("\"from\":").count(),
-        4,
+        marked, 4,
         "the frame marks a row as taking its argument from a list when it does not: {opening:?}"
     );
 }

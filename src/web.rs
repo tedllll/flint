@@ -1048,6 +1048,14 @@ pub fn respond(request: &Request, body: &str, state: &State) -> Answer {
         ("GET", "/jobs") => {
             Response::json(200, "OK", crate::tools::jobs_snapshot().to_string())
         }
+        // Who else is working in this directory, which is what `/say --to` addresses. The fourth
+        // route of this shape and the first that is about the *machine* rather than about this run:
+        // a page holds its own jobs and conversations, and other runs are a fact it cannot derive.
+        // Read on request rather than pushed on a clock -- the page asks when the picker is drawn,
+        // which is the only moment the list is wanted -- and answered from `live::peers_here`, the
+        // same list the terminal's `/say` addresses and describes, so the two cannot disagree about
+        // who is in the room. See `docs/web-mode.md` §8.
+        ("GET", "/peers") => Response::json(200, "OK", crate::live::peers_snapshot(&state.cwd).to_string()),
         // Everything since, and then everything as it happens.
         ("GET", "/events") => return Answer::Events {
             last: last_event_id(request),

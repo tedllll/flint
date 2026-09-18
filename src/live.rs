@@ -570,6 +570,52 @@ pub fn say_line(cwd: &Path, from: &str, to: &str, text: &str) -> anyhow::Result<
     Ok((path, line))
 }
 
+/// The other runs that would read a message left in this directory's mailbox.
+///
+/// `audience`'s counterpart, and the two are always read together: this is *who*, that is the
+/// sentence a person reads. It lives here rather than in `main.rs` since the page's addressing
+/// picker needs the same list — a second copy in the web route is how the terminal and the page come
+/// to disagree about who is in the room, which is exactly what the mailbox is supposed to answer.
+///
+/// Filtered to the runs sharing this directory's **mailbox** rather than to the directory: a project
+/// that keeps a `.flint/` has one mailbox for the whole project, so a run in `src/` and a run at the
+/// root do reach each other, while two unrelated directories do not.
+pub fn peers_here(cwd: &Path) -> Vec<Presence> {
+    let mine = mailbox_path(cwd);
+    let me = std::process::id();
+    scan_in(cwd)
+        .alive
+        .into_iter()
+        .filter(|other| other.pid != me && mailbox_path(&other.cwd) == mine)
+        .collect()
+}
+
+/// The same list as the page reads it, for the picker that addresses one run.
+///
+/// A JSON object rather than an array, for `job_op`'s reason: a listing is an answer, and an answer
+/// with room for a `note` is one that can explain itself later without a caller having to tell an
+/// empty array from a failed request. Nothing secret is in it — a presence record is a file any
+/// process on this machine can already read — and `age_secs` is what lets the page say how fresh the
+/// list is rather than presenting a five-minute-old heartbeat as "here now".
+pub fn peers_snapshot(cwd: &Path) -> serde_json::Value {
+    let now = now_secs();
+    let peers: Vec<serde_json::Value> = peers_here(cwd)
+        .into_iter()
+        .map(|other| {
+            serde_json::json!({
+                "pid": other.pid,
+                "cwd": other.cwd.display().to_string(),
+                "provider": other.provider,
+                "model": other.model,
+                "readonly": other.readonly,
+                "session": other.session,
+                "age_secs": now.saturating_sub(other.last_seen),
+            })
+        })
+        .collect();
+    serde_json::json!({ "peers": peers })
+}
+
 /// Who will see a message left in this directory, as one sentence.
 ///
 /// A pure function because the honesty is in the wording, and the wrong wording is the easy one: a

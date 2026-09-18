@@ -1575,6 +1575,67 @@ check("a position past the end of the file is a stale read, said and not thrown"
   eq(kinds(d), ["system", "user", "tool", "assistant"], "a stale pair does not cost the conversation");
 });
 
+// ROADMAP.md section 11 item 9(ii): the page's `/say` could not address one run because a pid typed
+// into a text field is prose. What makes the picker possible is two things the frame says -- the flag
+// an answer follows, and the list its choices come from -- and both are checked here against the page's
+// own functions rather than against its text.
+const SAY_FIELDS = [
+  { field: "text", flag: "--to", from: "peers", name: "pid", optional: true },
+  { field: "text", name: "text", optional: false },
+];
+
+check("a flagged answer is written after its flag, and left out whole", () => {
+  eq(
+    viewer.formLine("/say", SAY_FIELDS, ["41288", "the words"]),
+    "/say --to 41288 the words",
+    "the addressed line"
+  );
+  // The address is optional *and first*, which a positional answer cannot be: `--to 41288` is a
+  // phrase, so leaving it out leaves no hole for the words to fall into.
+  eq(viewer.formLine("/say", SAY_FIELDS, ["", "the words"]), "/say the words", "the broadcast line");
+  eq(viewer.formLine("/say", SAY_FIELDS, ["   ", "the words"]), "/say the words", "whitespace is empty");
+  // And a required answer still refuses: the bare command is a different thing -- for `/say` it is the
+  // usage line -- so the page must not send it by accident.
+  eq(viewer.formLine("/say", SAY_FIELDS, ["41288", ""]), null, "no words");
+  // The positional rows are unchanged, including the optional one that has to stay last.
+  const addFields = [
+    { field: "text", name: "name", optional: false },
+    { field: "text", name: "base_url", optional: false },
+    { field: "text", name: "model", optional: true },
+  ];
+  eq(
+    viewer.formLine("/provider add", addFields, ["claw", "http://127.0.0.1:8080/v1", ""]),
+    "/provider add claw http://127.0.0.1:8080/v1",
+    "an optional trailing answer"
+  );
+});
+
+check("the peer picker sends a pid and shows who it is", () => {
+  const select = viewer.__node("say-peer-probe");
+  viewer.fillPeerSelect(
+    select,
+    [
+      { pid: 41288, model: "deepseek-chat", age_secs: 3 },
+      { pid: 41999, model: "qwen3", readonly: true, age_secs: 0 },
+    ],
+    "(everyone here)"
+  );
+  const options = select.children.slice();
+  eq(options.length, 3, "the broadcast and two runs");
+  // The first option is the default and it means the broadcast: the row did that before it could
+  // address one, and losing it would be a regression wearing a feature's clothes.
+  eq(options[0].value, "", "the broadcast is what is sent when nothing is chosen");
+  eq(options[0].selected, true, "and it is chosen");
+  eq(options[1].value, "41288", "the pid is what is sent");
+  eq(options[1].textContent, "pid 41288 · deepseek-chat · last said so 3s ago", "and who that is");
+  eq(options[2].textContent, "pid 41999 · qwen3 · read-only · here now", "a readonly run says so");
+  eq(select.value, "", "the picker starts on the broadcast");
+  // Nobody else here is an answer, not an empty control: the message waits in the file either way.
+  viewer.fillPeerSelect(select, [], "(nobody else is here — it waits in the file for the next run)");
+  eq(select.firstChild.textContent, "(nobody else is here — it waits in the file for the next run)", "the empty case");
+  eq(select.firstChild.value, "", "and it is still the broadcast");
+});
+
 if (failures) {
   console.log(`\n${failures} failed`);
   process.exit(1);

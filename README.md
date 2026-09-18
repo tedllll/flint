@@ -253,7 +253,7 @@ Inside the REPL:
 | `/readonly [on\|off]` | toggle the write guard |
 | `/thinking [off\|low\|medium\|high]` | how much reasoning to ask the provider for, and which field it goes in (default `off`: ask for none) |
 | `/hear-peers [on\|off]` | relay messages from `flint say` to the model (default off) |
-| `/say <text>` | leave a message for whoever else is working in this directory (`--to <pid>` first to address one) |
+| `/say [--to <pid>] <text>` | leave a message for whoever else is working in this directory; on the page the address is a picker over the live runs, and leaving it empty reaches everyone here |
 | `/queue <text>` | say this after the turn that is running, without interrupting it |
 | `/tools` | list tools |
 | `/jobs` | the background work this run started, with each job's pid and what it is doing |
@@ -714,7 +714,11 @@ said: please do not commit docs/sandbox.md, I am still writing it
 From inside a run it is `/say <text>`, which writes the same line through the same function, so a
 message no longer needs a second terminal: the reply names the runs that share this mailbox — or says
 plainly that nobody is here and the message is waiting in the file — and the run that wrote it never
-reads its own words back as a peer's. `/say --to <pid>` addresses one run.
+reads its own words back as a peer's. `/say --to <pid>` addresses one run, and the **page offers the
+pids**: the command's row there draws a picker over the runs sharing this directory's mailbox — the same
+`GET /peers` listing the terminal's own `/say` is answered from — because a pid typed into a text field
+would be prose, and a message that quietly went to whoever the sentence named is worse than one that
+reached everybody here. Empty means everyone, which is what the row did before it could address one.
 
 The sentence appears in a running flint's transcript, prefixed with who said it. By default that is all
 it does: it is written to the session file as its own `peer` event, never as a chat message, so it

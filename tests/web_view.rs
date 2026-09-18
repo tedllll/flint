@@ -724,7 +724,7 @@ fn a_form_row_gets_a_field_and_sends_what_was_typed_into_it() {
     }
 }
 
-/// The answers of a form become one line, and a missing one stops it.
+/// The answers of a form become one line, and a missing one is left out or refuses.
 ///
 /// The half a drawing cannot show. `send` with no answers is the command's *interactive* form --
 /// `/provider add` bare is a wizard that asks a person for five things one at a time -- so a page that
@@ -732,18 +732,29 @@ fn a_form_row_gets_a_field_and_sends_what_was_typed_into_it() {
 /// sitting at. Which answers are required is the frame's word (`optional`), not the page's guess from
 /// the label, for the same reason the field's kind is: a page that decided would be re-deriving this
 /// program's grammar.
+///
+/// An optional answer that is empty is now *skipped* rather than ending the line, and the difference is
+/// `/say [--to <pid>] <text>` (ROADMAP section 11 item 9(ii)): a flagged answer is a phrase of its own,
+/// so an optional one can stand before a required one. For the positional rows this table has always
+/// had, an optional answer is last by construction and skipping reaches the place stopping did.
 #[test]
 fn the_answers_of_a_form_become_one_line_and_a_missing_one_stops_it() {
-    let answers = from("function formLine(send, fields, values)", 20);
+    let answers = from("function formLine(send, fields, values)", 26);
     assert!(
-        answers.contains("if (spec.optional) break;"),
-        "an empty optional answer does not end the line, so the answer after it is promoted into its \
-         place: {answers}"
+        answers.contains("if (spec.optional) continue;"),
+        "an empty optional answer is not left out of the line: {answers}"
     );
     assert!(
-        answers.contains("if (!answer) {\n      if (spec.optional) break;\n      return null;\n    }"),
+        answers.contains("if (!answer) {\n      //") && answers.contains("if (spec.optional) continue;\n      return null;"),
         "a required answer that is empty does not stop the line, so the bare command is sent: \
          {answers}"
+    );
+    // The flag is written before the answer it belongs to, which is what makes an address a phrase
+    // rather than a word in the sentence.
+    assert!(
+        answers.contains("if (spec.flag) answers.push(spec.flag);"),
+        "an answer that follows a flag is written without it, so the line reaches the terminal as \
+         prose: {answers}"
     );
     assert!(
         answers.contains("[send].concat(answers).join(\" \")"),
@@ -1037,5 +1048,48 @@ fn the_page_remembers_where_it_was_and_never_stores_the_token() {
     assert!(
         hook.contains("remember(doc.meta && doc.meta.id, applied)"),
         "the remembered position must be the one drawn to: {hook:?}"
+    );
+}
+
+/// The page draws `/say --to` as a picker over the live runs, and never as a pid to type.
+///
+/// `ROADMAP.md` section 11 item 9(ii) and section 8: a pid typed into a text field is *prose*, and a
+/// message that quietly went to whoever the sentence named is worse than one that reached everybody
+/// here. So the frame says the answer comes from a list (`from: "peers"`), the page fetches that list
+/// from `GET /peers` when the row is drawn, and the answer is a `select` whose value is the pid and
+/// whose label is who that pid is. The behaviour -- the composed line, the broadcast default, the
+/// label -- is checked in `scripts/web-view-test.js` against the page's own functions; what is held
+/// here is that the wiring exists and that the route is the one the terminal also reads.
+#[test]
+fn the_page_offers_the_live_runs_a_message_can_address() {
+    let html = view();
+    for needle in [
+        "spec.from === \"peers\"",
+        "function peerPicker()",
+        "fetch(\"/peers\"",
+        "(everyone here)",
+        "it waits in the file for the next run",
+    ] {
+        assert!(
+            html.contains(needle),
+            "the page no longer offers the runs a message can address: {needle:?} is gone"
+        );
+    }
+    // A hand-written option list would be a second reader of the presence records; the route is the
+    // one the terminal's own `/say` is answered from, so the page cannot offer a pid it would not.
+    forbidden(
+        "scan_in(",
+        "the page must read presence through GET /peers rather than deriving it from files itself",
+    );
+    // A pid is what is sent and who it is that is read, which is why this cannot go through
+    // `fillSelect` -- that helper makes the two the same string.
+    let filler = from("function fillPeerSelect(select, peers, note)", 12);
+    assert!(
+        filler.contains("option.value = String(peer.pid)"),
+        "the picker must send a pid: {filler:?}"
+    );
+    assert!(
+        filler.contains("everyone.value = \"\""),
+        "the broadcast must stay offered as the default: {filler:?}"
     );
 }

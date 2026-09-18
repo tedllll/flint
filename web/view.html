@@ -1317,6 +1317,10 @@ function showCommands(doc) {
       if (fields.length > 0) {
         const form = el("form", "field");
         const inputs = fields.map((spec) => {
+          // An answer the frame says comes from a list is a picker, not a field: a pid typed into a
+          // text box would be prose, and a message that quietly went to whoever the sentence named is
+          // worse than one that reached everybody here.
+          if (spec && spec.from === "peers") return peerPicker();
           const input = el("input", "value");
           input.type = spec && spec.field === "password" ? "password" : "text";
           // One answer says what the command is for; several have to say which answer each wants,
@@ -1940,12 +1944,81 @@ function formLine(send, fields, values) {
     const spec = fields[at] || {};
     const answer = String(values[at] == null ? "" : values[at]).trim();
     if (!answer) {
-      if (spec.optional) break;
+      // Left out where the frame said it may be, and *skipped* rather than stopping the line: an
+      // optional answer carrying a flag is a phrase of its own, so `/say [--to <pid>] <text>` composes
+      // without the address, while the positional ones the table has always had are last by
+      // construction and a `continue` reaches the same place a `break` did.
+      if (spec.optional) continue;
       return null;
     }
+    // The literal an answer follows, when it is not positional: `/say --to 123 the words`. The frame
+    // carries it rather than the page knowing a grammar, which is the same rule as `field` being the
+    // input's `type`.
+    if (spec.flag) answers.push(spec.flag);
     answers.push(answer);
   }
   return [send].concat(answers).join(" ");
+}
+
+/// A picker over the runs that share this directory's mailbox, for `/say --to <pid>`.
+///
+/// Fetched when the row is drawn, which is the one moment the list is wanted, and read from
+/// `GET /peers` — the same `live::peers_here` the terminal's `/say` addresses and its reply describes,
+/// so the page cannot offer a pid the terminal would not. The empty option is the default and it
+/// *means* the broadcast: `/say <text>` reaches everyone here, which is what this row did before it
+/// could address one, and a picker with no way back to that would be a regression wearing a feature's
+/// clothes. Nothing is cached: presence is a file somebody else is writing, and a remembered list
+/// would be the page's own idea of who is here.
+function describePeer(peer) {
+  const parts = ["pid " + peer.pid];
+  if (peer.model) parts.push(peer.model);
+  if (peer.readonly) parts.push("read-only");
+  const age = Number(peer.age_secs);
+  parts.push(!age ? "here now" : "last said so " + durationLabel(age) + " ago");
+  return parts.join(" · ");
+}
+
+/// Fill the peer picker, keeping the pid as the value and the description as the label.
+///
+/// Not `fillSelect`, and the difference is the point of the row: what is *sent* is a pid and what is
+/// *read* is who that pid is, so a helper that makes those the same string cannot express it. The
+/// options are removed one at a time for the reason `fillSelect` does it — the stub DOM in
+/// `scripts/web-view-test.js` has no `textContent = ""`.
+function fillPeerSelect(select, peers, note) {
+  if (!select) return;
+  while (select.firstChild) select.removeChild(select.firstChild);
+  const everyone = el("option", "", note || "(everyone here)");
+  everyone.value = "";
+  everyone.selected = true;
+  select.appendChild(everyone);
+  for (const peer of peers || []) {
+    const option = el("option", "", describePeer(peer));
+    option.value = String(peer.pid);
+    select.appendChild(option);
+  }
+  select.value = "";
+}
+
+function peerPicker() {
+  const select = el("select", "value");
+  fillPeerSelect(select, []);
+  fetch("/peers", { headers: authHeader() })
+    .then((response) => (response.ok ? response.json() : null))
+    .then((listing) => {
+      const peers = listing && Array.isArray(listing.peers) ? listing.peers : [];
+      fillPeerSelect(
+        select,
+        peers,
+        peers.length
+          ? "(everyone here)"
+          : "(nobody else is here — it waits in the file for the next run)"
+      );
+    })
+    .catch(() => {
+      // A listing the page could not read leaves the broadcast, which is the safe half: the message
+      // is written for whoever comes next either way, and only the address needs the list.
+    });
+  return select;
 }
 
 /// One conversation, and the actions it has, which are its own row's business rather than the
@@ -3049,6 +3122,9 @@ if (typeof module !== "undefined" && module.exports) {
     // -- a gap, a different conversation, and a position past the end -- against the real functions
     // rather than against the page's text.
     SEEN_KEY, remembered, remember, notePosition,
+    // The `/say --to` picker: `describePeer` and `fillPeerSelect` are pure enough to check in the
+    // sandbox, which is where the label/value split and the broadcast default are held.
+    describePeer, fillPeerSelect,
   };
 }
 </script>

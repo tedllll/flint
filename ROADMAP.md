@@ -1840,6 +1840,8 @@ list's, not this one's, and each line is edited in the same commit as the code t
   the honest remainder, the page remembering where this tab was reading so it can say what arrived while
   it was closed and treat a position past the end of the file as a stale read rather than an error.
 - §8: the picker of live runs that the page's `/say --to` is waiting on.
+- §11 item 9(ii): the page's `/say --to` picker of live runs — **built 2026-09-18**, which was the last
+  feature the plan of record still owed; what is left of item 9 is its two test-and-comment halves.
 - §11 item 5: `flint --version` — **built 2026-09-18**, with the name collision it found (`session`'s
   `version` is the file format's, not the build's) stated in `README.md` where a reader meets it.
 - §10 C3 and C5 — the two holes that needed a decision rather than code — **settled in writing
@@ -1986,9 +1988,22 @@ where prose and tree disagree are items 2, 3 and 9(iii).**
 9. **Three small gaps that the code names about itself.** (i) `tests/cli_output.rs` says of itself that
    the paste fix "is not covered here (see `HANDOFF.md`)", which by this repository's own rule — a
    regression test that has never been red has not been shown to test anything — means a shipped fix
-   with nothing holding it; (ii) `/say` on the page has no `--to`, and `src/main.rs:2848` says why:
-   "Addressing is a terminal move until the page can offer a picker of live runs" — the picker is the
-   missing half, and the presence records it would read already exist; (iii) the comment that justifies
+   with nothing holding it; (ii) **`/say` on the page has no `--to` — *built 2026-09-18*.** The code
+   said why: "Addressing is a terminal move until the page can offer a picker of live runs", and the
+   picker is what was missing. What it needed was a **read channel** for presence, and the shape was
+   already in the tree: `ArgFrom` gained a fourth list (`Peers`) beside the sidebar's conversations, the
+   provider picker's names and the jobs panel's pids, `PageArg` gained the `flag` an answer follows
+   (`--to`) — which is also what lets an *optional* answer stand before a required one, since `--to 123`
+   is a phrase and leaving it out leaves no hole — and the state frame carries both, so the page draws a
+   `select` whose **value is the pid and whose label is who that pid is**. The candidates come from
+   `GET /peers`, answered by `live::peers_here` — moved out of `main.rs` into the library for exactly
+   this reason, because the terminal's `/say`, its reply's audience sentence and the page's picker must
+   be one answer about who is in the room. Empty remains the default and it *means* the broadcast, which
+   is what the row did before it could address one. Held by `tests/cli_output.rs` (the frame carries
+   `"flag":"--to"` and `"from":"peers"`, `/help` prints the address, and the route answers a live run),
+   by `tests/web_view.rs` (the page draws a picker and reads presence through the route rather than
+   itself), and by two checks in `scripts/web-view-test.js` that compose the addressed and broadcast
+   lines and fill the picker through the page's own functions; (iii) the comment that justifies
    where the report whitelist lives says "the page has no confirmation step yet"
    (`src/main.rs:3156`), while §8 records a second press as the confirmation for destructive rows — one
    of the two is stale, and the whitelist's own reason is worth stating in the terms that are true.
