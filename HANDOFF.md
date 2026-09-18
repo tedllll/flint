@@ -49,6 +49,18 @@ silence being the thing flint can control: it cannot tell a follow-up from a new
 continues anything that was not asked for, names the conversation on `session.started`, and leaves
 `--no-session` and `--fork` as the doors that carry nothing and carry into a new conversation.
 
+**And a test that had been passing by luck is fixed, found by gating the flag above.**
+`tests/task.rs::an_interrupted_task_says_what_it_left_running` failed every time it was run **alone**
+(61 s to its timeout) and passed every time the whole suite ran — with nothing in the tree changed, and
+with the previous round's `src/tools.rs` reverted, which is what ruled the code out. The fixture decided
+which request it was answering with a counter shared by the parent's and the child's requests, so the
+*parent's* turn was sometimes the one held for 120 seconds. It recognises the child by its own prompt as
+a user message now, which is the only form that appears in the child's request and not in the parent's;
+the first attempt used a bare `contains` and held the parent too, because the parent's later requests
+carry those words inside the scripted tool call's arguments. Alone it passes in 1.7 s. This is the
+second defect of that class in this file (`tests/task.rs:512` flaked on ubuntu the same way), so the
+next reader should treat "shared counting across processes" in a stub as a smell.
+
 **The line after it is the page's own reconnect cursor and the picker of live runs the page's
 `/say --to` waits on.** §10's two holes that
 need a decision rather than code — C3 (nothing identifies a request, so a caller's retry may repeat

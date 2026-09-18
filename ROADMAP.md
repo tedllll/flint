@@ -1818,6 +1818,17 @@ not a survey.
 §9 and §10 named as still open, which a survey should finish rather than replace. The order is that
 list's, not this one's, and each line is edited in the same commit as the code that closes it.
 
+- A test that passed only by luck, found while gating the `--version` flag — **fixed 2026-09-18**.
+  `tests/task.rs::an_interrupted_task_says_what_it_left_running` failed **every time** it was run alone
+  (`cargo test --test task <name>`, 61 s to the timeout) and passed every time the whole suite ran, with
+  nothing in the tree changed; reverting `src/tools.rs` to the previous commit reproduced it, which is
+  what ruled out the change being gated. The cause was in the fixture rather than the code: `HeldChild`
+  decided which request it was answering with a counter shared by the parent's and the child's
+  requests, so the *parent's* turn could be the one held for 120 s. It now recognises the child by its
+  own prompt as a **user message** (`"content":"look around"`), which is the one form that appears in
+  the child's request and not in the parent's — a bare `contains` was tried first and held the parent
+  too, because the parent's later requests carry those words inside the scripted tool call's arguments
+  and in the handle's text. Alone, the test now passes in 1.7 s instead of failing at 61.
 - §10 B5's retry half — `provider_retries` on `turn.completed` — **built 2026-09-18**. The remaining
   line in B5 is the money, which is refused with its reason rather than owed.
 - §10's B-section: the schema-miss ending written down and pinned — **built 2026-09-18**, recorded in

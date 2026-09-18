@@ -921,23 +921,35 @@ struct HeldChild {
 }
 
 impl Respond for HeldChild {
-    fn respond(&self, _req: &Request) -> ResponseTemplate {
+    fn respond(&self, req: &Request) -> ResponseTemplate {
+        // Which request this is, decided by *what it was asked* rather than by arriving second.
+        //
+        // The counter this replaces assumed the child's request was the second one to reach the stub,
+        // and two processes do not promise an order: measured while gating an unrelated change, the
+        // test failed every time it was run **alone** (`cargo test --test task <name>`) and passed
+        // every time the whole suite ran, with nothing in the tree changed. The child is recognised by
+        // its own prompt *as a user message*, which is the one place it appears in a request the child
+        // sends: the parent's later requests carry the same words inside the scripted tool call's
+        // arguments (and in the handle's text), so a bare `contains` would hold the parent too -- which
+        // is the mistake the first version of this fix made, and it hung the test the other way.
+        let asked = String::from_utf8_lossy(&req.body).to_string();
+        let is_child = asked.contains(r#""content":"look around""#);
+        if is_child {
+            return ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_delay(self.hold)
+                .set_body_string(prose("CHILD EVENTUALLY ANSWERS"));
+        }
         let n = self.step.fetch_add(1, Ordering::SeqCst);
         let body = match n {
             // Waiting, because this test drops the *wait*: the parent is inside `task` when the person
             // types, which is the reported incident, and a background child would have returned already.
             0 => tool_call("task", r#"{"prompt":"look around","background":false}"#),
-            1 => prose("CHILD EVENTUALLY ANSWERS"),
             _ => prose(self.then),
         };
-        let template = ResponseTemplate::new(200)
+        ResponseTemplate::new(200)
             .insert_header("content-type", "text/event-stream")
-            .set_body_string(body);
-        if n == 1 {
-            template.set_delay(self.hold)
-        } else {
-            template
-        }
+            .set_body_string(body)
     }
 }
 
