@@ -560,20 +560,35 @@ async fn a_run_that_is_already_deep_refuses_to_go_deeper() {
     assert_eq!(out.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let text = transcript(&session_of(&stdout));
+    let requests = step.load(Ordering::SeqCst);
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
 
+    // The count comes **first**, because it is the assertion that can explain the other two.
+    //
+    // This test failed once on the ubuntu runner (2026-09-18, `9b33b32`) with "the depth limit was not
+    // reported", while passing seven times in seven here, and the report could not be believed *or*
+    // dismissed: the message carried the transcript and nothing else, so the two facts that would have
+    // said which side was wrong -- how many times the model was asked, and the stderr a retry writes
+    // its notice to -- had already been thrown away. Both are in the messages now. The prime suspect
+    // is the harness rather than the code: `Scripted` hands out its bodies by HTTP request number, so
+    // any request that is not a step of the conversation (a retry above all) moves the script on by
+    // one and the *second* body answers the first step -- which produces exactly this signature, a
+    // normal run whose transcript is missing the sentence. That mechanism was tested by hand and **not
+    // confirmed**: a 500 answered by a *different* mock does not touch the counter, and the case that
+    // would desynchronize it has not been reproduced. So it is written down as a suspect with the
+    // evidence the next occurrence will bring, not as the explanation.
+    assert_eq!(
+        requests, 2,
+        "the model was asked {requests} times, so the scripted provider desynchronized (a retried \
+         request consumes the next body):\n  stderr: {stderr}\n  transcript: {text}"
+    );
     assert!(
         text.contains("does not go deeper than 2"),
-        "the depth limit was not reported: {text}"
+        "the depth limit was not reported after 2 requests:\n  stderr: {stderr}\n  transcript: {text}"
     );
     assert!(
         text.contains("at depth 2"),
         "the refusal did not say where the run was: {text}"
-    );
-    // Refused, not attempted: only the parent's two turns happened.
-    assert_eq!(
-        step.load(Ordering::SeqCst),
-        2,
-        "a child was started despite the depth limit"
     );
 
     let _ = std::fs::remove_dir_all(&home);
