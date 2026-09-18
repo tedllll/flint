@@ -76,3 +76,23 @@ jobs:
       # the failure. `cargo test` builds the targets; this is what actually reads
       # the lints in them.
       - run: cargo clippy --all-targets -- -D warnings
+
+      # The two headless harnesses, which until now ran only on the machine that wrote
+      # them -- and a claim checked only by hand is a claim that stops being checked.
+      #
+      # They are the same shape as the tests above and belong in the same job for the same
+      # reason: `term-layout-test.js` models the viewport's own bytes and replays them
+      # through `vtscreen.js`, and `web-view-test.js` runs the page's script in a Node `vm`
+      # with a stub DOM. Neither needs a browser, a pty or a display, which is exactly why
+      # they can be here; `browser-controls-test.js`, which does need a browser, stays the
+      # one that is run by hand, and `ROADMAP.md` says so where it is named.
+      #
+      # Node is already on both runners, so nothing is installed for this. The version is
+      # printed because a harness that failed on a runner's Node and passed on a
+      # developer's is a difference worth being able to read off the log.
+      - name: The terminal and page harnesses
+        shell: bash
+        run: |
+          node --version
+          node scripts/term-layout-test.js
+          node scripts/web-view-test.js

@@ -104,6 +104,14 @@ broadcast, which is what the row did before it could address one. Held by `tests
 frame, `/help`, and the route answering a live run), `tests/web_view.rs`, and two checks in
 `scripts/web-view-test.js` that compose both lines and fill the picker through the page's own functions.
 
+**And §11 item 1 is built: the two headless Node harnesses run in CI now.** They ran only on the machine
+that wrote them, which is the state a check drifts into being a habit. `.github/workflows/ci.yml` gained
+one step in the existing test job — `node --version`, then `term-layout-test.js`, then
+`web-view-test.js` — for the reason the item gives: the page's renderer and the viewport's bytes are the
+two surfaces whose defects are invisible in the source, and both already had a harness. Nothing is
+installed, because Node is on both runners; `browser-controls-test.js` stays by hand, because it needs a
+real browser.
+
 **What is left on §11 item 9 is its two test-and-comment halves**: a regression test for the paste fix
 (which `tests/cli_output.rs` says of itself is not covered there) and the stale comment on where the
 report whitelist lives. §10's two holes that

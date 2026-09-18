@@ -1857,7 +1857,8 @@ the tree, and exactly one `#[ignore]`d test, which measures rather than asserts 
 the work that is left is not marked in the code — it is prose that says a limit out loud, and the places
 where prose and tree disagree are items 2, 3 and 9(iii).**
 
-1. **Two of the three Node harnesses are headless and a push runs neither of them.** The highest-value
+1. **Two of the three Node harnesses are headless and a push runs neither of them — *built
+   2026-09-18*.** The highest-value
    item here is not a feature — it is a **guard**. CI's job is `cargo test` and `cargo clippy` and
    nothing else (`.github/workflows/ci.yml`: the `Test` step, the annotation step, then clippy), and
    `HANDOFF.md` spells out what that leaves open in its own words: "`cargo test` does not run them, so a
@@ -1868,8 +1869,14 @@ where prose and tree disagree are items 2, 3 and 9(iii).**
    defects are invisible in the source, both harnesses exist and pass, and neither is run by anything
    automatic. `browser-controls-test.js` is the one that stays by hand, on purpose and for a stated
    reason (it needs a real browser, and CI does not have one — its own header says "deliberately **not**
-   part of CI"). So this item is one Node step in the CI job running the two headless harnesses, which
-   is exactly what `AGENTS.md`'s "Verifying a change" already tells a person to run.
+   part of CI"). So this item is one Node step in the CI job running the two headless harnesses, which is
+   exactly what `AGENTS.md`'s "Verifying a change" already tells a person to run. **That step is in
+   `.github/workflows/ci.yml`**: it prints `node --version` (so a harness that failed on a runner's Node
+   and passed on a developer's is a difference readable off the log) and then runs both harnesses, in the
+   same job as the tests and clippy rather than a job of its own, because the cache and the toolchain are
+   already there and a second job would spend minutes to add a minute. Nothing is installed: Node is on
+   both runners. `browser-controls-test.js` stays by hand — it needs a real browser — and `AGENTS.md`
+   still says so where the three are listed.
 2. **Stale sentences, found by checking claims instead of reading them — one fixed in this commit.**
    This is a class, not an incident, and it is the finding that says the most about the repository: four
    passages state something the tree stopped being true of, and **nothing in the gate can catch prose**.
