@@ -1807,11 +1807,14 @@ now describe the localized half instead of quoting it; the test's assertion is t
 other side (none of the OS's phrasing may appear at the prompt, in any language).
 
 **The verification record's §2 was read too, and one of its nine wording findings was a real hole.**
-The other eight are the inventory's own examples drifting by a word or a line (`/model`'s bare form is
-four lines and not one, the inline `@file` note leads with `inlined`, the error frame's keys are
-alphabetical, the refusal for a script starts with a capital, `X-Flint-At` is absent exactly when the
-file it points into does not exist yet) — worth a pass of its own some time, none of them behaviour.
-The ninth was not wording. `docs/session-format.md` says "a line that is half an object is damage", and
+Eight of the nine were the inventory's own examples drifting by a word or a line, and all eight are
+corrected in `4e3d7fd`: the clock's third wording (`writing the answer`, the one on screen most of the
+time), where a spilled result's path actually is (the model's copy, not the transcript's summary line),
+the `  inlined ` prefix on an attachment note, bare `/model` being four lines and not one, the error
+frame's keys being alphabetical in an example that showed them the other way, the word for damage and
+which door says it, the whole refusal sentence for a script, and `X-Flint-At` existing only once there
+is a file for it to point into. The ninth was not wording. `docs/session-format.md` says "a line that
+is half an object is damage", and
 **measured, it was silent**: the two-way guard that decides what an unparseable line *is* asked only
 whether the line named a type this build knows, so anything that was not JSON at all — a pretty-printed
 fragment, a torn tail from a write that was cut off — fell into the "somebody else's event" bucket and

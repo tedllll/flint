@@ -559,36 +559,66 @@ async fn a_run_that_is_already_deep_refuses_to_go_deeper() {
         .expect("failed to run flint");
     assert_eq!(out.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let text = transcript(&session_of(&stdout));
+    let session = session_of(&stdout);
+    let text = transcript(&session);
     let requests = step.load(Ordering::SeqCst);
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
 
     // The count comes **first**, because it is the assertion that can explain the other two.
     //
-    // This test failed once on the ubuntu runner (2026-09-18, `9b33b32`) with "the depth limit was not
-    // reported", while passing seven times in seven here, and the report could not be believed *or*
-    // dismissed: the message carried the transcript and nothing else, so the two facts that would have
-    // said which side was wrong -- how many times the model was asked, and the stderr a retry writes
-    // its notice to -- had already been thrown away. Both are in the messages now. The prime suspect
-    // is the harness rather than the code: `Scripted` hands out its bodies by HTTP request number, so
-    // any request that is not a step of the conversation (a retry above all) moves the script on by
-    // one and the *second* body answers the first step -- which produces exactly this signature, a
-    // normal run whose transcript is missing the sentence. That mechanism was tested by hand and **not
-    // confirmed**: a 500 answered by a *different* mock does not touch the counter, and the case that
-    // would desynchronize it has not been reproduced. So it is written down as a suspect with the
-    // evidence the next occurrence will bring, not as the explanation.
+    // This test failed twice on the ubuntu runner (2026-09-18, `9b33b32` and `7fa67fa`) with "the
+    // depth limit was not reported", while passing a dozen times here, most of them under load. The
+    // first report was undiagnosable on purpose-built grounds: the message carried the transcript and
+    // nothing else, so the facts that would say which side was wrong -- how many times the model was
+    // asked, what a retry wrote to stderr -- had already been thrown away. The second report carried
+    // both, and they **refuted** the desynchronized-script theory: exactly 2 requests and an empty
+    // stderr, which is a run that took two normal steps rather than one that retried.
+    //
+    // What is left is a transcript that does not contain a sentence the run must have written, and to
+    // tell "the tool refused and the file does not say so" from "this is the *child's* conversation"
+    // needs the one thing the two have in common -- the same `cwd`, provider, model and event shape,
+    // so the bytes cannot tell them apart. The path can. It is in the message now, with a gist of the
+    // lines that mention the tool, because `grep -A 6` in the CI annotation step only reaches six
+    // lines past the panic and the whole transcript is longer than that.
+    let lines: Vec<&str> = text.lines().collect();
+    let gist: Vec<&&str> = lines
+        .iter()
+        .filter(|l| {
+            l.contains("task")
+                || l.contains("depth")
+                || l.contains("PARENT")
+                || l.contains("exit code")
+                || l.contains("session")
+        })
+        .take(5)
+        .collect();
+    let tail: Vec<&&str> = lines.iter().rev().take(3).collect();
     assert_eq!(
         requests, 2,
         "the model was asked {requests} times, so the scripted provider desynchronized (a retried \
-         request consumes the next body):\n  stderr: {stderr}\n  transcript: {text}"
+         request consumes the next body):\n  session: {}\n  stderr: {stderr}",
+        session.display()
     );
     assert!(
         text.contains("does not go deeper than 2"),
-        "the depth limit was not reported after 2 requests:\n  stderr: {stderr}\n  transcript: {text}"
+        "the depth limit was not reported after 2 requests.\n  exit: {:?}\n  session: {}\n  \
+         {} transcript lines; the ones naming the tool: {gist:?}; last three: {tail:?}\n  stderr: \
+         {stderr}",
+        out.status.code(),
+        session.display(),
+        lines.len()
     );
     assert!(
         text.contains("at depth 2"),
         "the refusal did not say where the run was: {text}"
+    );
+    // The file this test reads has to be the parent's own conversation. A child's is the same shape
+    // -- same `cwd`, provider, model and events -- so a misread would show up as a transcript with no
+    // refusal in it and nothing to say why, which is precisely the signature that was reported twice.
+    assert!(
+        !session.to_string_lossy().contains("children"),
+        "this is the child's conversation, not the parent's: {}",
+        session.display()
     );
 
     let _ = std::fs::remove_dir_all(&home);
