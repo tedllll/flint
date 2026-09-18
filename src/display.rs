@@ -450,8 +450,26 @@ pub fn summarise_args_in(
         return util::preview(trimmed, limit);
     };
 
+    // A path is only shortened for display; the model still gets the full one it wrote. Shortened
+    // *before* the range below is appended, because the other order had to find the path again by
+    // splitting the line at its first space -- and a path with a space in it has more than one, so
+    // `read "C:\Program Files\x.md" lines 1-20` was shortened to `…\Program Files\x.md`.
+    let picked = match (shorten, name) {
+        (Some(shorten), "read" | "write" | "edit" | "list") => shorten(&picked),
+        _ => picked,
+    };
+    // A path with a space in it goes in quotes, which is the only thing in the line that says where
+    // the name ends -- to the person reading the transcript *and* to the page, whose own scanner
+    // reads a quoted run as one path and cuts a bare one at the space (`addressParts` in
+    // `web/view.html`). One line printed here is what both of them read.
+    let picked = match name {
+        "read" | "write" | "edit" | "list" => quote_if_spaced(&picked),
+        _ => picked,
+    };
+
     // A paged read is only comprehensible with its range: `read src/agent.rs` twice in a
-    // row is exactly the unreadable repetition the tool-result line was fixed for.
+    // row is exactly the unreadable repetition the tool-result line was fixed for. The range stays
+    // *outside* the quotes, so the line still says which part of a file whose name has a space.
     let summary = if name == "read" {
         match (v.get("offset").and_then(serde_json::Value::as_u64), v.get("limit").and_then(serde_json::Value::as_u64)) {
             (Some(offset), Some(limit)) if limit > 0 => {
@@ -463,18 +481,26 @@ pub fn summarise_args_in(
     } else {
         picked
     };
-    // A path is only shortened for display; the model still gets the full one it wrote.
-    let summary = match (shorten, name) {
-        (Some(shorten), "read" | "write" | "edit" | "list") => {
-            // Only the path part, not the "lines 100-149" suffix appended above.
-            match summary.split_once(' ') {
-                Some((path, rest)) => format!("{} {rest}", shorten(path)),
-                None => shorten(&summary),
-            }
-        }
-        _ => summary,
-    };
     util::preview(&summary.replace('\n', " \u{23ce} "), limit)
+}
+
+/// A path with a space in it, in double quotes. Everything else is returned unchanged.
+///
+/// Not decoration. `read C:\Program Files\flint\config.toml` is a path and a word, and which is
+/// which cannot be recovered from the line: two readers of it exist -- a person, and the browser
+/// page that turns a path in the transcript into a button onto the file (`GET /file`) -- and the
+/// page's scanner cut that line at the space, so it drew a link to `C:\Program`, a name that exists
+/// nowhere. The quotes are the one thing in the line that says where the name ends, which is why
+/// they are added here, where the line is written, rather than guessed at by each reader.
+///
+/// Only for a space: a path of ordinary characters is unambiguous already, and quoting every path
+/// would put punctuation in every tool line to no purpose.
+fn quote_if_spaced(path: &str) -> String {
+    if path.contains(' ') {
+        format!("\"{path}\"")
+    } else {
+        path.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -485,6 +511,40 @@ mod tests {
     fn bash_shows_the_command_and_nothing_else() {
         let args = r#"{"command":"dir C:\\tmp","timeout_secs":30}"#;
         assert_eq!(summarise_args("bash", args, 100), "dir C:\\tmp");
+    }
+
+    #[test]
+    fn a_path_with_a_space_in_it_is_quoted() {
+        // A bare path with a space is two things to every reader of the line, and the second reader
+        // is a machine: the page's address scanner cuts a bare path at the space, so an unquoted
+        // `C:\Program Files\x.md` became a button onto `C:\Program`, a file that exists nowhere.
+        let args = r#"{"path":"C:\\Program Files\\flint\\config.toml"}"#;
+        assert_eq!(
+            summarise_args("read", args, 200),
+            "\"C:\\Program Files\\flint\\config.toml\"",
+            "the quotes are what says where the name ends"
+        );
+        // A path with no space in it is left exactly as it was: the quotes are for the ambiguous
+        // case, and putting them on every path would be punctuation for nothing.
+        assert_eq!(summarise_args("read", r#"{"path":"src/lib.rs"}"#, 100), "src/lib.rs");
+        // The range of a paged read stays *outside* the quotes, so the line still reads as one
+        // statement about one file.
+        assert_eq!(
+            summarise_args("read", r#"{"path":"C:\\a b\\x.md","offset":100,"limit":50}"#, 200),
+            "\"C:\\a b\\x.md\" lines 100-149"
+        );
+    }
+
+    #[test]
+    fn shortening_happens_before_the_range_is_appended() {
+        // The order is the bug this guards: shortening used to run *after* the range was appended,
+        // and found the path by splitting the line at its first space -- so for a file named
+        // `x.md` in `C:\a b\`, the shortener was handed `C:\a` and the rest of the line went with
+        // it. The shortener here marks what it was given, so both facts are visible in one line:
+        // it received the whole path, and the quotes went on *after* it had run.
+        let shorten = |p: &str| format!("<{p}>");
+        let got = summarise_args_in("read", r#"{"path":"C:\\a b\\x.md","offset":100,"limit":50}"#, 200, Some(&shorten));
+        assert_eq!(got, "\"<C:\\a b\\x.md>\" lines 100-149", "the shortener's input was the whole path: {got}");
     }
 
     #[test]

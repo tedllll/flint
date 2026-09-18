@@ -1067,6 +1067,11 @@ function clip(s, n) {
 ///     `foo.c` is the price -- it stays text;
 ///   * a `//` in it means it is not a path at all -- the candidate that reaches here with one is a
 ///     URL that failed `asUrl`, so it stays text;
+///   * an absolute path has to be **two real segments deep, or end in an extension**: `/stop`,
+///     `/name`, `/jobs` and `/web` are this program's own commands, and a conversation about flint
+///     is full of them, so a one-segment `/word` is read as the word it is. `/etc/hosts`,
+///     `~/.flint/config.toml` and `C:\notes.md` pass; a bare `/tmp` or `C:\Users` does not, which
+///     costs nothing, because a directory is the one thing the preview refuses anyway;
 ///   * trailing `.` and `:` are punctuation rather than part of a name, and a trailing `:N` or
 ///     `:N:C` is the line a `grep` hit was found on: it comes back as `line` rather than as part
 ///     of the path, so the preview can open where the hit was.
@@ -1075,16 +1080,32 @@ function clip(s, n) {
 /// in a sentence, `src/bin`, `and/or` and `e.g.` are words, while `/etc/hosts` and `C:\work\x` are
 /// not. Tool output keeps the wider rule -- a relative path in a tool result is what the tool
 /// meant. The web-address half is the same in both: a URL in a sentence is still a URL.
+///
+/// A **quoted** run is one candidate, quotes and all: `"C:\Program Files\flint\config.toml"`,
+/// `'…'` and `` `…` ``. Without that, a path with a space in it was cut at the space -- the first
+/// fragment became a link to a file that does not exist and the rest was plain text, which is how
+/// one path reads as two things. A quote is also what flint itself puts around such a path when it
+/// prints one (`display::quote_if_spaced`), because the same ambiguity faces a person reading the
+/// terminal. A *bare* path with a space stays cut, and that residue is stated rather than hidden: no
+/// reader can tell `C:\Program Files\x` from a path and a word, and the first fragment is still a
+/// link to something that exists rather than to nothing.
 function addressParts(text, absoluteOnly) {
   const parts = [];
   let last = 0;
-  const candidates = String(text).matchAll(/[^\s"'`()\[\]{}<>,;]+/g);
+  const candidates = String(text).matchAll(/"[^"\n]*"|'[^'\n]*'|`[^`\n]*`|[^\s"'`()\[\]{}<>,;]+/g);
   for (const match of candidates) {
-    const found = asUrl(match[0]) || asPath(match[0], absoluteOnly);
+    const raw = match[0];
+    const quote = raw.length > 1 && /^["'`]/.test(raw) ? raw[0] : "";
+    const token = quote ? raw.slice(1, -1) : raw;
+    const found = asUrl(token) || asPath(token, absoluteOnly);
     if (!found) continue;
-    if (match.index > last) parts.push({ text: text.slice(last, match.index) });
+    // The opening quote stays text, and the closing one is left for the next piece: a link drawn
+    // *inside* the quotes it was written with, rather than a link that ate them.
+    if (match.index + quote.length > last) {
+      parts.push({ text: text.slice(last, match.index + quote.length) });
+    }
     parts.push(found);
-    last = match.index + match[0].length;
+    last = match.index + raw.length - (quote ? 1 : 0);
   }
   if (last < text.length) parts.push({ text: text.slice(last) });
   return parts;
@@ -1113,14 +1134,22 @@ function asUrl(token) {
 ///
 /// With `absoluteOnly` -- which is how prose is read -- a relative name is a word: see
 /// `addressParts` for why the two rules differ.
+///
+/// The result is `{path, line, written}`. `path` is what the route is asked to read, `line` is where
+/// to put the panel (`openPreview`), and `written` is what the *button says* -- the token as the
+/// reader met it, less a `file://` scheme, with its line suffix intact. Keeping the suffix on the
+/// button is the reason `written` exists: the page used to draw `src/web.rs` for a `grep` hit that
+/// said `src/web.rs:412:7`, so the one detail worth seeing in a hit (where it is) was in the tooltip
+/// and nowhere else.
 function asPath(token, absoluteOnly) {
-  let path = token.replace(/[.:]+$/, "");
-  let line = 0;
-  const numbered = /^(.*?):(\d+)(?::\d+)?$/.exec(path);
-  if (numbered) {
-    path = numbered[1];
-    line = Number(numbered[2]);
-  }
+  let text = token.replace(/[.:]+$/, "");
+  // `file://` is a third way to write a path, and the scheme is the only part of it this page cannot
+  // use: the route takes a path and the panel's own bar prints one. See `fileAddress`.
+  const scheme = fileAddress(text);
+  if (scheme) text = scheme;
+  const marked = stripLine(text);
+  let path = marked.path;
+  let line = marked.line;
   if (path.length < 3 || path.indexOf("//") !== -1) return null;
   const segments = path.split(/[\\/]+/);
   const name = segments[segments.length - 1];
@@ -1132,8 +1161,61 @@ function asPath(token, absoluteOnly) {
   // an empty list is true -- which is how this rule first swallowed every bare filename.
   const tail = segments.slice(1);
   if (tail.length && tail.every((s) => /^\d+$/.test(s))) return null;
-  if (!absolute && !/\.([A-Za-z0-9]{2,8})$/.test(name) && segments.length < 3) return null;
-  return { path: path, line: line };
+  // An extension at the end is the same evidence for an absolute path as for a relative one, and
+  // it is the only thing that saves `C:\notes.md` and `/notes.md`, which are two segments once the
+  // root is counted. Without it, one segment past the root is a *word* that happens to start with a
+  // slash: `/stop`, `/name`, `/jobs`, `/web` and `/events` are this program's own commands, and a
+  // transcript that turns them into links to files that do not exist is a transcript full of doors
+  // onto "nothing at …".
+  //
+  // The condition is asked only of a **slash-rooted** path, because a slash command is the whole
+  // reason for it: no command word begins with `~` or with a drive letter, so `~/notes` and `C:\x`
+  // are paths on their own evidence and are left as they are. `C:\Users` and `/tmp` stay dropped
+  // with the commands, which costs nothing -- a directory is the one thing the preview refuses by
+  // its own rule.
+  const rootSlash = /^[\\/]/.test(path);
+  const hasExtension = /\.([A-Za-z0-9]{2,8})$/.test(name);
+  if (absolute && rootSlash && !hasExtension && tail.length < 2) return null;
+  if (!absolute && !hasExtension && segments.length < 3) return null;
+  return { path: path, line: line, written: marked.written };
+}
+
+/// The line a token names, and the token without it.
+///
+/// Three ways of writing the same thing, because three tools write it and none of them is wrong:
+///
+/// - `src/a.rs:412` -- a compiler, most editors, and flint's own `grep`, which is also a
+///   `:412:7` with the column on the end. The column is *dropped* (a preview opens at a line, and
+///   nothing here draws a character offset) while `written` keeps it, since it is what the tool said.
+/// - `src/a.rs#L412` and `#L412-L420` -- GitHub's, which is how a link to a line travels between
+///   people. A range keeps its first line: the panel scrolls to one line, and the range's end is a
+///   fact about the tooltip rather than about the file.
+///
+/// A token with neither is returned whole with `line: 0`.
+function stripLine(token) {
+  const hash = /^(.*?)#L(\d+)(?:-L(\d+))?$/.exec(token);
+  if (hash) return { path: hash[1], line: Number(hash[2]), written: token };
+  const colon = /^(.*?):(\d+)(?::\d+)?$/.exec(token);
+  if (colon) return { path: colon[1], line: Number(colon[2]), written: token };
+  return { path: token, line: 0, written: token };
+}
+
+/// A `file://` address as the path it names, or `null` when the token is not one.
+///
+/// The scheme is dropped rather than kept as a link: an `<a href="file://…">` is a navigation the
+/// page will not make (and `asUrl` refuses the scheme by allowlist), while the *file* is the thing
+/// the reader pointed at, and `GET /file` is the door that reads it. A `/` in front of a drive
+/// letter goes with the scheme -- `file:///C:/x.js` is what a browser's copy-link produces, and
+/// `C:/x.js` is the path it means -- while on Unix the leading `/` is the path's own root and stays.
+///
+/// `file://host/share/x` is *not* one: that is a path on another machine, and this page reads files
+/// where the run lives. It stays text, and the doubling of the slash is what stops `asPath` from
+/// taking it for a UNC path, which is how a Windows reader would spell the same thing.
+function fileAddress(token) {
+  if (!/^file:\/\//i.test(token)) return null;
+  const rest = token.slice("file://".length);
+  if (!rest.startsWith("/")) return null;
+  return /^\/[A-Za-z]:[\\/]/.test(rest) ? rest.slice(1) : rest;
 }
 
 /// A byte count in the words the route uses for the same number, so the panel's note and the
@@ -1830,7 +1912,12 @@ function linkNodes(text, absoluteOnly) {
       nodes.push(document.createTextNode(part.text));
       continue;
     }
-    const button = el("button", "path", part.path);
+    // What the reader met, not what the route is asked for: a `grep` hit reads `src/web.rs:412:7`
+    // and a GitHub link reads `src/web.rs#L412`, and both of those say *where* in the file. The
+    // button goes to `part.path` at `part.line`; it says `part.written`, which is the same fact in
+    // the words the tool used -- and a `file://` prefix is dropped on the way (see `fileAddress`),
+    // since the scheme is the one part of the token the panel does not need to repeat.
+    const button = el("button", "path", part.written || part.path);
     button.type = "button";
     button.title = part.line ? part.path + ":" + part.line : part.path;
     button.addEventListener("click", (e) => {

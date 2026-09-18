@@ -185,15 +185,11 @@ pub fn expand(typed: &str, cwd: &Path) -> Result<Prompt> {
     })
 }
 
-/// The name as a path: a name that is already absolute is taken as written, everything else is
-/// relative to the working directory -- which is where the model's own tools resolve it.
+/// The name as a path: a name that is already absolute is taken as written, a leading `~` is the
+/// home directory, and everything else is relative to the working directory -- which is where the
+/// model's own tools resolve it ([`crate::config::resolve_path`], one rule for both).
 fn resolve(cwd: &Path, name: &str) -> PathBuf {
-    let path = Path::new(name);
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        cwd.join(path)
-    }
+    crate::config::resolve_path(cwd, name)
 }
 
 /// Every `@name` in the text, in the order it appears.

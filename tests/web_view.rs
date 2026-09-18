@@ -140,8 +140,16 @@ fn a_path_opens_in_this_page_or_not_at_all() {
         "the panel reads the file through the route and not by any other means"
     );
     assert!(
-        html.contains("el(\"button\", \"path\", part.path)"),
+        html.contains("el(\"button\", \"path\", part.written || part.path)"),
         "a path is a button, which cannot navigate the page"
+    );
+    // ...and the button *says* what the token said, line number and all: a `grep` hit that reads
+    // `src/web.rs:412` in the tool result must not read `src/web.rs` in the button, because where in
+    // the file is the one thing a hit is worth reading for. `part.path` is what the route is asked
+    // for; `part.written` is what the reader met.
+    assert!(
+        html.contains("part.line ? part.path + \":\" + part.line : part.path"),
+        "and the tooltip names the line the panel will open at"
     );
     forbidden("window.open(", "a file opens in this page, where the run that served it is");
     // The one place a path could reach the wire unencoded, or as markup, is the panel's header:

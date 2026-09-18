@@ -432,13 +432,15 @@ pub fn unattached_spill_dir() -> PathBuf {
     crate::config::spill_dir().join(format!("unattached-{}", std::process::id()))
 }
 
+/// A tool's path argument, as the path it means.
+///
+/// The rule -- `~` is the home directory, absolute is absolute, the rest is against the working
+/// directory -- is [`crate::config::resolve_path`], shared with the page's routes and a person's
+/// `@name`, because a model that writes `~/notes.txt` means the same file in all three places. This
+/// name stays because eight call sites here read better for it, and because *why a tool resolves a
+/// path at all* belongs beside the tool.
 fn resolve_path(cwd: &Path, raw: &str) -> PathBuf {
-    let p = Path::new(raw);
-    if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        cwd.join(p)
-    }
+    crate::config::resolve_path(cwd, raw)
 }
 
 /// Why Win32 will not use this name literally, if it will not.
@@ -4103,6 +4105,11 @@ mod tests {
         let cwd = Path::new("/work");
         assert_eq!(resolve_path(cwd, "a/b"), PathBuf::from("/work/a/b"));
         assert_eq!(resolve_path(cwd, "/etc/hosts"), PathBuf::from("/etc/hosts"));
+        // A model that writes `~/notes.txt` means the person's home directory, which is the file a
+        // `read` has to open for the transcript's own path button to be reading the same one.
+        assert_eq!(resolve_path(cwd, "~/notes.txt"), crate::config::home_dir().join("notes.txt"));
+        // ...while a file named with a leading tilde is a name in the working directory, not a home.
+        assert_eq!(resolve_path(cwd, "~notes.txt"), PathBuf::from("/work/~notes.txt"));
     }
 
     #[tokio::test]

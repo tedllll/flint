@@ -1556,14 +1556,16 @@ fn refusal(asked: &str, path: &std::path::Path) -> Response {
     }
 }
 
-/// A relative path against the directory the run is working in; an absolute one as it is.
+/// A relative path against the directory the run is working in; an absolute one as it is; and a
+/// leading `~` as the home directory of whoever is running.
+///
+/// The rule is [`crate::config::resolve_path`], shared with the model's tools and a person's
+/// `@name`, because the page is reading a path *the same model wrote in the transcript*: a `~/x`
+/// that the `read` tool resolved one way and this route resolved another would show the reader two
+/// different files under one name. What is local here is only which directory "relative" means --
+/// the run's own working directory, not the process's.
 fn resolve(asked: &str, cwd: &std::path::Path) -> std::path::PathBuf {
-    let path = std::path::Path::new(asked);
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        cwd.join(path)
-    }
+    crate::config::resolve_path(cwd, asked)
 }
 
 /// `POST /open`: hand a path to the program this machine uses for it.

@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
@@ -516,8 +516,75 @@ fn default_shell_args() -> Vec<String> {
     }
 }
 
+/// The directory this user's `~` means, or nothing when the machine will not say.
+///
+/// The two shapes exist because the two callers want different things from an unknown home: a
+/// caller *choosing where to write* falls back to the working directory, and a caller *resolving a
+/// path somebody wrote with a `~` in it* must not -- `~/notes.txt` silently becoming `./notes.txt`
+/// is a file read out of a directory nobody named, which is worse than saying the path is not there.
+/// One resolver, so `FLINT_HOME`'s default and a `~` in a tool argument cannot name two directories.
+pub fn home_dir_or_none() -> Option<PathBuf> {
+    dirs::home_dir()
+}
+
 pub fn home_dir() -> PathBuf {
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+    home_dir_or_none().unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// A path written with a leading `~`, as the path it means.
+///
+/// The rule is the shell's, narrowed to the one case this program can answer: `~` followed by a
+/// separator is this user's home directory. Three things are deliberately *not* expanded, because
+/// each would be a guess:
+///
+/// - `~user/notes.txt` -- another user's home. `dirs` knows the home of whoever is running, and
+///   nothing here can say where somebody else's is; a guess would be a read of the wrong file.
+/// - `~notes.txt` -- not a home at all. On Unix that is a file whose *name* begins with a tilde,
+///   and a program that quietly turned it into a path in the home directory would be unable to
+///   open the file it was pointed at.
+/// - `~/` with no home to expand to (a machine that will not say): the path stays as written, and
+///   the reader that asked reports it as missing.
+///
+/// `a/~/b` is not expanded either: the tilde has to be the first character, which is what makes
+/// this a rule about the *beginning* of a path rather than a search for a character in it.
+///
+/// The page's own address scanner states the same rule in `asPath` (`web/view.html`) so that a
+/// `~/…` in a transcript is a button and `~notes.txt` is a word: two readers, one definition of
+/// what a tilde path is.
+pub fn expand_home(path: &str) -> PathBuf {
+    expand_home_in(path, home_dir_or_none().as_deref())
+}
+
+/// The pure half of [`expand_home`], with the home handed in -- so the rule can be tested for the
+/// cases a real machine cannot be asked about (no home at all, and a path that is not ours to guess).
+pub fn expand_home_in(path: &str, home: Option<&std::path::Path>) -> PathBuf {
+    if let (Some(rest), Some(home)) = (tilde_rest(path), home) {
+        return home.join(rest);
+    }
+    PathBuf::from(path)
+}
+
+/// What follows a `~` that means this user's home, or nothing when the tilde is a character in a
+/// name. The separator is required: see [`expand_home`] for the two shapes that are not a home.
+fn tilde_rest(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix('~')?;
+    rest.strip_prefix(['/', '\\'])
+}
+
+/// A path somebody wrote, as the path it means: a leading `~` is this user's home directory (see
+/// [`expand_home`]), an absolute path is taken as written, and anything else is relative to `cwd`.
+///
+/// One function for the four doors a path comes in through -- a model's tool argument, the page's
+/// two routes (`GET /file`, `POST /open`), a person's `@name`, and a directory named in
+/// `config.toml` -- because four copies of "absolute, else against the working directory" is how a
+/// `~` came to be expanded by none of them, and how they could come to disagree about the rest.
+pub fn resolve_path(cwd: &Path, raw: &str) -> PathBuf {
+    let path = expand_home(raw);
+    if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    }
 }
 
 /// Where flint keeps its config and sessions.
@@ -1014,5 +1081,49 @@ mod tests {
         for level in crate::provider::Thinking::LEVELS {
             assert!(err.contains(level), "the error must offer {level}: {err}");
         }
+    }
+
+    /// A `~` at the start of a path is the home directory -- and nothing else is.
+    ///
+    /// The cases these assert are the ones where a rule like this goes wrong rather than the happy
+    /// one: `~user` is somebody else's home, `~notes.txt` is a file *named* that, `a/~/b` has a tilde
+    /// that is not at the start, and a machine that will not say where home is must leave the path
+    /// alone rather than resolve it against whatever the process happens to be sitting in.
+    #[test]
+    fn a_leading_tilde_is_the_home_directory_and_nothing_else_is() {
+        let home = Path::new("/home/me");
+        assert_eq!(expand_home_in("~/notes.txt", Some(home)), PathBuf::from("/home/me/notes.txt"));
+        assert_eq!(expand_home_in("~\\notes.txt", Some(home)), PathBuf::from("/home/me/notes.txt"));
+        assert_eq!(expand_home_in("~/", Some(home)), PathBuf::from("/home/me/"));
+        // The tilde is the *first* character or it is a character in a name.
+        assert_eq!(expand_home_in("a/~/b", Some(home)), PathBuf::from("a/~/b"));
+        assert_eq!(expand_home_in("~notes.txt", Some(home)), PathBuf::from("~notes.txt"));
+        assert_eq!(expand_home_in("~", Some(home)), PathBuf::from("~"));
+        // `~user` is another user's home, which nothing here can know: left as written, so the
+        // reader that asked reports it missing instead of reading a file that is not the one named.
+        assert_eq!(expand_home_in("~user/x", Some(home)), PathBuf::from("~user/x"));
+        // No home to expand to: the path stays what somebody wrote.
+        assert_eq!(expand_home_in("~/x", None), PathBuf::from("~/x"));
+        // Ordinary paths are not touched at all.
+        assert_eq!(expand_home_in("C:\\x\\y.md", Some(home)), PathBuf::from("C:\\x\\y.md"));
+        assert_eq!(expand_home_in("src/main.rs", Some(home)), PathBuf::from("src/main.rs"));
+    }
+
+    /// The one resolution rule, with the home handed in so the assertion does not depend on whose
+    /// machine this runs on: `~` first, then absolute, then against the working directory.
+    #[test]
+    fn a_path_resolves_through_the_home_directory() {
+        // `resolve_path` reads the real home, so the *rule* is asserted through the pure half and
+        // this test is about the shape of it: the result is absolute for every input.
+        let cwd = std::env::temp_dir();
+        assert!(resolve_path(&cwd, "a/b").is_absolute(), "relative to the working directory");
+        // "Absolute" is the platform's own notion of it -- `Path::is_absolute`, which on Windows
+        // wants a drive in front, so the two spellings are asserted one per platform rather than
+        // one of them being asked to mean the same thing on both.
+        let absolute = if cfg!(windows) { "C:\\etc\\hosts" } else { "/etc/hosts" };
+        assert_eq!(resolve_path(&cwd, absolute), PathBuf::from(absolute), "absolute as written");
+        let home = home_dir();
+        assert_eq!(resolve_path(&cwd, "~/x"), home.join("x"), "and a tilde in the real home");
+        assert_eq!(resolve_path(&cwd, "~x"), cwd.join("~x"), "which is not a home path");
     }
 }

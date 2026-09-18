@@ -430,8 +430,10 @@ pub fn skill_dirs_for(
         if dir.is_empty() {
             continue;
         }
-        let path = PathBuf::from(dir);
-        push(if path.is_absolute() { path } else { cwd.join(path) });
+        // A directory a person wrote in `config.toml`: `~` is their home directory, and anything
+        // relative is relative to the project they are in -- the same resolution a tool argument
+        // gets, because both are paths somebody typed.
+        push(crate::config::resolve_path(cwd, dir));
     }
     dirs
 }

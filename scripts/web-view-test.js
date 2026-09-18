@@ -1329,10 +1329,10 @@ check("an address is cut out of the line around it, and a word that only looks l
   eq(
     parts.filter((p) => p.path !== undefined),
     [
-      { path: "C:\\work\\src\\main.rs", line: 0 },
-      { path: "tests/say.rs", line: 412 },
+      { path: "C:\\work\\src\\main.rs", line: 0, written: "C:\\work\\src\\main.rs" },
+      { path: "tests/say.rs", line: 412, written: "tests/say.rs:412:3" },
     ],
-    "the two real paths, with the line a grep hit was on"
+    "the two real paths, with the line a grep hit was on and the token as it was written"
   );
   // The URL is no longer one of the pieces of text: it is the one candidate in this line with a
   // real address to go to, and the splitter says which kind it is rather than leaving the renderer
@@ -1342,37 +1342,63 @@ check("an address is cut out of the line around it, and a word that only looks l
     [{ url: "https://x.dev/a/b.rs" }],
     "the address in the line is an address"
   );
-  // Joined back together, nothing is lost or doubled, with one deliberate exception: the column of
-  // a `:line:column` hit is dropped -- the route opens a file at a line, and a character offset
-  // inside it was not asked for. This assertion is what makes the splitter a splitter rather than a
-  // renderer that eats the text between two paths.
+  // Joined back together, nothing is lost or doubled. `written` is what makes this lossless: the
+  // column of a `:line:column` hit is not part of the path the route opens, but it is part of what
+  // the tool said, and the splitter carries both. This assertion is what makes the splitter a
+  // splitter rather than a renderer that eats the text between two paths.
   eq(
     parts
       .map((p) =>
-        p.path !== undefined ? p.path + (p.line ? ":" + p.line : "") : p.url !== undefined ? p.url : p.text
+        p.path !== undefined ? p.written : p.url !== undefined ? p.url : p.text
       )
       .join(""),
-    "wrote C:\\work\\src\\main.rs and tests/say.rs:412, see and/or e.g. 4/2 https://x.dev/a/b.rs",
-    "the pieces put back together are the line that came in, minus the column"
+    "wrote C:\\work\\src\\main.rs and tests/say.rs:412:3, see and/or e.g. 4/2 https://x.dev/a/b.rs",
+    "the pieces put back together are exactly the line that came in"
   );
 
+  // `asPath` answers with `{path, line, written}`; most of the cases below are about which *path* a
+  // token is, so they compare those two fields. What the button prints is `written`, and the check
+  // after this one is where that is asserted.
+  const bare = (found) => (found ? { path: found.path, line: found.line } : null);
   // Absolute and relative, and the two shapes with no separator at all that are still files.
-  eq(viewer.asPath("/tmp/flint/spill/1.txt"), { path: "/tmp/flint/spill/1.txt", line: 0 }, "an absolute path");
-  eq(viewer.asPath("./src/bin"), { path: "./src/bin", line: 0 }, "an explicitly relative path");
+  eq(bare(viewer.asPath("/tmp/flint/spill/1.txt")), { path: "/tmp/flint/spill/1.txt", line: 0 }, "an absolute path");
+  eq(bare(viewer.asPath("./src/bin")), { path: "./src/bin", line: 0 }, "an explicitly relative path");
   eq(viewer.asPath("src/bin"), null, "one separator and no extension is left as text");
   eq(viewer.asPath("and/or"), null, "which is what keeps `and/or` out of it");
-  eq(viewer.asPath("a/b/c"), { path: "a/b/c", line: 0 }, "three segments are a path");
-  eq(viewer.asPath("Cargo.toml"), { path: "Cargo.toml", line: 0 }, "a name with an extension");
+  eq(bare(viewer.asPath("a/b/c")), { path: "a/b/c", line: 0 }, "three segments are a path");
+  eq(bare(viewer.asPath("Cargo.toml")), { path: "Cargo.toml", line: 0 }, "a name with an extension");
   eq(viewer.asPath("e.g."), null, "a prose abbreviation is not a file");
   eq(viewer.asPath("4/2"), null, "a ratio is not a directory");
   eq(viewer.asPath("2024/09/17"), null, "a date is not a directory");
   eq(viewer.asPath("https://api.github.com/repos/x/y.rs"), null, "a URL is not a path");
   // ...and the narrower rule prose is read with: only a path that is absolute, because a sentence
   // is where `src/bin` and `and/or` and `e.g.` are all just words.
-  eq(viewer.asPath("/tmp/flint/spill/1.txt", true), { path: "/tmp/flint/spill/1.txt", line: 0 }, "an absolute path, in prose");
-  eq(viewer.asPath("C:\\work\\main.rs", true), { path: "C:\\work\\main.rs", line: 0 }, "a Windows path, in prose");
+  eq(bare(viewer.asPath("/tmp/flint/spill/1.txt", true)), { path: "/tmp/flint/spill/1.txt", line: 0 }, "an absolute path, in prose");
+  eq(bare(viewer.asPath("C:\\work\\main.rs", true)), { path: "C:\\work\\main.rs", line: 0 }, "a Windows path, in prose");
   eq(viewer.asPath("src/main.rs", true), null, "a relative name in a sentence is a name");
   eq(viewer.asPath("Cargo.toml", true), null, "and so is a bare filename in one");
+
+  // A slash-rooted path has to be two segments deep or end in an extension, because this program's
+  // own commands are one segment with a slash in front and a conversation about flint is full of
+  // them. This was a bug rather than a worry: every `/jobs`, `/name` and `/events` in a transcript
+  // was a button onto a file that does not exist.
+  eq(viewer.asPath("/stop"), null, "a slash command is not a file");
+  eq(viewer.asPath("/jobs"), null, "nor is one this page offers");
+  eq(viewer.asPath("/events"), null, "nor is the route behind the live feed");
+  eq(bare(viewer.asPath("/etc/hosts")), { path: "/etc/hosts", line: 0 }, "while two real segments are a path");
+  eq(bare(viewer.asPath("/notes.md")), { path: "/notes.md", line: 0 }, "and an extension is the same evidence");
+  eq(viewer.asPath("/tmp"), null, "one segment with no extension is a directory or a command, and neither is read");
+  // The shape is asked of a *slash*-rooted path only: no command word begins with `~` or a drive
+  // letter, so those need no second piece of evidence -- and `~/notes` is a file people really mean.
+  eq(bare(viewer.asPath("~/.flint/config.toml")), { path: "~/.flint/config.toml", line: 0 }, "a home-relative path");
+  eq(bare(viewer.asPath("~/notes")), { path: "~/notes", line: 0 }, "even a bare name under it");
+  // ...and a file whose *name* begins with a tilde, which is a relative name and not a home: in a
+  // sentence it stays a word, and in a tool result it is a path the run resolves against its own
+  // directory -- never against the home directory, which is the rule `config::expand_home` states
+  // on the other side of the wire. Two readers, one definition of what a tilde path is.
+  eq(viewer.asPath("~notes.txt", true), null, "a file *named* with a leading tilde is a word in prose");
+  eq(bare(viewer.asPath("~notes.txt")), { path: "~notes.txt", line: 0 }, "and a relative name in a tool result, not a home");
+  eq(bare(viewer.asPath("C:\\notes", true)), { path: "C:\\notes", line: 0 }, "and a drive-rooted path needs none either");
 });
 
 check("a web address becomes a link, and only the two web schemes are addresses", () => {
@@ -1397,7 +1423,55 @@ check("a web address becomes a link, and only the two web schemes are addresses"
     .map((n) => n.text)
     .join("");
   ok(text.indexOf("javascript:alert(1)") !== -1, "a scheme that is not the web is left as the words it is");
-  ok(text.indexOf("file:///C:/notes.txt") !== -1, "including a local address, which no page may open");
+  // `file:` is still never a *link* -- no browser would follow one from a page served over http,
+  // and the page may not navigate this document anywhere at all. It is the page's own path button
+  // instead: a different door (`GET /file`, with the run's token, judged by the run), which is what
+  // a person pointing at a local file actually wants. The security claim is about the `<a>`, and it
+  // is unchanged by that.
+  eq(nodes.filter((n) => n.tag === "a" && String(n.href).indexOf("file:") === 0).length, 0, "no anchor goes to a local file");
+  eq(
+    nodes.filter((n) => n.tag === "button").map((b) => b.textContent),
+    ["C:/notes.txt"],
+    "and the local address is a path button that reads it through the run"
+  );
+});
+
+// The line a hit was on, in the three spellings three tools use, and the fourth way a path itself
+// gets written. All four were reported from a real transcript: a GitHub-style `#L42` and a
+// `file:///C:/…:42` were plain text (so nothing could be pressed), and a `:412` that *was*
+// recognised lost its line from the screen -- the button said `src/web.rs` while the tool had said
+// `src/web.rs:412`, which is the one detail a hit is worth reading for.
+check("a line number is written three ways, and the button keeps it", () => {
+  const at = (token, prose) => {
+    const found = viewer.asPath(token, prose);
+    return found ? { path: found.path, line: found.line } : null;
+  };
+  eq(at("src/web.rs:412"), { path: "src/web.rs", line: 412 }, "the compiler's and the editor's spelling");
+  eq(at("src/web.rs:412:7"), { path: "src/web.rs", line: 412 }, "a grep hit, whose column is dropped");
+  eq(at("src/web.rs#L412"), { path: "src/web.rs", line: 412 }, "GitHub's spelling");
+  eq(at("src/web.rs#L412-L420"), { path: "src/web.rs", line: 412 }, "a GitHub range keeps its first line");
+  eq(at("file:///C:/work/vtscreen.js:42"), { path: "C:/work/vtscreen.js", line: 42 }, "file:// with a line");
+  eq(at("file:///C:/work/vtscreen.js#L42"), { path: "C:/work/vtscreen.js", line: 42 }, "and with GitHub's");
+  eq(at("file:///home/me/x.js"), { path: "/home/me/x.js", line: 0 }, "on Unix the root is the path's own");
+  eq(viewer.asPath("file://server/share/x.js"), null, "a path on another machine stays text");
+
+  // What the button says, and what it opens: `written` is the token as the reader met it, `path` is
+  // what the route is asked to read. A path with no line has the two equal.
+  const nodes = viewer.linkNodes(
+    "see src/web.rs:412:7 and C:\\work\\a\\vtscreen.js#L42 and file:///C:/work/b.js:9 and C:\\work\\plain.rs",
+    false
+  );
+  const buttons = nodes.filter((n) => n.tag === "button");
+  eq(
+    buttons.map((b) => b.textContent),
+    ["src/web.rs:412:7", "C:\\work\\a\\vtscreen.js#L42", "C:/work/b.js:9", "C:\\work\\plain.rs"],
+    "the button prints the line, in the words the tool used, and drops only the file:// scheme"
+  );
+  eq(
+    buttons.map((b) => b.title),
+    ["src/web.rs:412", "C:\\work\\a\\vtscreen.js:42", "C:/work/b.js:9", "C:\\work\\plain.rs"],
+    "and the tooltip names the file and the line the panel will open at"
+  );
 });
 
 check("prose gets the web addresses and the absolute paths, and a word is left alone", () => {
