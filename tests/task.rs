@@ -1014,9 +1014,22 @@ async fn an_interrupted_task_says_what_it_left_running() {
         stdin.write_all(b"ask the child\n").expect("write");
         stdin.flush().expect("flush");
     }
-    // Long enough for the child to have started -- its own request is what the parent is waiting on --
-    // and short enough that it is still waiting when the line arrives.
-    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    // Wait for the fact this test is about -- the child's own conversation on disk -- rather than for
+    // a duration. The line here used to be `sleep(1500ms)`, and 1500 ms is not a premise: measured
+    // with the machine loaded (16 busy cores), the child had not reached the point of naming its
+    // conversation when the person typed, so the parent wrote the honest "It has not named its
+    // conversation yet" and the test failed for a reason that has nothing to do with what it tests.
+    // 10 runs out of 10, in 1.6 s each, and the fix is to wait for the state instead of guessing how
+    // long it takes.
+    //
+    // A file on disk is proof the parent's reader has had something to absorb: the child emits
+    // `session.started` *before* its first write (`src/session.rs`, "tells a caller which file before
+    // the first write"), and the path is known to the frame before the file exists.
+    let child_session_early = wait_for_child_conversation(&home, std::time::Duration::from_secs(60));
+    assert!(
+        child_session_early.is_some(),
+        "the child never named its conversation within 60s, so there is nothing to interrupt"
+    );
     {
         use std::io::Write;
         let stdin = child.stdin.as_mut().expect("stdin");
@@ -1054,10 +1067,17 @@ async fn an_interrupted_task_says_what_it_left_running() {
         text.contains("still going on its own"),
         "nothing says the child outlived the turn: {text}"
     );
+    // One full stop, not two. The note read "…again.." until the caller stopped punctuating a
+    // sentence that already ended in one, and this is the assertion that holds it: a defect inside a
+    // single sentence is invisible to every structural check in the suite.
+    assert!(
+        !text.contains("again..") && !text.contains("yet.."),
+        "the sentence about the child is punctuated twice: {text}"
+    );
     // The child's session path is the actionable half: the answer is being written there, and a run
     // that says so is a run whose work can still be collected.
-    let (pid, child_session) =
-        left_running_in(&text).expect("the note does not say what it left running");
+    let (pid, child_session) = left_running_in(&text)
+        .unwrap_or_else(|| panic!("the note does not say what it left running: {text}"));
     assert!(
         std::path::Path::new(&child_session).is_file(),
         "the note names a session that is not there: {child_session}"
@@ -1080,6 +1100,15 @@ async fn an_interrupted_task_says_what_it_left_running() {
 /// answer will be. The parent's own session is not the caller's to read -- `close_dangling_tool_calls`
 /// only runs on a *next* turn, which a one-shot does not have -- so the warning is the only channel
 /// left, and it is emitted before the outcome line because it is part of how the run ended.
+///
+/// The budget is 10 s rather than the 2 s it was, and that is about the premise rather than about the
+/// patience of a test. The claim here needs a child that has *named its conversation* before the
+/// deadline composes the warning, and naming it takes a measured 1.42 s unloaded and 1.74 s with
+/// sixteen busy cores (measured from the parent's spawn; `cargo test` alone runs 41 of these against
+/// the real binary at once). Against a 2 s budget that is half a second of margin, which is not a
+/// premise but a bet -- the neighbouring test in this file lost exactly that bet, 10 times out of 10,
+/// and the sentence it failed on had nothing to do with what it tested. Ten seconds is the same
+/// assertion with room in it: the child is held 120 s, so nothing else about the test moves.
 #[tokio::test]
 async fn a_json_run_cut_short_names_the_child_it_left_running() {
     let _solo = alone().await;
@@ -1105,7 +1134,7 @@ async fn a_json_run_cut_short_names_the_child_it_left_running() {
             "ask the child",
             "--json",
             "--max-seconds",
-            "2",
+            "10",
             "--cwd",
             &work.display().to_string(),
         ])
@@ -1156,7 +1185,13 @@ async fn a_json_run_cut_short_names_the_child_it_left_running() {
         .iter()
         .find(|text| text.contains("still going on its own"))
         .unwrap_or_else(|| panic!("the caller was never told about the child: {warnings:?}"));
-    let (pid, child_session) = left_running_in(note).expect("the warning names nothing actionable");
+    // One full stop, not two: the same sentence as the REPL's, through the other door.
+    assert!(
+        !note.contains("again..") && !note.contains("yet.."),
+        "the sentence about the child is punctuated twice: {note}"
+    );
+    let (pid, child_session) =
+        left_running_in(note).unwrap_or_else(|| panic!("the warning names nothing actionable: {note}"));
     assert!(
         Path::new(&child_session).is_file(),
         "the warning names a session that is not there: {child_session}"
@@ -1168,6 +1203,40 @@ async fn a_json_run_cut_short_names_the_child_it_left_running() {
 
     stop(pid);
     let _ = std::fs::remove_dir_all(&home);
+}
+
+/// The child's own conversation, once it is on disk -- or `None` if it never gets there.
+///
+/// Used as a *premise*, not as an assertion. Two tests in this file need a child that has already
+/// named its conversation before they can mean anything: one drops a turn while the child runs, the
+/// other cuts a run short on a budget. Waiting for this is the difference between a test and a bet on
+/// how fast the machine is, and the bet was lost loudly: with 16 busy cores the child had not named
+/// anything within the 1500 ms these tests used to sleep, and the assertion that failed was about a
+/// sentence, not about speed.
+///
+/// The path is under `children/` because that is where a conversation another run started is filed,
+/// and the file is written after `session.started` names it -- so its existence is also proof that
+/// the frame was emitted.
+fn wait_for_child_conversation(
+    home: &std::path::Path,
+    within: std::time::Duration,
+) -> Option<std::path::PathBuf> {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        let found = walk(&home.join("sessions")).into_iter().find(|path| {
+            path.extension().is_some_and(|ext| ext == "jsonl")
+                && path
+                    .parent()
+                    .is_some_and(|dir| dir.ends_with("children"))
+        });
+        if found.is_some() {
+            return found;
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 /// Every file under a directory, one level of `read_dir` at a time.
@@ -1188,8 +1257,7 @@ fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 }
 
 /// The pid in the sentence a dropped turn leaves about its child.
-fn pid_from(text: &str) -> Option<u32> {
-    let at = text.find("(pid ")? + "(pid ".len();
+fn pid_from(text: &str) -> Option<u32> {    let at = text.find("(pid ")? + "(pid ".len();
     let digits: String = text[at..].chars().take_while(char::is_ascii_digit).collect();
     digits.parse().ok()
 }
