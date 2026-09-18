@@ -991,6 +991,11 @@ The one guard is `/readonly`, which refuses `write`, `edit`, and any mutating
 shell command — and, for `exec`, any program that is not inspection only, judged by the
 program and its verb rather than by re-reading a command line it never had. Use it when you want flint to look but not touch.
 
+It holds on **every door**, including the two that are yours rather than the model's: `!cmd`
+typed at the prompt, and `flint exec <command>` (from `--readonly` or from a read-only config).
+A read-only run that could be walked around by the person at the keyboard would make the banner
+it prints about itself untrue.
+
 `--readonly` at startup turns it on for the whole run.
 
 ## Tools

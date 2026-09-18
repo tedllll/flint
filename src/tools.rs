@@ -2822,11 +2822,10 @@ impl Tool for BashTool {
         .clamp(1, 24 * 3600);
 
         if self.readonly && !is_readonly_command(command) {
-            return Err(anyhow!(
-                "readonly mode is ON: refusing to run `{}`. \
-                 Turn it off with /readonly, or use a read-only command.",
-                util::preview(command, 120)
-            ));
+            return Err(anyhow!(readonly_refusal(
+                command,
+                "Turn it off with /readonly, or use a read-only command."
+            )));
         }
 
         // Reached only after the gate above, which is the same gate a foreground command goes
@@ -3311,11 +3310,10 @@ impl Tool for ExecTool {
         .clamp(1, 24 * 3600);
 
         if self.readonly && !exec_is_readonly(program, &argv) {
-            return Err(anyhow!(
-                "readonly mode is ON: refusing to run `{}`. \
-                 Turn it off with /readonly, or run a program that only inspects.",
-                util::preview(&label, 120)
-            ));
+            return Err(anyhow!(readonly_refusal(
+                &label,
+                "Turn it off with /readonly, or run a program that only inspects."
+            )));
         }
 
         // No shell, and therefore no shell's quoting rules to satisfy: `exec` hands over an
@@ -3381,6 +3379,24 @@ pub fn is_readonly_command(command: &str) -> bool {
 
     let words: Vec<String> = lower.split_whitespace().map(str::to_string).collect();
     is_readonly_words(&words)
+}
+
+/// The sentence a command gets when `readonly` refuses it, from whichever door asked.
+///
+/// One string for four doors -- the `bash` tool, the `exec` tool, the `!` line a person types, and
+/// the `exec` subcommand -- because the rule they share is one rule, and a guard whose refusals read
+/// differently by door is one whose *judgement* looks different by door too. That is not a style
+/// preference: two of those doors used to skip the judgement entirely while a banner on the same
+/// screen said "writes and mutating commands are refused" (measured, 2026-09-18), and a shared
+/// sentence is the cheapest way for the four to be seen moving together.
+///
+/// The tail is the only part that differs, and only where it must: `/readonly` is a command inside a
+/// session, and the subcommand never sees one.
+pub fn readonly_refusal(label: &str, how_to_turn_it_off: &str) -> String {
+    format!(
+        "readonly mode is ON: refusing to run `{}`. {how_to_turn_it_off}",
+        util::preview(label, 120)
+    )
 }
 
 /// Whether a program and its already-separated words are inspection only.

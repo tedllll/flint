@@ -6346,6 +6346,109 @@ async fn a_report_asked_for_mid_turn_waits_for_the_turn() {
     );
 }
 
+/// `readonly` guarded one door out of three, and the other two were the person's own.
+///
+/// `docs/features.md` §2.3 says `flint exec` and the `exec` **tool** "go through the same readonly
+/// judgement"; they did not -- `exec_is_readonly` had exactly one caller, the tool -- and the banner
+/// this run prints on the same screen says "writes and mutating commands are refused" while `!cmd`
+/// typed at its prompt created the file anyway (measured). A guard that one door walks around is not
+/// a guard, and here the thing being falsified is flint's own sentence about itself.
+///
+/// Both halves are asserted in one run, because the fix must not turn `!` off: an inspection command
+/// still runs while the run is read-only, which is the whole of what "useful for a first look around
+/// an unfamiliar machine" asks for. The mutating half is a redirect (`echo hi > f`), which is a
+/// shell's own way of writing a file and is disqualified by the string rules whatever the platform.
+#[test]
+fn a_readonly_run_refuses_the_line_the_person_types() {
+    let home = test_home("readonly-bang", "http://127.0.0.1:9/v1");
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("working directory");
+    let text = repl_of_with(
+        &home,
+        &work,
+        &["--readonly"],
+        &["!echo hi > typed-out.txt", "!echo inspected"],
+    );
+    let created = work.join("typed-out.txt").exists();
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(
+        !created,
+        "a readonly run wrote a file through the line the person typed, which the banner on the same \
+         screen says is refused:\n{text}"
+    );
+    assert!(
+        text.contains("readonly") && text.to_lowercase().contains("refus"),
+        "nothing in the transcript says why the line did not run:\n{text}"
+    );
+    assert!(
+        text.contains("inspected"),
+        "`!echo` was refused as well, so `!` is not usable in a readonly run at all -- the refusal \
+         has to be the judgement, not the door:\n{text}"
+    );
+}
+
+/// The `exec` subcommand is the model's `exec` tool by another door, and §2.3 says so out loud.
+///
+/// It reads a config that exists (`load_existing`) and takes `--readonly` on its own command line, so
+/// both ways of asking for the guard were available and neither was consulted: `flint --readonly exec
+/// "echo hi > f"` wrote the file and exited 0. What is asserted here is the pair the sentence in
+/// `docs/features.md` promises -- the refusal, its exit code, and the inspection command that still
+/// has to work -- because a guard that refuses everything is a different bug with the same test.
+#[test]
+fn flint_exec_honours_the_readonly_flag() {
+    let home = test_home("readonly-exec", "http://127.0.0.1:9/v1");
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("working directory");
+
+    let refused = binary()
+        .args(["--readonly", "exec", "echo hi > exec-out.txt"])
+        .current_dir(&work)
+        .env("FLINT_HOME", &home)
+        .output()
+        .expect("failed to run flint");
+    let created = work.join("exec-out.txt").exists();
+
+    let allowed = binary()
+        .args(["--readonly", "exec", "echo inspected"])
+        .current_dir(&work)
+        .env("FLINT_HOME", &home)
+        .output()
+        .expect("failed to run flint");
+    let _ = std::fs::remove_dir_all(&home);
+
+    let stderr = String::from_utf8_lossy(&refused.stderr).to_string();
+    assert!(
+        !created,
+        "`flint --readonly exec` wrote the file anyway, which is the flag being ignored: stdout {} \
+         stderr {}",
+        String::from_utf8_lossy(&refused.stdout),
+        stderr
+    );
+    assert_eq!(
+        refused.status.code(),
+        Some(2),
+        "a refused invocation is a usage refusal like the others in §2.4, not the child's code: \
+         stderr {stderr}"
+    );
+    assert!(
+        stderr.contains("readonly"),
+        "the refusal does not say which guard refused it: {stderr}"
+    );
+    assert_eq!(
+        allowed.status.code(),
+        Some(0),
+        "`exec echo` was refused in a readonly run, so the judgement is on the door rather than on \
+         the command: stderr {}",
+        String::from_utf8_lossy(&allowed.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&allowed.stdout).contains("inspected"),
+        "the allowed command did not run: {}",
+        String::from_utf8_lossy(&allowed.stdout)
+    );
+}
+
 /// `/readonly` is the only switch this tool has, so it has to be a switch.
 ///
 /// Measured before it was fixed: `/readonly on` printed "no writes, no mutating commands", the

@@ -725,7 +725,7 @@ async fn real_main(args: Args) -> Result<i32> {
         // *before* running the command anyway -- untrue, since exec needs no key, and
         // the one message guaranteed to make someone stop and go debugging.
         let cfg = config::Config::load_existing();
-        return exec_direct(&cfg, command, &cwd, &Term::plain()).await;
+        return exec_direct(&cfg, cfg.readonly || args.readonly, command, &cwd, &Term::plain()).await;
     }
 
     // Everything below may need a provider, so a config is required from here.
@@ -1792,8 +1792,16 @@ async fn interactive(
         }
 
         if let Some(rest) = input.strip_prefix('!') {
-            run_shell_escape(cfg, agent.run_env(), rest, agent.cwd(), printer.term(), printer.pal)
-                .await;
+            run_shell_escape(
+                cfg,
+                agent.run_env(),
+                agent.readonly(),
+                rest,
+                agent.cwd(),
+                printer.term(),
+                printer.pal,
+            )
+            .await;
             continue;
         }
 
@@ -6409,9 +6417,15 @@ struct Handover {
 }
 
 /// `!cmd` escape inside the REPL and the `exec` subcommand.
+///
+/// The person's own door, and it is judged by the same rule as the model's tools. It was not, and
+/// the banner this run prints on the same screen -- "readonly — writes and mutating commands are
+/// refused" -- was falsified by `!echo hi > f` creating the file. A guard one door walks around is
+/// not a guard, and the sentence it falsifies is flint's own.
 async fn run_shell_escape(
     cfg: &config::Config,
     run_env: &tools::RunEnv,
+    readonly: bool,
     command: &str,
     cwd: &std::path::Path,
     term: &Term,
@@ -6423,6 +6437,17 @@ async fn run_shell_escape(
         term.line(format_args!("usage: !<command>"));
         return;
     }
+    if readonly && !tools::is_readonly_command(command) {
+        term.line(format_args!(
+            "{red}{}{reset}",
+            tools::readonly_refusal(
+                command,
+                "The line you type yourself is refused too; /readonly off allows it, or use a \
+                 read-only command."
+            )
+        ));
+        return;
+    }
     match tools::run_command_raw(cfg, run_env, command, cwd, 600).await {
         Ok(out) => term.text_ln(&out),
         Err(e) => term.line(format_args!("{red}error:{reset} {e:#}")),
@@ -6431,10 +6456,24 @@ async fn run_shell_escape(
 
 async fn exec_direct(
     cfg: &config::Config,
+    readonly: bool,
     command: &str,
     cwd: &std::path::Path,
     term: &Term,
 ) -> Result<i32> {
+    // Judged before anything runs, and refused as a *usage* error rather than as the child's exit
+    // code: no child ran, and the flag that asked for the guard is on this command line.
+    //
+    // `readonly` here is the config's key or the flag, whichever asked -- this path loads an existing
+    // config (`load_existing`) but never consults it for the guard, which is why `flint exec` under a
+    // read-only config ran mutating commands until this check existed.
+    if readonly && !tools::is_readonly_command(command) {
+        return usage::<i32>(tools::readonly_refusal(
+            command,
+            "`--readonly` and the config's `readonly` key both ask for this; leave them off, or run \
+             a program that only inspects.",
+        ));
+    }
     // A direct exec is meant for real work (installs, rebuilds), so it gets a
     // generous ceiling rather than the conversational default.
     //

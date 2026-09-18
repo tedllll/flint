@@ -29,11 +29,11 @@ reconstruct it:
 | 12. `docs/sandbox.md` contradicts `## Not doing, and why` | **declined in writing, 2026-09-18**: asked whether to build a permission layer or keep the default, the answer was keep the default (all permissions). The `ROADMAP.md` bullet is unchanged, `docs/sandbox.md` now labels itself an argument that lost, and the contradiction is closed in favour of the plan of record. Nothing else in §11 waited on it, and nothing does now |
 | 13. the addresses in the page's text, pressable | **built 2026-09-18**, asked for directly: a web address is a link in a new tab, a path stays a button into the preview, and the scheme test is an allowlist. Its one named residue — no OS-level open — was **built one session later** as `POST /open` plus the panel's `open` control (see `## What was just done`) |
 
-The gate as this session left it — re-measured after the note-and-flake fix below, on a tree with the
-untracked verification record held aside (that file and no other is the one thing `cargo test` disagrees
-with; see the paragraph after this one): `cargo test`
-**643 passing, 1 ignored** across the 14 suites (lib 357, bin 6, `agent_loop` 34, `balance` 7,
-`cli_output` 109, `json_output` 41, `say` 6, `search_tool` 4, `task` 17, `term_capture` 20 + 1 ignored,
+The gate as this session left it — re-measured after the note-and-flake fix and the readonly-door fix
+below, on a tree with the untracked verification record held aside (that file and no other is the one
+thing `cargo test` disagrees with; see the paragraph after this one): `cargo test`
+**645 passing, 1 ignored** across the 14 suites (lib 357, bin 6, `agent_loop` 34, `balance` 7,
+`cli_output` 111, `json_output` 41, `say` 6, `search_tool` 4, `task` 17, `term_capture` 20 + 1 ignored,
 `tty_hangup` 0 and the doc-tests 0 — both empty by construction — `web_view` 32, `who` 10);
 `cargo clippy --all-targets -- -D warnings` silent; the two headless Node harnesses green
 (`term-layout-test.js`, `web-view-test.js`) **and run by CI**; `examples/python/test_call.py` green; the
@@ -1756,6 +1756,35 @@ picker, type `/config` into the composer, and see whether the answer lands in th
 the block is drawn — then open the `commands` panel and read it against `/help` in the terminal.
 
 ## What was just done
+
+**`readonly` guarded one door out of three, and the two it missed were the person's own.** Found by the
+same external verification pass that reported the flaky test below, and the finding was two documents
+disagreeing with the tree at once — `docs/features.md` §2.3 said `flint exec` and the `exec` **tool**
+"go through the same readonly judgement", which was not true (`exec_is_readonly` had exactly one caller,
+the tool), while the banner a read-only run prints on its own screen says *"readonly — writes and
+mutating commands are refused"* and `!echo hi > f` typed at that screen's prompt created the file. That
+was reproduced before it was believed, in both doors: `flint --readonly exec "echo hi > exec-out.txt"`
+exited **0** with the file written, and a read-only session's `!` line did the same.
+
+The decision was to make the claim true rather than to narrow it, and the argument is the one the
+repository already made for the page's `POST /open` (a read-only run refuses a path *a person clicks*,
+because a guard with a door in it is not the guard its own banner describes). So `main.rs` now judges
+both: `run_shell_escape` takes the agent's live `readonly` (which `/readonly` moves, so it is read from
+the agent rather than from the flag) and `exec_direct` takes the config's key or the flag — that path
+loads an *existing* config and never consulted it for the guard, which is how a read-only config was
+bypassed too. The refusals are one string: `tools::readonly_refusal(label, how_to_turn_it_off)`, used by
+all four doors (the `bash` tool, the `exec` tool, the `!` line, the subcommand), because a guard whose
+refusals read differently by door is one whose *rule* looks different by door — and the two tool
+refusals had already drifted apart in their last clause before this was written.
+
+Two tests, both red first for the right reason (the file existed): `a_readonly_run_refuses_the_line_the_person_types`
+asserts the mutating `!` line is refused **and** that `!echo inspected` still runs in the same read-only
+session — a guard that refuses `!` altogether is a different bug with the same test — and
+`flint_exec_honours_the_readonly_flag` asserts the refusal, its exit **2** (a usage refusal: no child
+ran, and the flag asking for the guard is on that command line, so `EXIT_USAGE` is the code that means
+"changing the arguments fixes this"), and that `exec echo inspected` still exits 0. `docs/features.md`
+(§2.3, §2.4's new refusal row, §4's `!` row, §7.6), `README.md` and `AGENTS.md` now say the same thing,
+and §7.6 records why the sentence was narrowed nowhere and the code was changed instead.
 
 **Two tests that interrupted a run by counting milliseconds now wait for the frame that proves the
 state, because the gate's own command was failing on this machine.** `cargo test` came back with

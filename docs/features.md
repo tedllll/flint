@@ -104,7 +104,10 @@ things happen before the config is read on purpose and are worth knowing when te
 | `flint debug prompt-input [msg]` | print the request that *would* be sent, and send nothing | no | the JSON body: system prompt, history, tool schemas |
 
 `flint exec` is the one subcommand that is also a tool the model can call (`exec` in §6.1),
-and both go through the same readonly judgement.
+and both go through the same readonly judgement — as do the `!` line a person types and a
+read-only *config* read by the subcommand. Four doors, one rule (`tools::readonly_refusal` is
+the one sentence they all print; it was not always, and two of the four used to skip the
+judgement entirely — see §7.6).
 
 ### 2.4 Refusals at the command line — observed, with exit codes
 
@@ -122,6 +125,7 @@ Every one of these is `EXIT_USAGE` (2) unless noted, and goes to **stderr** as
 | `flint --port 4321` | `--port needs --web: it chooses the port the browser view listens on` | 2 |
 | `flint --cwd C:\definitely\missing -p hi` | `--cwd C:\definitely\missing: no such directory` | 2 |
 | `flint exec` | `exec requires a command` | 2 |
+| `flint --readonly exec "echo hi > out.txt"` | `readonly mode is ON: refusing to run `echo hi > out.txt`. `--readonly` and the config's `readonly` key both ask for this; leave them off, or run a program that only inspects.` — nothing runs, and the file is not created | 2 |
 | `flint export` | `export requires a session: `flint export <n\|id\|path> [--out <file>]`` | 2 |
 | `flint say` | `say requires a message. `flint say "I am editing src/provider.rs"`, with `--to <pid>` to address one run` | 2 |
 | `flint --schema '{bad json}'` | `cannot use the schema from '{bad json}': the schema is not valid JSON: …` | 2 |
@@ -371,7 +375,7 @@ press; `terminal` is not offered on the page at all.
 |---|---|---|---|
 | `/help` (or `/?`) | the command list | panel | — |
 | `/web [port]` | open the browser view of this conversation | terminal | the page *is* this view |
-| `!<command>` | run a shell command without the model | terminal | the output goes to the transcript; `!` is a shell escape, not a tool call |
+| `!<command>` | run a shell command without the model | terminal | the output goes to the transcript; `!` is a shell escape, not a tool call; in a `readonly` run it is refused unless the command is inspection only, by the same rule as `bash` (§7.6) |
 | `/stop` | the interrupt as a word | terminal | for ssh, a pipe, or the browser's composer, where a key is not available |
 | `/exit` (`/quit`, `/q`) | quit | terminal | a misclick on the page must not end a session |
 
@@ -494,6 +498,12 @@ All-or-nothing, and judged where it can be:
   elevation word (`sudo`, `doas`) disqualifies it, and what is left is judged by program and
   verb.
 - `exec` is judged from the program and its verb, not from a command line.
+- **The person's own doors are judged too**, which they were not until 2026-09-18: the `!` line
+  typed at the prompt (by the `bash` rule above, because a line is what it is) and the
+  `flint exec` subcommand (by the `exec` rule, from the flag or from a read-only config). The
+  banner a read-only run prints — `readonly — writes and mutating commands are refused` — was
+  true of the model's tools and false of the line directly under it, and its own words are the
+  reason the two doors were brought in rather than the sentence being narrowed.
 
 The refusal is a **guard against mistakes, not a boundary**: `readonly` is useful for a first
 look around an unfamiliar machine, and it is not a sandbox. `docs/features.md` §15 lists

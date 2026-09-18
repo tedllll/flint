@@ -218,7 +218,12 @@ The only switch is `readonly` (`/readonly`, or in the config), and it is all-or-
 refuses `write`, `edit`, `apply_patch` and mutating shell commands, while still allowing
 inspection. For `exec` it refuses any program that is not inspection only, judged from the
 program and its verb rather than from a command line — see `exec_is_readonly` and
-`is_readonly_words` in `src/tools.rs`. Useful for a first look around an unfamiliar machine;
+`is_readonly_words` in `src/tools.rs`. **Every door is judged, including the person's two** —
+a `!cmd` line typed at the prompt, and the `flint exec` subcommand (where the flag or a
+read-only config asks for it) — and `tools::readonly_refusal` is the one sentence all four
+print. Until 2026-09-18 only the model's tools were judged, so the banner a read-only run
+prints about itself ("writes and mutating commands are refused") was falsified by the line
+directly under it. Useful for a first look around an unfamiliar machine;
 not a safety net for ordinary work.
 
 The read-before-mutate gate — `write`, `edit` and patch updates refuse a file this run has
