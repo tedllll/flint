@@ -1715,6 +1715,26 @@ the block is drawn — then open the `commands` panel and read it against `/help
 
 ## What was just done
 
+**A written inventory of every door, because the person doing the checking was reading source.** The
+ask was blunt — *"write a complete feature description for QA: what can be operated, how, and what
+happens"* — and the honest reason to write it is that the tree had no single place that answers it. The
+README tells the story in the order somebody would learn it; `docs/decisions.md` says why; `--help`
+lists flags and nothing else; each `docs/*.md` is the measured record of one subsystem. What was missing
+was the flat list: 43 rows of the command table, the sixteen tool names and which of them a given run
+is offered, every flag, every refusal with its exit code, every frame of the `--json` stream, and every
+file on disk. That is `docs/features.md` (sixteen sections, ~970 lines), and
+it was built by reading the source rather than the docs — the dispatcher, the tool box, the config
+loader, the session reader, the web listener — with every quoted string taken from a live run against a
+scratch `FLINT_HOME`. Two read-only inventories (the page's controls, and the state under `FLINT_HOME`)
+were commissioned and their findings checked against the tree rather than copied in; they caught four
+things this file had wrong, all of them now fixed here and in the doc: a request table row that said
+`job_op`'s fourth verb was `kill` (it is `stop`), a `read` tool row that claimed an explicit directory
+refusal (there is none — the OS's error comes back wrapped), a `--json` cross-reference pointing at the
+terminal section, and a claim that a piped `flint` is a one-shot (it is a REPL that ends at EOF, exit 0
+even when the turn it ran failed — measured, and now written down that way). `AGENTS.md`'s layout table
+and the README's closing paragraph point at it, so the next change to a user-visible surface has one
+row to update.
+
 **`/resume` drew nothing, and the fix is one call in the right place.** Reported from a real session:
 going back to an older conversation inside a running flint left the screen clean apart from the one
 `resumed: <file> (N messages)` line. `--resume` at startup had printed the conversation for a long time,

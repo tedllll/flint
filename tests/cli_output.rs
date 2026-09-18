@@ -591,6 +591,11 @@ fn always_allowed(c: char) -> bool {
             | 0x20A0..=0x20CF // currency signs
             | 0x2190..=0x21FF // arrows: ← → ↔
             | 0x2200..=0x22FF // mathematical operators: ≡ ⋯
+            | 0x2300..=0x23FF // miscellaneous technical: the transcript's own marks, ⏵ while a tool
+                              // runs and ⏹ for a turn that was interrupted. The source writes them
+                              // as `\u{23f5}`-style escapes, so this is the first file to spell them:
+                              // `docs/features.md` quotes what a person sees on screen, and a
+                              // reader checking a build has to be able to recognise the glyph
             | 0x2500..=0x257F // box drawing, which the terminal fixtures draw with
             | 0x25A0..=0x27BF // geometric shapes and dingbats: ✓ ✗ ✔ ⚠
             | 0x2E00..=0x2E7F // supplemental punctuation

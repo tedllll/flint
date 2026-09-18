@@ -1340,7 +1340,9 @@ Releases are built by GitHub Actions for Linux (x86_64/aarch64, musl), macOS
 
 Where it is going, and what it deliberately will not do, is in
 [`ROADMAP.md`](ROADMAP.md); why it is built the way it is — decision by decision, with the
-reasoning — is in [`docs/decisions.md`](docs/decisions.md).
+reasoning — is in [`docs/decisions.md`](docs/decisions.md). Every door this build offers,
+with what to do at it and what comes back — the checklist for checking a build — is
+[`docs/features.md`](docs/features.md).
 
 ## Design notes
 
