@@ -1217,7 +1217,7 @@ pub fn jobs_snapshot() -> serde_json::Value {
             let ended = *job.ended.lock().unwrap_or_else(|e| e.into_inner());
             let (status, detail) = match &finished {
                 Some(finished) => (
-                    job_status(finished.code),
+                    job_status(finished.code, job.was_ended_here()),
                     format!("exit code {} ({})", finished.code, task_exit_meaning(finished.code)),
                 ),
                 // Not ended yet, and the flag is what says whether it is still working or already on
@@ -1253,16 +1253,23 @@ pub fn jobs_snapshot() -> serde_json::Value {
     serde_json::json!({ "jobs": jobs })
 }
 
-/// The one word for how a job ended, from the only thing that says: its exit code.
+/// The one word for how a job ended, from the exit code and from whether *this* run ended it.
 ///
 /// -1 is what an exit status carries when a signal ended the process, so it is a different fact from
 /// a failure and gets a different word: "it said it was done", "it broke" and "it was killed" are
 /// the three answers a person is looking for in a list of work, and a row that said "failed" for a
 /// kill would send somebody looking for a bug that is not there.
-fn job_status(code: i32) -> &'static str {
+///
+/// `ended_by_us` is the second half, and it is not decoration. A child asked to stop ends with **130**
+/// ("the run was stopped"), which read from the code alone is `failed` -- the one word §8 of
+/// `docs/features.md` promises a kill never gets. The flag is set before the signal goes out, so it
+/// is true of every job this run ended; a job that finished with 0 in that same instant still reads
+/// `completed`, because it did.
+fn job_status(code: i32, ended_by_us: bool) -> &'static str {
     match code {
         0 => "completed",
         -1 => "killed",
+        _ if ended_by_us => "killed",
         _ => "failed",
     }
 }
@@ -4678,6 +4685,10 @@ fn task_exit_meaning(code: i32) -> &'static str {
         0 => "finished",
         1 => "failed, cause not classified",
         2 => "the arguments were wrong, so nothing was asked",
+        // A signal, and the word the page's `status` has always used for it. It said `unknown` here,
+        // so the same finished job was `killed` in one door and `(unknown)` in the other two
+        // (`/jobs`, and the sentence `job_op` hands back) -- measured with `job_op stop`.
+        -1 => "killed",
         65 => "the answer is not usable: a schema never matched, or the run ran out of steps",
         69 => "a person must act: no key, rejected credentials, or an account with no balance",
         75 => "the retries ran out; asking again later is right",
@@ -6980,15 +6991,45 @@ mod background_command_tests {
         );
     }
 
-    /// The three words a row can carry, from the exit code alone. Pure, because the mapping is the
-    /// whole of the decision: a job that was killed and a job that failed look the same from the
-    /// outside, and a person reading the list is asking which one it was.
+    /// The three words a row can carry, from the exit code and from who ended it. Pure, because the
+    /// mapping is the whole of the decision: a job that was killed and a job that failed look the same
+    /// from the outside, and a person reading the list is asking which one it was.
+    ///
+    /// The second argument is the half that was missing: a child this run asked to stop ends with
+    /// **130** -- "the run was stopped", its own honest code -- and read from the code alone that is
+    /// `failed`, which is the word `docs/features.md` §8 promises a kill never gets.
     #[test]
     fn a_jobs_state_word_is_its_exit_code_read_the_way_a_person_reads_it() {
-        assert_eq!(job_status(0), "completed");
-        assert_eq!(job_status(-1), "killed");
-        assert_eq!(job_status(1), "failed");
-        assert_eq!(job_status(130), "failed");
+        assert_eq!(job_status(0, false), "completed");
+        assert_eq!(job_status(-1, false), "killed");
+        assert_eq!(job_status(-1, true), "killed");
+        assert_eq!(job_status(1, false), "failed");
+        assert_eq!(job_status(130, false), "failed");
+        assert_eq!(
+            job_status(130, true),
+            "killed",
+            "a child this run stopped read as a failure"
+        );
+        assert_eq!(
+            job_status(0, true),
+            "completed",
+            "a job that finished before the signal landed did not fail"
+        );
+    }
+
+    /// The words in brackets after an exit code, which is the other door onto the same judgement.
+    ///
+    /// `-1` is a signal, and the table said `unknown` for it while `job_status` said `killed` for the
+    /// same code -- so a command this run stopped was `killed` on the page and `(unknown)` in `/jobs`
+    /// and in the sentence `job_op` handed back. Measured on a real `job_op stop`, 2026-09-18.
+    #[test]
+    fn the_words_beside_an_exit_code_agree_with_the_state_word() {
+        assert_eq!(task_exit_meaning(-1), "killed");
+        assert_eq!(task_exit_meaning(0), "finished");
+        // The rich meanings stay rich where there is one: a code with something to say is not
+        // flattened into a state word just because the two share a function now.
+        assert_eq!(task_exit_meaning(130), "the run was stopped");
+        assert_eq!(task_exit_meaning(69), "a person must act: no key, rejected credentials, or an account with no balance");
     }
 
     /// What the page's list is drawn from, for a job that is still running and then for the same job
