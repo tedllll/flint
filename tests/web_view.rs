@@ -90,6 +90,12 @@ fn the_view_never_assigns_markup() {
 }
 
 /// Nothing is loaded from anywhere, and there is nothing to load it with.
+///
+/// A link a person presses is not the page reaching anywhere: that navigation belongs to the
+/// browser, in a new tab, and it is asserted in `an_address_leaves_the_page_and_a_path_does_not`.
+/// What is forbidden here is a **subresource** -- a script, a stylesheet, a fetch -- because that is
+/// the page itself making a request, and a page served off this machine has no business doing that
+/// at all.
 #[test]
 fn the_view_requests_nothing_external() {
     for needle in ["http://", "https://", "//cdn", "<script src", "<link rel=\"stylesheet\" href=\"http"] {
@@ -99,6 +105,12 @@ fn the_view_requests_nothing_external() {
     // what `/session` and `/events` will need. This is why the check is for absolute URLs
     // rather than for `fetch`.
     forbidden("XMLHttpRequest", "the view has no reason to use XHR");
+    // ...and the two spellings of the same mistake now that the page does name a scheme: a fetch or
+    // a tag pointed at somewhere else. The link's own `href` is a property set from the address in
+    // the text, so it never appears as one of these.
+    for needle in ["fetch(\"http", "fetch('http", "fetch(`http", "src=\"http", "href=\"//"] {
+        forbidden(needle, "the page must not request anything off this machine");
+    }
 }
 
 /// A path in a tool block is a thing to press, and it opens **in this page**.
@@ -107,6 +119,11 @@ fn the_view_requests_nothing_external() {
 /// still running -- the token, the stream and the reader's place all live in this document -- and
 /// a `window.open` would be a second copy of the page with none of them. What the page may do
 /// instead is ask the run for the file, over the one route that reads a path (`GET /file`).
+///
+/// An address on the *web* is the other kind, and it is a link in a new tab: see
+/// `an_address_leaves_the_page_and_a_path_does_not`, which is where that half is asserted. The two
+/// are split on purpose -- a path has no address a browser could open, and a URL has no file for
+/// `GET /file` to read.
 #[test]
 fn a_path_opens_in_this_page_or_not_at_all() {
     let html = view();
@@ -127,7 +144,6 @@ fn a_path_opens_in_this_page_or_not_at_all() {
         "a path is a button, which cannot navigate the page"
     );
     forbidden("window.open(", "a file opens in this page, where the run that served it is");
-    forbidden("target=\"_blank\"", "a second tab would be a page with no token and no stream");
     // The one place a path could reach the wire unencoded, or as markup, is the panel's header:
     // it is built from `textContent` like everything else.
     let head = from("function paintPreviewHead()", 14);
@@ -135,6 +151,49 @@ fn a_path_opens_in_this_page_or_not_at_all() {
         !head.contains("innerHTML") && head.contains("textContent"),
         "the panel's header is text like every other piece of the page:\n{head}"
     );
+}
+
+/// An address on the web is a link out of this page, and it is the only thing that may be.
+///
+/// This is a change of position, so it is written down as one. The page used to contain **no
+/// absolute URL anywhere** and the rule was that a path is a button "because a link would navigate
+/// away"; a web address reverses half of that: it has somewhere real to go, and the only way to
+/// open it without destroying this document -- the token, the stream, the reader's place -- is a
+/// new tab with the opener severed. So a path stays a button and an address becomes a link, and the
+/// tests keep the two apart rather than weakening the path's rule.
+///
+/// The scheme is the part that has to be an allowlist. This document holds the run's token, and a
+/// model writes the text it renders: an `href` of `javascript:...` is script running in it, needing
+/// no bug and no parser, only a click. `http` and `https` are the two schemes that mean "a page",
+/// and the check below is that they are tested in one place -- a function -- rather than assumed
+/// where the anchor is built.
+#[test]
+fn an_address_leaves_the_page_and_a_path_does_not() {
+    let html = view();
+    assert!(
+        html.contains("function asUrl(token)"),
+        "the one place a scheme is accepted must be one function, so there is one allowlist"
+    );
+    assert!(
+        html.contains("/^https?:\\/\\/[^\\s/]+/i.test(text)"),
+        "the test is an allowlist of the two web schemes, and it wants a host after them"
+    );
+    assert!(
+        html.contains("link.target = \"_blank\";"),
+        "a page opens in a new tab: this document is the conversation it was read in"
+    );
+    assert!(
+        html.contains("link.rel = \"noopener noreferrer\";"),
+        "and the tab it opens cannot reach back through `window.opener`"
+    );
+    // Prose is read with the narrower rule -- absolute paths only -- because a sentence is where
+    // `and/or` and `e.g.` and `src/bin` all live. This assertion is that the *view* uses it: a rule
+    // nobody calls is not a rule.
+    assert!(
+        html.contains("linkNodes(block.text, true)"),
+        "a turn's own words are read with the prose rule"
+    );
+    forbidden("href = part.text", "an address is a property, never markup");
 }
 
 /// The jobs panel reads the run's list, and a row is a press that stays in this page.

@@ -208,6 +208,18 @@ would disagree with.
   is a policy the tests can check (§10).
 - **Plain text, no Markdown renderer.** A renderer is a parser, a parser is a dependency, and
   a parser that emits HTML is the same injection hole with more steps. Code goes in `<pre>`.
+- **An address is the one thing that is pressable, and the two kinds are different on purpose.** A
+  *web address* becomes a link in a new tab (`target="_blank"`, `rel="noopener noreferrer"`): this
+  document is the conversation — its token, its stream, the reader's place — so following a link
+  inside it would throw all three away, and a new tab with the opener severed is the one way to open
+  a page without doing that. A *path* stays a button that opens the preview panel, because a file has
+  no address a browser may open from a page served over http; `GET /file` is that door (§12). The
+  scheme test is an **allowlist** (`asUrl`), and it is the security boundary rather than a nicety:
+  the `href` is set as a property from a model's words, in a document holding the run's token, so
+  `javascript:` would be script here needing no bug — only the click the reader was going to make.
+  `http` and `https` are links; `javascript:`, `data:` and `file:` stay the words they are. Prose is
+  read with the narrower path rule — absolute paths only — because a sentence is where `src/bin`,
+  `and/or` and `e.g.` are all just words (§11, measured).
 - **One file, no build step.** No pnpm, no vite, no TypeScript, no client plugins, no HMR.
   The HTML is a text file in the repository that a person can read and repair, embedded with
   `include_str!` so the binary stays one file. A UI layer that needs a build pipeline would
@@ -1004,6 +1016,44 @@ bytes. The press belongs to the harness in §11, which drives the page's control
 *prints what it drives* before it presses anything, with these two rows on its "not driven here" list
 rather than in a promise that the list could grow to include them. So this is a bounded claim with a
 stated boundary, which is what it was always meant to be.
+
+### An address in a turn's own words — measured, 2026-09-18
+
+Asked for directly, one day after §12's own complaint was settled: *"addresses on the page should be
+hyperlinks to the real thing — a web page, or an address on this computer."* §12 had made a **path**
+pressable and only inside a tool block, because the splitter was written for tool output; prose was left
+alone on purpose, since a sentence is where `and/or` and `e.g.` live. What was missing was the other kind
+of address, and prose.
+
+Two kinds, two doors, and the difference is which one has somewhere real to go. A web address is a link in
+a new tab with the opener severed; a path stays a button into the preview panel, because a file has no
+address a browser may open from a page served over http. The scheme test is an **allowlist** in one
+function, and that is the security boundary: the `href` is a property set from a model's words in a
+document that holds the run's token, so `javascript:` would be script here needing no bug — only the click
+the reader was about to make. Prose is read with the narrower path rule (absolute only), tool output with
+the wide one.
+
+| Claim | How | Result |
+|---|---|---|
+| The address in the run's own words is a link to the real page | the harness's scripted turn, read out of the DOM | one `a.link`, `href="https://example.com/flint"`, `target="_blank"`, `rel` carrying `noopener` |
+| An address that is not the web stays the words it is | the same sentence, carrying `javascript:alert(1)` | still exactly **one** link in that row, and the text is intact — the count is the assertion that catches a permissive allowlist |
+| A path in the run's own words opens that file | the same sentence, naming the file the turn wrote by absolute path | a `button.path`, and pressing it puts `four\nfive\n` in the panel with that path in its header |
+| The splitter's rules | `scripts/web-view-test.js`, no browser | the four schemes in one line (one link), prose's absolute-only rule (`src/main.rs` stays a word), and the view *calling* it — a splitter nobody calls would pass the first three |
+| The allowlist is the only place a scheme is accepted | the page's own bytes | `asUrl` is a function, and the mutation that widens it to "any scheme" makes the Node check fail |
+
+Two page-policy tests changed, and that is the part worth reading rather than the code:
+`the_view_requests_nothing_external` used to mean "no absolute URL appears in the page at all", which the
+new link could only satisfy by hiding the string from the scanner; it now means "the page itself requests
+nothing off this machine", keeps every forbid it had, and gained sharper ones (`fetch("http`, `src="http`).
+`a_path_opens_in_this_page_or_not_at_all` no longer forbids `target="_blank"` in general — that rule was
+about paths, and the address half is asserted in its own test, with `window.open(` still forbidden because
+a link is the safer form.
+
+**Not done, and named so that nobody assumes it.** There is no OS-level open: a directory — or "show me
+this in Explorer" — would need a new route that launches a program on the strength of text a model wrote,
+which is a door worth a decision of its own rather than a side effect of this one. And the **preview
+panel's own contents are still plain text**, so a URL inside a file a person is reading is not pressable
+yet.
 
 ---
 

@@ -26,6 +26,7 @@ reconstruct it:
 | 10. `/export` from inside a conversation | **built** |
 | 11. the page's panel groups are classes, not tasks | seen and judged **not worth a round on its own** — cosmetic, no behaviour, recorded so nobody re-derives it |
 | 12. `docs/sandbox.md` contradicts `## Not doing, and why` | **a decision for the person**: take a first stage and edit the bullet, or decline it in writing. Nothing else in §11 waits on it |
+| 13. the addresses in the page's text, pressable | **built 2026-09-18**, asked for directly: a web address is a link in a new tab, a path stays a button into the preview, and the scheme test is an allowlist |
 
 The gate as this session left it: `cargo test` **634 passing, 1 ignored** across the 14 suites (lib 351,
 bin 6, `agent_loop` 34, `balance` 7, `cli_output` 109, `json_output` 41, `task` 17, `search_tool` 4, `who`
@@ -57,8 +58,32 @@ carry the reason in the check annotation; until then, "a `--web` run died mid-te
 twice in one session" is recorded rather than explained, and the un-fixed class — the other `--web` tests
 that still discard stderr — is named here so the next person does not have to rediscover it.
 
-**The one promise this session kept in full, because it was the last feature the plan of record owed:**
-§11 item 9(ii), the page's `/say --to` picker of live runs. Paragraphs below keep the reasoning for each
+**And §11 item 13, asked for after this session's consolidation: an address in the page is pressable.**
+Everything the page rendered was text — a URL in a model's answer was a string to copy by hand, and a path
+was pressable only inside a *tool block*, because the splitter's rule was written for tool output and prose
+was left alone on purpose (`and/or` and `e.g.` are why it has an extension length and a segment count at
+all). It is two kinds of address and two doors now, and the split is the design: a **web address** is a
+link in a new tab (`target="_blank"`, `rel="noopener noreferrer"`) because this document is the
+conversation — its token, its stream, the reader's place — and a **path** stays a button into the preview
+panel, because a file has no address a browser may open from a page served over http. The scheme test is an
+**allowlist** and is the security boundary rather than a nicety: the `href` is set as a property from a
+model's words in a document that holds the run's token, so `javascript:` would be script here needing no
+bug, only the click the reader was about to make; `http` and `https` are links, and `javascript:`, `data:`
+and `file:` stay the words they are.
+
+Two page-policy tests were **edited on purpose** and that is the part a reader should check:
+`the_view_requests_nothing_external` used to mean "no absolute URL appears in the page at all" and now means
+"the page itself requests nothing off this machine" (the forbid list survived and got sharper), and
+`a_path_opens_in_this_page_or_not_at_all` no longer forbids `target="_blank"` outright — that rule was
+about paths, and it is now stated for addresses in its own test, with `window.open(` still forbidden. Held
+by: four Node checks (the splitter, the four schemes in one line, the prose rule, and the view actually
+calling it), the two policy tests, and three claims driven in a real browser — the harness went from 56/56
+to **59/59**. The allowlist was proved to bite by widening it to "any scheme" and watching the check fail.
+Not done, and named so nobody assumes it: no OS-level open (a directory, or "open in Explorer", needs a new
+route that launches a program on the strength of text a model wrote — a decision of its own), and a file
+being *previewed* is still plain text, so a URL inside it is not pressable.
+
+**The one promise this session kept in full, because it was the last feature the plan of record owed:** §11 item 9(ii), the page's `/say --to` picker of live runs. Paragraphs below keep the reasoning for each
 item in the order the round built them.
 
 **The first of them: a turn says how many times the provider was retried (`provider_retries`).** §10 B5

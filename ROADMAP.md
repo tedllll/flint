@@ -2068,6 +2068,47 @@ where prose and tree disagree is item 3.**
     answers, which is the thing this project refuses to have — and the sandbox document is also the
     reason the `readonly` half is honest about being all-or-nothing rather than half a boundary.
 
+13. **The addresses in a page's text, pressable — *built 2026-09-18*, and the one item here that was
+    asked for rather than found by a sweep.** Everything the page rendered was text: a URL in a model's
+    answer was a string to select by hand, and a path was pressable only inside a **tool block**, since
+    the splitter's rule was written for tool output and prose was deliberately left alone (`and/or` and
+    `e.g.` are the reason). Two kinds of address, two doors, and the difference between them is the whole
+    design:
+
+    - **a web address is a link in a new tab** (`target="_blank"`, `rel="noopener noreferrer"`). This
+      document is the conversation — the token, the stream, the reader's place — so following a link *in*
+      it would throw all three away, which is exactly what the old rule ("a path opens in this page")
+      said about `window.open`. A new tab with the opener severed is the same instinct applied to the one
+      kind of thing that has somewhere real to go.
+    - **a path stays a button** into the preview panel, because a file has no address a browser may open
+      from a page served over http — `GET /file` is the door, and it already says what it cannot do (a
+      directory, a binary, a file past the preview cap).
+
+    The scheme test is an **allowlist** (`asUrl`, `web/view.html`) and it is the security boundary rather
+    than a nicety: the `href` is set as a property from a model's words, in a document that holds the
+    run's token, so `javascript:` would be script here needing no bug and no parser — only the click the
+    reader was going to make anyway. `http` and `https` become links; `javascript:`, `data:` and `file:`
+    stay the words they are. That is held red-first on both sides: the Node check asserts the count of
+    links in a line carrying all four schemes (and was shown to bite by widening the allowlist to "any
+    scheme", which makes it fail), and the page-policy test asserts the allowlist is a function so there
+    is one of it.
+
+    Three claims in a real browser (`scripts/browser-controls-test.js`, 56 → **59/59**): the address in
+    the run's own words is a link with the right `href`, `target` and `rel`; a `javascript:` address in
+    the same sentence is not one; and the absolute path in the same sentence opens that file beside the
+    conversation. Two page-policy tests were **edited on purpose** and the change is the interesting
+    part: `the_view_requests_nothing_external` used to mean "no absolute URL appears in the page at all"
+    and now means "the page itself requests nothing off this machine" (the forbid list stayed, and got
+    sharper — `fetch("http`, `src="http`), and `a_path_opens_in_this_page_or_not_at_all` no longer
+    forbids `target="_blank"` outright, because that rule was about *paths* and is now stated for
+    addresses in its own test. `window.open(` is still forbidden: a link is the safer form.
+
+    What it deliberately does not do: no OS-level open (a directory, or "open in Explorer", would be a
+    new route that launches a program on the strength of text a model wrote — a door worth a decision of
+    its own rather than a side effect of this one), and the **preview panel's own file contents are still
+    plain text**, so a URL inside a file a person is reading is not pressable yet. Both are named in
+    `HANDOFF.md` rather than left as a surprise.
+
 **Read, and deliberately left out of the queue** — each of these came up in one of the two sweeps or in
 this reading, and was not proposed, for a reason worth keeping rather than rediscovering:
 

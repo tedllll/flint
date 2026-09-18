@@ -415,6 +415,7 @@ function announceScope() {
     "  the model picker from the keyboard",
     "  the composer's send button, and a line the run answers",
     "  a tool block's path buttons, and the preview panel: a grep hit, reload, Escape, a refusal",
+    "  the addresses in the run's own words: a web address, a path, and a scheme that is not the web",
     "  the jobs panel: a running clock, an exit code, a child's own conversation, output, a stop",
   ]) {
     console.log(door);
@@ -461,7 +462,10 @@ async function main() {
   // which of the two commands they are waiting for.
   const slow = `node -e "console.log('one'); setTimeout(() => console.log('two'), 15000)"`;
   const endless = `node -e "console.log('alive'); setTimeout(() => console.log('never'), 60000)"`;
-  const model = await stubModel([
+  // The bodies are read as requests arrive, so the last one can be written *after* the scratch
+  // directory exists. That matters for one claim: the prose names a real file by its absolute path,
+  // and the page has to be able to open it -- which a made-up path could not show.
+  const script = [
     toolCall("write", { path: "notes.txt", content: "one\ntwo\nthree\n" }),
     toolCall("read", { path: "notes.txt" }),
     toolCall("read", { path: "gone.txt" }),
@@ -471,8 +475,26 @@ async function main() {
     toolCall("task", { prompt: "say hi" }),
     prose("the child's answer"),
     prose("all done"),
-  ]);
+  ];
+  const model = await stubModel(script);
   const where = scratch(`http://127.0.0.1:${model.port}/v1`);
+  // The turn's last answer, and the three shapes of address a claim below is made against: a web
+  // address that must be a link, the absolute path of the file this run wrote that must open in the
+  // preview, and a `javascript:` address that must stay the words it is. The last one is the reason
+  // the splitter has an allowlist rather than a blocklist.
+  //
+  // Both of the last two bodies carry it, and that is measured rather than defensive: the parent's
+  // request after the `task` and the child's own first request race, and on this machine the parent
+  // took the first body and the child the second -- so which one ends up in the parent's transcript
+  // is a timing detail, and a claim that depended on it would be a claim that fails on a slower
+  // machine. The words are the same either way; the child's own conversation is not what is read.
+  const addresses = prose(
+    "all done -- see https://example.com/flint for the page, " +
+      `${path.join(where.cwd, "notes.txt")} for the file, ` +
+      "and javascript:alert(1) for the scheme that is not the web"
+  );
+  script[script.length - 1] = addresses;
+  script[script.length - 2] = addresses;
   const flint = await startFlint(where);
   console.log(`flint: ${flint.url}\n  home: ${where.home}\n  browser: ${binary}\n  model: port ${model.port}\n`);
 
@@ -1415,6 +1437,64 @@ async function main() {
       "Escape closes the job list too",
       listWasOpen === true && listNow === false,
       `open: ${listWasOpen} -> ${listNow}`
+    );
+
+    // ---- the addresses in the run's own words ------------------------------
+    // The turn's last answer carries three addresses of three kinds, and what the page must do with
+    // each is the claim: a link, a path that opens the panel, and words. They are read off the *same*
+    // row, so a page that turned everything into a link could not pass by accident -- and the count
+    // of links is asserted, which is the half that catches a `javascript:` address becoming one.
+    const spoken = await page.js(
+      `(() => { const row = Array.from(document.querySelectorAll(".turn.assistant"))
+            .filter((t) => t.textContent.includes("all done")).pop();
+          if (!row) return null;
+          return {
+            links: Array.from(row.querySelectorAll("a.link")).map((a) =>
+              ({ text: a.textContent, href: a.href, target: a.target, rel: a.rel })),
+            buttons: Array.from(row.querySelectorAll("button.path")).map((b) => b.textContent),
+            text: row.textContent,
+          }; })()`
+    );
+    check(
+      "an address in the run's own words is a link to the real page, in a new tab",
+      !!spoken &&
+        spoken.links.length === 1 &&
+        spoken.links[0].href === "https://example.com/flint" &&
+        spoken.links[0].text === "https://example.com/flint" &&
+        spoken.links[0].target === "_blank" &&
+        /noopener/.test(String(spoken.links[0].rel)),
+      `links: ${JSON.stringify(spoken && spoken.links)}`
+    );
+    check(
+      "and an address that is not the web stays the words it is",
+      !!spoken && spoken.links.length === 1 && /javascript:alert\(1\)/.test(String(spoken.text)),
+      `text: ${JSON.stringify(spoken && spoken.text)}`
+    );
+
+    const prosePath = path.join(where.cwd, "notes.txt");
+    const taggedProse = await page.js(
+      `(() => { const row = Array.from(document.querySelectorAll(".turn.assistant"))
+            .filter((t) => t.textContent.includes("all done")).pop();
+          if (!row) return false;
+          const b = Array.from(row.querySelectorAll("button.path"))
+            .find((x) => x.textContent === ${JSON.stringify(prosePath)});
+          if (!b) return false; b.id = "harness-prose-path"; return true; })()`
+    );
+    if (taggedProse) await page.click("#harness-prose-path");
+    const readByProse = await page
+      .waitFor(
+        `document.getElementById("preview-path").textContent === ${JSON.stringify(prosePath)}
+           ? { body: document.getElementById("preview-text").textContent,
+               note: document.getElementById("preview-note").textContent }
+           : null`,
+        "the file the run's words named",
+        30
+      )
+      .catch(() => null);
+    check(
+      "a path in the run's own words opens that file beside the conversation",
+      taggedProse === true && !!readByProse && readByProse.body === "four\nfive\n",
+      `tagged: ${taggedProse}, panel: ${JSON.stringify(readByProse)}`
     );
   } finally {
     page.close();

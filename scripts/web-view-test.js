@@ -385,7 +385,21 @@ check("a command's answer is drawn as a transcript block with its own label", ()
   const rows = page.__node("doc").children.filter((n) => n.className === "turn command");
   eq(rows.length, 1, "one command row");
   eq(rows[0].children[0].textContent, "/tools", "the label is the command that was run");
-  eq(rows[0].children[1].textContent, "bash\nread\nedit", "the answer is the body");
+  // The answer is the body's *pieces* rather than one `textContent`, because prose goes through the
+  // address splitter: a sentence with a URL or a path in it is several nodes, and a stub cannot
+  // join them the way a real DOM does. Joined back here, it is the same answer as before.
+  const pieces = [];
+  const collect = (node) => {
+    if (!node) return;
+    if (!node.tag) {
+      pieces.push(node.text);
+      return;
+    }
+    if (node.textContent) pieces.push(node.textContent);
+    for (const child of node.children || []) collect(child);
+  };
+  collect(rows[0].children[1]);
+  eq(pieces.join(""), "bash\nread\nedit", "the answer is the body");
 });
 
 check("a command frame with no text in it paints nothing rather than `undefined`", () => {
@@ -1303,13 +1317,13 @@ check("the feed trace says what the page cannot work out for itself", () => {
   eq(viewer.debugFeed, false, "off unless the address asks for it");
 });
 
-console.log("the paths in a transcript");
+console.log("the addresses in a transcript");
 
-check("a path is cut out of the line around it, and a word that only looks like one is not", () => {
+check("an address is cut out of the line around it, and a word that only looks like one is not", () => {
   // The rule in full, on the shapes a tool block actually contains. Every entry here is a case
   // that was argued about rather than an example that happened to pass: `e.g.` and `and/or` are
   // why the rule has an extension length and a segment count at all.
-  const parts = viewer.pathParts(
+  const parts = viewer.addressParts(
     "wrote C:\\work\\src\\main.rs and tests/say.rs:412:3, see and/or e.g. 4/2 https://x.dev/a/b.rs"
   );
   eq(
@@ -1320,12 +1334,24 @@ check("a path is cut out of the line around it, and a word that only looks like 
     ],
     "the two real paths, with the line a grep hit was on"
   );
+  // The URL is no longer one of the pieces of text: it is the one candidate in this line with a
+  // real address to go to, and the splitter says which kind it is rather than leaving the renderer
+  // to guess again from the string.
+  eq(
+    parts.filter((p) => p.url !== undefined),
+    [{ url: "https://x.dev/a/b.rs" }],
+    "the address in the line is an address"
+  );
   // Joined back together, nothing is lost or doubled, with one deliberate exception: the column of
   // a `:line:column` hit is dropped -- the route opens a file at a line, and a character offset
   // inside it was not asked for. This assertion is what makes the splitter a splitter rather than a
   // renderer that eats the text between two paths.
   eq(
-    parts.map((p) => (p.path === undefined ? p.text : p.path + (p.line ? ":" + p.line : ""))).join(""),
+    parts
+      .map((p) =>
+        p.path !== undefined ? p.path + (p.line ? ":" + p.line : "") : p.url !== undefined ? p.url : p.text
+      )
+      .join(""),
     "wrote C:\\work\\src\\main.rs and tests/say.rs:412, see and/or e.g. 4/2 https://x.dev/a/b.rs",
     "the pieces put back together are the line that came in, minus the column"
   );
@@ -1341,6 +1367,71 @@ check("a path is cut out of the line around it, and a word that only looks like 
   eq(viewer.asPath("4/2"), null, "a ratio is not a directory");
   eq(viewer.asPath("2024/09/17"), null, "a date is not a directory");
   eq(viewer.asPath("https://api.github.com/repos/x/y.rs"), null, "a URL is not a path");
+  // ...and the narrower rule prose is read with: only a path that is absolute, because a sentence
+  // is where `src/bin` and `and/or` and `e.g.` are all just words.
+  eq(viewer.asPath("/tmp/flint/spill/1.txt", true), { path: "/tmp/flint/spill/1.txt", line: 0 }, "an absolute path, in prose");
+  eq(viewer.asPath("C:\\work\\main.rs", true), { path: "C:\\work\\main.rs", line: 0 }, "a Windows path, in prose");
+  eq(viewer.asPath("src/main.rs", true), null, "a relative name in a sentence is a name");
+  eq(viewer.asPath("Cargo.toml", true), null, "and so is a bare filename in one");
+});
+
+check("a web address becomes a link, and only the two web schemes are addresses", () => {
+  // The scheme test is the security boundary rather than a cosmetic one: this document holds the
+  // run's token, and an `href` built out of a model's words is a way to run script in it --
+  // `javascript:` needs no bug, only a click. `data:` and `file:` are refused for the same reason,
+  // and a `file:` address is one no page served over http may open in any browser anyway.
+  const nodes = viewer.linkNodes(
+    "see https://api.github.com/repos/x/y.rs. then javascript:alert(1) and data:text/html,<b>x</b> and file:///C:/notes.txt"
+  );
+  const links = nodes.filter((n) => n.tag === "a");
+  eq(links.length, 1, "one address in the line is a link");
+  eq(links[0].href, "https://api.github.com/repos/x/y.rs", "the href is the address, without the full stop after it");
+  eq(links[0].textContent, "https://api.github.com/repos/x/y.rs", "the link reads as the address itself");
+  eq(links[0].target, "_blank", "a page opens in a new tab: this document is the conversation");
+  ok(
+    String(links[0].rel).indexOf("noopener") !== -1,
+    "and the new tab cannot reach back through window.opener"
+  );
+  const text = nodes
+    .filter((n) => n.tag === undefined)
+    .map((n) => n.text)
+    .join("");
+  ok(text.indexOf("javascript:alert(1)") !== -1, "a scheme that is not the web is left as the words it is");
+  ok(text.indexOf("file:///C:/notes.txt") !== -1, "including a local address, which no page may open");
+});
+
+check("prose gets the web addresses and the absolute paths, and a word is left alone", () => {
+  const nodes = viewer.linkNodes(
+    "look at /etc/hosts, C:\\work\\a.txt, and/or e.g. src/main.rs, then https://x.dev/a for more",
+    true
+  );
+  eq(
+    nodes.filter((n) => n.tag === "button").map((b) => b.textContent),
+    ["/etc/hosts", "C:\\work\\a.txt"],
+    "the two absolute paths in the sentence, and nothing that merely looks like one"
+  );
+  eq(nodes.filter((n) => n.tag === "a").map((a) => a.href), ["https://x.dev/a"], "and the one address in it");
+  const text = nodes
+    .filter((n) => n.tag === undefined)
+    .map((n) => n.text)
+    .join("");
+  ok(text.indexOf("src/main.rs") !== -1, "a relative name in a sentence stays a name");
+});
+
+check("a turn's own words carry those addresses into the page", () => {
+  // The view-level half, and the reason this check exists at all: a splitter nobody calls would
+  // pass every check above. This is the path prose actually takes into the transcript.
+  const block = viewer.renderBlock({ kind: "assistant", text: "done: https://x.dev/a and /tmp/notes.txt" });
+  const found = { links: [], buttons: [] };
+  const walk = (node) => {
+    if (!node) return;
+    if (node.tag === "a") found.links.push(node);
+    if (node.tag === "button" && node.className === "path") found.buttons.push(node);
+    for (const child of node.children || []) walk(child);
+  };
+  walk(block);
+  eq(found.links.map((a) => a.href), ["https://x.dev/a"], "the address in the answer is a link");
+  eq(found.buttons.map((b) => b.textContent), ["/tmp/notes.txt"], "and the file named in it is a button");
 });
 
 check("a rendered tool block makes its paths buttons, and pressing one opens the panel", () => {

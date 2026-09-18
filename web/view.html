@@ -419,6 +419,15 @@
     border-bottom: 1px dotted var(--dim);
   }
   button.path:hover, button.path:focus { color: var(--user); border-bottom-color: var(--user); }
+  /* An address on the web: the one thing on this page that is a link, because it is the one thing
+     with somewhere to go. A path is a button instead (`button.path`), since a file has no address a
+     browser may open from a page served over http. Dotted like a path so that the two read as the
+     same kind of thing -- something to press -- and it solidifies under the pointer. */
+  a.link {
+    color: var(--user); text-decoration: underline; text-decoration-style: dotted;
+    text-underline-offset: 2px;
+  }
+  a.link:hover, a.link:focus { text-decoration-style: solid; }
   /* The file, opened beside the conversation. A column of the layout, not a panel over it -- see
      the grid above for the measurement that settled it -- and deliberately not resizable: it has one
      width, and the reader closes it rather than negotiating with it. DSH's page opens a file
@@ -986,35 +995,40 @@ function clip(s, n) {
   return s.length > n ? s.slice(0, n) + "…" : s;
 }
 
-/// The pieces of a string that look like a path, and the plain text between them.
+/// The pieces of a string that are an address -- a web address or a path -- and the text between.
 ///
-/// A pure splitter, so the one rule this page has about paths can be tested under Node without a
+/// A pure splitter, so the rules this page has about addresses can be tested under Node without a
 /// DOM. It is deliberately dumb, and the whole of it is written down here rather than left to a
 /// regex nobody reads again:
 ///
 ///   * a candidate is a run of characters with no whitespace, quote, bracket, brace, angle
 ///     bracket, comma, semicolon or backtick in it -- so JSON arguments and English sentences
 ///     both come apart in the right places;
-///   * it is a path if it is **absolute** (`/…`, `./…`, `../…`, `~…`, `C:\…`), or its last
-///     segment has an extension of two to eight characters, or it has three or more segments. One
-///     separator and no extension is left as text on purpose: `and/or`, `read/write`,
+///   * a candidate that begins with one of the two web schemes is a **web address**, and nothing
+///     else about it is judged here: `asUrl` decides that, and it decides it by allowlist;
+///   * otherwise it is a path if it is **absolute** (`/…`, `./…`, `../…`, `~…`, `C:\…`), or its
+///     last segment has an extension of two to eight characters, or it has three or more segments.
+///     One separator and no extension is left as text on purpose: `and/or`, `read/write`,
 ///     `pass/fail` and `24/7` all look like `src/bin` from here, and this page cannot tell them
 ///     apart without asking the disk;
 ///   * a one-character "extension" is prose, not a file: `e.g.` and `i.e.` are the reason, and
 ///     `foo.c` is the price -- it stays text;
-///   * a `//` in it means it is a URL, not a path;
+///   * a `//` in it means it is not a path at all -- the candidate that reaches here with one is a
+///     URL that failed `asUrl`, so it stays text;
 ///   * trailing `.` and `:` are punctuation rather than part of a name, and a trailing `:N` or
 ///     `:N:C` is the line a `grep` hit was found on: it comes back as `line` rather than as part
 ///     of the path, so the preview can open where the hit was.
 ///
-/// Only tool blocks are split this way. Prose is left as prose, because prose is where `e.g.` and
-/// `and/or` live.
-function pathParts(text) {
+/// `absoluteOnly` is the narrower rule prose is read with, and the reason is the bullets above:
+/// in a sentence, `src/bin`, `and/or` and `e.g.` are words, while `/etc/hosts` and `C:\work\x` are
+/// not. Tool output keeps the wider rule -- a relative path in a tool result is what the tool
+/// meant. The web-address half is the same in both: a URL in a sentence is still a URL.
+function addressParts(text, absoluteOnly) {
   const parts = [];
   let last = 0;
   const candidates = String(text).matchAll(/[^\s"'`()\[\]{}<>,;]+/g);
   for (const match of candidates) {
-    const found = asPath(match[0]);
+    const found = asUrl(match[0]) || asPath(match[0], absoluteOnly);
     if (!found) continue;
     if (match.index > last) parts.push({ text: text.slice(last, match.index) });
     parts.push(found);
@@ -1024,8 +1038,30 @@ function pathParts(text) {
   return parts;
 }
 
+/// One candidate token as a web address, or `null`.
+///
+/// The scheme is the whole test, and it is an **allowlist** rather than a blocklist of the schemes
+/// that are dangerous. This document holds the run's token, and the text it renders is written by a
+/// model, so an `href` taken from that text is a way to run script here: `javascript:` needs no
+/// bug, no parser and no click beyond the one the reader was going to make anyway. The two schemes
+/// that mean "a page" pass; `javascript`, `data`, `file` and a bare `www.` with no scheme at all
+/// stay the words they are.
+///
+/// A trailing `.` or `:` is the sentence's punctuation rather than part of the address -- the other
+/// trailing punctuation never reaches here, because the splitter cuts on it. The host is part of the
+/// test as well: the scheme on its own is not an address, and neither is a scheme followed by
+/// nothing but slashes.
+function asUrl(token) {
+  const text = token.replace(/[.:]+$/, "");
+  if (!/^https?:\/\/[^\s/]+/i.test(text)) return null;
+  return { url: text };
+}
+
 /// One candidate token as a path, or `null` when it is a word that merely looks like one.
-function asPath(token) {
+///
+/// With `absoluteOnly` -- which is how prose is read -- a relative name is a word: see
+/// `addressParts` for why the two rules differ.
+function asPath(token, absoluteOnly) {
   let path = token.replace(/[.:]+$/, "");
   let line = 0;
   const numbered = /^(.*?):(\d+)(?::\d+)?$/.exec(path);
@@ -1037,6 +1073,7 @@ function asPath(token) {
   const segments = path.split(/[\\/]+/);
   const name = segments[segments.length - 1];
   const absolute = /^([\\/]|~[\\/]|[A-Za-z]:[\\/])/.test(path);
+  if (absoluteOnly && !absolute) return null;
   // `4/2`, `2024/09` and `1/2/3` are ratios and dates as often as they are directories, and a
   // numeric segment in every position after the first is the shape they share. The check is only
   // made when there *is* a position after the first: `Cargo.toml` is one segment, and `every` on
@@ -1669,15 +1706,40 @@ function toolSummary(block) {
   return parts;
 }
 
-/// Text with the paths in it as buttons that open the preview, and everything else as text.
+/// A line of text with the addresses in it as things to press.
 ///
-/// Buttons rather than links: a link would navigate away from a conversation that is still
-/// running, and this opens a panel *over* it. It stays inside the page's one rule -- the splitter
-/// decides where the text is cut, and every piece still goes in through `textContent`, so a file
-/// whose name is `<script>` is a filename here like any other.
-function linkNodes(text) {
+/// Two kinds, two doors, and the difference is which one has somewhere real to go:
+///
+///   * a **web address** is a link in a new tab. This document is the conversation -- the token,
+///     the stream, the reader's place -- and following a link in it would throw all three away, so
+///     the tab is what keeps it. It goes in as a *property* (`link.href = part.url`) rather than as
+///     markup, which is what makes `asUrl`'s allowlist the only thing between a model's words and
+///     script in this page: a scheme that is not the web never becomes a link at all.
+///   * a **path** is a button that opens the preview panel, because a file has no address a browser
+///     could open from here, and `GET /file` is the one route that can read one.
+///
+/// It stays inside the page's one rule either way: the splitter decides where the text is cut, and
+/// every piece still goes in through `textContent`, so a file whose name is `<script>` is a
+/// filename here like any other.
+///
+/// `absoluteOnly` is passed through to the splitter: prose is read with the narrow rule, tool
+/// output with the wide one.
+function linkNodes(text, absoluteOnly) {
   const nodes = [];
-  for (const part of pathParts(text)) {
+  for (const part of addressParts(text, absoluteOnly)) {
+    if (part.url !== undefined) {
+      const link = el("a", "link", clip(part.url, 120));
+      link.href = part.url;
+      // The visible text may be shortened; the address it goes to is not.
+      link.title = part.url;
+      link.target = "_blank";
+      // `noopener` so the page that opens cannot reach back through `window.opener` and drive
+      // this document with its token; `noreferrer` for the same reason a token never travels in a
+      // query string.
+      link.rel = "noopener noreferrer";
+      nodes.push(link);
+      continue;
+    }
     if (part.path === undefined) {
       nodes.push(document.createTextNode(part.text));
       continue;
@@ -1774,7 +1836,12 @@ function renderBlock(block) {
     r.addEventListener("toggle", () => { block.reasoningOpen = r.open; });
     turn.appendChild(r);
   }
-  turn.appendChild(el("div", "body", block.text));
+  // The turn's own words, with the addresses in them: a URL a person can press, and a path that
+  // opens beside the conversation. The narrow path rule is the right one here -- see
+  // `addressParts` -- because a sentence is where `and/or` and `e.g.` live.
+  const body = el("div", "body");
+  for (const node of linkNodes(block.text, true)) body.appendChild(node);
+  turn.appendChild(body);
   return turn;
 }
 
@@ -3116,7 +3183,7 @@ if (typeof module !== "undefined" && module.exports) {
     sessionsFrom, messageBody, resumeLine, streamingAnswer, carryStreaming, setStreamingAnswer,
     paint, feedTrouble, tokenRefused, feedTrace, debugFeed, applyState, showState, fillSelect,
     showToggles, showCommands, showActions, sessionRow, formLine,
-    pathParts, asPath, bytesLabel, previewNote, linkNodes, renderBlock, fileRoute,
+    addressParts, asUrl, asPath, bytesLabel, previewNote, linkNodes, renderBlock, fileRoute,
     jobsFrom, durationLabel, jobWhen, jobIsLive,
     // The position this tab was reading from: exported so the Node harness can check the three cases
     // -- a gap, a different conversation, and a position past the end -- against the real functions

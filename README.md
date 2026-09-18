@@ -810,6 +810,15 @@ path is the path of the process that wrote it, so `src/web.rs` means the run's `
 nothing else; §12 of `docs/web-mode.md` has the rule for what in a line counts as a path and the
 measured record from a real browser.
 
+**A web address in the transcript is a link.** An `http` or `https` address in the run's own words —
+the answer that cites a page, a fetch result, a URL in a tool's output — opens in a new tab, with the
+opener severed, so the conversation you are reading stays where it is. It is the same splitter as the
+paths, and the same rule about what a line may contain: only those two schemes ever become a link, so
+`javascript:` and `data:` stay the words they are. That is deliberate rather than incidental — the page
+holds the run's token, and an `href` taken from a model's words is script in *that* document if the
+scheme is not checked. A path stays a button rather than a link, because a file has no address a
+browser may open from a page served over http. §11 of `docs/web-mode.md` is the measured record.
+
 **The run's background work is in the header.** A `task` child, or a `bash`/`pwsh`/`exec` command
 started with `background: true`, appears in a **jobs** list — one row per job, badged with what it is,
 saying what was asked, and ticking how long it has been going. A job that ends keeps its row and gains
