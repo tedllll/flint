@@ -1258,9 +1258,11 @@ it runs, and carrying the exit code in words when it ends. A row is a door — p
 job's log, or a child's conversation, in the preview column the paragraph above built. The frame that
 says the list changed is a **revision counter**, not the list: `tools::jobs_revision()` is compared by
 the SSE loop on every frame it forwards and on a four-second timer, which is the one change with no
-traffic to ride on (a command ending while the run is idle). DSH's job popover is the shape, and the two
-things refused from it are the live-tail inside the list (the preview column already reads a job's
-output) and a `stopping` status (nothing records a stop until it has ended). `docs/web-mode.md` §13 has
+traffic to ride on (a command ending while the run is idle). DSH's job popover is the shape, and one
+thing was refused from it: the live-tail inside the list (the preview column already reads a job's
+output). A `stopping` status was refused in the same breath, on the grounds that nothing recorded a stop
+until it had ended — **built 2026-09-18** (§11 item 7), which corrects that sentence rather than leaving
+it as a refusal the tree no longer honours. `docs/web-mode.md` §13 has
 the measured record, including the two claims that were written wrong — one looked for *any* settled
 job when the child settles seconds before the command, and one reused a row's `id` and so pressed the
 wrong row the second time.
@@ -1291,10 +1293,12 @@ reads the two commands out of the opening state frame, the browser claims (**56/
 the two mutations.
 
 **Still open in this section:** the item §9 was written about is now built, and the next round is
-whatever using it turns up. Two limits are recorded rather than owed: a `stopping` state would need a
-flag on the `Job` that nothing sets today, and a job started by an *earlier* run of flint is not in the
-list at all — a handle is what this process started, and deriving a list from files is the thing this
-repository does not do. A third is now stated rather than implied: **the panel has no kill control**, and
+whatever using it turns up. The `stopping` state it recorded as a limit is **built 2026-09-18** (a flag
+set where the stop is asked for, read against `finished`, so the panel can say "on its way out" instead
+of "still working" — see §11 item 7). One limit is recorded rather than owed: a job started by an
+*earlier* run of flint is not in the list at all — a handle is what this process started, and deriving a
+list from files is the thing this repository does not do. A third is now stated rather than implied:
+**the panel has no kill control**, and
 that is a decision, not a gap — a row is a door (it opens the log), and a second gesture on the same
 target is the ambiguity that made a browser harness press the wrong row in the round above, so the
 person's stop is a command reachable from the page's command panel.
@@ -1798,8 +1802,8 @@ list's, not this one's, and each line is edited in the same commit as the code t
 - §10's B-section: the schema-miss ending written down and pinned — **built 2026-09-18**, recorded in
   this section's own item 6 rather than twice.
 - §9: `/export` from inside a running conversation ("the obvious next door") — **built 2026-09-18**;
-  a job that can say it is `stopping`; and the page's own half of the reconnect cursor, which
-  `HANDOFF.md` calls the part of the item that stays open.
+  a job that can say it is `stopping` — **built 2026-09-18**; and the page's own half of the reconnect
+  cursor, which `HANDOFF.md` calls the part of the item that stays open.
 - §8: the picker of live runs that the page's `/say --to` is waiting on.
 - §10 C3 and C5 — the two holes that need a decision rather than code: a request nothing identifies
   (so a caller's retry may repeat tools), and a session carried into a second purpose by `--continue`.
@@ -1884,13 +1888,21 @@ where prose and tree disagree are items 2, 3 and 9(iii).**
    rather than decorative: reporting the schema miss as `incomplete` makes it fail with `outcome:
    "incomplete"` and `reason:"steps"` — naming a budget that never came due, which is exactly the
    "fix" the test exists to refuse.
-7. **A job cannot say it is stopping.** §9 records the limit: a `stopping` state "would need a flag on
-   the `Job` that nothing sets today". A stopped job reads as `running` until it is gone, so the
-   person's status row and the page's jobs panel cannot distinguish "asked to stop, not gone yet" from
-   "still working" — and after the process-group kill work in `docs/windows-tooling.md` §6.1, a stop
-   that takes a moment is a real window rather than a theoretical one. Small: set the flag where the
-   stop is written (`job_op`'s `stop`, the page's row, `/jobs stop`), report it in the same listing, and
-   one test that a stopped job says so before it ends.
+7. **A job can say it is stopping — *built 2026-09-18*.** §9 recorded the limit: a `stopping` state
+   "would need a flag on the `Job` that nothing sets today", so a stopped job read as `running` until it
+   was gone and the person's status row and the page's jobs panel could not tell "asked to stop, not gone
+   yet" from "still working" — a real window rather than a theoretical one since the process-group kill
+   work in `docs/windows-tooling.md` §6.1. The flag is set in the two places a stop is *asked for*
+   (`Job::ask_to_stop`, before the `/stop` line goes to a child, and `Job::kill`, before the signal), so
+   `job_op`'s `stop`, `/jobs stop <pid>` and the page's destructive row all get it by going through the
+   same functions. It is read only against `finished` (`Job::is_stopping`), because the word is about
+   liveness and not about history: a job that ended under a stop is described as ended, never as
+   stopping afterwards. The test kills a live job and reads the row between the signal and the supervisor
+   recording the exit — deterministic by construction rather than by timing, since `kill` is synchronous
+   and the test does not await — asserts both doors (`describe` and `jobs_report`) carry the word, then
+   waits for the job and asserts the word is gone. The first version of that test asserted on the bare
+   word and was caught by its own fixture's directory name (`jobs-stopping`), which is why it now asserts
+   on the state slot rather than on the word.
 8. **The page cannot get back to a restarted flint by itself.** §9's cursor work made the *server* able
    to answer a reconnect from a file position, and `HANDOFF.md` names the half that is left: "the new
    process listens on a new port with a new token, so the page's stream has nowhere to go, and the page

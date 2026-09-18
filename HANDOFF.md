@@ -28,8 +28,8 @@ reports one retry") and is backed by a second assertion in the plainest test the
 says `0`. The Python caller carries it in the same field `duration_ms` travels in, and `README.md`'s
 sample frames show it.
 
-**The line after it is a job that can say it is `stopping`, the page's own reconnect cursor, and the
-picker of live runs the page's `/say --to` waits on.** §10's two holes that
+**The line after it is the page's own reconnect cursor and the picker of live runs the page's
+`/say --to` waits on.** §10's two holes that
 need a decision rather than code — C3 (nothing identifies a request, so a caller's retry may repeat
 tools) and C5 (a session carried into a second purpose by `--continue`) — are on the same list, to be
 settled in writing rather than left as an itch.
@@ -45,6 +45,29 @@ drift, and a test drives both for the same conversation and asserts the bytes ar
 refusals are held as well: `--no-session` (in the sentence every other door uses), a conversation nobody
 has spoken in yet, and a write that fails — which is reported and the run carries on, the difference
 from `flint export`, which returns an error because it *is* the run.
+
+**The fourth is built, and it is one word that was missing rather than one feature: a job asked to stop
+now says `stopping` (§11 item 7).** §9 recorded the limit exactly — a `stopping` state "would need a flag
+on the `Job` that nothing sets today" — and the window it names is the one a person looks in: having just
+asked for a stop, they read the list to see whether it landed. `running` is true and useless there (it is
+doing nothing new, it is on its way out) and `ended` is a promise the run cannot keep yet. So `Job` gained
+`stopping`, set in the two places a stop is *asked for* — `Job::ask_to_stop`, before `/stop` goes to a
+child's stdin, and `Job::kill`, before the signal — which is why `job_op stop`, `/jobs stop <pid>` and the
+page's destructive row all get it without knowing about it. The word is read only through
+`Job::is_stopping`, which is the flag **and** `!finished`: a flag read on its own would describe a job
+that ended a minute ago as still stopping, and that is the half the test holds after the wait. All three
+readers moved together as they have to: `jobs_report` for the terminal and `job_op`, `jobs_snapshot` for
+the page's row (with `.stopping` dimming the same dot the running row uses, because "on its way out" is
+the run's own decision taking effect and not a failure).
+
+The test is deterministic by construction rather than by timing, which is worth recording because the
+obvious version is not: a stop usually lands in milliseconds, so watching for the window from outside is
+a race. Instead it kills a live background command and reads the row **without awaiting** — `kill` is
+synchronous and the test's own runtime cannot run the supervisor in between — then asserts the word
+reaches both doors (`describe` and `jobs_report`) and the page's row, waits for the job, and asserts the
+word is gone. Its first draft asserted on the bare word and failed against its own fixture, whose temp
+directory is named `jobs-stopping` and whose path is printed in the row; it asserts on the state slot
+(`-- stopping for`) now, so a path can never satisfy it.
 
 **The second of them is built: the one `--json` ending that looked like a bug is now documented and
 pinned (§11 item 6).** When a `--schema` run's answers never match, the stream carries `turn.completed`

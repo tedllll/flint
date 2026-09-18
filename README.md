@@ -800,7 +800,10 @@ keeps the half of an answer it had drawn — while a command is killed, and the 
 which happened. The page's command panel offers the same line, and its candidates are the live rows of
 the jobs panel you are already looking at, which is why nothing had to be sent for it. A job this run
 ended reads as `killed`, never `failed`: a kill's exit status is the shell's, and on Windows a killed
-`cmd.exe` reports 1. `docs/web-mode.md` §13.
+`cmd.exe` reports 1. And between the ask and the end it reads as **`stopping`** — neither `running`,
+which says it is doing something it is not, nor ended, which the run cannot promise yet — in the
+terminal's listing, in `job_op status` and on the page's row alike, because all three read the same
+record. `docs/web-mode.md` §13.
 
 **What that costs, stated plainly:** a caller who has the port and the token can run the agent,
 because that is what an input box is. What keeps it acceptable is §4 of `docs/web-mode.md` —

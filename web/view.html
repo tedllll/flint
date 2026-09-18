@@ -134,6 +134,10 @@
     background: var(--dim); align-self: center;
   }
   #jobs .row.job.running .dot { background: var(--warn); }
+  /* On its way out rather than working: the same dot, dimmed, because the state is the run's own
+     decision taking effect and not a failure -- a person who has just asked for a stop is looking at
+     this row to see the ask land. */
+  #jobs .row.job.stopping .dot { background: var(--warn); opacity: .45; }
   #jobs .row.job.completed .dot { background: var(--ok); }
   #jobs .row.job.failed .dot, #jobs .row.job.killed .dot { background: var(--bad); }
   #jobs .row.job .kind {

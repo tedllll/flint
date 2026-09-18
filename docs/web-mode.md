@@ -1180,9 +1180,12 @@ to say *which* row it means, in both directions.
 
 **Restraint, and the honest limits.**
 
-- `stopping` is not a status. A stop is a write to a child's stdin or a kill, and neither has a state
-  the `Job` records until it has ended; a status word invented to fill that gap would be a claim the run
-  cannot back. The row says `running` until it is not.
+- `stopping` was not a status when this was measured, and it is one now. A stop is a write to a child's
+  stdin or a kill, and the `Job` recorded nothing between the ask and the exit, so a status word invented
+  to fill that gap would have been a claim the run could not back: the row said `running` until it was
+  not. **Built 2026-09-18** (`ROADMAP.md` §11 item 7): the run sets a flag where the stop is asked for
+  (`Job::ask_to_stop`, `Job::kill`) and reads it against `finished` (`Job::is_stopping`), so a row can
+  say `stopping` while that is true and is described as ended the moment it is not.
 - `KEEP_FINISHED = 8` is the panel's horizon, and it is the process's, not the page's: a job that fell
   off the end is still in the session file it wrote, and there is no persisted job list to grow into a
   second history — the same rule as everywhere else here.
@@ -1276,9 +1279,10 @@ means *this run ended it*, and it is true on both platforms for the same reason.
   exactly the ambiguity that made a browser harness assert on the wrong row in the previous round. The
   person's stop is a command, and the command is reachable from the page through the same command panel
   as everything else.
-- `stopping` is still not a status, for §13's original reason. A stop is a write or a signal, and the
-  row says `running` until it is not -- which is now also why the *candidate* list is filtered to live
-  jobs rather than the row being rewritten.
+- `stopping` was not a status for §13's original reason, and **it is one since 2026-09-18** -- see that
+  bullet. The *candidate* list is still filtered to live jobs rather than the row being rewritten, which
+  was never the same decision: that filter is about which job a second press may name, not about what a
+  row may say.
 - **The 20-second window is flint's, and a job that outlasts it says so.** A child asked to stop may
   finish the thought it was on; a command whose kill has not landed yet is reported as exactly that,
   with the job's own budget named as what ends it either way. Nothing waits forever, and nothing claims

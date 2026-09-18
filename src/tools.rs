@@ -1089,6 +1089,17 @@ struct Job {
     /// the kind of difference a status word has to be independent of. So the truth is recorded where
     /// the decision is made rather than inferred from a number afterwards.
     ended_by_us: std::sync::atomic::AtomicBool,
+    /// Whether this run has *asked* it to stop and it has not gone yet.
+    ///
+    /// A third piece of the same story as `ended_by_us`, one moment earlier: a stop is not an
+    /// instant -- a child finishes the thought it was on and a killed process tree takes as long as
+    /// the kill takes -- and the listing somebody reads during that moment is the one that would
+    /// otherwise lie in the most expensive direction. `running` is true and useless there ("is it
+    /// still doing what I asked, or is it on its way out?"), and `ended` would be a promise the run
+    /// cannot make yet. So the word the flag buys is `stopping`, and it is deliberately read only
+    /// against `finished`: a job that ended under a stop is described as ended, never as stopping
+    /// after the fact.
+    stopping: std::sync::atomic::AtomicBool,
     /// The budget that is enforced on it whether or not anyone is waiting.
     timeout_secs: u64,
     /// The child's stdin, kept here rather than in the future that started it: `/stop` has to be
@@ -1189,9 +1200,10 @@ fn jobs_changed() {
 ///     read off the moment the job recorded for itself -- see `JobMoment` -- rather than computed from
 ///     the clock at the time of the look, because a start that can move by a second between two
 ///     glances is not a start.
-///   * `status` is a word rather than a sentence -- `running`, `completed`, `killed`, `failed` --
-///     and `detail` carries the fact sentence beside it, because a row needs a word it can colour
-///     and a person wants the exit code.
+///   * `status` is a word rather than a sentence -- `running`, `stopping`, `completed`, `killed`,
+///     `failed` -- and `detail` carries the fact sentence beside it, because a row needs a word it can
+///     colour and a person wants the exit code. `stopping` is the one that is not read off the exit
+///     code: a job that has been asked to stop and has not gone yet has no exit code to be read.
 ///   * `path` is where the job's output is: a child's conversation, or a command's log. It is what a
 ///     row opens, through the same `GET /file` a path in the transcript uses.
 ///
@@ -1208,6 +1220,11 @@ pub fn jobs_snapshot() -> serde_json::Value {
                     job_status(finished.code),
                     format!("exit code {} ({})", finished.code, task_exit_meaning(finished.code)),
                 ),
+                // Not ended yet, and the flag is what says whether it is still working or already on
+                // its way out -- read against the same `finished` the arm above is, so the word cannot
+                // outlive the state. The panel draws this row while somebody is watching a stop land,
+                // which is exactly when `running` would be the wrong word.
+                None if job.is_stopping() => ("stopping", "asked to stop, not gone yet".to_string()),
                 None => ("running", String::new()),
             };
             let path = match job.kind {
@@ -1322,6 +1339,15 @@ impl Job {
             JobKind::Child => "`wait` collects what it said",
             JobKind::Command => "`wait` collects its output, `output` reads what is new",
         };
+        // "running" and "stopping" are the only two words for a job that has not ended, and the
+        // difference is the one a person asks about while they wait: what it produces from here is
+        // what it already had (a child's half of an answer, a command's log), not what comes next.
+        // The clock is the same one either way -- the ask is not a second start.
+        let state = if self.is_stopping() {
+            "stopping"
+        } else {
+            "running"
+        };
         match self.finished.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             Some(finished) => format!(
                 "pid {}: {} -- ended with exit code {} ({}), {}; {}",
@@ -1333,16 +1359,18 @@ impl Job {
                 collecting
             ),
             None if self.kind == JobKind::Command => format!(
-                "pid {}: {} -- running for {}, {}",
+                "pid {}: {} -- {} for {}, {}",
                 self.pid,
                 self.label,
+                state,
                 elapsed_label(self.started.elapsed()),
                 produced
             ),
             None => format!(
-                "pid {}: {} -- running for {}, {}; asked: {}",
+                "pid {}: {} -- {} for {}, {}; asked: {}",
                 self.pid,
                 self.label,
+                state,
                 elapsed_label(self.started.elapsed()),
                 produced,
                 util::truncate(&self.prompt, 80)
@@ -1371,6 +1399,22 @@ impl Job {
 
     fn was_ended_here(&self) -> bool {
         self.ended_by_us.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Note that the ask has gone out, before anything waits for it to land.
+    ///
+    /// Before, for `ended_here`'s reason: whoever looks next sees the state that is true *then*, and
+    /// the wait that follows is exactly the moment somebody looks.
+    fn asked_to_stop(&self) {
+        self.stopping
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether it has been asked and has not gone yet -- the whole of the `stopping` word, in one
+    /// place, because reading the flag without `finished` beside it would say "stopping" about a job
+    /// that ended a minute ago.
+    fn is_stopping(&self) -> bool {
+        self.stopping.load(std::sync::atomic::Ordering::SeqCst) && !self.has_finished()
     }
 
     /// Wait for the child to end, or give up after `limit`.
@@ -1437,6 +1481,12 @@ impl Job {
         let mut wrote = stdin.write_all(b"/stop\n").await.is_ok();
         wrote = wrote && stdin.flush().await.is_ok();
         *self.stdin.lock().unwrap_or_else(|e| e.into_inner()) = Some(stdin);
+        // Only when the word actually went out: a failed write means the child's stdin is closed,
+        // which is the one thing that says it has already ended -- and calling that `stopping` would
+        // contradict the `ended` line the very next look prints.
+        if wrote {
+            self.asked_to_stop();
+        }
         wrote
     }
 
@@ -1457,7 +1507,10 @@ impl Job {
     /// this is not going to hand a group id to a parser it does not control.
     fn kill(&self) {
         // Before the signal, so the status word this ends up under is the one that is true: see
-        // `ended_by_us`.
+        // `ended_by_us`. The `stopping` flag goes up here too, one moment before `ended_by_us` is
+        // read: a kill is not the same as an end, and the time between them is exactly the window a
+        // listing is likely to be read in.
+        self.asked_to_stop();
         self.ended_here();
         #[cfg(windows)]
         {
@@ -2398,6 +2451,7 @@ async fn start_background_command(
         no_session: false,
         reported: std::sync::atomic::AtomicBool::new(false),
         ended_by_us: std::sync::atomic::AtomicBool::new(false),
+        stopping: std::sync::atomic::AtomicBool::new(false),
         timeout_secs,
         // Nothing is ever written to a command's stdin after it starts: the payload, when there is
         // one, has already gone in through the detached writer above.
@@ -5366,6 +5420,7 @@ fn start_child(child: Child) -> Result<std::sync::Arc<Job>> {
         no_session: child.no_session,
         reported: std::sync::atomic::AtomicBool::new(false),
         ended_by_us: std::sync::atomic::AtomicBool::new(false),
+        stopping: std::sync::atomic::AtomicBool::new(false),
         timeout_secs: child.timeout_secs,
         stdin: std::sync::Mutex::new(stdin),
         session: std::sync::Mutex::new(None),
@@ -6763,6 +6818,79 @@ mod background_command_tests {
             jobs_report(None).contains(&format!("pid {pid}")),
             "the whole-run listing has to name it: {}",
             jobs_report(None)
+        );
+    }
+
+    /// A job that has been asked to stop says so, for as long as that is true.
+    ///
+    /// The window is real and it is the one a listing is most likely to be read in: somebody who has
+    /// just asked for a stop looks at the list to see whether it worked. `running` is the wrong word
+    /// there -- it is doing nothing new, it is on its way out -- and `ended` is a promise the run
+    /// cannot make yet, so the row says `stopping` until it is neither.
+    ///
+    /// The first half of this is deterministic by construction rather than by timing: `kill` is
+    /// synchronous and the test does not await between the signal and the read, so on the test's own
+    /// runtime the supervisor has had no chance to record the exit. The second half is the rule the
+    /// flag must obey: the word is read *against* liveness, so a job that is gone is never described
+    /// as stopping after the fact -- which is the failure a flag read on its own would produce.
+    #[tokio::test]
+    async fn a_job_asked_to_stop_says_stopping_until_it_is_gone() {
+        let dir = TempDir::new("jobs-stopping");
+        let tools = toolbox(&dir, false);
+        let handle = tools
+            .invoke(
+                "bash",
+                &json!({ "command": slow_command(), "background": true }),
+            )
+            .await
+            .expect("background bash");
+        let (pid, _log) = handle_of(&handle);
+        let job = job_by_pid(pid).expect("the job just started");
+
+        let before = job.describe();
+        assert!(
+            before.contains("-- running for"),
+            "a job nobody has touched is running: {before}"
+        );
+
+        job.kill();
+        let during = job.describe();
+        // The state slot rather than the bare word: the line also carries a path, and this fixture's
+        // directory is named after the state under test -- which is a false positive nobody enjoys
+        // diagnosing twice.
+        assert!(
+            during.contains("-- stopping for"),
+            "a job this run has just killed is not listed as on its way out: {during}"
+        );
+        assert!(
+            !during.contains("exit code"),
+            "the row claims it has ended before the supervisor could have seen it: {during}"
+        );
+
+        // What the model and the person read, not just what the struct would say: one listing, so the
+        // word reaches whoever looks next through either door.
+        assert!(
+            jobs_report(Some(pid)).contains("-- stopping for"),
+            "the listing a door prints does not carry the word: {}",
+            jobs_report(Some(pid))
+        );
+        // And the page's row, which is the third reader of the same record: it is drawn exactly when
+        // somebody is watching a stop they just asked for.
+        let row = job_row(pid);
+        assert_eq!(
+            row["status"], "stopping",
+            "the panel's row does not say it is on its way out: {row}"
+        );
+
+        let _ = job.wait(Some(std::time::Duration::from_secs(30))).await;
+        let after = job.describe();
+        assert!(
+            after.contains("exit code"),
+            "a stopped job does not say it ended: {after}"
+        );
+        assert!(
+            !after.contains("-- stopping for"),
+            "the word outlived the state it describes: {after}"
         );
     }
 
