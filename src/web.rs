@@ -964,12 +964,7 @@ impl Response {
              Content-Type: {}\r\n\
              Content-Length: {}\r\n\
              Connection: close\r\n\
-             Cache-Control: no-store\r\n\
-             X-Content-Type-Options: nosniff\r\n\
-             Referrer-Policy: no-referrer\r\n\
-             Content-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; \
-             style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:\r\n\
-             {extra}\r\n",
+             {SECURITY_HEADERS}{extra}\r\n",
             self.status,
             self.reason,
             self.content_type,
@@ -979,6 +974,20 @@ impl Response {
         out.into_bytes()
     }
 }
+
+/// The four headers every response carries, in one place because there were two.
+///
+/// They drifted: `SSE_HEADERS` was written by hand beside `Response::render` and its own comment
+/// claimed to carry "everything a small response has, except a length", while the CSP line -- the one
+/// that makes the page's own inline script the only script it may run, and `connect-src 'self'` the
+/// only place it may connect -- was missing from the stream. `docs/features.md` §12.2 promises all
+/// four on **every** response, and a promise kept by two literals is kept by neither. The order is
+/// what the browser sees rather than what a test expects; `Cache-Control` first, as it always was.
+const SECURITY_HEADERS: &str = "\
+Cache-Control: no-store\r\n\
+X-Content-Type-Options: nosniff\r\n\
+Referrer-Policy: no-referrer\r\n\
+Content-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:\r\n";
 
 /// What a request turned into.
 ///
@@ -2105,15 +2114,21 @@ async fn read_body(
 ///
 /// No `Content-Length`, because the response ends when the client goes away rather than at a
 /// byte count -- which is the one case §6's "a small, complete response" does not cover, and
-/// the reason this route writes its own headers instead of going through `Response`.
-const SSE_HEADERS: &str = "\
-HTTP/1.1 200 OK\r\n\
-Content-Type: text/event-stream\r\n\
-Cache-Control: no-store\r\n\
-Connection: close\r\n\
-X-Content-Type-Options: nosniff\r\n\
-Referrer-Policy: no-referrer\r\n\
-\r\n";
+/// the reason this route writes its own headers instead of going through `Response`. Everything
+/// else it *is* `Response`'s, through [`SECURITY_HEADERS`], because the copy of those four that
+/// used to live here was missing one of them.
+///
+/// A function rather than a `const &str` for that reason alone: a constant cannot splice another
+/// constant into it at compile time without `concat!` seeing two literals, and the alternative --
+/// writing the four out twice -- is the bug this replaced.
+fn sse_headers() -> String {
+    format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: text/event-stream\r\n\
+         Connection: close\r\n\
+         {SECURITY_HEADERS}\r\n"
+    )
+}
 
 /// The words the status row is showing, sent once when a client connects.
 ///
@@ -2214,7 +2229,7 @@ async fn stream_events(
     // frame belongs to neither the file nor the stream.
     let (mut rx, catch) = live.follow(last, session.as_deref());
 
-    stream.write_all(SSE_HEADERS.as_bytes()).await?;
+    stream.write_all(sse_headers().as_bytes()).await?;
     match catch {
         Catch::Reset => {
             // What it missed cannot be placed in the file it is showing either -- a cursor from
@@ -3945,6 +3960,27 @@ mod stream_tests {
         assert!(
             !raw.contains("Content-Length"),
             "an endless response cannot carry a length: {raw}"
+        );
+
+        // The stream is a response like any other, and §12.2 says *every* response carries the four
+        // headers. This one was written by hand beside `Response::render` and carried three: the CSP
+        // line was missing, while this constant's own comment claimed to have "everything a small
+        // response has, except a length". Asserted here as well as on `Response`, because the two
+        // blocks drifting is the failure -- one copy is the fix, and a test on each side is what
+        // notices if a third copy appears.
+        for header in [
+            "\r\nCache-Control: no-store\r\n",
+            "\r\nX-Content-Type-Options: nosniff\r\n",
+            "\r\nReferrer-Policy: no-referrer\r\n",
+        ] {
+            assert!(
+                raw.contains(header),
+                "the stream is missing {header:?}: {raw}"
+            );
+        }
+        assert!(
+            raw.contains("default-src 'none'") && raw.contains("connect-src 'self'"),
+            "the stream is the one response served without a policy: {raw}"
         );
 
         // Every `data:` line parses as one NDJSON object -- the same assertion
