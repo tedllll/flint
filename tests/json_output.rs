@@ -193,6 +193,67 @@ fn run_bytes(home: &Path, cwd: &Path, args: &[&str]) -> std::process::Output {
         .expect("failed to run flint")
 }
 
+/// Read a child's stdout as it arrives, into a buffer the test can look at *while* the child runs.
+///
+/// The tests that interrupt a run need to know it reached the state worth interrupting, and
+/// `read_to_string` cannot tell them: it returns when the pipe closes, which is after the moment they
+/// are aiming at. Bytes are kept rather than a `String` because a chunk boundary can fall inside one
+/// character, and a stream that lost a byte to that would be a stream this file's assertions are made
+/// against.
+fn draining(
+    mut stream: impl std::io::Read + Send + 'static,
+) -> (std::sync::Arc<std::sync::Mutex<Vec<u8>>>, std::thread::JoinHandle<()>) {
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<u8>>> = std::sync::Arc::default();
+    let sink = std::sync::Arc::clone(&seen);
+    let reader = std::thread::spawn(move || {
+        let mut chunk = [0u8; 4096];
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => sink
+                    .lock()
+                    .expect("the buffer")
+                    .extend_from_slice(&chunk[..n]),
+            }
+        }
+    });
+    (seen, reader)
+}
+
+/// Everything the child has printed so far, lossily: these runs write JSON lines, and a byte that is
+/// not UTF-8 is not what any test in this file is about.
+fn text_of(seen: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>) -> String {
+    String::from_utf8_lossy(&seen.lock().expect("the buffer")).to_string()
+}
+
+/// Wait until the run has said `needle`, and hand back everything it has said.
+///
+/// This is what a test that interrupts a run waits on instead of a fixed sleep: "the tool has already
+/// run" and "the delta has already been drawn" are premises the test needs, and a premise that is
+/// waited for is a premise that either holds or fails with the stream in hand -- where a sleep of a
+/// chosen number of milliseconds is a race the test loses silently on a loaded machine. Measured, on
+/// the tree *before* this change as well as after it: with these two tests sleeping, the suite failed
+/// four runs in four on a twenty-core machine, and the first thing the panic said was that a frame was
+/// missing rather than that the machine was slow.
+fn wait_for(
+    seen: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    needle: &str,
+    within: std::time::Duration,
+) -> String {
+    let started = std::time::Instant::now();
+    loop {
+        let text = text_of(seen);
+        if text.contains(needle) {
+            return text;
+        }
+        assert!(
+            started.elapsed() < within,
+            "the run never said {needle:?} within {within:?}, so there is nothing to interrupt: {text}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 fn kinds(lines: &[Value]) -> Vec<String> {
     lines
         .iter()
@@ -399,17 +460,14 @@ async fn a_stopped_turn_says_which_tools_it_already_ran() {
         .spawn()
         .expect("failed to start flint");
 
-    let mut stdout = child.stdout.take().expect("a pipe");
-    let reader = std::thread::spawn(move || {
-        use std::io::Read;
-        let mut text = String::new();
-        let _ = stdout.read_to_string(&mut text);
-        text
-    });
+    let stdout = child.stdout.take().expect("a pipe");
+    let (seen, reader) = draining(stdout);
 
-    // Long enough for the tool to have run and the next request to be in flight, which the tool frames
-    // in the assertion below prove rather than this number.
-    std::thread::sleep(std::time::Duration::from_millis(2500));
+    // The state this test is about -- a tool that has already run, and a second request in flight --
+    // is waited for rather than counted down to: the frame the assertions below are made against is
+    // the only honest proof that the turn got that far. The number that used to be here was 2500
+    // milliseconds, and it was the whole of the failure when the suite ran in parallel.
+    wait_for(&seen, "tool.completed", std::time::Duration::from_secs(60));
     {
         use std::io::Write;
         let mut stdin = child.stdin.take().expect("a pipe");
@@ -428,7 +486,8 @@ async fn a_stopped_turn_says_which_tools_it_already_ran() {
         );
         std::thread::sleep(std::time::Duration::from_millis(50));
     };
-    let text = reader.join().expect("the reader thread");
+    reader.join().expect("the reader thread");
+    let text = text_of(&seen);
     let lines: Vec<Value> = text
         .lines()
         .filter_map(|line| serde_json::from_str(line).ok())
@@ -1378,16 +1437,13 @@ async fn a_stopped_run_keeps_what_it_had_drawn() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("failed to start flint");
-    let mut stdout = child.stdout.take().expect("a pipe");
-    let reader = std::thread::spawn(move || {
-        let mut text = String::new();
-        let _ = stdout.read_to_string(&mut text);
-        text
-    });
+    let stdout = child.stdout.take().expect("a pipe");
+    let (seen, reader) = draining(stdout);
 
-    // Give the delta time to arrive and be reported before stopping: the stop has to catch a drawn
-    // answer, not an empty one, or this test proves nothing.
-    std::thread::sleep(std::time::Duration::from_millis(2000));
+    // The stop has to catch a drawn answer, not an empty one, or this test proves nothing -- so what
+    // it waits for is the delta itself, on the stream, rather than a number of milliseconds that used
+    // to stand for "probably arrived by now".
+    wait_for(&seen, "half an", std::time::Duration::from_secs(60));
     {
         let mut stdin = child.stdin.take().expect("a pipe");
         stdin.write_all(b"/stop\n").expect("writing to flint");
@@ -1408,7 +1464,8 @@ async fn a_stopped_run_keeps_what_it_had_drawn() {
     // Reaped on every path, including the ones that already have the status: a killed child that is
     // never waited on is a zombie, and clippy is right to say so.
     let _ = child.wait();
-    let text = reader.join().expect("the reader thread");
+    reader.join().expect("the reader thread");
+    let text = text_of(&seen);
     let events = session_events(&home);
     let _ = std::fs::remove_dir_all(&home);
 
