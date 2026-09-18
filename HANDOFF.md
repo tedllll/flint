@@ -35,18 +35,27 @@ CI**; the browser harness run by hand at **56/56 claims held**, printing the lis
 not-drives it is bounded by. The release binary on `PATH` is the tree's (`flint --version` → `flint
 0.1.0`, exit 0).
 
-**One CI failure was seen and not reproduced, and the test that saw it now says more.** The push that
-added the two Node harnesses to CI (`fef238f`) came back with `test (ubuntu-latest)` **red** — not at the
-new step, but in `tests/cli_output.rs`: `the_view_follows_the_conversation_through_a_switch` panicked with
-`failed to write stdin: Os { code: 32, kind: BrokenPipe }`, and every commit after it was green on the same
-code. So it is a race in that test, not a defect it caught: a run that has already exited has a closed
-pipe, and the write reports that as a broken pipe with nothing about *why the run is gone*. The test had
-already learned this lesson once — there is a check a few lines later that panics with the run's status,
-stderr and transcript "because a run that is gone cannot answer, and saying so is worth more than the
-connection error" — and the write itself had not. It goes through `write_to_run` now, which panics with the
-status and both files; the diagnostic was proved by killing the run and writing past the pipe, which
-prints exactly that. The flake itself is un-fixed because it was not reproduced: what is fixed is that a
-repeat is readable instead of a bare `Broken pipe`.
+**One CI failure was seen, then a second of the same shape, and neither was reproduced — so the tests
+that saw them now say more.** The push that added the two Node harnesses to CI (`fef238f`) came back with
+`test (ubuntu-latest)` **red** — not at the new step, but in `tests/cli_output.rs`:
+`the_view_follows_the_conversation_through_a_switch` panicked with
+`failed to write stdin: Os { code: 32, kind: BrokenPipe }`. Every commit after it was green on the same
+code. Then the diagnostic commit itself (`3dad8ee`) came back red on ubuntu too, in a *different* `--web`
+test: `a_background_command_is_a_job_the_page_can_watch_end`, "cannot connect to the view at
+127.0.0.1:43443 for /jobs: Connection refused". Both are a run that is gone before the test is finished
+with it, and both messages said only the symptom.
+
+Neither flake is fixed, because neither has been reproduced and a guess at an unreproduced race is how a
+test loses the property it was holding. What is fixed is the diagnosis, which the file had already learned
+once for itself — "a run that is gone cannot answer, and saying so is worth more than the connection
+error: this is where the one unreadable failure of this test would have been read". The view-follows test
+now writes through `write_to_run`, and the jobs test reads through `get_or_say`: both carry the run's
+**status** and the two files that know (stderr and the transcript), and the jobs test no longer sends its
+stderr to `/dev/null`, which is exactly why it could not say why. The diagnostic was proved by killing a
+run and writing past the pipe, and the mutation reverted. The next ubuntu failure of either test will
+carry the reason in the check annotation; until then, "a `--web` run died mid-test on the Linux runner
+twice in one session" is recorded rather than explained, and the un-fixed class — the other `--web` tests
+that still discard stderr — is named here so the next person does not have to rediscover it.
 
 **The one promise this session kept in full, because it was the last feature the plan of record owed:**
 §11 item 9(ii), the page's `/say --to` picker of live runs. Paragraphs below keep the reasoning for each

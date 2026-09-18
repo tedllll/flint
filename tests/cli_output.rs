@@ -2674,6 +2674,9 @@ async fn a_background_command_is_a_job_the_page_can_watch_end() {
     let work = home.join("work");
     std::fs::create_dir_all(&work).expect("the working directory");
     let log = home.join("transcript.txt");
+    // stderr to a file rather than `/dev/null`: this test refused a connection on the ubuntu runner
+    // once, and the reason it could not say why was here. See `get_or_say`.
+    let errors = home.join("stderr.txt");
     let mut child = binary()
         .arg("--web")
         .env("FLINT_HOME", &home)
@@ -2681,7 +2684,7 @@ async fn a_background_command_is_a_job_the_page_can_watch_end() {
         .current_dir(&work)
         .stdin(std::process::Stdio::piped())
         .stdout(std::fs::File::create(&log).expect("transcript file"))
-        .stderr(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&errors).expect("stderr file"))
         .spawn()
         .expect("failed to run flint");
 
@@ -2693,7 +2696,7 @@ async fn a_background_command_is_a_job_the_page_can_watch_end() {
 
     let answered = post_message(port, &token, "start it");
     let started = read_until(&mut watching, "event: jobs", 30);
-    let listed = http_get(port, "/jobs", &token);
+    let listed = get_or_say(port, "/jobs", &token, &mut child, &errors, &log);
     let running: serde_json::Value =
         serde_json::from_str(&listed).unwrap_or_else(|e| panic!("not JSON ({e}): {listed:?}"));
     let row = running["jobs"]
@@ -2709,7 +2712,7 @@ async fn a_background_command_is_a_job_the_page_can_watch_end() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut settled: serde_json::Value = row.clone();
     while std::time::Instant::now() < deadline {
-        let again = http_get(port, "/jobs", &token);
+        let again = get_or_say(port, "/jobs", &token, &mut child, &errors, &log);
         settled = serde_json::from_str::<serde_json::Value>(&again)
             .unwrap_or_else(|e| panic!("not JSON ({e}): {again:?}"))["jobs"]
             .as_array()
@@ -6060,6 +6063,34 @@ fn port_and_token(url: &str) -> (u16, String) {
         .1
         .to_string();
     (port, token)
+}
+
+/// Read a route from a `--web` run, or say why the run could not answer it.
+///
+/// A refused connection is the one failure a `--web` test cannot read from the response, because there
+/// is none: `http_get` names the route and the port, and nothing about *why the run is gone*. On
+/// 2026-09-18 the ubuntu runner refused a connection here -- `a_background_command_is_a_job_the_page_can_watch_end`,
+/// which sent its stderr to `/dev/null` and so could not say more -- one push after a different `--web`
+/// test lost the same race as a broken stdin pipe. Neither has been reproduced, so neither is "fixed";
+/// what a repeat needs is the two files that know, which is what this helper exists to hand over. It is
+/// the same rule the view-follows test learned for itself: a run that is gone cannot answer, and saying
+/// so is worth more than the connection error.
+fn get_or_say(
+    port: u16,
+    route: &str,
+    token: &str,
+    child: &mut std::process::Child,
+    errors: &std::path::Path,
+    log: &std::path::Path,
+) -> String {
+    if let Ok(Some(status)) = child.try_wait() {
+        panic!(
+            "the run ended ({status}) before {route} could be read\n  stderr: {}\n  transcript: {}",
+            std::fs::read_to_string(errors).unwrap_or_default().trim(),
+            std::fs::read_to_string(log).unwrap_or_default().trim()
+        );
+    }
+    http_get(port, route, token)
 }
 
 /// GET one route from the view and return the body.
