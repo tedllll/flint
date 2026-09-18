@@ -333,11 +333,15 @@ existed still reads as what it was: a message no model ever saw.
 - **Unknown `type` is skipped in silence.** Another build, a newer flint, or you with an
   editor may leave an event this build has never heard of. Ignoring it is what lets the
   format grow: treating it as damage would turn every future version into corruption for
-  this one.
-- **A *known* `type` that does not parse is damage**, and it is reported rather than
-  skipped. The difference matters: a `chat` line that will not parse is a conversation with
-  a hole in it, and continuing as if nothing happened is how you get answers that ignore
-  something you said.
+  this one. The line has to be a *well-formed* object with a `type` in it for this to apply:
+  that is what makes it somebody else's event rather than a line with a hole in it.
+- **Everything else that will not parse is damage**, and it is reported rather than
+  skipped: `flint: N unreadable line(s) skipped in <path>` on stderr. That covers a `chat`
+  line whose fields do not fit *and* a line that is not JSON at all — a torn tail from a
+  write that was cut off, a fragment left by folding a line by hand, or a file a Windows
+  editor re-saved with a mark on the front (see below). The difference matters because a
+  `chat` line that will not parse is a conversation with a hole in it, and continuing as if
+  nothing happened is how you get answers that ignore something you said.
 - **Listing reads only the two ends.** A list needs a name, a date and a size, so it reads
   the head and the tail of each file and nothing else. A conversation of a hundred
   megabytes appears in the list exactly as fast as a short one.
@@ -364,13 +368,18 @@ printf '%s\n' '{"type":"title","name":"the one about the proxy"}' >> ~/.flint/se
 # Every remaining line is still valid, and the next `flint --resume` continues from there.
 ```
 
-Two warnings about editing, both learned the hard way:
+Three warnings about editing, all learned the hard way:
 
 - **Keep it one object per line.** A pretty-printed object breaks the file: the reader is
-  line-oriented, and a line that is half an object is damage.
+  line-oriented, and a line that is half an object is damage — reported, now, rather than
+  skipped in silence, which is what it did until 2026-09-18.
 - **Do not delete the first line.** `meta` is what identifies the session and its
   environment; without it the file loads as a conversation with no model and no working
   directory attached to it.
+- **A byte-order mark is fine, and is stripped.** `notepad` and `Set-Content -Encoding utf8`
+  write one, and it lands on the `meta` line: the mark comes off before the line is parsed,
+  in both the reader and the listing, so a file saved that way is not a file missing its
+  working directory. Nothing else about the line changes.
 
 Archiving is `mv` beside the file it came from, into that directory's `archive/`
 (`sessions/archive/` for a root session, `sessions/<dir>/archive/` for a project's), which is

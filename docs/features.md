@@ -877,15 +877,19 @@ One JSON object per line, `type`-tagged, append-only, `FORMAT_VERSION = 2`. Elev
 | `thinking` | `--thinking`, `/thinking <level>` | `level` | the level in force |
 | `compact` | `/compact` | `summary`, `from` (byte offset of the first `chat` line still sent) | the fold; last wins, and the folded lines stay in the file |
 
-An **unknown** type is skipped in silence. A line that names a *known* type but will not parse is
-reported as damage. Both rules hold for any reader, and the page draws a damage notice rather than
-dropping the line.
+An **unknown** type is skipped in silence — a *well-formed* object naming a type this build has
+never heard of, which is how the format grows. Everything else that will not parse is **damage**,
+and it is reported (`N unreadable line(s) skipped in <path>`): a known type whose fields do not
+fit, a torn tail, and a line that is not JSON at all — which is what a pretty-printed object
+leaves behind. The page draws a damage notice rather than dropping the line.
 
 Hand-editable, concretely: appending a well-formed known line is safe (`title`, `switch`, `schema`,
 `thinking`, `usage`); deleting lines from the bottom is safe; deleting a `compact` line puts the
 conversation back whole. Deleting the first `meta` line is **not** safe — the file then loads with no
 `cwd` and no model, so `--continue` can no longer match it to a directory. Pretty-printing a line is
-damage: the reader is line-oriented.
+damage: the reader is line-oriented. A byte-order mark is **not** damage — `notepad` and
+`Set-Content -Encoding utf8` put one on the first line, and it is stripped there and in the listing,
+because an encoding's mark is not content.
 
 ### 13.5 The `--json` stream, frame by frame
 

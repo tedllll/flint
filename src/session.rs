@@ -204,20 +204,28 @@ pub enum SessionEvent {
 
 /// The event names this build understands.
 ///
-/// Used for one decision only: a line that failed to parse but names a type in here is
-/// damage, and a line that names anything else is somebody else's event.
+/// Used for one decision only: a well-formed line naming a type *outside* this list is somebody
+/// else's event and is skipped in silence, while everything else that will not parse is damage. The
+/// list has to be written down because "the parser did not recognise it" is the same error for a
+/// future event and for a broken one -- the difference is whether the line is a JSON object with a
+/// `type` in it at all.
 const KNOWN_TYPES: [&str; 11] = [
     "meta", "chat", "import", "fork", "usage", "title", "switch", "schema", "peer", "thinking",
     "compact",
 ];
 
-/// Whether a line names an event type this build knows.
-fn names_a_known_event(line: &str) -> bool {
+/// Whether a line is a well-formed event this build does not know -- the only kind of unparseable
+/// line that is skipped in silence.
+///
+/// It must *parse* as a JSON object and carry a `type` outside [`KNOWN_TYPES`]. A line that does not
+/// parse at all is not "an event from a newer flint", it is a line with a hole in it, and the two are
+/// different verdicts on purpose: the first is how the format grows, and the second is how a
+/// conversation quietly loses a turn.
+fn names_an_unknown_event(line: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(line)
         .ok()
         .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_string))
-        .map(|t| KNOWN_TYPES.contains(&t.as_str()))
-        .unwrap_or(false)
+        .is_some_and(|t| !KNOWN_TYPES.contains(&t.as_str()))
 }
 
 /// Append handle for a session file.
@@ -615,6 +623,12 @@ pub struct LoadedSession {
     /// The last `title` in the file, if it was ever named.
     pub title: Option<String>,
     pub messages: Vec<Message>,
+    /// How many lines the reader could not read, from [`load`].
+    ///
+    /// Carried as a fact of the read rather than only announced, because the announcement is a side
+    /// effect on stderr and a hole in a file is worth being able to *test* for. `load` still emits the
+    /// notice; this is the same number, for a caller or a test that wants it.
+    pub damaged: usize,
     pub last_usage: Option<Usage>,
     /// The answer shape in force, from the last `schema` line in the file.
     ///
@@ -752,6 +766,7 @@ pub fn load(path: &Path) -> Result<LoadedSession> {
         model: String::new(),
         title: None,
         messages: Vec::new(),
+        damaged: 0,
         last_usage: None,
         output_schema: None,
         thinking: None,
@@ -765,6 +780,13 @@ pub fn load(path: &Path) -> Result<LoadedSession> {
     // read to the end.
     let mut chat_offsets: Vec<u64> = Vec::new();
     for (at, line) in lines_with_offsets(&text) {
+        // The mark is the encoding's business, not the content's -- `attach.rs` and `web.rs` strip it
+        // for the same reason, and here it lands on the *first* line, which is `meta`. Offsets are
+        // unaffected: this changes the text handed to the parser, not where the line starts.
+        // The mark is the encoding's business, not the content's -- `attach.rs` and `web.rs` strip it
+        // for the same reason, and here it lands on the *first* line, which is `meta`. Offsets are
+        // unaffected: this changes the text handed to the parser, not where the line starts.
+        let line = line.strip_prefix('\u{feff}').unwrap_or(line);
         if line.trim().is_empty() {
             continue;
         }
@@ -844,9 +866,16 @@ pub fn load(path: &Path) -> Result<LoadedSession> {
             Ok(SessionEvent::Compact { summary, from }) => {
                 loaded.compaction = Some(Compaction { summary, from })
             }
-            // Skipped in silence when the file claims a newer revision -- a type this
-            // build knows may have changed shape in it, and that is not damage either.
-            Err(_) if loaded.version > FORMAT_VERSION || !names_a_known_event(line) => {}
+            // Three verdicts, and only one of them is silence. A file that claims a newer revision
+            // may have changed the shape of a line this build knows, so nothing in it is damage. A
+            // well-formed object naming a type this build does not know is somebody else's event --
+            // the case that makes the format extensible. Everything else is a hole: a known type
+            // whose fields do not fit, a torn tail from a write that was cut off, and a line that is
+            // not JSON at all, which is what a pretty-printed object and a `notepad` save leave
+            // behind. That last group used to be silent, and `docs/session-format.md` already
+            // promised it was not -- measured on 2026-09-18, by folding a `title` line by hand.
+            Err(_) if loaded.version > FORMAT_VERSION => {}
+            Err(_) if names_an_unknown_event(line) => {}
             Err(_) => damaged += 1,
         }
     }
@@ -865,6 +894,7 @@ pub fn load(path: &Path) -> Result<LoadedSession> {
         loaded.messages.insert(0, compacted_message(&fold.summary));
     }
 
+    loaded.damaged = damaged;
     if damaged > 0 {
         // Through the notice sink: `/resume` loads a file in the middle of a session, and a stray
         // write to stderr with the strip active lands inside the answer being drawn.
@@ -955,6 +985,11 @@ pub fn scan(path: &Path) -> Result<SessionSummary> {
     }
 
     for line in lines {
+        // The mark comes off here too, and for a reason beyond tidiness: this is the reader
+        // `--continue` matches a directory with, and the line the mark lands on is `meta`. Stripping
+        // it in `load` and not here would leave two readers of one file disagreeing about where the
+        // conversation was held.
+        let line = line.strip_prefix('\u{feff}').unwrap_or(line);
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
@@ -2020,6 +2055,69 @@ mod tests {
         );
         let loaded = load(&path).unwrap();
         assert!(loaded.messages.is_empty());
+        assert_eq!(
+            loaded.damaged, 2,
+            "a line that is not JSON at all is a hole like any other"
+        );
+    }
+
+    /// A hand-edited file is the case this matters for, and pretty-printing is how a person breaks it.
+    ///
+    /// `docs/session-format.md` warns that the reader is line-oriented and that "a line that is half an
+    /// object is damage" -- and measured on 2026-09-18 it was *silent*: the three fragments left by
+    /// folding one `title` line by hand name no event type, so the two-way guard filed them under
+    /// "somebody else's event" and the person's edit vanished with no word. The report is the whole
+    /// point of the rule: an edit that did not take is something the editor has to be told about.
+    #[test]
+    fn a_pretty_printed_line_is_damage_and_is_counted() {
+        let dir = TempDir::new("pretty");
+        let path = dir.file(
+            "p.jsonl",
+            &[
+                meta("p", Some(2)),
+                r#"{"#.to_string(),
+                r#"  "type": "title","#.to_string(),
+                r#"  "title": "folded by hand""#.to_string(),
+                r#"}"#.to_string(),
+            ],
+        );
+        let loaded = load(&path).unwrap();
+        assert_eq!(
+            loaded.damaged, 4,
+            "a pretty-printed line was skipped in silence"
+        );
+        // And the hole is real: the name the person tried to add is not there.
+        assert_eq!(loaded.title, None);
+    }
+
+    /// A byte-order mark is the encoding's business, not the content's -- the same sentence
+    /// `attach.rs` and `web.rs` already act on.
+    ///
+    /// This is the case a Windows person actually has: `notepad` and `Set-Content -Encoding utf8`
+    /// both write one. It mattered twice over, because the mark is on the *first* line, which is
+    /// `meta` -- so the file loaded with no working directory and `--continue` could no longer match
+    /// it to a directory, silently. Under the verdicts above that line is also damage now, which is
+    /// true but is not a reason to lose it: the mark comes off, and the line reads.
+    #[test]
+    fn a_byte_order_mark_does_not_cost_the_file_its_first_line() {
+        let dir = TempDir::new("bom");
+        // The line the mark lands on is `meta`, and `meta` is where the directory is written -- so
+        // this is the assertion that the mark did not cost the file its `cwd`, which is what
+        // `--continue` matches on. The helper in this module writes `/tmp`; the path is what matters,
+        // and the id is read back beside it so a file that lost the whole line cannot pass.
+        let path = dir.file(
+            "b.jsonl",
+            &[format!("\u{feff}{}", meta("b", Some(2))), user("hello")],
+        );
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.id, "b", "the mark ate the meta line");
+        assert_eq!(loaded.cwd, "/tmp");
+        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.damaged, 0, "a mark is not a hole");
+        // Both readers, because two readers of one file that disagree is its own bug: the listing
+        // is what `--continue` matches a directory with.
+        let summary = scan(&path).unwrap();
+        assert_eq!(summary.cwd, "/tmp");
     }
 
     /// A reasoning level travels in the file, and the last line wins.

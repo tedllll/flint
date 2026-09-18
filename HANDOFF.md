@@ -32,7 +32,7 @@ reconstruct it:
 The gate as this session left it — re-measured after the verification-pass fixes at the top of
 `## What was just done`, on a tree with the untracked verification record held aside (that file and no
 other is the one thing `cargo test` disagrees with; see the paragraph after this one): `cargo test`
-**648 passing, 1 ignored** across the 14 suites (lib 358, bin 6, `agent_loop` 34, `balance` 7,
+**650 passing, 1 ignored** across the 14 suites (lib 360, bin 6, `agent_loop` 34, `balance` 7,
 `cli_output` 113, `json_output` 41, `say` 6, `search_tool` 4, `task` 17, `term_capture` 20 + 1 ignored,
 `tty_hangup` 0 and the doc-tests 0 — both empty by construction — `web_view` 32, `who` 10);
 `cargo clippy --all-targets -- -D warnings` silent; the two headless Node harnesses green
@@ -48,7 +48,7 @@ CP936 artifacts — the character a middle dot becomes when a UTF-8 file is read
 character is the second half of the Chinese word for a filesystem *path*, which is a word no Chinese
 document about this program can avoid. A long Chinese verification record therefore trips a check that is
 right about Rust sources and the page. Proven rather than assumed: with
-that one file moved aside the guard passes and the whole suite is the 648 above; with it present, 112 of
+that one file moved aside the guard passes and the whole suite is the 650 above; with it present, 112 of
 `cli_output`'s 113 pass and the guard names only lines of that file. So a Chinese verification record
 cannot live in this tree as it stands. Two ways out, and the choice is a person's: keep the file outside
 the checkout (its evidence already lives under `%TEMP%\fv\`), or teach the guard that `U+8DEF` is
@@ -1805,6 +1805,30 @@ artifact is a symptom rather than prose. The same sentence in `tests/cli_output.
 declared, was caught by the marker half of the guard, which is the half a whitelist cannot cover. Both
 now describe the localized half instead of quoting it; the test's assertion is the same rule from the
 other side (none of the OS's phrasing may appear at the prompt, in any language).
+
+**The verification record's §2 was read too, and one of its nine wording findings was a real hole.**
+The other eight are the inventory's own examples drifting by a word or a line (`/model`'s bare form is
+four lines and not one, the inline `@file` note leads with `inlined`, the error frame's keys are
+alphabetical, the refusal for a script starts with a capital, `X-Flint-At` is absent exactly when the
+file it points into does not exist yet) — worth a pass of its own some time, none of them behaviour.
+The ninth was not wording. `docs/session-format.md` says "a line that is half an object is damage", and
+**measured, it was silent**: the two-way guard that decides what an unparseable line *is* asked only
+whether the line named a type this build knows, so anything that was not JSON at all — a pretty-printed
+fragment, a torn tail from a write that was cut off — fell into the "somebody else's event" bucket and
+vanished with no word. That is the one verdict a hand-editable format cannot afford. The rule is three
+verdicts now, and the distinction is well-formedness: a newer file is silent (nothing in it is damage),
+a well-formed object naming a type this build does not know is silent (that is how the format grows),
+and everything else is damage and is counted and announced. The count is also carried on the loaded
+session, because the announcement is a stderr side effect and a hole in a file should be *testable* —
+three tests, each watched failing first (0 vs 4 fragments, 1 vs 2 holes, and the mark below).
+
+The same pass found the reason the BOM case mattered: the mark lands on the **first** line, which is
+`meta`, so a file re-saved by `notepad` or `Set-Content -Encoding utf8` loaded with no working directory
+and `--continue` could no longer match it to one — silently. Under the new rule that line is damage,
+which is true and is still not a reason to lose it: `attach.rs` and `web.rs` already act on the same
+sentence ("a byte-order mark is the encoding's business, not the content's"), so `load` and `scan` strip
+it now. Both, because the listing is the reader `--continue` matches a directory with, and two readers
+of one file disagreeing about where a conversation was held is its own bug.
 
 **CI red on the commit that fixed §1.1, and the annotation fix earned itself immediately.** The ubuntu
 job failed `a_run_that_is_already_deep_refuses_to_go_deeper` with "the depth limit was not reported",
