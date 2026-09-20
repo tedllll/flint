@@ -82,16 +82,24 @@ fn plain(text: &str) -> String {
 /// Seconds of CPU this process has burned, for the failure message.
 ///
 /// A run that hangs and a run that spins look the same to a stopwatch and completely different in
-/// `/proc`, and the point of this test is the spin: the report says which one it was.
+/// the process's own accounting, and the point of this test is the spin: the report says which one
+/// it was. Both platforms are asked, because a number that is only available on one of them is
+/// missing exactly where somebody is reading the failure.
 fn cpu_seconds(pid: u32) -> f64 {
-    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-        return f64::NAN;
-    };
+    if let Some(seconds) = cpu_seconds_from_proc(pid) {
+        return seconds;
+    }
+    // No `/proc`, which means this is not Linux. `ps` is the portable answer and is only ever
+    // spawned on the path where there is no `/proc` to read.
+    ps_cpu_seconds(pid).unwrap_or(f64::NAN)
+}
+
+/// Linux: exact, and spawns nothing.
+fn cpu_seconds_from_proc(pid: u32) -> Option<f64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     // The comm field is parenthesised and may contain spaces, so fields are counted from the closing
     // bracket rather than from the front of the line.
-    let Some((_, rest)) = stat.rsplit_once(')') else {
-        return f64::NAN;
-    };
+    let (_, rest) = stat.rsplit_once(')')?;
     // `utime` and `stime` are fields 14 and 15 of the line, so 12 and 13 of what follows ") ".
     let fields: Vec<&str> = rest.split_whitespace().collect();
     let ticks: f64 = [fields.get(11), fields.get(12)]
@@ -101,7 +109,70 @@ fn cpu_seconds(pid: u32) -> f64 {
         .sum();
     // `getconf CLK_TCK` is 100 on every Linux this runs on, and this number is only ever read out of
     // a failure message.
-    ticks / 100.0
+    Some(ticks / 100.0)
+}
+
+/// Everywhere else: ask `ps`.
+fn ps_cpu_seconds(pid: u32) -> Option<f64> {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "time=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    parse_ps_time(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `[[dd-]hh:]mm:ss[.ss]`, which is what both `ps`es print -- macOS leaves `0:00.51`, Linux
+/// `00:00:00`, so the fields are counted from the right rather than by position.
+fn parse_ps_time(text: &str) -> Option<f64> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let (days, rest) = match text.split_once('-') {
+        Some((days, rest)) => (days.parse::<f64>().ok()?, rest),
+        None => (0.0, text),
+    };
+    let fields: Vec<&str> = rest.split(':').collect();
+    if fields.is_empty() || fields.len() > 3 {
+        return None;
+    }
+    let mut seconds = 0.0;
+    for field in &fields {
+        seconds = seconds * 60.0 + field.parse::<f64>().ok()?;
+    }
+    Some(days * 86_400.0 + seconds)
+}
+
+/// The two shapes `ps` prints, and nothing else.
+///
+/// Checked rather than assumed, because a parser that quietly returns `None` puts `NaN` back in the
+/// failure message this exists to fill in -- and nothing would say so.
+#[test]
+fn the_ps_time_parser_reads_both_platforms() {
+    assert_eq!(parse_ps_time("  0:00.51"), Some(0.51));
+    assert_eq!(parse_ps_time("00:00:01"), Some(1.0));
+    assert_eq!(parse_ps_time("0:05"), Some(5.0));
+    assert_eq!(parse_ps_time("1:00:00"), Some(3600.0));
+    assert_eq!(parse_ps_time("2-01:00:00"), Some(2.0 * 86_400.0 + 3600.0));
+    // A process that is gone, and anything else that is not a time.
+    assert_eq!(parse_ps_time(""), None);
+    assert_eq!(parse_ps_time("   "), None);
+    assert_eq!(parse_ps_time("no such process"), None);
+    assert_eq!(parse_ps_time("1:2:3:4"), None);
+}
+
+/// This platform can answer the question the failure message asks.
+///
+/// Which is the whole point of asking two ways: on the machine this test is written on, the
+/// `/proc`-only version returned `NaN`, so the one number that tells a spin from a hang was missing
+/// exactly where somebody would be reading it.
+#[test]
+fn this_process_has_a_cpu_time_on_this_platform() {
+    let seconds = cpu_seconds(std::process::id());
+    assert!(
+        seconds.is_finite() && seconds >= 0.0,
+        "no CPU time for this process on this platform: {seconds}"
+    );
 }
 
 /// A terminal that goes away ends the run, and does not burn a core doing it.
@@ -121,14 +192,20 @@ fn a_terminal_that_goes_away_ends_the_run() {
 
     let mut master: libc::c_int = -1;
     let mut slave: libc::c_int = -1;
-    let size = libc::winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
+    // Both pointer arguments are spelled mutably, and that is the portable spelling rather than a
+    // preference: BSD's `openpty` declares them `*mut` because it writes through them, while glibc
+    // declares them `*const`. Rust coerces `*mut` to `*const` at a call and not the other way round,
+    // so the mutable form is the one both accept -- and the immutable one is what this test was
+    // written with, which is why it compiled on the Linux runner and nowhere else. Nothing here
+    // writes to the size; `&mut` is only how glibc and BSD can be offered the same value.
+    let mut size = libc::winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
     let opened = unsafe {
         libc::openpty(
             &mut master,
             &mut slave,
             std::ptr::null_mut(),
-            std::ptr::null(),
-            &size,
+            std::ptr::null_mut(),
+            &mut size,
         )
     };
     assert_eq!(opened, 0, "openpty failed: {}", std::io::Error::last_os_error());
