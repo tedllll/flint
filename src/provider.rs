@@ -136,6 +136,39 @@ pub fn is_local_endpoint(base_url: &str) -> bool {
 /// anyway because the cost of the API rejecting a request is the whole session being
 /// unusable, and the check is cheap; a provider that only sometimes produces valid
 /// payloads is not one you can rescue a broken machine with.
+/// The conversation as the provider is given it: everything but the reasoning.
+///
+/// **One type serves both the session file and this request, and the field belongs to the file.**
+/// `reasoning` is in the record because the record is the whole turn and the page draws it; none of
+/// it goes back to a provider, for either of the two reasons below.
+///
+/// *It is the larger half of the context.* A turn's tokens are mostly reasoning -- measured on two
+/// local models, 341 completion tokens of which 292 characters were the answer, and 436 of which 49
+/// characters were -- so the history that accumulates is mostly reasoning, and every turn was
+/// re-sending all of it. The tool schemas were the smaller problem, and they were four times the
+/// system prompt.
+///
+/// *And no vendor wants it.* DeepSeek's reasoner documents that `reasoning_content` must not be
+/// passed back in the input; a local `mlx_lm.server` has no use for it; Anthropic's extended
+/// thinking wants its own signed blocks, which this is not. A field one vendor forbids and the rest
+/// ignore is not one to send by default.
+///
+/// Written as a strip rather than as a wire-only type so that the *shape* of a message stays
+/// derived from its serde attributes -- a hand-built copy would be a second definition of the
+/// request's message shape, and the two would drift.
+fn wire_messages(messages: &[Message]) -> Vec<Value> {
+    messages
+        .iter()
+        .map(|message| {
+            let mut value = serde_json::to_value(message).unwrap_or(Value::Null);
+            if let Some(object) = value.as_object_mut() {
+                object.remove("reasoning");
+            }
+            value
+        })
+        .collect()
+}
+
 fn ensure_tool_calls_are_answered(messages: &[Message]) -> Vec<Message> {
     let mut out: Vec<Message> = Vec::with_capacity(messages.len());
     let mut index = 0;
@@ -339,7 +372,7 @@ pub fn request_body(
 
     let mut body = json!({
         "model": model,
-        "messages": ensure_tool_calls_are_answered(messages),
+        "messages": wire_messages(&ensure_tool_calls_are_answered(messages)),
         "stream": true,
         // Ask for a final usage frame; harmless for servers that ignore it.
         "stream_options": { "include_usage": true },
@@ -1094,6 +1127,46 @@ fn usage_from(usage: &Value) -> Usage {
 
 #[cfg(test)]
 mod tests {
+    /// The reasoning a turn produced is kept in the session file and never sent back.
+    ///
+    /// One type serves both the file and the request body, and `reasoning` belongs to the file --
+    /// it is the record, and the page draws it. It must not go back to a provider, and the two
+    /// reasons are worth keeping apart from the fix:
+    ///
+    /// **It is the larger half of the context.** A turn's tokens are mostly reasoning -- measured
+    /// on two local models, 341 completion tokens of which 292 *characters* were the answer, and
+    /// 436 of which 49 characters were -- so the history that accumulates is mostly reasoning, and
+    /// every turn was re-sending all of it. The tool schemas were the smaller problem.
+    ///
+    /// **And no vendor wants it.** DeepSeek's reasoner documents that `reasoning_content` must not
+    /// be passed back in the input; a local `mlx_lm.server` has no use for it; Anthropic's
+    /// extended thinking wants its own signed blocks, which this is not. A field that one vendor
+    /// forbids and the rest ignore is not a field to send by default, and the file already has it
+    /// for whoever wants to read it.
+    #[test]
+    fn a_reasoning_chain_is_never_sent_back() {
+        let turn = vec![
+            Message::user("what is 2+2"),
+            Message::Assistant {
+                content: Some("4".to_string()),
+                reasoning: Some("two and two make four, ".repeat(40)),
+                tool_calls: Vec::new(),
+            },
+            Message::user("and 3+3"),
+        ];
+        let thinking = Thinking { level: "off".to_string(), field: String::new() };
+        let body = request_body("m", &turn, &[], false, &thinking);
+        let sent = serde_json::to_string(&body["messages"]).unwrap();
+        assert!(
+            !sent.contains("reasoning"),
+            "the reasoning chain went back to the provider: {sent}"
+        );
+        // The conversation itself is still there, or this would pass by sending nothing.
+        assert!(sent.contains("2+2"), "the question was dropped: {sent}");
+        assert!(sent.contains("\"4\""), "the answer was dropped: {sent}");
+        assert!(sent.contains("and 3+3"), "the history was dropped: {sent}");
+    }
+
     use super::*;
 
     fn texts(events: &[Event]) -> String {

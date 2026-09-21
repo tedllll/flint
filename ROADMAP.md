@@ -2159,7 +2159,7 @@ this reading, and was not proposed, for a reason worth keeping rather than redis
   argues about at length, and the answer to that argument was no, so inventing a rung quietly here would
   be answering it again by accident.
 
-### 9. The reasoning chain is sent back to the provider — **measured, not decided**
+### 9. The reasoning chain is no longer sent back — **decided and done**
 
 Found by asking whether it is. It is. A `Message::Assistant` carries `reasoning`, one type serves
 both the session file and the request body (`provider::request_body` sends `messages` directly), and
@@ -2181,10 +2181,17 @@ Two reasons this matters, and the second is not about size:
   for at least the first and right for the second, and nothing in the tree knows which it is talking
   to.
 
-Not decided because the fix is a policy rather than a deletion: either the wire form stops carrying
-`reasoning` and a provider that needs it gets a flag, or the field becomes per-provider beside
-`thinking_field` — which already exists for the *request* side of the same vendor disagreement and is
-the obvious precedent. Either way the session file keeps it: it is the record, and the page draws it.
+**Decided: it is never sent, to any provider — local or hosted.** `provider::wire_messages` strips the
+field at the request boundary and is the one place that decides it, so the session file still carries
+the whole turn (it is the record, and the page draws it) while no endpoint ever sees it again. Written
+as a strip rather than as a wire-only message type because the *shape* of a message should stay derived
+from its serde attributes — a hand-built copy would be a second definition of the request's message
+shape, and the two would drift.
+
+A provider that later turns out to need its reasoning returned (Anthropic's signed thinking blocks are
+the case that exists) should get that as a **provider field beside `thinking_field`**, which is already
+the precedent for the same vendor disagreement on the request side. Not a default, and not a flag that
+sends it everywhere.
 
 ## Small, agreed, unscheduled
 
