@@ -134,6 +134,8 @@ pub struct ToolBox {
     run_env: RunEnv,
     /// Whether the tools are offered one at a time. See `Config::lazy_tools`.
     lazy: bool,
+    /// The tools declared whatever `lazy` says -- `Config::eager_tools`, or `ALWAYS_DECLARED`.
+    eager: Vec<String>,
     /// The tools the model has asked about, shared with the `tools` tool that adds to it.
     ///
     /// A `ToolBox` is built once and read on every request, so this is what makes the set grow
@@ -258,7 +260,13 @@ impl ToolBox {
         // first in the list, because it is the one that is always sent.
         let unlocked: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
             std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
-        let catalogue = catalogue_of(&tools);
+        // Absent means the eight whose arguments a model gets right without being told; a list --
+        // including an empty one -- is what the person asked for, and is not second-guessed.
+        let eager: Vec<String> = config
+            .eager_tools
+            .clone()
+            .unwrap_or_else(|| ALWAYS_DECLARED.iter().map(|n| n.to_string()).collect());
+        let catalogue = catalogue_of(&tools, config.lazy_tools, &eager);
         tools.insert(
             0,
             Box::new(ToolsTool {
@@ -273,6 +281,7 @@ impl ToolBox {
             .collect();
         ToolBox {
             lazy: config.lazy_tools,
+            eager,
             unlocked,
             tools,
             by_name,
@@ -379,10 +388,9 @@ impl ToolBox {
     /// "what can the model call right now", and the REPL, the page, `debug prompt-input` and a
     /// `task` child all get it by asking the same question.
     pub fn specs(&self) -> Vec<(String, String, Value)> {
-        let unlocked = self.unlocked.lock().unwrap_or_else(|e| e.into_inner());
         self.tools
             .iter()
-            .filter(|t| !self.lazy || t.name() == "tools" || unlocked.contains(t.name()))
+            .filter(|t| self.is_declared(t.name()))
             .map(|t| {
                 (
                     t.name().to_string(),
@@ -391,6 +399,24 @@ impl ToolBox {
                 )
             })
             .collect()
+    }
+
+    /// Whether this request gives the model a tool, and so its arguments.
+    ///
+    /// One function because two places need the same answer: what `specs` sends, and whether a
+    /// failed call should point at the lookup -- a call that got its arguments wrong is only
+    /// interesting when the model was never given them.
+    pub fn is_declared(&self, name: &str) -> bool {
+        if !self.lazy {
+            return true;
+        }
+        if name == "tools" || self.eager.iter().any(|e| e == name) {
+            return true;
+        }
+        self.unlocked
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(name)
     }
 
     /// Every tool, whether or not this request declares it.
@@ -405,14 +431,53 @@ impl ToolBox {
     }
 
     pub async fn invoke(&self, name: &str, args: &Value) -> Result<String> {
-        let index = self
+        let Some(index) = self
             .by_name
             .iter()
             .find(|(n, _)| n == name)
             .map(|(_, i)| *i)
-            .ok_or_else(|| anyhow!("unknown tool '{name}'"))?;
-        let output = self.tools[index].call(args).await?;
+        else {
+            // A name that is not a tool at all. The listing is the only useful thing to say, and
+            // this is the one place that knows it is missing rather than wrong.
+            let held = if self.lazy { self.declared_names() } else { String::new() };
+            return Err(anyhow!(
+                "unknown tool '{name}'.{}{held}",
+                if self.lazy { " Call `tools` to list what there is." } else { "" }
+            ));
+        };
+        // The arguments came from somewhere, and if the model was never given them it guessed --
+        // which is what it did when asked for `apply_patch`'s: it answered "name" and did not look
+        // the tool up. The refusal is the moment it is willing to listen, so the refusal says where
+        // the answer is. Only for a tool this request did not declare: for the rest the model has
+        // the schema in front of it and a pointer would be noise.
+        let was_declared = self.is_declared(name);
+        let output = match self.tools[index].call(args).await {
+            Ok(output) => output,
+            Err(e) if !was_declared => {
+                return Err(anyhow!(
+                    "{e:#}\n\n(`{name}` is not in your list yet, so its arguments were not given \
+                     to you. Call `tools` with {{\"name\": \"{name}\"}} and it will be there from \
+                     the next turn.)"
+                ));
+            }
+            Err(e) => return Err(e),
+        };
         Ok(self.cap(output))
+    }
+
+    /// The tools this request does not declare, named for a refusal that has to say what there is.
+    fn declared_names(&self) -> String {
+        let held: Vec<String> = self
+            .tools
+            .iter()
+            .map(|t| t.name().to_string())
+            .filter(|name| !self.is_declared(name))
+            .collect();
+        if held.is_empty() {
+            String::new()
+        } else {
+            format!(" Held back for now: {}.", held.join(", "))
+        }
     }
 
     /// Keep one tool answer inside the request budget, without pretending the rest does
@@ -4983,6 +5048,27 @@ impl Tool for TaskTool {
 /// session path in that record is for -- and is handled there by a person, not from here.
 pub struct JobOpTool;
 
+/// The tools whose arguments follow a convention, and which are therefore always declared.
+///
+/// The split is not "common versus rare" -- it is **guessable versus not**. `read` takes a path and
+/// `bash` takes a command line, and a model that has met a coding agent before gets those right
+/// without being told; `apply_patch` takes a patch in a format nothing else uses, and `job_op` is
+/// flint's own idea. Measured against a local model: with *nothing* declared but a catalogue, it
+/// called `read` with `file_path` and got the right answer in the same number of turns as the eager
+/// build -- and, asked for `apply_patch`'s argument, answered "`name`" (the real one is `patch`)
+/// without looking it up.
+///
+/// So these eight are always in the request, and the rest are behind `tools`. That is about half
+/// the payload saved rather than nine tenths, and it buys the thing the measurement says is
+/// missing: the tools a run reaches for constantly never depend on the model choosing to look
+/// something up.
+///
+/// `Config::eager_tools` replaces this list -- including with nothing, which is the all-lazy shape
+/// the first version of this had.
+const ALWAYS_DECLARED: [&str; 8] = [
+    "bash", "exec", "read", "write", "edit", "list", "glob", "grep",
+];
+
 /// Ask what you can do, and how to call it.
 ///
 /// The one tool that is always in the request when `lazy_tools` is on, and the reason the other
@@ -5087,11 +5173,17 @@ fn gloss(name: &str) -> Option<&'static str> {
     })
 }
 
-/// The one-line catalogue the `tools` tool carries: every name, and the words that make it choosable.
-fn catalogue_of(tools: &[Box<dyn Tool>]) -> String {
+/// The one-line catalogue the `tools` tool carries: the tools this request does **not** declare.
+///
+/// Only those, because the rest are in the request already, with their full schemas -- naming them
+/// here as well would be the duplication this whole design removes, paid for on every turn.
+fn catalogue_of(tools: &[Box<dyn Tool>], lazy: bool, eager: &[String]) -> String {
     let mut names: Vec<String> = Vec::with_capacity(tools.len());
     for tool in tools {
         let name = tool.name();
+        if !lazy || name == "tools" || eager.contains(&name.to_string()) {
+            continue;
+        }
         match gloss(name) {
             Some("") => names.push(name.to_string()),
             Some(words) => names.push(format!("{name} ({words})")),
@@ -5101,9 +5193,14 @@ fn catalogue_of(tools: &[Box<dyn Tool>]) -> String {
             None => names.push(name.to_string()),
         }
     }
+    if names.is_empty() {
+        return "Every tool there is already has its arguments in your list; nothing is held back."
+            .to_string();
+    }
     format!(
-        "The tools you can call: {}. Call this with a name to get the arguments that tool takes \
-         -- it is added to your list from the next turn on, and you call it as usual.",
+        "The tools you can call but have not been given the arguments for: {}. Call this with a \
+         name to get what that tool takes -- it is added to your list from the next turn on, and \
+         you call it as usual.",
         names.join(", ")
     )
 }
@@ -7734,21 +7831,93 @@ mod exec_tests {
         ToolBox::new(&Config::default(), readonly, dir.to_path_buf())
     }
 
-    /// With `lazy_tools` on, the first request declares the lookup and nothing else.
+    /// With `lazy_tools` on, the first request declares the core and the lookup -- and the tools
+    /// whose arguments a model guesses wrong are not in it.
     ///
-    /// This is the whole point: thirteen schemas measured 10,710 characters against a 3,400
-    /// character system prompt, and a run that uses four of them was paying for all thirteen on
-    /// every turn.
+    /// The split is measured, not assumed: with nothing declared but a catalogue, a local model
+    /// called `read` with `file_path` correctly and, asked for `apply_patch`'s argument, answered
+    /// "`name`" without looking it up.
     #[test]
-    fn the_first_request_declares_only_the_lookup() {
+    fn the_first_request_declares_the_core_and_the_lookup() {
         let dir = TempDir::new("lazy-first");
         let box_ = toolbox(dir.path(), false);
         let names: Vec<String> = box_.specs().into_iter().map(|(n, _, _)| n).collect();
-        assert_eq!(names, vec!["tools".to_string()], "the first request declares: {names:?}");
+        for core in ALWAYS_DECLARED {
+            assert!(names.contains(&core.to_string()), "{core} is not declared: {names:?}");
+        }
+        assert!(names.contains(&"tools".to_string()), "the lookup is not declared: {names:?}");
+        for held in ["apply_patch", "task", "tasks", "job_op", "fetch"] {
+            assert!(
+                !names.contains(&held.to_string()),
+                "{held} is declared, and its arguments are the ones a model gets wrong: {names:?}"
+            );
+        }
         assert!(
-            box_.all_specs().len() > 10,
-            "the set is only small because it is empty: {} tools were built",
-            box_.all_specs().len()
+            names.len() < box_.all_specs().len(),
+            "nothing is being held back, so this proves nothing"
+        );
+    }
+
+    /// An empty `eager_tools` is the all-lazy shape, for anybody who wants to measure their model.
+    #[test]
+    fn an_empty_eager_list_declares_nothing_but_the_lookup() {
+        let dir = TempDir::new("lazy-empty");
+        let config = Config {
+            lazy_tools: true,
+            eager_tools: Some(Vec::new()),
+            ..Config::default()
+        };
+        let box_ = ToolBox::new(&config, false, dir.path().to_path_buf());
+        let names: Vec<String> = box_.specs().into_iter().map(|(n, _, _)| n).collect();
+        assert_eq!(names, vec!["tools".to_string()], "the first request declares: {names:?}");
+    }
+
+    /// A call that was never given its arguments is refused *and told where they are*.
+    ///
+    /// This is the repair loop for the failure the measurement found: the model guesses an argument
+    /// rather than looking the tool up, and the refusal is the one moment it is willing to listen.
+    #[tokio::test]
+    async fn a_call_that_was_never_given_its_arguments_is_pointed_at_the_lookup() {
+        let dir = TempDir::new("lazy-teach");
+        let box_ = toolbox(dir.path(), false);
+        let error = box_
+            .invoke("apply_patch", &json!({ "name": "whatever" }))
+            .await
+            .expect_err("the wrong argument must fail");
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("tools") && text.contains("apply_patch"),
+            "the refusal does not say where the arguments are: {text}"
+        );
+
+        // And once it has been asked about, the same mistake is told plainly -- the model has the
+        // schema in front of it at that point, so a pointer would be noise.
+        box_.invoke("tools", &json!({ "name": "apply_patch" })).await.unwrap();
+        let error = box_
+            .invoke("apply_patch", &json!({ "name": "whatever" }))
+            .await
+            .expect_err("the wrong argument still fails");
+        let text = format!("{error:#}");
+        assert!(
+            !text.contains("not in your list yet"),
+            "the pointer is repeated after the tool was declared: {text}"
+        );
+    }
+
+    /// A name that is not a tool at all is told what there is.
+    #[tokio::test]
+    async fn an_unknown_tool_is_told_what_there_is() {
+        let dir = TempDir::new("lazy-unknown");
+        let box_ = toolbox(dir.path(), false);
+        let error = box_
+            .invoke("definitely_not_a_tool", &json!({}))
+            .await
+            .expect_err("an unknown name must fail");
+        let text = format!("{error:#}");
+        assert!(text.contains("tools"), "the refusal does not point at the lookup: {text}");
+        assert!(
+            text.contains("apply_patch"),
+            "the refusal does not say what is held back: {text}"
         );
     }
 
@@ -7772,7 +7941,7 @@ mod exec_tests {
         assert!(names.contains(&"read".to_string()), "read was not unlocked: {names:?}");
         assert!(names.contains(&"tools".to_string()), "the lookup left the list: {names:?}");
         assert!(
-            !names.contains(&"write".to_string()),
+            !names.contains(&"apply_patch".to_string()),
             "asking about one tool unlocked another: {names:?}"
         );
     }
@@ -7783,11 +7952,15 @@ mod exec_tests {
         let dir = TempDir::new("lazy-list");
         let box_ = toolbox(dir.path(), false);
         let answer = box_.invoke("tools", &json!({})).await.expect("the lookup answers");
-        for tool in box_.all_specs() {
-            assert!(answer.contains(&tool.0), "the listing omits {}: {answer}", tool.0);
+        for (name, _, _) in box_.all_specs() {
+            if box_.is_declared(&name) {
+                continue;
+            }
+            assert!(answer.contains(&name), "the listing omits {name}: {answer}");
         }
-        let names: Vec<String> = box_.specs().into_iter().map(|(n, _, _)| n).collect();
-        assert_eq!(names, vec!["tools".to_string()], "listing unlocked something: {names:?}");
+        let before: Vec<String> = box_.specs().into_iter().map(|(n, _, _)| n).collect();
+        let after: Vec<String> = box_.specs().into_iter().map(|(n, _, _)| n).collect();
+        assert_eq!(before, after, "listing unlocked something");
     }
 
     /// Every tool is named in the catalogue's table, so a new one cannot appear without a decision.
@@ -7867,12 +8040,12 @@ mod exec_tests {
         // orders of magnitude below the eager one.
         let per_request = weight(box_.specs());
         assert!(
-            per_request <= 1_000,
-            "one request carries {per_request} characters of tool text; it was 874 when this \
-             budget was set. The catalogue is the only tool text paid for on every turn of every \
-             run, so what grows here grows everywhere -- a paragraph here costs more than a \
-             paragraph anywhere else in this file. Room for one more tool's line, and not for a \
-             sentence: sentences are what the lookup answers with."
+            per_request <= 5_400,
+            "one request carries {per_request} characters of tool text; it was 5,387 when this \
+             budget was set. This is the core's eight schemas plus the lookup's catalogue, and it \
+             is what every turn of every run pays: a paragraph here costs more than a paragraph \
+             anywhere else in this file. The way to bring it down is to move a tool into the \
+             lookup's half -- `ALWAYS_DECLARED` -- not to find shorter words for a schema."
         );
         // And everything, for the runs that ask for all of it -- the number this started at.
         // Only paid with `lazy_tools = false`, which is why the ceiling is this loose: it is the

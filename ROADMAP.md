@@ -2217,21 +2217,22 @@ able to plan (`tools {"name": "read"}` is the second step, and a model that gues
   call `tools` first. So the lookup is not yet a habit this model has, and the design leans on a
   step it skipped.
 
-**What is not measured, and is the thing to decide.** Whether the extra turn is worth the 91%
-saving *for a strict provider*, where an undeclared call is refused rather than quietly accepted,
-and whether a model recovers from a wrong argument by looking the tool up. The local test could not
-answer it: the patch task that would show the recovery ran past eight minutes on a 9B model. Three
-ways forward, and the choice is a policy rather than a patch:
+**Both answers to that measurement are now built**, and they are the shape it ships in:
 
-1. Keep it as it is, and make a failed call *teach*: when a tool refuses for a missing or unknown
-   argument, the error names `tools` and the tool to ask about. That is the repair loop for exactly
-   the failure measured above, and it is cheap.
-2. Keep a core eager — the tools whose arguments are conventional (`read`, `write`, `edit`, `list`,
-   `glob`, `grep`, `bash`, `exec`, about 4,700 characters) — and keep only the unguessable ones
-   (`task`, `tasks`, `job_op`, `apply_patch`, `fetch`, about 4,900) behind the lookup. A 50% saving
-   with no extra turn on the common path, and none of the guessing.
-3. Neither, if the measurement above turns out to be a small-model habit rather than a property of
-   the mechanism: a larger model may well look first.
+1. **A call that was never given its arguments is refused *and told where they are*** — the refusal
+   names `tools` and the tool, and says it will be there from the next turn. That is the repair loop
+   for exactly the failure above: the wrong-argument call is the evidence that the model guessed, and
+   the refusal is the moment it is willing to listen. The pointer is *not* repeated once the tool has
+   been declared, because by then the schema is in front of it.
+2. **A core is always declared** — `bash`, `exec`, `read`, `write`, `edit`, `list`, `glob`, `grep`,
+   the eight whose arguments a model already knows — and only the five it gets wrong are behind the
+   lookup. Measured: **6,116 characters per request against 10,710** (43% off), with no extra turn on
+   the path every run takes.
+
+`eager_tools` replaces that list, and an **empty** list is the all-lazy shape (874 characters, still
+built and still one config line away) for anyone who wants to find out whether a larger model asks
+before it guesses. That is the one question left open here, and it is deliberately a question for a
+person with a bigger model rather than for this file.
 
 ## Small, agreed, unscheduled
 

@@ -140,11 +140,14 @@ readonly = false                # refuse write/edit/apply_patch and mutating bas
 proxy = ""                      # exported to bash children as HTTP(S)_PROXY
 verbose = "on"                  # off|on|full: how much of the agent's activity to narrate
 tool_detail = false             # print the output behind a tool result
-lazy_tools = true               # offer the tools one at a time, through the `tools` tool:
-                                # one small schema in every request and a one-line catalogue of
-                                # the rest, instead of every schema every time. Measured: 874
-                                # characters per request against 9,356. Costs one extra turn per
-                                # tool the first time it is needed
+lazy_tools = true               # declare the conventional tools plus the `tools` lookup, and
+                                # name the rest in a one-line catalogue the model can ask about.
+                                # Measured: 6,116 characters per request against 10,710 for the
+                                # whole set. Costs one extra turn per held-back tool, once
+eager_tools = []                # absent = bash, exec, read, write, edit, list, glob, grep, the
+                                # ones whose arguments a model already knows. A list replaces it;
+                                # an EMPTY list is all-lazy -- nothing but the lookup, 874
+                                # characters, for measuring whether a model asks before guessing
 instructions = "hint"           # AGENTS.md: "hint" (name them), "paste", "off"
 skill_dirs = []                 # extra skill directories, after the standard two
 thinking = "off"                # off|low|medium|high: reasoning to ask for. "off" sends no

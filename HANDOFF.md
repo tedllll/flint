@@ -1788,13 +1788,14 @@ reasoning (341 completion tokens of which 292 characters were the answer on one 
 this was the larger half of the context. `provider::wire_messages` strips it at the boundary; the
 file still keeps it.
 
-**The measurement that decides how far this goes is half done.** Against a real local model the
-catalogue is enough to know what exists (it listed all thirteen from the text alone) and a
-conventional tool is used correctly with no extra turn — but asked for `apply_patch`'s argument it
-answered "`name`" instead of looking it up, and the real one is `patch`. **The lookup is not yet a
-habit of that model.** Whether it is worth an extra turn per tool for a strict provider, and whether
-a model recovers from a wrong argument by looking the tool up, is open — `ROADMAP.md` §10 has the
-numbers and the three shapes the answer could take.
+**And the measurement above decided the shape it ships in.** The catalogue is enough to know what
+exists — the model listed all thirteen from the text alone — but asked for `apply_patch`'s argument
+it answered "`name`" (the real one is `patch`) **without looking it up**. So the lookup is not yet a
+habit of that model, and the design no longer leans on it: the eight tools whose arguments follow a
+convention are always declared, the five flint-specific ones are behind `tools`, and a call to one of
+those that was never given its arguments is refused **and told where they are**. Measured:
+**6,116 characters per request against 10,710.** `eager_tools = []` is the all-lazy shape (874
+characters) for anyone who wants to test whether a larger model asks before it guesses.
 
 
 **The page stopped being a surface and became a window with a door: a picture in the preview, the

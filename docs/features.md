@@ -400,14 +400,27 @@ The set is built per run, so the model's list is not always the same:
 |---|---|---|
 | `tools`, and whichever of the others the model has asked about | `pwsh` | `search` when a search credential resolves; `skill` when there is a skill to load |
 
-**With `lazy_tools` on — the default — the request declares one tool and a one-line catalogue of
-the rest**, and a tool is declared from the turn after the model asks about it. Measured: 874
-characters of tool text per request, against 9,356 for the whole set. `lazy_tools = false` sends
-everything every time, which is what every version before this did. The catalogue is what the model
-reads to know what exists; `tools {"name": "read"}` is what it reads to know what arguments to pass,
-and the call is what puts `read` in the next request. A model that guesses correctly — `read` with
-`file_path` — never needs the second step, which is why the catalogue's glosses are chosen to make
-the *choice* possible and nothing more.
+**With `lazy_tools` on — the default — the request declares the conventional tools plus the `tools`
+lookup**, and the rest are named in a one-line catalogue inside that lookup, joining the request from
+the turn after the model asks about them. Measured: **6,116 characters per request against 10,710**
+for the whole set.
+
+The split is *guessable versus not*, not common versus rare, and it comes from a measurement against
+a local model: given nothing but a catalogue it called `read` with `file_path` correctly, and asked
+for `apply_patch`'s argument it answered "`name`" — the real one is `patch` — **without looking it
+up**. So the eight tools whose arguments follow a convention (`bash`, `exec`, `read`, `write`, `edit`,
+`list`, `glob`, `grep`) are always declared, and the five flint-specific ones (`apply_patch`, `task`,
+`tasks`, `job_op`, `fetch`, plus `search`/`skill`/`pwsh` when they apply) are behind the lookup.
+
+`eager_tools` replaces that list, and **an empty list is the all-lazy shape**: nothing but the lookup,
+built and measured at 874 characters, for anybody who wants to find out whether their model asks
+before it guesses. `lazy_tools = false` sends everything every time, which is what every version
+before this did.
+
+A call to a tool this request did not declare is refused **and told where the arguments are** — the
+refusal names `tools` and the tool — because a wrong-argument call is exactly the evidence that the
+model guessed, and the refusal is the moment it is willing to listen. Once the tool is declared the
+pointer is not repeated: the schema is in front of it by then.
 
 `search` is *not* offered when it cannot work — a tool that always fails costs a schema on
 every request — and flint says why at startup instead. `flint debug prompt-input "<anything>"`

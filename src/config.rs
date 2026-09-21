@@ -263,6 +263,16 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub lazy_tools: bool,
 
+    /// The tools declared on every request even when `lazy_tools` is on.
+    ///
+    /// Absent means the eight whose arguments follow a convention a model already knows (`read`,
+    /// `write`, `edit`, `list`, `glob`, `grep`, `bash`, `exec`) -- the ones a run reaches for
+    /// constantly, which must not depend on the model choosing to look something up. A list replaces
+    /// that, and an **empty** list is the all-lazy shape: nothing but the lookup, for anybody who
+    /// wants to measure whether their model asks before it guesses.
+    #[serde(default)]
+    pub eager_tools: Option<Vec<String>>,
+
     /// What to do with project instruction files (`AGENTS.md`): `hint`, `paste` or `off`.
     ///
     /// Named rather than pasted by default, because naming is what the model can act on:
@@ -469,6 +479,7 @@ impl Default for Config {
             verbose: crate::display::Verbosity::On,
             tool_detail: false,
             lazy_tools: true,
+            eager_tools: None,
             instructions: default_instructions(),
             skill_dirs: Vec::new(),
             // Absent on purpose: with no block, search inherits the credential of the

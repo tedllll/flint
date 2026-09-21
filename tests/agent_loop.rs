@@ -71,6 +71,7 @@ fn test_config(base_url: &str) -> Config {
         verbose: flint::display::Verbosity::On,
         tool_detail: false,
         lazy_tools: false,
+        eager_tools: None,
         instructions: "hint".to_string(),
         skill_dirs: Vec::new(),
         search: None,
