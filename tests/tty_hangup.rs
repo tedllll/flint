@@ -199,6 +199,13 @@ fn a_terminal_that_goes_away_ends_the_run() {
     // written with, which is why it compiled on the Linux runner and nowhere else. Nothing here
     // writes to the size; `&mut` is only how glibc and BSD can be offered the same value.
     let mut size = libc::winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
+    // `&mut size` rather than `&size`, and allowed rather than worked around, because the two libcs
+    // disagree about the *type* and not about the meaning: BSD declares both pointer arguments `*mut`
+    // because it writes through them, glibc declares both `*const`. A `*mut` coerces to a `*const`
+    // and not the other way round, so the mutable form is the one both accept -- and clippy then
+    // points out, on the glibc side only, that a mutable borrow was not needed. Casting the pointer
+    // to silence it would be giving up the type that makes the call correct on the other platform.
+    #[allow(clippy::unnecessary_mut_passed)]
     let opened = unsafe {
         libc::openpty(
             &mut master,

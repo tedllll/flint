@@ -451,7 +451,10 @@ impl ToolBox {
         let was_declared = self.is_declared(name);
         let output = match self.tools[index].call(args).await {
             Ok(output) => output,
-            Err(e) if !was_declared => {
+            // Only for an argument error: a call that failed at the *work* plainly had the
+            // arguments it needed, and telling that model where the schema is would be noise on top
+            // of a real failure.
+            Err(e) if !was_declared && e.downcast_ref::<BadArguments>().is_some() => {
                 return Err(anyhow!(
                     "{e:#}\n\n(`{name}` is not in your list yet, so its arguments were not given \
                      to you. Call `tools` with {{\"name\": \"{name}\"}} and it will be there from \
@@ -637,14 +640,37 @@ fn type_name(value: &Value) -> &'static str {
     }
 }
 
+/// An error from reading a tool's arguments, as opposed to one from doing the work.
+///
+/// `ToolBox::invoke` uses the distinction to help a model that was never given a tool's schema
+/// without also explaining itself to one that was: an `edit` whose `old_string` did not match is a
+/// call that plainly *had* its arguments, and Windows CI said so in as many words -- the pointer
+/// meant for a guess was appended to the CRLF hint, turning a one-line hint into two paragraphs,
+/// and the test that holds "the hint is one line" failed.
+#[derive(Debug)]
+pub(crate) struct BadArguments(pub String);
+
+impl std::fmt::Display for BadArguments {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for BadArguments {}
+
+/// The error a tool returns when the arguments it was given are missing or the wrong shape.
+fn bad_arguments(message: String) -> anyhow::Error {
+    BadArguments(message).into()
+}
+
 pub(crate) fn require_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     match args.get(key) {
         Some(Value::String(text)) => Ok(text),
-        Some(other) => Err(anyhow!(
+        Some(other) => Err(bad_arguments(format!(
             "argument '{key}' must be a string, but it is {}",
             type_name(other)
-        )),
-        None => Err(anyhow!("missing required string argument '{key}'")),
+        ))),
+        None => Err(bad_arguments(format!("missing required string argument '{key}'"))),
     }
 }
 
@@ -671,13 +697,15 @@ fn require_path(args: &Value) -> Result<&str> {
         .map(|_| require_str(args, "path"))
         .transpose()?;
     match (named, older) {
-        (Some(named), Some(older)) if named != older => Err(anyhow!(
+        (Some(named), Some(older)) if named != older => Err(bad_arguments(format!(
             "arguments 'file_path' and 'path' name different files ({named} and {older}); \
              they are the same argument and only one may be given"
-        )),
+        ))),
         (Some(named), _) => Ok(named),
         (None, Some(older)) => Ok(older),
-        (None, None) => Err(anyhow!("missing required string argument 'file_path'")),
+        (None, None) => Err(bad_arguments(
+            "missing required string argument 'file_path'".to_string(),
+        )),
     }
 }
 
@@ -690,10 +718,10 @@ fn optional_str<'a>(args: &'a Value, key: &str) -> Result<Option<&'a str>> {
     match args.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(text)) => Ok(Some(text)),
-        Some(other) => Err(anyhow!(
+        Some(other) => Err(bad_arguments(format!(
             "argument '{key}' must be a string, but it is {}",
             type_name(other)
-        )),
+        ))),
     }
 }
 
@@ -7921,6 +7949,40 @@ mod exec_tests {
         );
     }
 
+    /// A call that failed at the *work* is not told where the schema is.
+    ///
+    /// The pointer is for a model that guessed its arguments. A call that had every argument it
+    /// needed and failed on the content is not that, and Windows CI is where the difference showed:
+    /// the CRLF hint is deliberately one line of text, and the pointer the first version appended
+    /// made it three -- so `an_edit_against_crlf_says_so_when_the_text_does_not_match` failed, which
+    /// is what a test holding a shape is for.
+    #[tokio::test]
+    async fn a_call_that_failed_at_the_work_is_not_told_about_the_lookup() {
+        let dir = TempDir::new("lazy-work-failure");
+        let box_ = toolbox(dir.path(), false);
+        std::fs::write(dir.path().join("f.txt"), "one\ntwo\n").unwrap();
+        // `read` first, because the edit gate refuses a file this run has not read -- and that
+        // refusal would be a different one than the test is about.
+        box_.invoke("read", &json!({ "path": "f.txt" })).await.unwrap();
+
+        let error = box_
+            .invoke(
+                "edit",
+                &json!({ "path": "f.txt", "old_string": "not in the file", "new_string": "x" }),
+            )
+            .await
+            .expect_err("the text is not there to replace");
+        let text = format!("{error:#}");
+        assert!(
+            !text.contains("not in your list yet"),
+            "a call that had its arguments was told to go and read them: {text}"
+        );
+        assert!(
+            !text.contains('\n'),
+            "the refusal must stay one line, which is what the CRLF case holds: {text:?}"
+        );
+    }
+
     /// A name that is not a tool at all is told what there is.
     #[tokio::test]
     async fn an_unknown_tool_is_told_what_there_is() {
@@ -8067,10 +8129,16 @@ mod exec_tests {
         // And everything, for the runs that ask for all of it -- the number this started at.
         // Only paid with `lazy_tools = false`, which is why the ceiling is this loose: it is the
         // whole set, including the lookup, and it is nobody's per-turn cost by default.
+        //
+        // Per platform, because Windows carries `pwsh` and nothing else does -- 11,101 measured
+        // there against 10,221 here, which is the 880 of a tool the other two platforms do not have.
+        // One ceiling would either fail on Windows or be slack everywhere else.
+        let ceiling = if cfg!(windows) { 11_500 } else { 10_500 };
         let total = weight(box_.all_specs());
         assert!(
-            total <= 10_500,
-            "the whole tool set is {total} characters, and it was 10,221 when the budget was set. \
+            total <= ceiling,
+            "the whole tool set is {total} characters; it was 10,221 when the budget was set \
+             (10,221 + pwsh's 880 on Windows). \
              A run pays this on every turn when `lazy_tools = false`: trim the description, \
              share the paragraph with the tool that already says it, or move it to a comment \
              where it costs nothing. If the words are genuinely worth paying for, raise the \
