@@ -265,6 +265,22 @@ cargo clippy --all-targets      # expected to be silent, and worth keeping that 
 node scripts/term-layout-test.js
 ```
 
+**Silent here is not silent everywhere, and that has cost a red CI twice.** A lint that depends on a
+platform's *signature* cannot fire on the platform whose signature is the other one: `libc::openpty`
+takes `*mut` on BSD and `*const` on glibc, so `&mut size` is required on one and
+`clippy::unnecessary_mut_passed` on the other — and this machine is the one where it is required.
+The same shape bit the tool-payload budget, which was measured on macOS and is 880 characters larger
+on Windows because that is where `pwsh` lives. Before pushing a change to anything under `#[cfg]`,
+anything calling `libc`, or any test that counts characters, ask what the *other* two platforms make
+of it — or read the failing job's annotations first, which name the test and the reason:
+
+```bash
+curl -s "https://api.github.com/repos/tedllll/flint/actions/runs/<run>/jobs"        # job ids
+curl -s "https://api.github.com/repos/tedllll/flint/check-runs/<id>/annotations"    # the reason
+```
+
+The job log needs a token and is not worth chasing; the annotations carry the panic.
+
 A push runs the first two on Linux and Windows (`.github/workflows/ci.yml`). The runner's log
 cannot be downloaded without a token, so a failing job re-emits the failing test's name and its
 panic as check annotations — `GET /repos/tedllll/flint/actions/runs/<run>/jobs` for the job ids,
