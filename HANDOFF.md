@@ -1805,6 +1805,15 @@ built). Windows is **854 / 4,387 / 11,777**, measured on a real Windows machine 
 the delta is `pwsh`, and it is 1,734 characters rather than the 880 the comment claimed for three
 commits, because that 880 had been worked out by subtracting a macOS figure from a stale one.
 
+That machine is Windows 11 with **only Windows PowerShell 5.1 and no `pwsh` at all**, which is the one
+configuration CI cannot reach — `windows-latest` has PowerShell 7, so the runner takes the preferred
+branch every time and the fallback is never executed there. It was driven for real this session, through
+`PwshTool` directly rather than through a model: it picked `powershell`, named it in the result
+(`5.1.26100.9444 (powershell) -- script: …`), wrote a `.ps1` beginning `ef bb bf`, passed `b c` as one
+argument, and refused under `readonly`. The non-ASCII case the BOM exists for round-trips as `你好`; the
+first reading of it as `浣犲ソ` was the capture pipeline decoding a native program's UTF-8 as code page
+936, not the tool.
+
 
 **The page stopped being a surface and became a window with a door: a picture in the preview, the
 run's controls behind a settings dialog, and a `/` menu in the composer.** Asked for directly
