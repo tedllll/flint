@@ -260,12 +260,10 @@ impl ToolBox {
         // first in the list, because it is the one that is always sent.
         let unlocked: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
             std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
-        // Absent means the eight whose arguments a model gets right without being told; a list --
-        // including an empty one -- is what the person asked for, and is not second-guessed.
-        let eager: Vec<String> = config
-            .eager_tools
-            .clone()
-            .unwrap_or_else(|| ALWAYS_DECLARED.iter().map(|n| n.to_string()).collect());
+        // Absent means all-lazy: the lookup and its catalogue, and every other tool obtained by
+        // asking. A list is what the person asked for -- `CONVENTIONAL_TOOLS` is the one to paste
+        // for a model that guesses rather than looking -- and is not second-guessed.
+        let eager: Vec<String> = config.eager_tools.clone().unwrap_or_default();
         let catalogue = catalogue_of(&tools, config.lazy_tools, &eager);
         tools.insert(
             0,
@@ -2879,8 +2877,7 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
-        "Run a shell command and return its combined output. The working directory is preserved across \
-         calls within a session."
+        "Run a shell command line. The working directory is kept between calls."
     }
 
     fn schema(&self) -> Value {
@@ -3347,9 +3344,7 @@ impl Tool for ExecTool {
     }
 
     fn description(&self) -> &str {
-        "Run one program, with its arguments already separate, and return its combined output. No shell \
-         is involved, so every argument arrives exactly as written, and shell syntax (`|`, `>`, `&&`, \
-         `$VAR`, globbing, `cd`) does not work here -- use `bash` for those."
+        "Run one program, arguments already separate. No shell."
     }
 
     fn schema(&self) -> Value {
@@ -3614,7 +3609,7 @@ impl Tool for ReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read a text file, with line numbers. Page through a long file with `offset` and `limit`."
+        "Read a text file, with line numbers."
     }
 
     fn schema(&self) -> Value {
@@ -3686,8 +3681,7 @@ impl Tool for WriteTool {
     }
 
     fn description(&self) -> &str {
-        "Create or overwrite a text file; parent directories are created. An existing file must have \
-         been read and unchanged since. Prefer `edit` for small changes."
+        "Create or overwrite a text file."
     }
 
     fn schema(&self) -> Value {
@@ -3761,8 +3755,7 @@ impl Tool for EditTool {
     }
 
     fn description(&self) -> &str {
-        "Replace an exact string in a file. `old_string` must match byte for byte and, unless \
-         `replace_all`, must appear exactly once. The file must have been read first."
+        "Replace an exact string in a file."
     }
 
     fn schema(&self) -> Value {
@@ -3985,7 +3978,7 @@ impl Tool for ListTool {
     }
 
     fn description(&self) -> &str {
-        "List directory entries: files and subdirectories."
+        "List a directory."
     }
 
     fn schema(&self) -> Value {
@@ -4427,8 +4420,7 @@ impl Tool for GlobTool {
     }
 
     fn description(&self) -> &str {
-        "Find files by name pattern, recursively. `*.rs` finds every Rust file below the path; \
-         `**/test_*.py` matches at any depth."
+        "Find files by name pattern."
     }
 
     fn schema(&self) -> Value {
@@ -4488,8 +4480,7 @@ impl Tool for GrepTool {
     }
 
     fn description(&self) -> &str {
-        "Search file contents for a literal string, recursively, and return file names with line \
-         numbers. Narrow it with `path` and `glob`."
+        "Search file contents."
     }
 
     fn schema(&self) -> Value {
@@ -5063,9 +5054,17 @@ pub struct JobOpTool;
 /// missing: the tools a run reaches for constantly never depend on the model choosing to look
 /// something up.
 ///
-/// `Config::eager_tools` replaces this list -- including with nothing, which is the all-lazy shape
-/// the first version of this had.
-const ALWAYS_DECLARED: [&str; 8] = [
+/// **Not the default.** `Config::eager_tools` is empty unless somebody asks for a set, so the
+/// shipped shape is all-lazy: the lookup and its catalogue, 874 characters, and every tool obtained
+/// by asking. This list is the conservative answer for a model that guesses instead of looking --
+/// the eight whose arguments need no lookup, about 4,600 characters of the 6,116 a request costs
+/// when they are declared. Paste it into `eager_tools` when a model's refusals show it guessing.
+///
+/// Measured both ways with `deepseek-flash`, on four tasks including a real `apply_patch` edit:
+/// identical results, and the lazy shape cost 1,401/2,093/1,885 prompt tokens against
+/// 2,651/2,781/3,099. It also called `tools` before `apply_patch` and answered `patch` -- the
+/// behaviour a local 9B model did not show, which is why this is a config key and not a constant.
+pub const CONVENTIONAL_TOOLS: [&str; 8] = [
     "bash", "exec", "read", "write", "edit", "list", "glob", "grep",
 ];
 
@@ -5140,9 +5139,10 @@ impl Tool for ToolsTool {
 /// The few words that make a tool's name enough to choose by, or empty when the name is enough.
 ///
 /// **This is the only tool text paid for on every request**, so it says no more than the choice
-/// needs: a run picks `exec` over `bash` from these words alone, and everything else -- what a tool
-/// does in full, and the arguments it takes -- is what the lookup answers with, once, for the tools
-/// the run actually uses.
+/// needs: a run picks `exec` over `bash` from these words alone. It is deliberately not a place for
+/// detail -- a tool's own description is paid for only from the turn it is unlocked, and the schema
+/// arrives with it, so putting the same words here would move them to the most expensive place in
+/// the request to save the model nothing.
 ///
 /// Written as an explicit table rather than derived from the descriptions, because a derived one
 /// would be a sentence (which is what this exists to avoid) and because a new tool must not appear
@@ -7831,45 +7831,60 @@ mod exec_tests {
         ToolBox::new(&Config::default(), readonly, dir.to_path_buf())
     }
 
-    /// With `lazy_tools` on, the first request declares the core and the lookup -- and the tools
-    /// whose arguments a model guesses wrong are not in it.
+    /// The shipped shape: the first request declares the lookup and nothing else.
     ///
-    /// The split is measured, not assumed: with nothing declared but a catalogue, a local model
-    /// called `read` with `file_path` correctly and, asked for `apply_patch`'s argument, answered
-    /// "`name`" without looking it up.
+    /// Measured with `deepseek-flash` on four tasks, including a real `apply_patch` edit: identical
+    /// results to the shape that declares eight tools, at 1,401/2,093/1,885 prompt tokens against
+    /// 2,651/2,781/3,099. It calls `tools` before a tool whose arguments it cannot guess, and calls
+    /// a conventional one straight away.
     #[test]
-    fn the_first_request_declares_the_core_and_the_lookup() {
+    fn the_first_request_declares_only_the_lookup() {
         let dir = TempDir::new("lazy-first");
         let box_ = toolbox(dir.path(), false);
         let names: Vec<String> = box_.specs().into_iter().map(|(n, _, _)| n).collect();
-        for core in ALWAYS_DECLARED {
+        assert_eq!(names, vec!["tools".to_string()], "the first request declares: {names:?}");
+        assert!(
+            box_.all_specs().len() > 10,
+            "the set is only small because it is empty: {} tools were built",
+            box_.all_specs().len()
+        );
+    }
+
+    /// And `eager_tools` is the other answer, for a model that guesses instead of looking.
+    ///
+    /// A local 9B model did exactly that: asked for `apply_patch`'s argument it answered "`name`"
+    /// (the real one is `patch`) without asking. `CONVENTIONAL_TOOLS` is the list to paste for it.
+    #[test]
+    fn a_configured_eager_list_is_declared_and_the_rest_are_not() {
+        let dir = TempDir::new("lazy-eager");
+        let config = Config {
+            lazy_tools: true,
+            eager_tools: Some(CONVENTIONAL_TOOLS.iter().map(|n| n.to_string()).collect()),
+            ..Config::default()
+        };
+        let box_ = ToolBox::new(&config, false, dir.path().to_path_buf());
+        let names: Vec<String> = box_.specs().into_iter().map(|(n, _, _)| n).collect();
+        for core in CONVENTIONAL_TOOLS {
             assert!(names.contains(&core.to_string()), "{core} is not declared: {names:?}");
         }
         assert!(names.contains(&"tools".to_string()), "the lookup is not declared: {names:?}");
         for held in ["apply_patch", "task", "tasks", "job_op", "fetch"] {
             assert!(
                 !names.contains(&held.to_string()),
-                "{held} is declared, and its arguments are the ones a model gets wrong: {names:?}"
+                "{held} is one a model gets wrong, and it is declared: {names:?}"
             );
         }
-        assert!(
-            names.len() < box_.all_specs().len(),
-            "nothing is being held back, so this proves nothing"
-        );
     }
 
-    /// An empty `eager_tools` is the all-lazy shape, for anybody who wants to measure their model.
+    /// Every name in `CONVENTIONAL_TOOLS` is a tool, or the list a person pastes is a lie.
     #[test]
-    fn an_empty_eager_list_declares_nothing_but_the_lookup() {
-        let dir = TempDir::new("lazy-empty");
-        let config = Config {
-            lazy_tools: true,
-            eager_tools: Some(Vec::new()),
-            ..Config::default()
-        };
-        let box_ = ToolBox::new(&config, false, dir.path().to_path_buf());
-        let names: Vec<String> = box_.specs().into_iter().map(|(n, _, _)| n).collect();
-        assert_eq!(names, vec!["tools".to_string()], "the first request declares: {names:?}");
+    fn the_conventional_list_names_real_tools() {
+        let dir = TempDir::new("lazy-conventional");
+        let box_ = toolbox(dir.path(), false);
+        let all: Vec<String> = box_.all_specs().into_iter().map(|(n, _, _)| n).collect();
+        for name in CONVENTIONAL_TOOLS {
+            assert!(all.contains(&name.to_string()), "CONVENTIONAL_TOOLS names {name}, which is not a tool");
+        }
     }
 
     /// A call that was never given its arguments is refused *and told where they are*.

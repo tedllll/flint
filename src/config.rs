@@ -265,11 +265,16 @@ pub struct Config {
 
     /// The tools declared on every request even when `lazy_tools` is on.
     ///
-    /// Absent means the eight whose arguments follow a convention a model already knows (`read`,
-    /// `write`, `edit`, `list`, `glob`, `grep`, `bash`, `exec`) -- the ones a run reaches for
-    /// constantly, which must not depend on the model choosing to look something up. A list replaces
-    /// that, and an **empty** list is the all-lazy shape: nothing but the lookup, for anybody who
-    /// wants to measure whether their model asks before it guesses.
+    /// **Absent means none**, so the shipped shape is the lookup and its catalogue alone. Measured
+    /// with `deepseek-flash` on four tasks, one of them a real `apply_patch` edit: identical results
+    /// to declaring tools, at 1,401/2,093/1,885 prompt tokens against 2,651/2,781/3,099 -- the lazy
+    /// shape is cheaper on every one of them, and it asks `tools` before a tool whose arguments it
+    /// cannot guess.
+    ///
+    /// A list is the conservative answer for a model that guesses instead of asking. A local 9B did
+    /// that: asked for `apply_patch`'s argument it answered "`name`" (the real one is `patch`)
+    /// without looking. Paste `tools::CONVENTIONAL_TOOLS` -- `bash`, `exec`, `read`, `write`, `edit`,
+    /// `list`, `glob`, `grep` -- for that model, or name your own set.
     #[serde(default)]
     pub eager_tools: Option<Vec<String>>,
 

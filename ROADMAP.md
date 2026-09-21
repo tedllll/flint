@@ -2217,22 +2217,25 @@ able to plan (`tools {"name": "read"}` is the second step, and a model that gues
   call `tools` first. So the lookup is not yet a habit this model has, and the design leans on a
   step it skipped.
 
-**Both answers to that measurement are now built**, and they are the shape it ships in:
+**Both answers are built, and the measurement picked one.** `deepseek-flash` does what the local
+9B did not: asked for `apply_patch`'s argument it **called `tools`** and answered `patch`, and on a
+real patch task it called `read`, then `tools`, then `apply_patch`, and the file came out right —
+identical results to the shape that declares eight schemas, at **1,885 prompt tokens against
+3,099**. Cheaper on all four tasks measured. So **all-lazy is the shipped default: 988 characters
+per request against 10,710.**
+
+Two mechanisms still exist because a weaker model needs them:
 
 1. **A call that was never given its arguments is refused *and told where they are*** — the refusal
-   names `tools` and the tool, and says it will be there from the next turn. That is the repair loop
-   for exactly the failure above: the wrong-argument call is the evidence that the model guessed, and
-   the refusal is the moment it is willing to listen. The pointer is *not* repeated once the tool has
-   been declared, because by then the schema is in front of it.
-2. **A core is always declared** — `bash`, `exec`, `read`, `write`, `edit`, `list`, `glob`, `grep`,
-   the eight whose arguments a model already knows — and only the five it gets wrong are behind the
-   lookup. Measured: **6,116 characters per request against 10,710** (43% off), with no extra turn on
-   the path every run takes.
+   names `tools` and the tool, and is not repeated once the tool has been declared, because by then
+   the schema is in front of it. This is the repair loop for the local model's failure: the
+   wrong-argument call is the evidence it guessed, and the refusal is the moment it will listen.
+2. **`eager_tools`** declares a set on every request anyway — `CONVENTIONAL_TOOLS` is the eight whose
+   arguments need no lookup, and pasting it costs about 5,200 characters a request for a model that
+   will not ask.
 
-`eager_tools` replaces that list, and an **empty** list is the all-lazy shape (874 characters, still
-built and still one config line away) for anyone who wants to find out whether a larger model asks
-before it guesses. That is the one question left open here, and it is deliberately a question for a
-person with a bigger model rather than for this file.
+What is still open is only *which* models need (2). One local 9B did; `deepseek-flash` did not.
+`lazy_tools = false` remains the do-no-thinking-at-all shape.
 
 ## Small, agreed, unscheduled
 

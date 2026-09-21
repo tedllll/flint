@@ -140,14 +140,15 @@ readonly = false                # refuse write/edit/apply_patch and mutating bas
 proxy = ""                      # exported to bash children as HTTP(S)_PROXY
 verbose = "on"                  # off|on|full: how much of the agent's activity to narrate
 tool_detail = false             # print the output behind a tool result
-lazy_tools = true               # declare the conventional tools plus the `tools` lookup, and
-                                # name the rest in a one-line catalogue the model can ask about.
-                                # Measured: 6,116 characters per request against 10,710 for the
-                                # whole set. Costs one extra turn per held-back tool, once
-eager_tools = []                # absent = bash, exec, read, write, edit, list, glob, grep, the
-                                # ones whose arguments a model already knows. A list replaces it;
-                                # an EMPTY list is all-lazy -- nothing but the lookup, 874
-                                # characters, for measuring whether a model asks before guessing
+lazy_tools = true               # every request carries the `tools` lookup and a one-line
+                                # catalogue, and a tool joins the request from the turn after the
+                                # model asks about it. Measured: 988 characters per request against
+                                # 10,710 for the whole set
+eager_tools = []                # tools to declare on every request anyway. Absent or empty is
+                                # the shipped all-lazy shape; paste `bash`, `exec`, `read`,
+                                # `write`, `edit`, `list`, `glob`, `grep` for a model that guesses
+                                # instead of asking -- measured on a local 9B, which answered
+                                # "name" for apply_patch's argument (the real one is `patch`)
 instructions = "hint"           # AGENTS.md: "hint" (name them), "paste", "off"
 skill_dirs = []                 # extra skill directories, after the standard two
 thinking = "off"                # off|low|medium|high: reasoning to ask for. "off" sends no

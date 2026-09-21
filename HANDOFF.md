@@ -1788,14 +1788,13 @@ reasoning (341 completion tokens of which 292 characters were the answer on one 
 this was the larger half of the context. `provider::wire_messages` strips it at the boundary; the
 file still keeps it.
 
-**And the measurement above decided the shape it ships in.** The catalogue is enough to know what
-exists — the model listed all thirteen from the text alone — but asked for `apply_patch`'s argument
-it answered "`name`" (the real one is `patch`) **without looking it up**. So the lookup is not yet a
-habit of that model, and the design no longer leans on it: the eight tools whose arguments follow a
-convention are always declared, the five flint-specific ones are behind `tools`, and a call to one of
-those that was never given its arguments is refused **and told where they are**. Measured:
-**6,116 characters per request against 10,710.** `eager_tools = []` is the all-lazy shape (874
-characters) for anyone who wants to test whether a larger model asks before it guesses.
+**And the measurement decided the shape it ships in: all-lazy.** A local 9B guessed rather than
+asked — for `apply_patch`'s argument it answered "`name`", the real one is `patch`, without calling
+`tools`. `deepseek-flash` does ask: on a real patch task its order was `read`, `tools`,
+`apply_patch`, and the file came out right, at **1,885 prompt tokens against 3,099** for the shape
+that declares eight schemas. So a request carries the lookup and a one-line catalogue — **988
+characters against 10,710** — and `eager_tools` is there for a model that guesses (`CONVENTIONAL_TOOLS`
+is the list to paste), with the refused-call teaching as the repair loop either way.
 
 
 **The page stopped being a surface and became a window with a door: a picture in the preview, the
