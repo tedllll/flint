@@ -5111,9 +5111,7 @@ impl Tool for ToolsTool {
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "A tool to read the arguments of. It is added to your list from \
-                                    the next turn on, and you call it as usual. Leave this out to \
-                                    list what there is."
+                    "description": "Which tool. Leave it out to list what there is."
                 }
             },
             "required": []
@@ -5197,10 +5195,14 @@ fn catalogue_of(tools: &[Box<dyn Tool>], lazy: bool, eager: &[String]) -> String
         return "Every tool there is already has its arguments in your list; nothing is held back."
             .to_string();
     }
+    // The sentence about what a call *does* is here and not also beside the argument, because both
+    // places are paid for on every request and saying it twice cost 75 characters a turn to say it
+    // once. The argument description is what is left when the tool's own description has already
+    // explained the mechanism.
     format!(
-        "The tools you can call but have not been given the arguments for: {}. Call this with a \
-         name to get what that tool takes -- it is added to your list from the next turn on, and \
-         you call it as usual.",
+        "The tools you can call but have not been given the arguments for: {}. Call this with one \
+         of those names to get what it takes -- it joins your list from the next turn, and you call \
+         it as usual.",
         names.join(", ")
     )
 }
