@@ -8098,15 +8098,39 @@ mod exec_tests {
     /// for the tools, without the per-tool envelope around it (measured at 10,710 with that
     /// included). Thirteen tools came to 13,523 before the trim, against a system prompt of 3,273:
     /// the tool payload was **four times** the prompt that everybody blamed for being long. It is
-    /// 9,367 for the set this test builds, and 10,043 in a run that also offers `search`.
+    /// 822 characters per request now, and 10,043 when a run sends everything.
     ///
-    /// The ceilings are deliberately close, so they fail on a paragraph rather than on a rewrite --
-    /// about a hundred and fifty characters of new prose trips one. Raising one is allowed; raising
-    /// it without deciding that the words are worth paying for on every request is not.
+    /// The box carries a search credential on purpose -- being *offered* costs no network -- so
+    /// these are what a run with a DeepSeek provider pays rather than the floor a bare config sets.
+    /// A skill directory would add one more catalogue line; nothing else here is optional.
+    ///
+    /// The ceilings are deliberately close, so they fail on a paragraph rather than on a rewrite:
+    /// about a hundred and fifty characters of new prose trips the per-request or the eager one,
+    /// and about two hundred and fifty trips the whole set. Raising one is allowed; raising it
+    /// without deciding that the words are worth paying for on every request is not.
     #[test]
     fn the_tool_payload_stays_within_its_budget() {
         let dir = TempDir::new("schema-budget");
-        let box_ = toolbox(dir.path(), false);
+        // The three numbers are one config apart or none, so the messages below can quote what
+        // this test measures instead of a figure somebody worked out by hand once -- which is how
+        // the Windows delta came to be recorded as 880 when `pwsh` alone is 1,702.
+        let search_ready = || Config {
+            providers: vec![crate::config::ProviderConfig {
+                name: "deepseek".to_string(),
+                base_url: "https://api.deepseek.com/v1".to_string(),
+                api_key: "x".to_string(),
+                model: "deepseek-chat".to_string(),
+                models: Vec::new(),
+                api_key_env: None,
+                start: None,
+                stop: None,
+                start_timeout_secs: 0,
+                proxy: None,
+                thinking_field: String::new(),
+            }],
+            ..Config::default()
+        };
+        let box_ = ToolBox::new(&search_ready(), false, dir.path().to_path_buf());
         let weight = |specs: Vec<(String, String, Value)>| -> usize {
             specs
                 .iter()
@@ -8116,15 +8140,13 @@ mod exec_tests {
                 .sum()
         };
         // The shipped shape: the lookup and its catalogue, and nothing else. This is everything a
-        // turn pays until the model asks for more, so it is the number to hold closest. The box
-        // here has no search credential and no skills, so a real run adds a catalogue line for
-        // each; Windows adds `pwsh`'s.
+        // turn pays until the model asks for more, so it is the number to hold closest.
         let per_request = weight(box_.specs());
         assert!(
             per_request <= 1_000,
-            "one request carries {per_request} characters of tool text; it was 797 when this \
-             budget was set, and 822 in a run that also offers `search` (829 and 854 with `pwsh` on \
-             Windows). The lookup and its catalogue are the only tool text paid for on every turn \
+            "one request carries {per_request} characters of tool text; it was 822 when this \
+             budget was set, and 854 on Windows, where the catalogue carries one more line for \
+             `pwsh`. The lookup and its catalogue are the only tool text paid for on every turn \
              of every run, so what grows here grows everywhere -- a paragraph here costs more than \
              a paragraph anywhere else in this file. Room for one more tool's line, and not for a \
              sentence: sentences are what the lookup answers with."
@@ -8137,7 +8159,7 @@ mod exec_tests {
         let eager_box = ToolBox::new(
             &Config {
                 eager_tools: Some(CONVENTIONAL_TOOLS.iter().map(|n| n.to_string()).collect()),
-                ..Config::default()
+                ..search_ready()
             },
             false,
             dir.path().to_path_buf(),
@@ -8145,25 +8167,25 @@ mod exec_tests {
         let eager_request = weight(eager_box.specs());
         assert!(
             eager_request <= 4_500,
-            "the eager shape carries {eager_request} characters of tool text; it was 4,330 when \
-             this budget was set, and 4,355 in a run that also offers `search` (4,362 and 4,387 \
-             with `pwsh` on Windows). Every one of those schemas is there because a model's \
-             refusals showed it guessing rather than looking, and all of it is paid on every turn. \
-             Take a tool out of `CONVENTIONAL_TOOLS`, or trim one, before raising the number."
+            "the eager shape carries {eager_request} characters of tool text; it was 4,355 when \
+             this budget was set, and 4,387 on Windows. Every one of those schemas is there \
+             because a model's refusals showed it guessing rather than looking, and all of it is \
+             paid on every turn. Take a tool out of `CONVENTIONAL_TOOLS`, or trim one, before \
+             raising the number."
         );
         // And everything, for the runs that ask for all of it -- the number this started at.
-        // Only paid with `lazy_tools = false`, which is why the ceiling is this loose: it is the
+        // Only paid with `lazy_tools = false`, which is why this ceiling is the loosest: it is the
         // whole set, including the lookup, and it is nobody's per-turn cost by default.
         //
-        // Per platform, because Windows carries `pwsh` and nothing else does -- the 880 of a tool
-        // the other two platforms do not have. One ceiling would either fail on Windows or be
-        // slack everywhere else.
-        let ceiling = if cfg!(windows) { 11_500 } else { 10_500 };
+        // Per platform, because Windows carries `pwsh` and nothing else does: a 1,702-character
+        // schema plus its 32-character catalogue line is 1,734 that the other two platforms never
+        // pay. One ceiling would either fail on Windows or be slack everywhere else.
+        let ceiling = if cfg!(windows) { 12_000 } else { 10_300 };
         let total = weight(box_.all_specs());
         assert!(
             total <= ceiling,
-            "the whole tool set is {total} characters; it was 9,367 when the budget was set, plus \
-             `search`'s 651 and `pwsh`'s 880 on Windows (which is why the ceiling is per platform). \
+            "the whole tool set is {total} characters; it was 10,043 when the budget was set, and \
+             11,777 on Windows (which is why the ceiling is per platform). \
              A run pays this on every turn when `lazy_tools = false`: trim the description, \
              share the paragraph with the tool that already says it, or move it to a comment \
              where it costs nothing. If the words are genuinely worth paying for, raise the \

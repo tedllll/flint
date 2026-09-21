@@ -1799,8 +1799,11 @@ is the list to paste), with the refused-call teaching as the repair loop either 
 Both of those figures are what they were at that commit and have moved since: the catalogue's lines
 were shortened and the lookup stopped saying the same sentence twice (`4b187ce`), so the numbers to
 read today are **822 characters of tool text per request against 10,043** counted the same way, and
-1,000 against 4,500 are the ceilings the budget test now holds (`the_tool_payload_stays_within_its_budget`,
-which had been left guarding a shape the default no longer built).
+1,000 / 4,500 / 10,300 are the ceilings the budget test now holds
+(`the_tool_payload_stays_within_its_budget`, which had been left guarding a shape the default no longer
+built). Windows is **854 / 4,387 / 11,777**, measured on a real Windows machine rather than inferred:
+the delta is `pwsh`, and it is 1,734 characters rather than the 880 the comment claimed for three
+commits, because that 880 had been worked out by subtracting a macOS figure from a stale one.
 
 
 **The page stopped being a surface and became a window with a door: a picture in the preview, the

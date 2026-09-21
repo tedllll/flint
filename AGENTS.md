@@ -270,10 +270,14 @@ node scripts/term-layout-test.js
 platform's *signature* cannot fire on the platform whose signature is the other one: `libc::openpty`
 takes `*mut` on BSD and `*const` on glibc, so `&mut size` is required on one and
 `clippy::unnecessary_mut_passed` on the other — and this machine is the one where it is required.
-The same shape bit the tool-payload budget, which was measured on macOS and is 880 characters larger
-on Windows because that is where `pwsh` lives. Before pushing a change to anything under `#[cfg]`,
-anything calling `libc`, or any test that counts characters, ask what the *other* two platforms make
-of it — or read the failing job's annotations first, which name the test and the reason:
+The same shape bit the tool-payload budget, which was measured on macOS and is 1,734 characters larger
+on Windows because that is where `pwsh` lives — a 1,702-character schema plus its 32-character line in
+the catalogue. (The delta was recorded as 880 for three commits, because it had been worked out by
+subtracting a macOS figure from a stale one rather than measured on Windows at all. A real Windows
+machine has now run the test, and its message quotes what that machine measures.) Before pushing a
+change to anything under `#[cfg]`, anything calling `libc`, or any test that counts characters, ask
+what the *other* two platforms make of it — or read the failing job's annotations first, which name the
+test and the reason:
 
 ```bash
 curl -s "https://api.github.com/repos/tedllll/flint/actions/runs/<run>/jobs"        # job ids
