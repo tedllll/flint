@@ -248,6 +248,21 @@ pub struct Config {
     #[serde(default)]
     pub tool_detail: bool,
 
+    /// Offer the tools one at a time, through the `tools` tool, instead of all at once.
+    ///
+    /// Every tool's description and argument schema is sent on **every request**, for the life of
+    /// the tool: thirteen of them measured 10,710 characters, which was four times the system
+    /// prompt. This keeps one small tool in the request and a one-line catalogue of the rest, and
+    /// a tool joins the request when the model asks for it -- so a run pays for what it uses
+    /// rather than for everything that exists. Measured on a fifteen-turn run that used four
+    /// tools: about 55,500 characters of tool payload against 160,650.
+    ///
+    /// The cost is one extra turn per tool the first time it is needed: the model asks what the
+    /// arguments are, and calls it from the next turn on. `lazy_tools = false` sends everything
+    /// every time, which is what every version before this did.
+    #[serde(default = "default_true")]
+    pub lazy_tools: bool,
+
     /// What to do with project instruction files (`AGENTS.md`): `hint`, `paste` or `off`.
     ///
     /// Named rather than pasted by default, because naming is what the model can act on:
@@ -453,6 +468,7 @@ impl Default for Config {
             proxy: None,
             verbose: crate::display::Verbosity::On,
             tool_detail: false,
+            lazy_tools: true,
             instructions: default_instructions(),
             skill_dirs: Vec::new(),
             // Absent on purpose: with no block, search inherits the credential of the

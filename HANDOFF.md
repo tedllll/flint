@@ -1774,6 +1774,29 @@ the block is drawn — then open the `commands` panel and read it against `/help
 
 ## What was just done
 
+**The context problem was the tool schemas, and they are now a tenth of what they were.** Reported
+as "the system prompt is too long"; measured, the system prompt is 3,273 characters and the thirteen
+tool schemas were 10,710 — four times the prompt everybody was looking at. Two changes: the prose
+went first (`perf:`, 13,523 -> 10,710), and then the shape — **`lazy_tools`, on by default**, so one
+request carries the `tools` lookup and a one-line catalogue instead of every schema. **874 characters
+per request against 9,356.**
+
+**And the reasoning chain no longer goes back to any provider.** One type serves both the session
+file and the request body, so every reasoning block a turn produced was re-sent on every turn after
+it — measured at 800 characters coming back in the next request. A turn's tokens are *mostly*
+reasoning (341 completion tokens of which 292 characters were the answer on one local model), so
+this was the larger half of the context. `provider::wire_messages` strips it at the boundary; the
+file still keeps it.
+
+**The measurement that decides how far this goes is half done.** Against a real local model the
+catalogue is enough to know what exists (it listed all thirteen from the text alone) and a
+conventional tool is used correctly with no extra turn — but asked for `apply_patch`'s argument it
+answered "`name`" instead of looking it up, and the real one is `patch`. **The lookup is not yet a
+habit of that model.** Whether it is worth an extra turn per tool for a strict provider, and whether
+a model recovers from a wrong argument by looking the tool up, is open — `ROADMAP.md` §10 has the
+numbers and the three shapes the answer could take.
+
+
 **The page stopped being a surface and became a window with a door: a picture in the preview, the
 run's controls behind a settings dialog, and a `/` menu in the composer.** Asked for directly
 (2026-09-18), in the order the user sent it: the preview panel should support the common image formats

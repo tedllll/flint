@@ -398,7 +398,16 @@ The set is built per run, so the model's list is not always the same:
 
 | Always | Windows only | When available |
 |---|---|---|
-| `bash`, `exec`, `read`, `write`, `edit`, `apply_patch`, `list`, `glob`, `grep`, `task`, `tasks`, `job_op`, `fetch` | `pwsh` | `search` when a search credential resolves; `skill` when there is a skill to load |
+| `tools`, and whichever of the others the model has asked about | `pwsh` | `search` when a search credential resolves; `skill` when there is a skill to load |
+
+**With `lazy_tools` on — the default — the request declares one tool and a one-line catalogue of
+the rest**, and a tool is declared from the turn after the model asks about it. Measured: 874
+characters of tool text per request, against 9,356 for the whole set. `lazy_tools = false` sends
+everything every time, which is what every version before this did. The catalogue is what the model
+reads to know what exists; `tools {"name": "read"}` is what it reads to know what arguments to pass,
+and the call is what puts `read` in the next request. A model that guesses correctly — `read` with
+`file_path` — never needs the second step, which is why the catalogue's glosses are chosen to make
+the *choice* possible and nothing more.
 
 `search` is *not* offered when it cannot work — a tool that always fails costs a schema on
 every request — and flint says why at startup instead. `flint debug prompt-input "<anything>"`
@@ -1069,7 +1078,7 @@ tests name the behaviour they hold.
 | the page's pure functions | `scripts/web-view-test.js` |
 | the Python and MCP callers | `examples/python/test_call.py`, `examples/mcp/test_mcp.py` |
 | the one suite that needs a real pty (Unix) | `tests/tty_hangup.rs` |
-| what the tool payload costs, and that it carries no source formatting | `src/tools.rs`'s tests (`the_tool_payload_stays_within_its_budget`, `no_description_carries_source_formatting`, `a_parameter_shared_by_two_tools_is_described_once`) |
+| the tool payload's cost, the catalogue's size, the unlock, and that no description carries source formatting | `src/tools.rs`'s tests (`the_tool_payload_stays_within_its_budget`, `no_description_carries_source_formatting`, `a_parameter_shared_by_two_tools_is_described_once`) |
 
 ## See also
 

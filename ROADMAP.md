@@ -2193,6 +2193,46 @@ the case that exists) should get that as a **provider field beside `thinking_fie
 the precedent for the same vendor disagreement on the request side. Not a default, and not a flag that
 sends it everywhere.
 
+### 10. What one request carries, and the measurement that is still open — **built, half measured**
+
+The tool payload was the context problem nobody was looking at: thirteen schemas measured 10,710
+characters against a system prompt of 3,273, so the *four times* the prompt was what a run actually
+paid on every turn. First the prose was cut (`perf:`, 13,523 -> 10,710), and then the shape changed:
+**`lazy_tools` is on by default**, so a request declares one tool — `tools` — and a one-line
+catalogue of the rest, and a tool joins the request from the turn after the model asks about it.
+Measured: **874 characters per request against 9,356**, and the catalogue is what makes the model
+able to plan (`tools {"name": "read"}` is the second step, and a model that guesses `read` with
+`file_path` never needs it).
+
+**What is measured, against a real local model (Ornith-1.5-9B through `mlx_lm.server`):**
+
+- The catalogue alone is enough to know what exists: asked to list its tools, the model listed all
+  thirteen correctly from the catalogue text, with no lookup.
+- A tool whose arguments follow a convention is guessed correctly and used: asked to read a file,
+  it called `read` with `file_path` and got the right answer, in **the same number of turns as the
+  eager build** — because `mlx_lm.server` does not enforce the declared tool list, so the call
+  reached flint anyway.
+- **A tool whose arguments do not follow a convention is guessed at rather than looked up.** Asked
+  for `apply_patch`'s argument, the model answered "`name`" — the real one is `patch` — and did not
+  call `tools` first. So the lookup is not yet a habit this model has, and the design leans on a
+  step it skipped.
+
+**What is not measured, and is the thing to decide.** Whether the extra turn is worth the 91%
+saving *for a strict provider*, where an undeclared call is refused rather than quietly accepted,
+and whether a model recovers from a wrong argument by looking the tool up. The local test could not
+answer it: the patch task that would show the recovery ran past eight minutes on a 9B model. Three
+ways forward, and the choice is a policy rather than a patch:
+
+1. Keep it as it is, and make a failed call *teach*: when a tool refuses for a missing or unknown
+   argument, the error names `tools` and the tool to ask about. That is the repair loop for exactly
+   the failure measured above, and it is cheap.
+2. Keep a core eager — the tools whose arguments are conventional (`read`, `write`, `edit`, `list`,
+   `glob`, `grep`, `bash`, `exec`, about 4,700 characters) — and keep only the unguessable ones
+   (`task`, `tasks`, `job_op`, `apply_patch`, `fetch`, about 4,900) behind the lookup. A 50% saving
+   with no extra turn on the common path, and none of the guessing.
+3. Neither, if the measurement above turns out to be a small-model habit rather than a property of
+   the mechanism: a larger model may well look first.
+
 ## Small, agreed, unscheduled
 
 - ~~`read`/`write`/`edit` taking `file_path`, with `path` kept as an alias so nothing breaks.~~

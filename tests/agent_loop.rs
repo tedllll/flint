@@ -70,6 +70,7 @@ fn test_config(base_url: &str) -> Config {
         proxy: None,
         verbose: flint::display::Verbosity::On,
         tool_detail: false,
+        lazy_tools: false,
         instructions: "hint".to_string(),
         skill_dirs: Vec::new(),
         search: None,

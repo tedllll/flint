@@ -132,6 +132,13 @@ pub struct ToolBox {
     /// itself. One fact in one place: the escape and the `bash` tool must not describe different
     /// runs to the same script.
     run_env: RunEnv,
+    /// Whether the tools are offered one at a time. See `Config::lazy_tools`.
+    lazy: bool,
+    /// The tools the model has asked about, shared with the `tools` tool that adds to it.
+    ///
+    /// A `ToolBox` is built once and read on every request, so this is what makes the set grow
+    /// during a run: the lookup tool writes, `specs` reads, and the next request declares one more.
+    unlocked: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl ToolBox {
@@ -247,12 +254,26 @@ impl ToolBox {
                 dirs: skill_dirs.skill_dirs,
             }));
         }
+        // The lookup itself, built last so its catalogue can name every tool the run has -- and
+        // first in the list, because it is the one that is always sent.
+        let unlocked: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let catalogue = catalogue_of(&tools);
+        tools.insert(
+            0,
+            Box::new(ToolsTool {
+                catalogue,
+                unlocked: std::sync::Arc::clone(&unlocked),
+            }),
+        );
         let by_name = tools
             .iter()
             .enumerate()
             .map(|(i, t)| (t.name().to_string(), i))
             .collect();
         ToolBox {
+            lazy: config.lazy_tools,
+            unlocked,
             tools,
             by_name,
             max_output: config.max_tool_output,
@@ -351,10 +372,17 @@ impl ToolBox {
         self
     }
 
-    /// (name, description, JSON schema) for every tool, for the request body.
+    /// (name, description, JSON schema) for the tools this request declares.
+    ///
+    /// With `lazy_tools` on that is the lookup and whatever the model has asked about so far --
+    /// see `ToolsTool`. The filter is here rather than in the caller so that there is one answer to
+    /// "what can the model call right now", and the REPL, the page, `debug prompt-input` and a
+    /// `task` child all get it by asking the same question.
     pub fn specs(&self) -> Vec<(String, String, Value)> {
+        let unlocked = self.unlocked.lock().unwrap_or_else(|e| e.into_inner());
         self.tools
             .iter()
+            .filter(|t| !self.lazy || t.name() == "tools" || unlocked.contains(t.name()))
             .map(|t| {
                 (
                     t.name().to_string(),
@@ -362,6 +390,17 @@ impl ToolBox {
                     t.schema(),
                 )
             })
+            .collect()
+    }
+
+    /// Every tool, whether or not this request declares it.
+    ///
+    /// For the things that are about the *set* rather than about one request: the `--readonly`
+    /// refusal's wording, and the tests that hold the payload's size.
+    pub fn all_specs(&self) -> Vec<(String, String, Value)> {
+        self.tools
+            .iter()
+            .map(|t| (t.name().to_string(), t.description().to_string(), t.schema()))
             .collect()
     }
 
@@ -4944,6 +4983,131 @@ impl Tool for TaskTool {
 /// session path in that record is for -- and is handled there by a person, not from here.
 pub struct JobOpTool;
 
+/// Ask what you can do, and how to call it.
+///
+/// The one tool that is always in the request when `lazy_tools` is on, and the reason the other
+/// twelve are not. Every schema costs its characters on **every** request, for the life of the
+/// tool; thirteen of them measured 10,710, four times the system prompt. So the request carries
+/// this one and a one-line catalogue of the rest, and a tool joins the request the moment the model
+/// asks about it.
+///
+/// This is the pattern the skill catalogue already uses -- names and summaries always visible, the
+/// body loaded only when it is wanted -- applied to tools. What makes it work for tools where a
+/// plain catalogue would not is the *unlock*: a call to this tool with a name puts that tool in the
+/// next request's `tools`, so the model reads the arguments and then calls it as it always would.
+/// Without that, a model that knows what `read` does still could not call it, because a provider
+/// only accepts a call to a tool the request declared.
+///
+/// **The catalogue is always visible, and that is deliberate.** The model can see that `apply_patch`
+/// exists before deciding to use it, so "a tool that appears and disappears is one a model cannot
+/// plan around" -- the argument written next to `task` -- does not apply: nothing disappears, and
+/// what appears, appears because the model asked.
+pub struct ToolsTool {
+    /// One line per tool: its name and the first sentence of its description.
+    catalogue: String,
+    /// Shared with the `ToolBox`, which is what turns a request for a tool into a schema in the
+    /// next request. The same shape `reads` uses: state one tool writes and another consults.
+    unlocked: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+}
+
+#[async_trait::async_trait]
+impl Tool for ToolsTool {
+    fn name(&self) -> &str {
+        "tools"
+    }
+
+    fn description(&self) -> &str {
+        &self.catalogue
+    }
+
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "A tool to read the arguments of. It is added to your list from \
+                                    the next turn on, and you call it as usual. Leave this out to \
+                                    list what there is."
+                }
+            },
+            "required": []
+        })
+    }
+
+    async fn call(&self, args: &Value) -> Result<String> {
+        let wanted = args.get("name").and_then(|v| v.as_str()).map(str::trim).unwrap_or("");
+        if wanted.is_empty() {
+            return Ok(format!("{}\n\nCall this again with one of those names to get the arguments it takes.", self.catalogue));
+        }
+        let mut unlocked = self.unlocked.lock().unwrap_or_else(|e| e.into_inner());
+        if !unlocked.insert(wanted.to_string()) {
+            return Ok(format!("{wanted} is already in your list; call it with the arguments in the schema you were given."));
+        }
+        Ok(format!(
+            "{wanted} is now in your list, from this turn on. Call it as usual -- its arguments are \
+             in the schema that came with this answer."
+        ))
+    }
+}
+
+/// The few words that make a tool's name enough to choose by, or empty when the name is enough.
+///
+/// **This is the only tool text paid for on every request**, so it says no more than the choice
+/// needs: a run picks `exec` over `bash` from these words alone, and everything else -- what a tool
+/// does in full, and the arguments it takes -- is what the lookup answers with, once, for the tools
+/// the run actually uses.
+///
+/// Written as an explicit table rather than derived from the descriptions, because a derived one
+/// would be a sentence (which is what this exists to avoid) and because a new tool must not appear
+/// in the catalogue by accident: `every_tool_has_a_gloss` fails until somebody decides what it
+/// says. An empty gloss is a decision too.
+fn gloss(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "bash" => "run a shell command line",
+        "exec" => "run a program, arguments already separate",
+        "read" => "read a text file",
+        "write" => "create or overwrite a file",
+        "edit" => "replace an exact string in a file",
+        "apply_patch" => "one patch across several files",
+        "list" => "list a directory",
+        "glob" => "find files by name pattern",
+        "grep" => "search file contents",
+        "fetch" => "read a web page",
+        "task" => "ask another flint; hands back a handle",
+        "tasks" => "several flint runs at once",
+        "job_op" => "check, wait for or stop a job",
+        "skill" => "load a skill's body",
+        "search" => "search the web",
+        "pwsh" => "run a PowerShell script",
+        // The lookup itself is named in the sentence above the list; a gloss for it would be the
+        // sentence again.
+        "tools" => "",
+        _ => return None,
+    })
+}
+
+/// The one-line catalogue the `tools` tool carries: every name, and the words that make it choosable.
+fn catalogue_of(tools: &[Box<dyn Tool>]) -> String {
+    let mut names: Vec<String> = Vec::with_capacity(tools.len());
+    for tool in tools {
+        let name = tool.name();
+        match gloss(name) {
+            Some("") => names.push(name.to_string()),
+            Some(words) => names.push(format!("{name} ({words})")),
+            // A tool with no gloss at all is a programming error, and one a test catches before a
+            // run does. The catalogue still names it, because a tool the model cannot see is worse
+            // than one it cannot tell apart.
+            None => names.push(name.to_string()),
+        }
+    }
+    format!(
+        "The tools you can call: {}. Call this with a name to get the arguments that tool takes \
+         -- it is added to your list from the next turn on, and you call it as usual.",
+        names.join(", ")
+    )
+}
+
 /// What the presence records say about a run this one did not start.
 fn foreign_run(pid: u32) -> Option<String> {
     let listing = crate::live::scan();
@@ -6344,7 +6508,7 @@ mod name_tests {
         // learns why its old calls still work, and a person reading `debug prompt-input` sees the
         // same sentence.
         let schema = tools
-            .specs()
+            .all_specs()
             .into_iter()
             .find(|(name, _, _)| name == "read")
             .map(|(_, _, schema)| schema)
@@ -7570,6 +7734,110 @@ mod exec_tests {
         ToolBox::new(&Config::default(), readonly, dir.to_path_buf())
     }
 
+    /// With `lazy_tools` on, the first request declares the lookup and nothing else.
+    ///
+    /// This is the whole point: thirteen schemas measured 10,710 characters against a 3,400
+    /// character system prompt, and a run that uses four of them was paying for all thirteen on
+    /// every turn.
+    #[test]
+    fn the_first_request_declares_only_the_lookup() {
+        let dir = TempDir::new("lazy-first");
+        let box_ = toolbox(dir.path(), false);
+        let names: Vec<String> = box_.specs().into_iter().map(|(n, _, _)| n).collect();
+        assert_eq!(names, vec!["tools".to_string()], "the first request declares: {names:?}");
+        assert!(
+            box_.all_specs().len() > 10,
+            "the set is only small because it is empty: {} tools were built",
+            box_.all_specs().len()
+        );
+    }
+
+    /// Asking about a tool puts it in the next request, which is what makes lazy work at all.
+    ///
+    /// A provider only accepts a call to a tool the request declared. So the lookup answering with
+    /// prose would leave the model knowing what `read` takes and still unable to call it -- the
+    /// unlock is the half that matters.
+    #[tokio::test]
+    async fn asking_about_a_tool_adds_it_to_the_next_request() {
+        let dir = TempDir::new("lazy-unlock");
+        let box_ = toolbox(dir.path(), false);
+
+        let answer = box_
+            .invoke("tools", &json!({ "name": "read" }))
+            .await
+            .expect("the lookup answers");
+        assert!(answer.contains("read"), "the answer must name it: {answer}");
+
+        let names: Vec<String> = box_.specs().into_iter().map(|(n, _, _)| n).collect();
+        assert!(names.contains(&"read".to_string()), "read was not unlocked: {names:?}");
+        assert!(names.contains(&"tools".to_string()), "the lookup left the list: {names:?}");
+        assert!(
+            !names.contains(&"write".to_string()),
+            "asking about one tool unlocked another: {names:?}"
+        );
+    }
+
+    /// Asking with no name lists what there is, and unlocks nothing.
+    #[tokio::test]
+    async fn the_lookup_with_no_name_lists_the_tools() {
+        let dir = TempDir::new("lazy-list");
+        let box_ = toolbox(dir.path(), false);
+        let answer = box_.invoke("tools", &json!({})).await.expect("the lookup answers");
+        for tool in box_.all_specs() {
+            assert!(answer.contains(&tool.0), "the listing omits {}: {answer}", tool.0);
+        }
+        let names: Vec<String> = box_.specs().into_iter().map(|(n, _, _)| n).collect();
+        assert_eq!(names, vec!["tools".to_string()], "listing unlocked something: {names:?}");
+    }
+
+    /// Every tool is named in the catalogue's table, so a new one cannot appear without a decision.
+    ///
+    /// The catalogue is the only tool text paid for on every request; a tool that reached it with
+    /// no words, or with a sentence, would be either a tool the model cannot choose between or the
+    /// cost this design exists to remove.
+    #[test]
+    fn every_tool_has_a_gloss() {
+        let dir = TempDir::new("lazy-gloss");
+        let box_ = toolbox(dir.path(), false);
+        for (name, _, _) in box_.all_specs() {
+            let words = gloss(&name);
+            assert!(words.is_some(), "{name} has no gloss in `gloss()`, so the catalogue cannot name it");
+            let words = words.unwrap();
+            assert!(
+                words.len() <= 45,
+                "{name}'s gloss is {} characters ({words:?}); the catalogue is paid for on every \
+                 request, and the rest belongs in what the lookup answers with",
+                words.len()
+            );
+        }
+    }
+
+    /// And the catalogue itself stays small, since that is what the whole design buys.
+    #[test]
+    fn the_catalogue_stays_small() {
+        let dir = TempDir::new("lazy-catalogue");
+        let box_ = toolbox(dir.path(), false);
+        let catalogue = box_
+            .all_specs()
+            .iter()
+            .find(|(n, _, _)| n == "tools")
+            .map(|(_, d, _)| d.clone())
+            .expect("the lookup is in the set");
+        assert!(
+            catalogue.len() <= 700,
+            "the catalogue is {} characters: {catalogue}",
+            catalogue.len()
+        );
+        // Every gloss is a phrase, not a sentence: a full stop inside the parentheses would mean a
+        // description had been pasted into the catalogue, which is the cost this design removes.
+        let listed = catalogue.split("The tools you can call: ").nth(1).unwrap_or("");
+        let listed = listed.split(". Call this").next().unwrap_or("");
+        assert!(
+            !listed.contains(". "),
+            "the catalogue is carrying sentences, which is what the lookup is for: {catalogue}"
+        );
+    }
+
     /// Every character of every schema is paid for on **every request**, for the life of the
     /// tool, so the total is a budget rather than an accident.
     ///
@@ -7586,20 +7854,37 @@ mod exec_tests {
     fn the_tool_payload_stays_within_its_budget() {
         let dir = TempDir::new("schema-budget");
         let box_ = toolbox(dir.path(), false);
-        let total: usize = box_
-            .specs()
-            .iter()
-            .map(|(name, description, schema)| {
-                name.len() + description.len() + serde_json::to_string(schema).unwrap().len()
-            })
-            .sum();
+        let weight = |specs: Vec<(String, String, Value)>| -> usize {
+            specs
+                .iter()
+                .map(|(name, description, schema)| {
+                    name.len() + description.len() + serde_json::to_string(schema).unwrap().len()
+                })
+                .sum()
+        };
+        // What one request carries with `lazy_tools` on, which is what a run actually pays per
+        // turn: the lookup and its catalogue. This is the number that matters, and it is two
+        // orders of magnitude below the eager one.
+        let per_request = weight(box_.specs());
         assert!(
-            total <= 9_500,
-            "the tool payload is {total} characters, and it was 9,356 when the budget was set. \
-             Every request pays this on every turn, for the life of the tool: trim the \
-             description, share the paragraph with the tool that already says it, or move it to a \
-             comment where it costs nothing. If the words are genuinely worth paying for, raise \
-             the number -- deliberately."
+            per_request <= 1_000,
+            "one request carries {per_request} characters of tool text; it was 874 when this \
+             budget was set. The catalogue is the only tool text paid for on every turn of every \
+             run, so what grows here grows everywhere -- a paragraph here costs more than a \
+             paragraph anywhere else in this file. Room for one more tool's line, and not for a \
+             sentence: sentences are what the lookup answers with."
+        );
+        // And everything, for the runs that ask for all of it -- the number this started at.
+        // Only paid with `lazy_tools = false`, which is why the ceiling is this loose: it is the
+        // whole set, including the lookup, and it is nobody's per-turn cost by default.
+        let total = weight(box_.all_specs());
+        assert!(
+            total <= 10_500,
+            "the whole tool set is {total} characters, and it was 10,221 when the budget was set. \
+             A run pays this on every turn when `lazy_tools = false`: trim the description, \
+             share the paragraph with the tool that already says it, or move it to a comment \
+             where it costs nothing. If the words are genuinely worth paying for, raise the \
+             number -- deliberately."
         );
     }
 
@@ -7614,7 +7899,7 @@ mod exec_tests {
     fn no_description_carries_source_formatting() {
         let dir = TempDir::new("schema-text");
         let box_ = toolbox(dir.path(), false);
-        for (name, description, schema) in box_.specs() {
+        for (name, description, schema) in box_.all_specs() {
             let mut strings = vec![description];
             collect_strings(&schema, &mut strings);
             for text in strings {
@@ -7639,7 +7924,7 @@ mod exec_tests {
     fn a_parameter_shared_by_two_tools_is_described_once() {
         let dir = TempDir::new("schema-shared");
         let box_ = toolbox(dir.path(), false);
-        let specs = box_.specs();
+        let specs = box_.all_specs();
         for param in ["timeout_secs", "background"] {
             let mut seen: Vec<(String, String)> = Vec::new();
             for (name, _, schema) in &specs {
