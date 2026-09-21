@@ -1873,6 +1873,24 @@ const DEFAULT_BASH_TIMEOUT: u64 = 120;
 /// Budget for a command that installs, builds or downloads, which is slow by nature.
 const LONG_BASH_TIMEOUT: u64 = 900;
 
+/// What `timeout_secs` means, for the two tools that take one.
+///
+/// Written once because it was written twice -- in `bash` and in `exec` -- and the two copies had
+/// already drifted into different words for the same rule. Every request pays for every word of
+/// every schema, on every turn, for the life of the tool; a paragraph that exists in two tools is
+/// paid for twice, for ever, to say one thing.
+const TIMEOUT_SECS: &str = "Kill it after this many seconds (default 120; 900 when it installs, \
+                            builds, downloads or runs in the background). Raise it for anything \
+                            known to be slow.";
+
+/// What `background: true` does, for the two tools that wait by default.
+///
+/// The same paragraph was in `bash` and in `exec`, differently worded in each. `task` waits by
+/// default too, with the opposite default, so it keeps its own -- see `TaskTool`.
+const BACKGROUND_WAITS: &str = "Default false: wait here and return the output. Set true for \
+                                anything slow, and the call returns at once with a pid and a log \
+                                file that `job_op` reads, waits for or kills.";
+
 /// Whether a command is the kind that legitimately takes minutes.
 ///
 /// Deliberately generous and deliberately dumb: a false positive costs a longer wait
@@ -2757,12 +2775,8 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
-        "Run a shell command on the local machine and return its combined output. \
-         This is the primary way to inspect and repair the system (package \
-         managers, git, cargo, npm, service status). Working directory is \
-         preserved across calls within a session. Set `background: true` for a command that \
-         takes minutes: the call comes back at once with a pid and a log file, and `job_op` \
-         reads, waits for or kills it -- do that rather than holding the session still."
+        "Run a shell command and return its combined output. The working directory is preserved across \
+         calls within a session."
     }
 
     fn schema(&self) -> Value {
@@ -2772,30 +2786,12 @@ impl Tool for BashTool {
                 "command": { "type": "string", "description": "The command line to execute." },
                 "download": {
                     "type": "boolean",
-                    "description": "Set when the command fetches something over the network and \\
-                         the command line does not make that obvious. A download is not killed on \\
-                         a total time budget; it is killed only if it stops producing output."
+                    "description": "Set when the command fetches something over the network. A \
+                                    download is killed only if it stops producing output, not on \
+                                    a total time budget."
                 },
-                "background": {
-                    "type": "boolean",
-                    "description": format!(
-                        "Default false: wait here for the command and return its output. Set true for \
-                         anything slow -- a build, an install, a test suite -- and the call returns at \
-                         once with a pid and a log file, with `job_op` to read, wait for or kill it. A \
-                         background command's default budget is {LONG_BASH_TIMEOUT}s rather than \
-                         {DEFAULT_BASH_TIMEOUT}s. Its log file is in this session's directory and can \
-                         be read with `read` while it runs."
-                    )
-                },
-                "timeout_secs": {
-                    "type": "integer",
-                    "description": format!(
-                        "Kill the command after this many seconds (default {DEFAULT_BASH_TIMEOUT} \
-                         for ordinary commands, {LONG_BASH_TIMEOUT} when the command installs, \
-                         builds, downloads or runs in the background). Raise it for anything known \
-                         to be slow."
-                    )
-                }
+                "background": { "type": "boolean", "description": BACKGROUND_WAITS },
+                "timeout_secs": { "type": "integer", "description": TIMEOUT_SECS }
             },
             "required": ["command"]
         })
@@ -3247,13 +3243,9 @@ impl Tool for ExecTool {
     }
 
     fn description(&self) -> &str {
-        "Run one program with its arguments already separate, and return its combined \
-         output. Use this instead of `bash` for anything that is not shell syntax: no \
-         shell is involved, so every argument arrives exactly as written -- quotes, \
-         spaces, backslashes, `$`, `%` and non-ASCII text are all just characters. \
-         Shell features do not work here (`|`, `>`, `&&`, `$VAR`, globbing, `cd`); use \
-         `bash` for those. There is no approval prompt and nothing here can answer one, \
-         so a step that needs a password or an elevation prompt is the user's to run."
+        "Run one program, with its arguments already separate, and return its combined output. No shell \
+         is involved, so every argument arrives exactly as written, and shell syntax (`|`, `>`, `&&`, \
+         `$VAR`, globbing, `cd`) does not work here -- use `bash` for those."
     }
 
     fn schema(&self) -> Value {
@@ -3267,28 +3259,14 @@ impl Tool for ExecTool {
                 "args": {
                     "type": "array",
                     "items": { "type": "string" },
-                    "description": "One string per argument, in order, exactly as the program should receive it. No quoting and no escaping: [\"commit\", \"-m\", \"a message with spaces\"] is three arguments. Put a regex, a JSON body or any other long or quote-heavy text in `stdin`, or in a file whose path you pass."
+                    "description": "One string per argument, in order, exactly as the program should receive it. No quoting and no escaping: [\"commit\", \"-m\", \"a message with spaces\"] is three arguments. Put a regex or a JSON body in `stdin`, or in a file whose path you pass."
                 },
                 "stdin": {
                     "type": "string",
                     "description": "Text to write to the program's standard input."
                 },
-                "timeout_secs": {
-                    "type": "integer",
-                    "description": format!(
-                        "Kill the program after this many seconds (default {DEFAULT_BASH_TIMEOUT} \
-                         for ordinary commands, {LONG_BASH_TIMEOUT} when it installs, builds, \
-                         downloads or runs in the background). Raise it for anything known to be slow."
-                    )
-                },
-                "background": {
-                    "type": "boolean",
-                    "description": format!(
-                        "Default false: wait here for the program. Set true for anything slow, and the \
-                         call returns at once with a pid and a log file (default budget \
-                         {LONG_BASH_TIMEOUT}s) for `job_op` to read, wait for or kill."
-                    )
-                }
+                "timeout_secs": { "type": "integer", "description": TIMEOUT_SECS },
+                "background": { "type": "boolean", "description": BACKGROUND_WAITS }
             },
             "required": ["program"]
         })
@@ -3532,15 +3510,14 @@ impl Tool for ReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read a text file and return it with line numbers prefixed. \
-         Use `offset` and `limit` to page through long files."
+        "Read a text file, with line numbers. Page through a long file with `offset` and `limit`."
     }
 
     fn schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "file_path": { "type": "string", "description": "File path (absolute, or relative to the working directory). `path` is accepted as an alias." },
+                "file_path": { "type": "string", "description": "File to read: absolute, or relative to the working directory. `path` is an alias." },
                 "offset": { "type": "integer", "description": "1-based first line to return." },
                 "limit": { "type": "integer", "description": "Maximum number of lines (default 2000)." }
             },
@@ -3605,16 +3582,15 @@ impl Tool for WriteTool {
     }
 
     fn description(&self) -> &str {
-        "Create or completely overwrite a text file. Parent directories are \
-         created automatically. An existing file must have been read first, and is \
-         refused if it has changed on disk since. For small changes prefer `edit`."
+        "Create or overwrite a text file; parent directories are created. An existing file must have \
+         been read and unchanged since. Prefer `edit` for small changes."
     }
 
     fn schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "file_path": { "type": "string", "description": "File path to write. `path` is accepted as an alias." },
+                "file_path": { "type": "string", "description": "File to write. `path` is an alias." },
                 "content": { "type": "string", "description": "Full file content." }
             },
             "required": ["file_path", "content"]
@@ -3681,16 +3657,15 @@ impl Tool for EditTool {
     }
 
     fn description(&self) -> &str {
-        "Replace an exact string in a file. `old_string` must match byte for byte \
-         and, unless `replace_all` is true, must appear exactly once. The file must \
-         have been read first."
+        "Replace an exact string in a file. `old_string` must match byte for byte and, unless \
+         `replace_all`, must appear exactly once. The file must have been read first."
     }
 
     fn schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "file_path": { "type": "string", "description": "File to edit. `path` is accepted as an alias." },
+                "file_path": { "type": "string", "description": "File to edit. `path` is an alias." },
                 "old_string": { "type": "string", "description": "Exact text to replace." },
                 "new_string": { "type": "string", "description": "Replacement text." },
                 "replace_all": { "type": "boolean", "description": "Replace every occurrence (default false)." }
@@ -3795,14 +3770,12 @@ impl Tool for PatchTool {
     }
 
     fn description(&self) -> &str {
-        "Apply a patch to one or more text files, all or nothing. Use this instead of \
-         several `edit` calls when one change spans files. Format: `*** Begin Patch`, then \
-         one section per file -- `*** Add File: <path>`, `*** Update File: <path>` or \
-         `*** Delete File: <path>` -- ending with `*** End Patch`. In an update, a line \
-         starting with `+` is added, `-` is removed, and a space is context; `@@ ... @@` \
-         starts another hunk. Each hunk is found by its own lines, so a file that has \
-         changed since you read it makes the whole patch fail instead of landing in the \
-         wrong place. Files must have been read before being updated or deleted."
+        "Apply a patch to one or more text files, all or nothing. Use this instead of several `edit` \
+         calls when one change spans files. Format: `*** Begin Patch`, then one section per file -- \
+         `*** Add File: <path>`, `*** Update File: <path>` or `*** Delete File: <path>` -- ending with \
+         `*** End Patch`. In an update, `+` adds a line, `-` removes one, a space is context, and `@@ \
+         ... @@` starts another hunk. Each hunk is found by its own lines, so a file changed since it \
+         was read fails the whole patch. Files must be read before being updated or deleted."
     }
 
     fn schema(&self) -> Value {
@@ -3908,8 +3881,7 @@ impl Tool for ListTool {
     }
 
     fn description(&self) -> &str {
-        "List directory entries (files and subdirectories) to orient yourself in \
-         the filesystem."
+        "List directory entries: files and subdirectories."
     }
 
     fn schema(&self) -> Value {
@@ -4351,9 +4323,8 @@ impl Tool for GlobTool {
     }
 
     fn description(&self) -> &str {
-        "Find files by name pattern, searching recursively. Use this instead of \
-         shelling out: `*.rs` finds every Rust file below the path, and `**/test_*.py` \
-         matches at any depth. This is the tool for \"where is that file\"."
+        "Find files by name pattern, recursively. `*.rs` finds every Rust file below the path; \
+         `**/test_*.py` matches at any depth."
     }
 
     fn schema(&self) -> Value {
@@ -4413,9 +4384,8 @@ impl Tool for GrepTool {
     }
 
     fn description(&self) -> &str {
-        "Search file *contents* for a literal string, recursively, and return matches \
-         with file names and line numbers. This is the tool for \"where is this used\". \
-         Narrow the search with `path` and `glob` when the tree is large."
+        "Search file contents for a literal string, recursively, and return file names with line \
+         numbers. Narrow it with `path` and `glob`."
     }
 
     fn schema(&self) -> Value {
@@ -4858,17 +4828,12 @@ impl Tool for TaskTool {
     }
 
     fn description(&self) -> &str {
-        "Ask another flint to do a job in its own context and give back its answer. Use it for \
-         work that is large or self-contained -- a wide search, reading a lot of files, a question \
-         whose transcript you do not want in this conversation. The other flint starts fresh: it \
-         cannot see this conversation, so the prompt has to stand alone. `agent` names a profile \
-         from this directory's `.flint/agents/`, which decides the instructions, the model and \
-         whether the child may write. It is a whole model run, so it costs what a run costs. \
-         This starts it and returns at once with a handle -- pid and the conversation its answer is \
-         being written to -- instead of waiting for it, because a job that takes minutes must not \
-         make this session unusable. You are told when it ends and can collect its answer with \
-         `job_op` action \"wait\". Use `background: false` when the next thing you do depends on \
-         the answer and there is nothing else to get on with. `readonly` here forces it there."
+        "Ask another flint to do a job in its own context and give back its answer. Use it for work \
+         that is large or self-contained -- a wide search, reading a lot of files, a question whose \
+         transcript you do not want here. The child starts fresh, so `prompt` has to stand alone. \
+         `agent` names a profile from this directory's `.flint/agents/`, which decides its \
+         instructions, model and whether it may write. It returns at once with a handle; `background: \
+         false` waits for the answer instead, for when what you do next depends on it."
     }
 
     fn task_config(&mut self) -> Option<&mut TaskConfig> {
@@ -4879,7 +4844,7 @@ impl Tool for TaskTool {
         let mut properties = json!({
             "prompt": {
                 "type": "string",
-                "description": "What to ask, complete enough to stand alone: the other flint has no history from here."
+                "description": "What to ask."
             },
             "cwd": {
                 "type": "string",
@@ -4897,14 +4862,12 @@ impl Tool for TaskTool {
             },
             "timeout_secs": {
                 "type": "number",
-                "description": "Stop the child after this long (default 600). Stopping is `/stop`, so half an answer survives."
+                "description": "Stop the child after this many seconds (default 600); its half answer survives."
             },
             "background": {
                 "type": "boolean",
-                "description": "Default true: start it and return at once with a handle (its pid and \
-                     its conversation) instead of waiting. Collect the answer with `job_op` action \
-                     \"wait\", and see where it is with \"status\". Set it to false only when what you \
-                     do next depends on the answer."
+                "description": "Default true: return at once with a handle. Set false to wait for the \
+                     answer -- only when what you do next depends on it."
             }
         });
         // Only offered when this directory actually has profiles, and only the names that exist: an
@@ -5178,13 +5141,9 @@ impl Tool for JobOpTool {
     }
 
     fn description(&self) -> &str {
-        "See what became of a job this run started and did not wait for -- a `task` child, or a \
-         command started with `background: true`. `status` reports every job this run started, \
-         running first; `output` reads what a background command has printed since it was last \
-         asked, without collecting it; `wait` collects the whole of what a job produced, waiting for \
-         it if need be; `stop` ends one, which keeps whatever it had already produced. Only jobs \
-         *this* run started can be waited for or stopped -- a run in another process can be seen with \
-         `flint who`, not handled from here."
+        "See what became of a job this run started and did not wait for -- a `task` child, or a command \
+         started with `background: true`. Only jobs this run started can be waited for or stopped; a \
+         run in another process is `flint who`'s business, not this tool's."
     }
 
     fn schema(&self) -> Value {
@@ -5194,11 +5153,14 @@ impl Tool for JobOpTool {
                 "action": {
                     "type": "string",
                     "enum": ["status", "output", "wait", "stop"],
-                    "description": "status: where every job of this run is. output: what a background command has printed since you last asked. wait: the whole of what it produced, when it has it. stop: end it."
+                    "description": "status: where every job of this run is. output: what a background \
+                                    command printed since you last asked. wait: the whole of what it \
+                                    produced. stop: end it, keeping what it produced."
                 },
                 "pid": {
                     "type": "number",
-                    "description": "Which job, as the handle from `task` or from a background command gave it. Default: all of them for status, or the only one in play for output, wait and stop."
+                    "description": "Which job, as the handle gave it. Default: all of them for \
+                                    `status`, the only one in play for the rest."
                 },
                 "timeout_secs": {
                     "type": "number",
@@ -5258,12 +5220,10 @@ impl Tool for TasksTool {
     }
 
     fn description(&self) -> &str {
-        "Run several separate flint runs at the same time, one per job, and give back every answer \
-         labelled in the order asked. Use it when the jobs are genuinely independent -- the same \
-         question about N things, N parts of a tree, N options to try -- because that is when running \
-         them at once is worth more than running them in a row. The children cannot see this \
-         conversation or each other, so every job has to stand alone, and nothing learned by one \
-         helps another. Each job is a whole model run: this spends N runs at once."
+        "Run several flint runs at the same time, one per job, and give back every answer labelled in \
+         the order asked. Use it when the jobs are genuinely independent -- the same question about N \
+         things, or N options to try. The children cannot see this conversation or each other, so every \
+         job stands alone. This spends N runs at once."
     }
 
     fn task_config(&mut self) -> Option<&mut TaskConfig> {
@@ -7608,6 +7568,113 @@ mod exec_tests {
 
     fn toolbox(dir: &Path, readonly: bool) -> ToolBox {
         ToolBox::new(&Config::default(), readonly, dir.to_path_buf())
+    }
+
+    /// Every character of every schema is paid for on **every request**, for the life of the
+    /// tool, so the total is a budget rather than an accident.
+    ///
+    /// Counted as name + description + parameters for every tool -- what the request body carries
+    /// for the tools, without the per-tool envelope around it (measured at 10,710 with that
+    /// included). Thirteen tools came to 13,523 before the trim, against a system prompt of 3,273:
+    /// the tool payload was **four times** the prompt that everybody blamed for being long. It is
+    /// 9,356 now.
+    ///
+    /// The ceiling is deliberately close, so it fails on a paragraph rather than on a rewrite --
+    /// about a hundred and fifty characters of new prose trips it. Raising it is allowed; raising
+    /// it without deciding that the words are worth paying for on every request is not.
+    #[test]
+    fn the_tool_payload_stays_within_its_budget() {
+        let dir = TempDir::new("schema-budget");
+        let box_ = toolbox(dir.path(), false);
+        let total: usize = box_
+            .specs()
+            .iter()
+            .map(|(name, description, schema)| {
+                name.len() + description.len() + serde_json::to_string(schema).unwrap().len()
+            })
+            .sum();
+        assert!(
+            total <= 9_500,
+            "the tool payload is {total} characters, and it was 9,356 when the budget was set. \
+             Every request pays this on every turn, for the life of the tool: trim the \
+             description, share the paragraph with the tool that already says it, or move it to a \
+             comment where it costs nothing. If the words are genuinely worth paying for, raise \
+             the number -- deliberately."
+        );
+    }
+
+    /// A description is a JSON string, so a wrapped source line is not a wrapped message.
+    ///
+    /// Rust only continues a string literal across lines with a single `\` at the end; `\\` is an
+    /// escaped backslash, and the newline and the indentation that follow it land in the text the
+    /// model reads. That is what `bash`'s `download` description did -- one stray backslash and
+    /// fifty characters of whitespace in the middle of a sentence -- and nothing noticed, because
+    /// it looks right in the source.
+    #[test]
+    fn no_description_carries_source_formatting() {
+        let dir = TempDir::new("schema-text");
+        let box_ = toolbox(dir.path(), false);
+        for (name, description, schema) in box_.specs() {
+            let mut strings = vec![description];
+            collect_strings(&schema, &mut strings);
+            for text in strings {
+                assert!(
+                    !text.contains('\n'),
+                    "{name} has a newline in a description the model reads: {text:?}"
+                );
+                assert!(
+                    !text.contains("  "),
+                    "{name} has a run of spaces in a description the model reads: {text:?}"
+                );
+            }
+        }
+    }
+
+    /// A paragraph that belongs to two tools is written once.
+    ///
+    /// `timeout_secs` and `background` were written separately in `bash` and in `exec` and had
+    /// already drifted into different words for the same rule, which costs that paragraph twice on
+    /// every request to say one thing.
+    #[test]
+    fn a_parameter_shared_by_two_tools_is_described_once() {
+        let dir = TempDir::new("schema-shared");
+        let box_ = toolbox(dir.path(), false);
+        let specs = box_.specs();
+        for param in ["timeout_secs", "background"] {
+            let mut seen: Vec<(String, String)> = Vec::new();
+            for (name, _, schema) in &specs {
+                if let Some(p) = schema
+                    .get("properties")
+                    .and_then(|p| p.get(param))
+                    .and_then(|p| p.get("description"))
+                    .and_then(|d| d.as_str())
+                {
+                    seen.push((name.clone(), p.to_string()));
+                }
+            }
+            // `task` and `tasks` wait by default and say so; `job_op`'s timeout means something
+            // else entirely. What must not differ is the pair that means the same thing.
+            let waits: Vec<&(String, String)> = seen
+                .iter()
+                .filter(|(n, _)| n == "bash" || n == "exec")
+                .collect();
+            assert_eq!(waits.len(), 2, "{param} is missing from bash or exec: {seen:?}");
+            assert_eq!(
+                waits[0].1, waits[1].1,
+                "bash and exec describe {param} differently, so one of them is paid for twice: \
+                 {:?} against {:?}",
+                waits[0].1, waits[1].1
+            );
+        }
+    }
+
+    fn collect_strings(value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::String(t) => out.push(t.clone()),
+            Value::Array(items) => items.iter().for_each(|v| collect_strings(v, out)),
+            Value::Object(map) => map.values().for_each(|v| collect_strings(v, out)),
+            _ => {}
+        }
     }
 
     fn args_of(list: &[&str]) -> Vec<String> {

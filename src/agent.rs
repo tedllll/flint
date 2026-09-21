@@ -50,6 +50,8 @@ Rules:
   in full, in place of naming them -- not a tool result of yours and not a path to go and \
   look up. What is between the tags is the whole file, so do not spend a `read` confirming \
   it, and do not assume the file is longer than what is there.
+- Nothing can answer an approval prompt: a step that needs a password or an elevation \
+  prompt is the user's to run.
 
 About flint itself:
 - flint is the program you are running inside. It is normally an installed \

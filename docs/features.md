@@ -1069,6 +1069,7 @@ tests name the behaviour they hold.
 | the page's pure functions | `scripts/web-view-test.js` |
 | the Python and MCP callers | `examples/python/test_call.py`, `examples/mcp/test_mcp.py` |
 | the one suite that needs a real pty (Unix) | `tests/tty_hangup.rs` |
+| what the tool payload costs, and that it carries no source formatting | `src/tools.rs`'s tests (`the_tool_payload_stays_within_its_budget`, `no_description_carries_source_formatting`, `a_parameter_shared_by_two_tools_is_described_once`) |
 
 ## See also
 
