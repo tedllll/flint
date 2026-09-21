@@ -2159,6 +2159,33 @@ this reading, and was not proposed, for a reason worth keeping rather than redis
   argues about at length, and the answer to that argument was no, so inventing a rung quietly here would
   be answering it again by accident.
 
+### 9. The reasoning chain is sent back to the provider — **measured, not decided**
+
+Found by asking whether it is. It is. A `Message::Assistant` carries `reasoning`, one type serves
+both the session file and the request body (`provider::request_body` sends `messages` directly), and
+the field is written into the file because the file is the record — so it goes on the wire too.
+
+Measured against a recording stub: an 800-character reasoning block, stored in the session, came
+back in the **next** request's body as an assistant message's `reasoning` field.
+
+Two reasons this matters, and the second is not about size:
+
+- **Size, and it is the larger half of the context problem.** A turn's tokens are mostly reasoning:
+  measured on two local models, 341 completion tokens of which 292 *characters* were the answer, and
+  436 tokens of which 49 characters were. So the history that accumulates is mostly reasoning, and
+  every turn re-sends all of it. This dwarfs the tool schemas (§8's neighbour, and the reason
+  `perf:` above was worth doing but is not the big lever).
+- **Correctness, and it is provider-dependent.** DeepSeek's reasoner documents that
+  `reasoning_content` must **not** be passed back in the input; Anthropic's extended thinking
+  requires its thinking blocks returned verbatim, signatures included. Sending it always is wrong
+  for at least the first and right for the second, and nothing in the tree knows which it is talking
+  to.
+
+Not decided because the fix is a policy rather than a deletion: either the wire form stops carrying
+`reasoning` and a provider that needs it gets a flag, or the field becomes per-provider beside
+`thinking_field` — which already exists for the *request* side of the same vendor disagreement and is
+the obvious precedent. Either way the session file keeps it: it is the record, and the page draws it.
+
 ## Small, agreed, unscheduled
 
 - ~~`read`/`write`/`edit` taking `file_path`, with `path` kept as an alias so nothing breaks.~~
