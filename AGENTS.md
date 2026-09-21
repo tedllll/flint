@@ -142,13 +142,14 @@ verbose = "on"                  # off|on|full: how much of the agent's activity 
 tool_detail = false             # print the output behind a tool result
 lazy_tools = true               # every request carries the `tools` lookup and a one-line
                                 # catalogue, and a tool joins the request from the turn after the
-                                # model asks about it. Measured: 988 characters per request against
-                                # 10,710 for the whole set
+                                # model asks about it. Measured: 822 characters per request against
+                                # 10,043 for the whole set
 eager_tools = []                # tools to declare on every request anyway. Absent or empty is
                                 # the shipped all-lazy shape; paste `bash`, `exec`, `read`,
                                 # `write`, `edit`, `list`, `glob`, `grep` for a model that guesses
                                 # instead of asking -- measured on a local 9B, which answered
-                                # "name" for apply_patch's argument (the real one is `patch`)
+                                # "name" for apply_patch's argument (the real one is `patch`).
+                                # Declaring those eight costs 4,355 characters on every request
 instructions = "hint"           # AGENTS.md: "hint" (name them), "paste", "off"
 skill_dirs = []                 # extra skill directories, after the standard two
 thinking = "off"                # off|low|medium|high: reasoning to ask for. "off" sends no

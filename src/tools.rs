@@ -134,7 +134,8 @@ pub struct ToolBox {
     run_env: RunEnv,
     /// Whether the tools are offered one at a time. See `Config::lazy_tools`.
     lazy: bool,
-    /// The tools declared whatever `lazy` says -- `Config::eager_tools`, or `ALWAYS_DECLARED`.
+    /// The tools declared whatever `lazy` says -- `Config::eager_tools`, which is where
+    /// `CONVENTIONAL_TOOLS` goes when a person pastes it.
     eager: Vec<String>,
     /// The tools the model has asked about, shared with the `tools` tool that adds to it.
     ///
@@ -5067,7 +5068,7 @@ impl Tool for TaskTool {
 /// session path in that record is for -- and is handled there by a person, not from here.
 pub struct JobOpTool;
 
-/// The tools whose arguments follow a convention, and which are therefore always declared.
+/// The tools whose arguments follow a convention, and which are therefore the ones worth declaring.
 ///
 /// The split is not "common versus rare" -- it is **guessable versus not**. `read` takes a path and
 /// `bash` takes a command line, and a model that has met a coding agent before gets those right
@@ -5077,16 +5078,16 @@ pub struct JobOpTool;
 /// build -- and, asked for `apply_patch`'s argument, answered "`name`" (the real one is `patch`)
 /// without looking it up.
 ///
-/// So these eight are always in the request, and the rest are behind `tools`. That is about half
-/// the payload saved rather than nine tenths, and it buys the thing the measurement says is
-/// missing: the tools a run reaches for constantly never depend on the model choosing to look
-/// something up.
+/// So these eight are the ones worth declaring on every request, and the rest are behind `tools`.
+/// That is about half the payload saved rather than nine tenths, and it buys the thing the
+/// measurement says is missing: the tools a run reaches for constantly never depend on the model
+/// choosing to look something up.
 ///
 /// **Not the default.** `Config::eager_tools` is empty unless somebody asks for a set, so the
-/// shipped shape is all-lazy: the lookup and its catalogue, 874 characters, and every tool obtained
+/// shipped shape is all-lazy: the lookup and its catalogue, 822 characters, and every tool obtained
 /// by asking. This list is the conservative answer for a model that guesses instead of looking --
-/// the eight whose arguments need no lookup, about 4,600 characters of the 6,116 a request costs
-/// when they are declared. Paste it into `eager_tools` when a model's refusals show it guessing.
+/// the eight whose arguments need no lookup, 4,355 characters of tool text on every request when
+/// they are declared. Paste it into `eager_tools` when a model's refusals show it guessing.
 ///
 /// Measured both ways with `deepseek-flash`, on four tasks including a real `apply_patch` edit:
 /// identical results, and the lazy shape cost 1,401/2,093/1,885 prompt tokens against
@@ -8097,10 +8098,10 @@ mod exec_tests {
     /// for the tools, without the per-tool envelope around it (measured at 10,710 with that
     /// included). Thirteen tools came to 13,523 before the trim, against a system prompt of 3,273:
     /// the tool payload was **four times** the prompt that everybody blamed for being long. It is
-    /// 9,356 now.
+    /// 9,367 for the set this test builds, and 10,043 in a run that also offers `search`.
     ///
-    /// The ceiling is deliberately close, so it fails on a paragraph rather than on a rewrite --
-    /// about a hundred and fifty characters of new prose trips it. Raising it is allowed; raising
+    /// The ceilings are deliberately close, so they fail on a paragraph rather than on a rewrite --
+    /// about a hundred and fifty characters of new prose trips one. Raising one is allowed; raising
     /// it without deciding that the words are worth paying for on every request is not.
     #[test]
     fn the_tool_payload_stays_within_its_budget() {
@@ -8114,31 +8115,55 @@ mod exec_tests {
                 })
                 .sum()
         };
-        // What one request carries with `lazy_tools` on, which is what a run actually pays per
-        // turn: the lookup and its catalogue. This is the number that matters, and it is two
-        // orders of magnitude below the eager one.
+        // The shipped shape: the lookup and its catalogue, and nothing else. This is everything a
+        // turn pays until the model asks for more, so it is the number to hold closest. The box
+        // here has no search credential and no skills, so a real run adds a catalogue line for
+        // each; Windows adds `pwsh`'s.
         let per_request = weight(box_.specs());
         assert!(
-            per_request <= 5_400,
-            "one request carries {per_request} characters of tool text; it was 5,387 when this \
-             budget was set. This is the core's eight schemas plus the lookup's catalogue, and it \
-             is what every turn of every run pays: a paragraph here costs more than a paragraph \
-             anywhere else in this file. The way to bring it down is to move a tool into the \
-             lookup's half -- `ALWAYS_DECLARED` -- not to find shorter words for a schema."
+            per_request <= 1_000,
+            "one request carries {per_request} characters of tool text; it was 797 when this \
+             budget was set, and 822 in a run that also offers `search` (829 and 854 with `pwsh` on \
+             Windows). The lookup and its catalogue are the only tool text paid for on every turn \
+             of every run, so what grows here grows everywhere -- a paragraph here costs more than \
+             a paragraph anywhere else in this file. Room for one more tool's line, and not for a \
+             sentence: sentences are what the lookup answers with."
+        );
+        // And the other shape a person can ask for: the conventional eight declared on every
+        // request whatever the lookup says. A different request, so its own number -- and this is
+        // the box `eager_tools = CONVENTIONAL_TOOLS` really builds, which is the thing to measure:
+        // when the default flipped to all-lazy, the old ceiling stayed behind on a box that no
+        // longer held that list, so the shape a person pastes was guarded by nothing.
+        let eager_box = ToolBox::new(
+            &Config {
+                eager_tools: Some(CONVENTIONAL_TOOLS.iter().map(|n| n.to_string()).collect()),
+                ..Config::default()
+            },
+            false,
+            dir.path().to_path_buf(),
+        );
+        let eager_request = weight(eager_box.specs());
+        assert!(
+            eager_request <= 4_500,
+            "the eager shape carries {eager_request} characters of tool text; it was 4,330 when \
+             this budget was set, and 4,355 in a run that also offers `search` (4,362 and 4,387 \
+             with `pwsh` on Windows). Every one of those schemas is there because a model's \
+             refusals showed it guessing rather than looking, and all of it is paid on every turn. \
+             Take a tool out of `CONVENTIONAL_TOOLS`, or trim one, before raising the number."
         );
         // And everything, for the runs that ask for all of it -- the number this started at.
         // Only paid with `lazy_tools = false`, which is why the ceiling is this loose: it is the
         // whole set, including the lookup, and it is nobody's per-turn cost by default.
         //
-        // Per platform, because Windows carries `pwsh` and nothing else does -- 11,101 measured
-        // there against 10,221 here, which is the 880 of a tool the other two platforms do not have.
-        // One ceiling would either fail on Windows or be slack everywhere else.
+        // Per platform, because Windows carries `pwsh` and nothing else does -- the 880 of a tool
+        // the other two platforms do not have. One ceiling would either fail on Windows or be
+        // slack everywhere else.
         let ceiling = if cfg!(windows) { 11_500 } else { 10_500 };
         let total = weight(box_.all_specs());
         assert!(
             total <= ceiling,
-            "the whole tool set is {total} characters; it was 10,221 when the budget was set \
-             (10,221 + pwsh's 880 on Windows). \
+            "the whole tool set is {total} characters; it was 9,367 when the budget was set, plus \
+             `search`'s 651 and `pwsh`'s 880 on Windows (which is why the ceiling is per platform). \
              A run pays this on every turn when `lazy_tools = false`: trim the description, \
              share the paragraph with the tool that already says it, or move it to a comment \
              where it costs nothing. If the words are genuinely worth paying for, raise the \

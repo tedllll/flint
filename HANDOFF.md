@@ -1796,6 +1796,12 @@ that declares eight schemas. So a request carries the lookup and a one-line cata
 characters against 10,710** — and `eager_tools` is there for a model that guesses (`CONVENTIONAL_TOOLS`
 is the list to paste), with the refused-call teaching as the repair loop either way.
 
+Both of those figures are what they were at that commit and have moved since: the catalogue's lines
+were shortened and the lookup stopped saying the same sentence twice (`4b187ce`), so the numbers to
+read today are **822 characters of tool text per request against 10,043** counted the same way, and
+1,000 against 4,500 are the ceilings the budget test now holds (`the_tool_payload_stays_within_its_budget`,
+which had been left guarding a shape the default no longer built).
+
 
 **The page stopped being a surface and became a window with a door: a picture in the preview, the
 run's controls behind a settings dialog, and a `/` menu in the composer.** Asked for directly

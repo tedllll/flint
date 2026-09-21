@@ -402,7 +402,10 @@ The set is built per run, so the model's list is not always the same:
 
 **With `lazy_tools` on — the default — one request carries the `tools` lookup and a one-line
 catalogue of everything else.** A tool joins the request from the turn after the model asks about
-it. Measured: **988 characters per request against 10,710** for the whole set.
+it. Measured, counting each tool's name, description and schema: **822 characters per request
+against 10,043** for the whole set, in a run that offers `search` and on a machine that has no
+`pwsh`. The catalogue is the only tool text paid for on every turn, so the budget test holds this
+number to 1,000 — about two hundred characters of room, and no more.
 
 The catalogue names each tool and gives it four or five words — that is the text paid for on every
 turn, so it is deliberately not where detail goes. A tool's own description is paid for only from the
