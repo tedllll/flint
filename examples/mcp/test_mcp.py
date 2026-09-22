@@ -6,8 +6,11 @@ cause travel with it, that structured output comes back structured, and -- the o
 -- that a run which fails says so through `isError` instead of returning an empty answer that reads
 like success.
 
-Run it the way the README says: `python examples/mcp/test_mcp.py`. It needs a built `flint` (PATH or
-`FLINT_BIN`) and spawns the same stub provider `examples/python/test_call.py` uses.
+Run it the way the README says: `python examples/mcp/test_mcp.py`. It spawns the same stub provider
+`examples/python/test_call.py` uses, and it runs **this checkout's build** (`target/debug/flint`) when
+there is one -- `FLINT_BIN` over that, `PATH` otherwise, which is `flint_call._binary`'s rule and the
+first thing this check now asserts about itself, because the version that did not have the rule was
+testing the installed release.
 """
 
 from __future__ import annotations
@@ -24,6 +27,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 PYTHON_EXAMPLES = HERE.parent / "python"
+# The build in this checkout, two levels up. A *check* should be running this rather than whichever
+# `flint` happens to be installed -- see `flint_binary`.
+BUILT = HERE.parents[1] / "target" / "debug" / ("flint.exe" if os.name == "nt" else "flint")
 sys.path.insert(0, str(PYTHON_EXAMPLES))
 
 FAILURES: list[str] = []
@@ -41,6 +47,23 @@ def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def flint_binary() -> str:
+    """Which flint this check runs, by the rule `flint_call._binary` states.
+
+    `FLINT_BIN` if it is set, else the build in this checkout when there is one, else `flint` on
+    `PATH`. The middle case is the whole point, and it is not hypothetical: on the machine this was
+    written on, `shutil.which("flint")` was `C:\\Users\\<me>\\bin\\flint.exe` -- the release built from
+    the *last* commit, installed by the person's own build step -- so the check was testing a binary
+    that no longer matched the tree it was meant to be checking, and it passed. The same trap is
+    spelled out in `flint_call._binary`; this is that rule, repeated here rather than imported,
+    because everything under `examples/mcp/` has to stay copyable into somebody else's project with
+    nothing but the standard library and itself.
+    """
+    if os.environ.get("FLINT_BIN"):
+        return os.environ["FLINT_BIN"]
+    return str(BUILT) if BUILT.exists() else "flint"
 
 
 class Server:
@@ -111,7 +134,19 @@ def main() -> int:
 
     env = dict(os.environ)
     env["FLINT_HOME"] = str(scratch)
-    env.setdefault("FLINT_BIN", shutil.which("flint") or "flint")
+    # Not `setdefault`: the rule below is this check's own, and it already honours an explicit
+    # `FLINT_BIN` -- which is how a caller points it at a binary of their choosing.
+    env["FLINT_BIN"] = flint_binary()
+
+    print("0. which flint is under test")
+    chosen = env["FLINT_BIN"]
+    print(f"   {chosen}")
+    check("a build in this checkout is what runs, not whichever flint is installed",
+          Path(chosen).is_file()
+          and (not BUILT.exists()
+               or bool(os.environ.get("FLINT_BIN"))
+               or Path(chosen).resolve() == BUILT.resolve()),
+          f"chose {chosen}; this checkout has {BUILT}")
 
     server = Server(env)
     try:

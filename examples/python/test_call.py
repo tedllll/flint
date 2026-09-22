@@ -20,7 +20,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from flint_call import ask  # noqa: E402
+from flint_call import ask, FLINT  # noqa: E402
 
 HERE = Path(__file__).parent
 # Which binary these run is `flint_call._binary`'s business: the build in this checkout when there is
@@ -134,6 +134,18 @@ def main():
         )
     try:
         print(f"scratch FLINT_HOME: {scratch}")
+        # Which flint this is, said out loud, for the reason `flint_call._binary` gives: a check that
+        # ran an installed build passes for the wrong reason, and a log that does not name the binary
+        # cannot tell the two apart afterwards. The claim is the mirror of the one in
+        # `examples/mcp/test_mcp.py`, where the rule was wrong and this is what caught it.
+        built = HERE.parents[1] / "target" / "debug" / ("flint.exe" if os.name == "nt" else "flint")
+        print(f"flint under test: {FLINT}")
+        check("a build in this checkout is what runs, not whichever flint is installed",
+              Path(FLINT).is_file()
+              and (not built.exists()
+                   or os.environ.get("FLINT_BIN")
+                   or Path(FLINT).resolve() == built.resolve()),
+              f"ran {FLINT}; this checkout has {built}")
         print("\n1. one turn, with a tool round in the middle")
         turn = ask("[[bash]] 跑个命令看看", home=str(scratch), cwd=str(HERE))
         kinds = [e["type"] for e in turn.events]
