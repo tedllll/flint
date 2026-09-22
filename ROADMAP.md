@@ -1845,7 +1845,9 @@ list's, not this one's, and each line is edited in the same commit as the code t
   it was closed and treat a position past the end of the file as a stale read rather than an error.
 - §8: the picker of live runs that the page's `/say --to` is waiting on.
 - §11 item 9(ii): the page's `/say --to` picker of live runs — **built 2026-09-18**, which was the last
-  feature the plan of record still owed; what is left of item 9 is its two test-and-comment halves.
+  feature the plan of record still owed. The line here used to add "what is left of item 9 is its two
+  test-and-comment halves"; item 9's own entry says all three of its items are closed and names what
+  holds each one, so that clause was stale and is gone (it is the fifth of item 2's class, below).
 - §11 item 5: `flint --version` — **built 2026-09-18**, with the name collision it found (`session`'s
   `version` is the file format's, not the build's) stated in `README.md` where a reader meets it.
 - §10 C3 and C5 — the two holes that needed a decision rather than code — **settled in writing
@@ -1897,11 +1899,11 @@ where prose and tree disagree is item 3.**
    which on this machine is the **installed release** (`C:\Users\<me>\bin\flint.exe`) rather than the
    checkout's build — the wrong-reason pass `flint_call._binary` was written to refuse. It now uses that
    same rule, and both checks print which binary they ran and assert it is this checkout's.
-2. **Stale sentences, found by checking claims instead of reading them — all four now corrected
+2. **Stale sentences, found by checking claims instead of reading them — all five now corrected
    (2026-09-18).**
-   This is a class, not an incident, and it is the finding that says the most about the repository: four
+   This is a class, not an incident, and it is the finding that says the most about the repository: five
    passages state something the tree stopped being true of, and **nothing in the gate can catch prose**.
-   The four: (i) `HANDOFF.md`'s cold-start section says a `/config edit` page form "would need a
+   The five: (i) `HANDOFF.md`'s cold-start section says a `/config edit` page form "would need a
    `/config set <key> <value>` the terminal does not have" — the terminal has had it since 11:36 on the
    same day that section is dated from (`bb9e07c`; the help row is `src/main.rs:2876`), and the sentence
    was corrected in that commit; (ii) `docs/sandbox.md` recorded that "CI checks nothing on push", which
@@ -1912,9 +1914,13 @@ where prose and tree disagree is item 3.**
    reason it is recorded rather than guarded further; (iv) `HANDOFF.md`'s cold-start section listed
    "adding a provider from the page" as left open, which §8 records as closed on 2026-09-17 — the
    paragraph now says what closed it and why the shape §11 refused for `/config edit` is the right one
-   here. All four were fixed rather than only the first, because a survey that points at a wrong
-   sentence and leaves it there has made the problem worse. The general one — a snapshot section that
-   says when it was true instead of sounding like state — is stated at the top of that section.
+   here; and (v) this section's own opening list said of §11 item 9 that "what is left of item 9 is its
+   two test-and-comment halves", while item 9 names the test and the corrected comment that closed each
+   of its three items — the two lines were read against each other on 2026-09-18 and the stale clause
+   is gone, which is worth recording here because no check could have found it. All five were fixed
+   rather than only the first, because a survey that points at a wrong sentence and leaves it there has
+   made the problem worse. The general one — a snapshot section that says when it was true instead of
+   sounding like state — is stated at the top of that section.
 3. **What the page claims and what the harness holds are not the same set — bounded 2026-09-18.**
    `HANDOFF.md` recorded it in
    its own words — "the mid-turn report wait is unasserted (`docs/web-mode.md` §11)" — and §11 did
