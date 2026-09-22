@@ -1911,6 +1911,17 @@ where prose and tree disagree is item 3.**
    true. Fixed by putting the condition on the values rather than on the file, and the step itself
    learned the second half of the same lesson: **a failing check now carries its own `FAIL` lines as
    annotations**, because its first red run reported "exit code 1" and nothing else.
+   **And the windows job then paid for the same lesson once more, with the encoding.** Both checks print
+   Chinese fixture text in their own `FAIL` details, and on Windows Python encodes a *redirected* stdout
+   by the console code page — `cp1252` on the runner — so printing what it saw raised
+   `UnicodeEncodeError` inside `check()`: a crash in the harness that reads as a failure of the thing
+   under test. This machine's code page is `gbk`, which has those characters, which is why the check had
+   always passed here. Both files now force UTF-8 on their own stdout, `errors="replace"` so a console
+   that cannot show a character still shows the rest of the line and the verdict stays the point; and
+   `flint_server.py` does the same one layer down, where the reason is a specification rather than a
+   console: JSON-RPC over stdio *is* UTF-8, and a prompt typed in Chinese must not depend on the code
+   page of the machine relaying it. Three findings from one step, all of them in the check rather than
+   the product — which is the direction a first run should fail in, and no reason to stop looking.
 2. **Stale sentences, found by checking claims instead of reading them — all five now corrected
    (2026-09-18).**
    This is a class, not an incident, and it is the finding that says the most about the repository: five

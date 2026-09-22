@@ -1986,7 +1986,15 @@ was red in that one step on `686411c` and on `915c2a8` — the first run with no
 second with the traceback but not the reason — which is how the config-precedence bug above was found.
 The step now carries each check's own `FAIL` lines as annotations, and **the head that carries the fix is
 the first one that can be green on both runners: read its `test (ubuntu-latest)` before believing any
-line above it.**
+line above it.** That head's ubuntu job *was* green — the fixed config made the whole file pass on Linux
+for the first time — and its windows job then found the third thing in the same step: the runner's Python
+encodes a redirected stdout as `cp1252`, both checks print Chinese fixture text in their `FAIL` details,
+and so `check()` itself raised `UnicodeEncodeError` — a crash in the harness that reads like a product
+failure, and one this machine cannot see because its code page is `gbk`. Reproduced here first by setting
+`PYTHONIOENCODING=cp1252` (red before, green after, with the Chinese arriving intact rather than as
+replacement characters); both scripts now force UTF-8 on their own stdout, and `flint_server.py` does the
+same because its stdio protocol is UTF-8 by specification — a Chinese prompt through the MCP door must
+not depend on the code page of the machine relaying it.
 
 **The standing duty is done for both pushed heads.** `target\release\flint.exe` and
 `C:\Users\zhangzhuo\bin\flint.exe` are the same bytes (SHA-256
