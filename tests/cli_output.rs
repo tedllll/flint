@@ -2563,13 +2563,18 @@ async fn renaming_a_conversation_tells_the_page_to_read_the_list_again() {
     .expect("the test config");
 
     let log = home.join("transcript.txt");
+    // The run's stderr, kept rather than sent to `/dev/null`: a `--web` run that dies mid-test
+    // otherwise reports a connection that was refused, or a transcript that simply stops, and
+    // nothing about *why* -- the class the flaky jobs test came from, which `HANDOFF.md` names.
+    // It sits in this test's own home, and a test that panics leaves the whole home behind.
+    let errors = home.join("stderr.txt");
     let mut child = binary()
         .arg("--web")
         .env("FLINT_HOME", &home)
         .env_remove("NO_COLOR")
         .stdin(std::process::Stdio::piped())
         .stdout(std::fs::File::create(&log).expect("transcript file"))
-        .stderr(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&errors).expect("stderr file"))
         .spawn()
         .expect("failed to run flint");
 
@@ -2842,6 +2847,11 @@ async fn a_person_can_read_the_run_s_jobs_and_stop_one() {
     let work = home.join("work");
     std::fs::create_dir_all(&work).expect("the working directory");
     let log = home.join("transcript.txt");
+    // The run's stderr, kept rather than sent to `/dev/null`: a `--web` run that dies mid-test
+    // otherwise reports a connection that was refused, or a transcript that simply stops, and
+    // nothing about *why* -- the class the flaky jobs test came from, which `HANDOFF.md` names.
+    // It sits in this test's own home, and a test that panics leaves the whole home behind.
+    let errors = home.join("stderr.txt");
     let mut child = binary()
         .arg("--web")
         .env("FLINT_HOME", &home)
@@ -2849,7 +2859,7 @@ async fn a_person_can_read_the_run_s_jobs_and_stop_one() {
         .current_dir(&work)
         .stdin(std::process::Stdio::piped())
         .stdout(std::fs::File::create(&log).expect("transcript file"))
-        .stderr(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&errors).expect("stderr file"))
         .spawn()
         .expect("failed to run flint");
 
@@ -2863,7 +2873,7 @@ async fn a_person_can_read_the_run_s_jobs_and_stop_one() {
     let _started = read_until(&mut watching, "event: jobs", 30);
     // The pid is the page's to hold: its rows carry it, which is what makes it a candidate for the
     // destructive row below rather than something the page has to parse out of a sentence.
-    let listed = http_get(port, "/jobs", &token);
+    let listed = get_or_say(port, "/jobs", &token, &mut child, &errors, &log);
     let row: serde_json::Value = serde_json::from_str::<serde_json::Value>(&listed)
         .unwrap_or_else(|e| panic!("not JSON ({e}): {listed:?}"))["jobs"]
         .as_array()
@@ -2883,7 +2893,7 @@ async fn a_person_can_read_the_run_s_jobs_and_stop_one() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut settled: serde_json::Value = row.clone();
     while std::time::Instant::now() < deadline {
-        let again = http_get(port, "/jobs", &token);
+        let again = get_or_say(port, "/jobs", &token, &mut child, &errors, &log);
         settled = serde_json::from_str::<serde_json::Value>(&again)
             .unwrap_or_else(|e| panic!("not JSON ({e}): {again:?}"))["jobs"]
             .as_array()
@@ -3855,6 +3865,11 @@ async fn the_page_is_offered_the_arguments_a_command_takes() {
         0,
     );
     let log = home.join("transcript.txt");
+    // The run's stderr, kept rather than sent to `/dev/null`: a `--web` run that dies mid-test
+    // otherwise reports a connection that was refused, or a transcript that simply stops, and
+    // nothing about *why* -- the class the flaky jobs test came from, which `HANDOFF.md` names.
+    // It sits in this test's own home, and a test that panics leaves the whole home behind.
+    let errors = home.join("stderr.txt");
     let mut child = binary()
         .arg("--web")
         .args(["--resume", "20260101000000-1-777"])
@@ -3863,7 +3878,7 @@ async fn the_page_is_offered_the_arguments_a_command_takes() {
         .current_dir(&work)
         .stdin(std::process::Stdio::piped())
         .stdout(std::fs::File::create(&log).expect("transcript file"))
-        .stderr(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&errors).expect("stderr file"))
         .spawn()
         .expect("failed to run flint");
 
@@ -6218,13 +6233,18 @@ async fn a_stopped_turn_tells_the_page_it_is_over() {
     let provider = HangingProvider::start("A HALF-WRITTEN ARTICLE\n");
     let home = test_home("stop-settles-view", &provider.base_url);
     let log = home.join("transcript.txt");
+    // The run's stderr, kept rather than sent to `/dev/null`: a `--web` run that dies mid-test
+    // otherwise reports a connection that was refused, or a transcript that simply stops, and
+    // nothing about *why* -- the class the flaky jobs test came from, which `HANDOFF.md` names.
+    // It sits in this test's own home, and a test that panics leaves the whole home behind.
+    let errors = home.join("stderr.txt");
     let mut child = binary()
         .arg("--web")
         .env("FLINT_HOME", &home)
         .env_remove("NO_COLOR")
         .stdin(std::process::Stdio::piped())
         .stdout(std::fs::File::create(&log).expect("transcript file"))
-        .stderr(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&errors).expect("stderr file"))
         .spawn()
         .expect("failed to run flint");
 
@@ -6286,13 +6306,18 @@ async fn a_report_asked_for_mid_turn_waits_for_the_turn() {
     let provider = HangingProvider::start("A HALF-WRITTEN ARTICLE\n");
     let home = test_home("report-mid-turn", &provider.base_url);
     let log = home.join("transcript.txt");
+    // The run's stderr, kept rather than sent to `/dev/null`: a `--web` run that dies mid-test
+    // otherwise reports a connection that was refused, or a transcript that simply stops, and
+    // nothing about *why* -- the class the flaky jobs test came from, which `HANDOFF.md` names.
+    // It sits in this test's own home, and a test that panics leaves the whole home behind.
+    let errors = home.join("stderr.txt");
     let mut child = binary()
         .arg("--web")
         .env("FLINT_HOME", &home)
         .env_remove("NO_COLOR")
         .stdin(std::process::Stdio::piped())
         .stdout(std::fs::File::create(&log).expect("transcript file"))
-        .stderr(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&errors).expect("stderr file"))
         .spawn()
         .expect("failed to run flint");
 
@@ -6694,13 +6719,18 @@ async fn the_page_is_told_the_state_its_controls_would_show() {
     .expect("the test config");
 
     let log = home.join("transcript.txt");
+    // The run's stderr, kept rather than sent to `/dev/null`: a `--web` run that dies mid-test
+    // otherwise reports a connection that was refused, or a transcript that simply stops, and
+    // nothing about *why* -- the class the flaky jobs test came from, which `HANDOFF.md` names.
+    // It sits in this test's own home, and a test that panics leaves the whole home behind.
+    let errors = home.join("stderr.txt");
     let mut child = binary()
         .arg("--web")
         .env("FLINT_HOME", &home)
         .env_remove("NO_COLOR")
         .stdin(std::process::Stdio::piped())
         .stdout(std::fs::File::create(&log).expect("transcript file"))
-        .stderr(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&errors).expect("stderr file"))
         .spawn()
         .expect("failed to run flint");
 

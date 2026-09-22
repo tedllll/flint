@@ -133,6 +133,21 @@ proved by killing a run and writing past the pipe, and the mutation reverted. Th
 other `--web` tests that still discard stderr — is named here so the next person does not have to
 rediscover it.
 
+**That class was closed on 2026-09-22, and the flake was hunted once more without success.** The six
+`--web` spawns in `tests/cli_output.rs` that still sent the child's stderr to `Stdio::null()` now hand it
+a file in the test's own home (`<home>/stderr.txt`, the convention the one-shot tests already used), and
+`a_person_can_read_the_run_s_jobs_and_stop_one` — the flaky test's other-job cousin — reads `/jobs`
+through `get_or_say` instead of `http_get`, so both tests that read a route now carry the run's status,
+its stderr and its transcript into the panic. A test's home is removed at the end of a *passing* run and
+left behind by a panic, which is the whole mechanism: proved by mutating one test to panic one line after
+the spawn — the home survived with `stderr.txt` in it — and reverting the mutation. On the flake itself:
+`a_background_command_is_a_job_the_page_can_watch_end` was run **fifteen times on this Windows machine,
+fifteen green, 4.26 s each**, so the one sighting stays a ubuntu-runner sighting, its likeliest cause (the
+`async fn resumed after completion` panic) stays fixed, and what a repeat will now produce is the run's
+own words rather than a refused connection. The evidence that this class was worth closing is one command
+away: `Select-String -Path tests\cli_output.rs -Pattern 'Stdio::null'` returns the two one-shot runs that
+mean it, and nothing that starts a view.
+
 **And §11 item 13, asked for after this session's consolidation: an address in the page is pressable.**
 Everything the page rendered was text — a URL in a model's answer was a string to copy by hand, and a path
 was pressable only inside a *tool block*, because the splitter's rule was written for tool output and prose
