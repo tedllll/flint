@@ -1974,9 +1974,19 @@ one from the environment. That step was watched
 red twice before it was trusted (a renamed MCP tool, and the `--json` stream's own `type` key renamed in
 `src/ndjson.rs`), and building it found that `test_mcp.py` had been resolving its binary as
 `shutil.which("flint")` — the *installed release* on this machine, not the checkout's build. Both scripts
-now use `flint_call._binary`'s rule and both say which binary they ran. `ROADMAP.md` §11 item 1 carries
-the long form.
-CI is green on the pushed heads.
+now use `flint_call._binary`'s rule and both say which binary they ran. **Its first ubuntu run then found
+the second thing, in the same file**: the `config.toml` `test_call.py` writes was one conditional
+expression, and `+` binds tighter than `if`/`else` — so on Linux the `else` branch was the whole file
+(`shell_args = ["-c"]`, no provider), flint exited 1, no session file, and every later check read as a
+product failure. Written 2026-09-15 (`f12fcaa`) and green on the machine that wrote it, that check had
+been Windows-only for three days while claiming to check a door both platforms have. `ROADMAP.md` §11
+item 1 carries the long form, the expression itself and the fix.
+**CI, as this file is being written:** green on the pushed heads up to `67c0cac`; `test (ubuntu-latest)`
+was red in that one step on `686411c` and on `915c2a8` — the first run with no annotation at all, the
+second with the traceback but not the reason — which is how the config-precedence bug above was found.
+The step now carries each check's own `FAIL` lines as annotations, and **the head that carries the fix is
+the first one that can be green on both runners: read its `test (ubuntu-latest)` before believing any
+line above it.**
 
 **The standing duty is done for both pushed heads.** `target\release\flint.exe` and
 `C:\Users\zhangzhuo\bin\flint.exe` are the same bytes (SHA-256

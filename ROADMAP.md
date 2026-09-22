@@ -1899,6 +1899,18 @@ where prose and tree disagree is item 3.**
    which on this machine is the **installed release** (`C:\Users\<me>\bin\flint.exe`) rather than the
    checkout's build — the wrong-reason pass `flint_call._binary` was written to refuse. It now uses that
    same rule, and both checks print which binary they ran and assert it is this checkout's.
+   **And the step's own first ubuntu run found the case that justifies it.** `test_call.py` writes the
+   `config.toml` its runs are made against, and it wrote it as one conditional expression —
+   `'default_provider = "stub"\n' "shell = " + json.dumps("cmd" if os.name == "nt" else "sh") + "\n"
+   'shell_args = ["/C"]\n' if os.name == "nt" else 'shell_args = ["-c"]\n'` — and `+` binds tighter than
+   `if`/`else`, so the `else` branch was the **whole file**: on Linux it held `shell_args = ["-c"]` and
+   nothing else, with no provider to default to. flint exited 1 without writing a session file, and
+   every check after the first read as a product failure. Written 2026-09-15 (`f12fcaa`), run by hand
+   and green on the machine that wrote it, this check had been a Windows-only check of a door both
+   platforms have — which is precisely the claim-checked-only-by-hand the step exists to stop being
+   true. Fixed by putting the condition on the values rather than on the file, and the step itself
+   learned the second half of the same lesson: **a failing check now carries its own `FAIL` lines as
+   annotations**, because its first red run reported "exit code 1" and nothing else.
 2. **Stale sentences, found by checking claims instead of reading them — all five now corrected
    (2026-09-18).**
    This is a class, not an incident, and it is the finding that says the most about the repository: five

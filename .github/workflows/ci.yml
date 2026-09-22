@@ -128,12 +128,14 @@ jobs:
       # the reason not to do it: a guarantee that rides on a compatibility shim is worse than the
       # check resolving the path in its own language.
       #
-      # Each check is `tee`d into a file and, when it fails, its last lines are re-emitted as
+      # Each check is `tee`d into a file and, when it fails, what it says is re-emitted as
       # annotations -- the same reason the `Name the failing tests` step above exists, learned the
       # same way: the first run of this step failed on ubuntu and the only report available was
       # "exit code 1", because a step that writes only to stdout is invisible to anyone without a
-      # token. A Python failure puts its reason on the *last* line, which is why it is the tail that
-      # is carried out. Both checks run even when the first one fails, so one push answers for both.
+      # token. The check's own `FAIL <claim> -- <what it saw>` lines are carried first, because that
+      # detail is where the reason is (an exit code and the child's stderr); the last lines are
+      # carried after them, because a Python traceback puts the exception on its last line. Both
+      # checks run even when the first one fails, so one push answers for both.
       - name: The Python caller and the MCP server
         shell: bash
         run: |
@@ -163,7 +165,8 @@ jobs:
             if "$@" 2>&1 | tee "$log"; then
               return 0
             fi
-            tail -n 12 "$log" | sed -e 's/%/%25/g' -e 's/\r$//' | sed 's/^/::error::/'
+            grep -E '^  FAIL' "$log" | head -10 | sed -e 's/%/%25/g' -e 's/\r$//' | sed 's/^/::error::/' || true
+            tail -n 6 "$log" | sed -e 's/%/%25/g' -e 's/\r$//' | sed 's/^/::error::/'
             return 1
           }
           status=0
