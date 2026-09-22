@@ -1852,8 +1852,11 @@ fn the_page_offers_the_live_runs_a_message_can_address() {
         "scan_in(",
         "the page must read presence through GET /peers rather than deriving it from files itself",
     );
-    // A pid is what is sent and who it is that is read, which is why this cannot go through
-    // `fillSelect` -- that helper makes the two the same string.
+    // A pid is what is sent and who it is that is read, which is why this cannot go through the
+    // shared choice control: that one makes a word and the line it sends the same string, and this
+    // picker's value is a pid while its text is who that pid is. It is also the one place a
+    // `<select>` is right -- an answer being given rather than a value being set -- which is why the
+    // settings grew buttons and this did not.
     let filler = from("function fillPeerSelect(select, peers, note)", 12);
     assert!(
         filler.contains("option.value = String(peer.pid)"),
