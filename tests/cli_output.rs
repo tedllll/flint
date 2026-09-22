@@ -6744,11 +6744,11 @@ async fn the_page_is_told_the_state_its_controls_would_show() {
     let answered = post_message(port, &token, "/model stub-other");
     let changed = read_until(&mut watching, "\"model\":\"stub-other\"", 20);
 
-    // A switch, over the same route: the page sends `/<name> <value>` -- `/verbose full` here --
-    // and what it is told afterwards is the value in force. The three things a switch needs are
-    // the name, the values that name takes and the value it is on, and the page carries none of
-    // them: it is handed all three, which is what keeps a switch from offering a word the
-    // command refuses.
+    // A switch, over the same route: the page sends `/<key> <value>` -- `/verbose full` here --
+    // and what it is told afterwards is the value in force. The four things a control needs are the
+    // key, the words that key takes, the value it is on, and which screen it belongs on, and the page
+    // carries none of them: it is handed all four, which is what keeps a switch from offering a word
+    // the command refuses.
     let switched = post_message(port, &token, "/verbose full");
     // The value, not the whole object: a JSON object's key order is serde's business, and a test
     // that pinned it would fail on a change that means nothing to the page.
@@ -6797,13 +6797,26 @@ async fn the_page_is_told_the_state_its_controls_would_show() {
         "the page was not told the state changed after its own command: {changed:?}"
     );
     assert!(
-        opening.contains("\"name\":\"verbose\"") && opening.contains("\"values\":[\"off\",\"on\",\"full\"]"),
-        "the state does not carry a toggle as a name and the values that name takes, which is \
-         what a switch is drawn from and what the page must not carry a copy of: {opening:?}"
+        opening.contains("\"key\":\"verbose\"")
+            && opening.contains("\"choices\":[\"off\",\"on\",\"full\"]")
+            && opening.contains("\"group\":\"run\"")
+            && opening.contains("\"kind\":\"select\""),
+        "the state does not carry a setting as a key, the words that key takes, and the screen it \
+         belongs on, which is what a control is drawn from and what the page must not carry a copy \
+         of: {opening:?}"
+    );
+    // And the five switches are still carried in the shape the page's switch controls read *today*,
+    // derived from the settings above rather than listed a second time. This assertion is deleted with
+    // the field, in the commit that draws those controls from `settings`: it is here so that the
+    // one-commit overlap cannot be a run whose dialog lost its switches.
+    assert!(
+        opening.contains("{\"name\":\"verbose\",\"value\":\"on\",\"values\":[\"off\",\"on\",\"full\"]}"),
+        "the switches the page draws today do not follow the settings they are derived from: \
+         {opening:?}"
     );
     assert!(
-        opening.contains("\"name\":\"thinking\"")
-            && opening.contains("\"values\":[\"off\",\"low\",\"medium\",\"high\"]")
+        opening.contains("\"key\":\"thinking\"")
+            && opening.contains("\"choices\":[\"off\",\"low\",\"medium\",\"high\"]")
             && opening.contains("\"value\":\"off\""),
         "the state does not offer the reasoning ladder, so the page has nothing to pick from and \
          the default is not visible: {opening:?}"
@@ -6813,7 +6826,7 @@ async fn the_page_is_told_the_state_its_controls_would_show() {
         "the line the reasoning switch sends was not accepted: {reasoned:?}"
     );
     assert!(
-        reasoning.contains("\"name\":\"thinking\"") && reasoning.contains("\"value\":\"high\""),
+        reasoning.contains("\"key\":\"thinking\"") && reasoning.contains("\"value\":\"high\""),
         "the run was not shown the reasoning level it had just set: {reasoning:?}"
     );
     assert!(
@@ -6826,7 +6839,7 @@ async fn the_page_is_told_the_state_its_controls_would_show() {
         "the line a switch sends was not accepted: {switched:?}"
     );
     assert!(
-        told.contains("\"name\":\"verbose\"") && told.contains("\"value\":\"full\""),
+        told.contains("\"key\":\"verbose\"") && told.contains("\"value\":\"full\""),
         "a switch was not told the value it had just set: {told:?}"
     );
     assert!(
@@ -7007,7 +7020,7 @@ async fn the_page_is_told_what_a_command_answered() {
         "a command that failed was not answered on the page: {refused:?}"
     );
     assert!(
-        after.contains("\"name\":\"verbose\"") && after.contains("\"value\":\"full\""),
+        after.contains("\"key\":\"verbose\"") && after.contains("\"value\":\"full\""),
         "the run did not survive a mistyped command, so the session ended the way it used to: \
          {after:?} stderr: {complaints:?}"
     );
@@ -7015,6 +7028,25 @@ async fn the_page_is_told_what_a_command_answered() {
         mistyped.starts_with("HTTP/1.1 202"),
         "the mistake was refused at the route rather than answered by the command: {mistyped:?}"
     );
+}
+
+/// The state frame out of a live stream, whole.
+///
+/// `commands_in` below is this for one field; a test that has to ask about two fields of the same
+/// frame -- which row is on which screen, and what each setting is -- reads the object once.
+fn state_in(frame: &str) -> serde_json::Value {
+    for line in frame.lines() {
+        let Some(json) = line.strip_prefix("data: ") else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+            continue;
+        };
+        if value.get("type").and_then(|t| t.as_str()) == Some("state") {
+            return value;
+        }
+    }
+    serde_json::Value::Null
 }
 
 /// The command list out of a state frame: `(label, send, help, class)` per row.
@@ -7218,10 +7250,10 @@ async fn the_page_is_told_which_commands_it_may_offer() {
         "a no-argument action is not carried, which is the class §8 builds first: {commands:?}"
     );
     // The classes the page cannot draw from *this* frame are not in it. `/exit` is the one §8 calls
-    // out (a window onto a process, and a misclick must not end a session); the toggles are
-    // already on the page from the `toggles` field, and repeating them here would be one fact in
-    // two places; `/web` has nothing to offer (the page *is* the web view) and `!` is a shell
-    // escape that the composer can type anyway.
+    // out (a window onto a process, and a misclick must not end a session); the switches are already
+    // on the page from the `settings` field, and repeating them here would be one fact in two places;
+    // `/web` has nothing to offer (the page *is* the web view) and `!` is a shell escape that the
+    // composer can type anyway.
     for absent in [
         "\"label\":\"/exit\"",
         "\"label\":\"/verbose",
@@ -7229,13 +7261,91 @@ async fn the_page_is_told_which_commands_it_may_offer() {
         "\"label\":\"/readonly",
         "\"label\":\"/hear-peers",
         "\"label\":\"/thinking",
-        "\"label\":\"/web",
+        "\"label\":\"/web\"",
         "\"label\":\"!<command>\"",
     ] {
         assert!(
             !opening.contains(absent),
             "the frame offers {absent}, which the page either must not offer or already has: \
              {opening:?}"
+        );
+    }
+    // Which screen a row is on is the frame's answer too, and the rows that are on none are the
+    // palette's own: a row the dialog files nowhere is still offered by the `/` menu, and the group
+    // is what tells the two apart. Checked per row rather than counted, because a group on the wrong
+    // row is a command on the wrong screen.
+    let frame = state_in(&opening);
+    let group_of = |label: &str| -> Option<String> {
+        frame
+            .get("commands")
+            .and_then(|c| c.as_array())
+            .and_then(|rows| {
+                rows.iter()
+                    .find(|row| row.get("label").and_then(|l| l.as_str()) == Some(label))
+            })
+            .and_then(|row| row.get("group").and_then(|g| g.as_str()))
+            .map(str::to_string)
+    };
+    assert_eq!(
+        group_of("/provider key <key>").as_deref(),
+        Some("model"),
+        "the key row is not on the screen that holds the endpoint: {opening:?}"
+    );
+    assert_eq!(
+        group_of("/jobs stop <pid>").as_deref(),
+        Some("work"),
+        "the stop is not filed with the jobs it stops: {opening:?}"
+    );
+    assert_eq!(
+        group_of("/help"),
+        None,
+        "the frame files `/help` on a settings screen, and the dialog is not a palette: {opening:?}"
+    );
+    // The other half of the frame: what a page may *change* rather than what it may send. Every
+    // setting carries the words that change it, the values it may take, the value in force, the
+    // sentence `/help` prints, and the screen it belongs on -- and there is one per setting, with the
+    // four keys `/config set` takes among them, or a person looking for `max_steps` finds it in the
+    // terminal and nowhere else.
+    let settings = frame
+        .get("settings")
+        .and_then(|s| s.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for (key, group, kind) in [
+        ("provider", "model", "select"),
+        ("model", "model", "select"),
+        ("thinking", "model", "select"),
+        ("verbose", "run", "select"),
+        ("detail", "run", "select"),
+        ("readonly", "run", "select"),
+        ("hear-peers", "run", "select"),
+        ("shell", "limits", "text"),
+        ("shell_args", "limits", "text"),
+        ("max_steps", "limits", "number"),
+        ("proxy", "limits", "text"),
+    ] {
+        let found = settings
+            .iter()
+            .find(|setting| setting.get("key").and_then(|k| k.as_str()) == Some(key))
+            .unwrap_or_else(|| panic!("the frame has no `{key}` setting: {settings:?}"));
+        let text = |name: &str| found.get(name).and_then(|v| v.as_str()).unwrap_or_default();
+        assert_eq!(text("group"), group, "`{key}` is on the wrong screen: {found:?}");
+        assert_eq!(text("kind"), kind, "`{key}` is drawn as the wrong input: {found:?}");
+        assert!(
+            !text("send").is_empty(),
+            "`{key}` has no words that change it: {found:?}"
+        );
+        assert!(
+            !text("help").is_empty(),
+            "`{key}` has no sentence to show: {found:?}"
+        );
+        // A choice must carry the choices -- a `<select>` with none is a control that lies about the
+        // run -- and a value that is not a choice must carry none, or the page draws a picker whose
+        // only option is the value already in force.
+        assert_eq!(
+            found.get("choices").is_some(),
+            kind == "select",
+            "`{key}` carries choices on the wrong kind of setting: {found:?}"
         );
     }
     // And the terminal's own help is the same table: every row the page was handed is a row
@@ -7261,6 +7371,20 @@ async fn the_page_is_told_which_commands_it_may_offer() {
         assert!(
             flat.contains(help.as_str()) || flat.contains(unsubstituted.as_str()),
             "`{label}` is described one way to the page and another in `/help`: {transcript:?}"
+        );
+    }
+    // And the words a *setting* is changed with are words `/help` prints, on the same authority: the
+    // frame hands the page the line rather than letting it spell `<key> <value>` out for itself, and a
+    // line that no longer exists would be a control that answers with a refusal. The head of a
+    // `/config set <key>` line is the command; the key after it is the setting's own name, which
+    // `/help` prints once, in the command's usage line.
+    for setting in &settings {
+        let key = setting.get("key").and_then(|k| k.as_str()).unwrap_or_default();
+        let send = setting.get("send").and_then(|s| s.as_str()).unwrap_or_default();
+        let head = send.split(' ').take(2).collect::<Vec<_>>().join(" ");
+        assert!(
+            flat.contains(&format!("{send} ")) || flat.contains(&format!("{head} ")),
+            "`{key}` is changed by `{send}`, which `/help` does not print: {transcript:?}"
         );
     }
 }
@@ -7590,7 +7714,10 @@ async fn a_switch_is_offered_the_values_it_may_take() {
     );
     // And the listing is still a listing: `/model` on its own is a report, and carries no values.
     assert!(
-        opening.contains("\"class\":\"panel\",\"help\":\"show the model in force\",\"label\":\"/model\",\"send\":\"/model\""),
+        opening.contains(
+            "\"class\":\"panel\",\"group\":\"model\",\"help\":\"show the model in force\",\
+             \"label\":\"/model\",\"send\":\"/model\""
+        ),
         "`/model` is no longer offered as a report: {opening:?}"
     );
 
@@ -7600,7 +7727,7 @@ async fn a_switch_is_offered_the_values_it_may_take() {
     assert!(
         opening.contains(
             "\"class\":\"form\",\"fields\":[{\"field\":\"password\",\"name\":\"key\",\
-             \"optional\":false}],\"help\":\"set the API key for stub\",\
+             \"optional\":false}],\"group\":\"model\",\"help\":\"set the API key for stub\",\
              \"label\":\"/provider key <key>\",\"send\":\"/provider key\""
         ),
         "the key row does not name the provider it is for, so a masked box appears with no way to \
@@ -7881,16 +8008,20 @@ async fn a_destructive_row_says_where_its_argument_comes_from() {
     // The frame's keys are alphabetical, so each fragment is one whole row.
     assert!(
         opening.contains(
-            "\"from\":\"sessions\",\"help\":\"delete one\",\"label\":\"/delete <n|id>\",\"send\":\"/delete\""
+            "\"from\":\"sessions\",\"group\":\"conversation\",\"help\":\"delete one\",\
+             \"label\":\"/delete <n|id>\",\"send\":\"/delete\""
         ) && opening.contains(
-            "\"from\":\"sessions\",\"help\":\"file one away, out of the list\",\"label\":\"/archive <n|id>\",\"send\":\"/archive\""
+            "\"from\":\"sessions\",\"group\":\"conversation\",\
+             \"help\":\"file one away, out of the list\",\"label\":\"/archive <n|id>\",\
+             \"send\":\"/archive\""
         ),
         "a row that deletes a conversation does not say that its argument is one of the \
          conversations: {opening:?}"
     );
     assert!(
         opening.contains(
-            "\"from\":\"providers\",\"help\":\"delete one\",\"label\":\"/provider rm <name>\",\"send\":\"/provider rm\""
+            "\"from\":\"providers\",\"group\":\"model\",\"help\":\"delete one\",\
+             \"label\":\"/provider rm <name>\",\"send\":\"/provider rm\""
         ),
         "the row that deletes a provider does not say that its argument is one of the providers, so \
          a page would have to tell the two lists apart by reading the command's name: {opening:?}"
@@ -7899,7 +8030,8 @@ async fn a_destructive_row_says_where_its_argument_comes_from() {
     // list a `/jobs stop` can actually take: the pids the panel drew a moment ago.
     assert!(
         opening.contains(
-            "\"from\":\"jobs\",\"help\":\"end one of them\",\"label\":\"/jobs stop <pid>\",\"send\":\"/jobs stop\""
+            "\"from\":\"jobs\",\"group\":\"work\",\"help\":\"end one of them\",\
+             \"label\":\"/jobs stop <pid>\",\"send\":\"/jobs stop\""
         ),
         "the row that ends a job does not say that its argument is one of the run's jobs, so the \
          page would have to guess where a pid comes from: {opening:?}"

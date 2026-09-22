@@ -2606,8 +2606,9 @@ enum OnPage {
     /// Destroys something. A button, behind the page's own confirmation: nothing in flint is
     /// recoverable, and a misclick in a browser is a misclick.
     Danger,
-    /// Already on the page from another field of the frame. Sending these in the command list as
-    /// well would be one fact in two places, which is how the two come to disagree about it.
+    /// Already on the page from another field of the frame: the switches, which `settings` carries
+    /// with the words that change them. Sending these in the command list as well would be one fact
+    /// in two places, which is how the two come to disagree about it.
     Toggles,
     /// The terminal's own, and not offered on the page at all: `/exit` because the page is a window
     /// onto a process and a misclick must not end a session, `/web` because the page *is* the web
@@ -5720,15 +5721,50 @@ fn state_frame(
             })
         })
         .collect();
+    let settings = settings(cfg, provider, agent, printer);
     serde_json::json!({
         "type": "state",
         "provider": provider.name,
         "model": provider.model,
-        "toggles": toggles(agent, printer),
+        "settings": settings,
+        // The switches, in the shape the page's controls read *today*: `settings` above says the same
+        // things and more, and the page moves onto it in the next commit -- this field goes with the
+        // last reader, so that no commit in between leaves a run whose dialog lost its switches.
+        "toggles": toggles(&settings),
         "providers": providers,
         "commands": page_commands(cfg, provider, agent),
     })
     .to_string()
+}
+
+/// The five switches out of `settings`, in the shape the page's switches read today: a name, the
+/// words that name takes, and the value it is on.
+///
+/// Derived rather than listed a second time, because a frame that said a switch was `on` in one field
+/// and `full` in another would be one fact in two places -- the mistake the switch round existed to
+/// remove (§11). Deleted in the commit that draws the page's controls from `settings`, along with the
+/// `toggles` field itself: until then this is what keeps a run working across the change.
+fn toggles(settings: &serde_json::Value) -> serde_json::Value {
+    /// The settings that were switches before they were settings, in the order they were shown in.
+    const SWITCHES: [&str; 5] = ["verbose", "detail", "readonly", "hear-peers", "thinking"];
+    let all = settings.as_array().cloned().unwrap_or_default();
+    serde_json::Value::Array(
+        all.iter()
+            .filter(|setting| {
+                setting
+                    .get("key")
+                    .and_then(|key| key.as_str())
+                    .is_some_and(|key| SWITCHES.contains(&key))
+            })
+            .map(|setting| {
+                serde_json::json!({
+                    "name": setting.get("key"),
+                    "values": setting.get("choices"),
+                    "value": setting.get("value"),
+                })
+            })
+            .collect(),
+    )
 }
 
 /// The page's menu: the commands it may offer, in the shape a control is drawn from.
@@ -5736,11 +5772,13 @@ fn state_frame(
 /// `label` is what `/help` prints, so the page can show the command's own words; `send` is what
 /// goes on the wire, so the page never assembles a command line out of parts; `class` is §8's
 /// class, which is what a control is chosen by -- and what the drift test in `tests/cli_output.rs`
-/// filters on to run only the commands that are safe to run with no argument.
+/// filters on to run only the commands that are safe to run with no argument. `group` is which
+/// settings screen the row is on, when it is on one: the dialog is the run's settings, and the `/`
+/// menu below the composer is the palette those same rows are also offered from.
 ///
-/// Two kinds of row are left out rather than marked: the toggles, which the `toggles` field carries
-/// in the shape a switch needs, and the terminal's own commands, which have no business on a page
-/// (`/exit` above all: a misclick must not end a session).
+/// Two kinds of row are left out of this list rather than marked: the switches, which the `settings`
+/// field carries with the words that change them, and the terminal's own commands, which have no
+/// business on a page (`/exit` above all: a misclick must not end a session).
 fn page_commands(
     cfg: &config::Config,
     provider_cfg: &config::ProviderConfig,
@@ -5797,6 +5835,12 @@ fn page_commands(
             if let Some(from) = row.from {
                 json["from"] = serde_json::json!(from.word());
             }
+            // Which settings screen the row is on, and omitted when it is on none: a row the dialog
+            // does not file is one the `/` menu still offers, and the absence is the whole of what the
+            // page needs to know about it.
+            if let Some(group) = row.group {
+                json["group"] = serde_json::json!(group);
+            }
             json
         })
         .collect();
@@ -5833,6 +5877,14 @@ struct PageRow {
     args: &'static [PageArg],
     /// On a destructive row: which list the page offers the argument from.
     from: Option<ArgFrom>,
+    /// Which screen of the page's settings this row belongs on, when it belongs on one.
+    ///
+    /// `None` is not "unknown": it is a row this page has no settings screen for, and the `/` menu is
+    /// where it is offered instead. That is where the reports of a run's *machinery* belong -- `/help`,
+    /// `/queue`, and the two switches whose command is the picker itself (`/provider <name>`,
+    /// `/model <name>`): a settings screen holds what a person came to change, and a palette holds
+    /// everything.
+    group: Option<&'static str>,
 }
 
 /// Every row the page may offer, with the values it may be given.
@@ -5884,9 +5936,68 @@ fn page_rows(
                     _ => Vec::new(),
                 },
                 args: row.args,
-                from: row.from,            })
+                from: row.from,
+                group: page_group(row),
+            })
         })
         .collect()
+}
+
+/// Which screen of the settings dialog a row belongs on, or `None` for one the `/` menu keeps.
+///
+/// A list of words beside the table rather than a column in it, and the difference is worth saying:
+/// the group is where *this page* files a command, which is a reading order, not a fact about the
+/// command -- the same distinction as `HelpSection`, except that this one is the page's own and has
+/// no terminal behind it. Keyed on `send` *and* class, because two rows share a `send` when one is the
+/// report and the other the act (`/provider` lists them, `/provider <name>` switches), and the two
+/// belong in different places: the report is a reading, and the switch is a picker the screen draws
+/// itself. The tests are what keep this a list rather than a second copy of the table:
+/// `every_row_the_page_offers_has_a_home_or_is_the_palettes` in `tests/cli_output.rs` fails on a row
+/// nobody filed, and `the_page_files_every_settings_screen_the_process_hands_it` in
+/// `tests/web_view.rs` fails on a group word the page cannot label.
+fn page_group(row: &CommandHelp) -> Option<&'static str> {
+    let group = match (row.send, row.on_page) {
+        // The endpoint and the brain: the two readings of them, and every way to change them. The
+        // *switches* themselves (`/provider <name>`, `/model <name>`) are not here -- those two rows
+        // are the pickers this screen draws, and a second control for the same act would be one act
+        // with two buttons.
+        ("/provider", OnPage::Panel)
+        | ("/provider add", _)
+        | ("/provider edit", _)
+        | ("/provider key", _)
+        | ("/provider rm", _)
+        | ("/model", OnPage::Panel) => "model",
+        // How this run behaves, including what it does with the peers it can hear.
+        ("/verbose", _) | ("/detail", _) | ("/readonly", _) | ("/hear-peers", _) | ("/thinking", _)
+        | ("/say", _) | ("/reload", _) => "run",
+        // What it may spend, and how it runs a command.
+        ("/config", _) | ("/config edit", _) => "limits",
+        // What it can use, and what it knows.
+        ("/tools", _)
+        | ("/skills", _)
+        | ("/skill", _)
+        | ("/prompts", _)
+        | ("/prompt", _)
+        | ("/agents", _) => "tools",
+        // This conversation: its name, its size, and every door onto another one.
+        ("/name", _)
+        | ("/usage", _)
+        | ("/compact", _)
+        | ("/export", _)
+        | ("/import", _)
+        | ("/sessions", _)
+        | ("/resume", _)
+        | ("/fork", _)
+        | ("/new", _)
+        | ("/archive", _)
+        | ("/delete", _) => "conversation",
+        // The work this run left running.
+        ("/jobs", _) | ("/jobs stop", _) => "work",
+        // The palette's: `/help`, `/queue`, `/config set` (the four settings screens are the better
+        // door onto the same five keys), and the two switches whose picker is on the screen already.
+        _ => return None,
+    };
+    Some(group)
 }
 
 /// The sentence the page shows for a row: the table's own, with the one thing the page can say better.
@@ -5942,48 +6053,202 @@ impl OnPage {
     }
 }
 
-/// The settings a page can switch, each with the values it takes and the value it is on.
+/// The settings a page may change, each with the words that change it, the values it takes, and the
+/// value it is on.
 ///
-/// The same shape for all of them, and the shape is the point: `name`, `values`, `value` is
-/// everything a `<select>` needs and everything the command needs (`/<name> <value>`), so the
-/// page carries no list of its own -- not the toggles, not the words they take, not which one is
-/// on. A page with its own copy of that is a page that can offer a word the command refuses.
+/// One list for every kind of setting, and the shape is the point: the page is told what the setting
+/// *is* (`kind`: a choice from `choices`, or a number, or text), what it is *called* (`key`, which is
+/// also the config file's own key and the command's own word), what it is *on* (`value`), what
+/// changing it does (`send`, plus the value), which screen it belongs on (`group`), and the one
+/// sentence `/help` prints about it. So the page carries no list of its own -- not the settings, not
+/// the words they take, not which one is on -- and a setting that moves in here moves on the page.
 ///
-/// Built from the values *in force*: the printer's level, which is three-valued while the file's
-/// key is a word, and the agent's guard rather than `cfg.readonly`. Nothing secret goes in it.
-fn toggles(agent: &agent::Agent, printer: &Printer<'_>) -> serde_json::Value {
-    /// The word for a two-valued toggle. `/detail` and `/readonly` both take `on` and `off`.
-    fn on_off(on: bool) -> &'static str {
-        if on {
-            "on"
-        } else {
-            "off"
+/// `kind` is what keeps a number from being typed as prose: `max_steps` is a whole number and
+/// `shell_args` is a line of words, and the page draws the input the process says to draw rather than
+/// deciding from the name. `send` is the words *before* the value -- `/verbose`, `/config set shell`
+/// -- and the page joins them with the value, which is the same composition `/provider <name>` is:
+/// the words are the process's, and the page is not inventing grammar. A setting whose value is not a
+/// word at all (`/config edit`, which asks four questions) is a command row, not a setting.
+///
+/// Built from the values *in force*: the printer's level, which is three-valued while the file's key
+/// is a word, the agent's guard rather than `cfg.readonly`, and the config this run loaded rather than
+/// the file on disk. Nothing secret goes in it.
+fn settings(
+    cfg: &config::Config,
+    provider_cfg: &config::ProviderConfig,
+    agent: &agent::Agent,
+    printer: &Printer<'_>,
+) -> serde_json::Value {
+    /// One setting, as the page draws it.
+    ///
+    /// A function rather than a literal per row, because four of these are the same shape with
+    /// different words, and the one thing that has to be equal for all of them -- the name of the
+    /// `send` column, and the `choices` that are absent when there are none -- is worth saying once.
+    fn one(
+        group: &str,
+        key: &str,
+        kind: &str,
+        value: String,
+        choices: Option<Vec<String>>,
+        send: &str,
+        help: String,
+    ) -> serde_json::Value {
+        let mut json = serde_json::json!({
+            "group": group,
+            "key": key,
+            "kind": kind,
+            "value": value,
+            "send": send,
+            "help": help,
+        });
+        // Omitted when the setting is not a choice, for the reason `page_commands` omits an empty
+        // `values` list: a frame that said `"choices": []` would be saying "no choices" eight times.
+        if let Some(choices) = choices {
+            json["choices"] = serde_json::json!(choices);
         }
+        json
     }
 
-    let verbose = display::Verbosity::ALL.map(|level| level.word());
-    serde_json::json!([
-        {
-            "name": "verbose",
-            "values": verbose,
-            "value": display::Verbosity::from_level(printer.verbosity()).word(),
-        },
-        { "name": "detail", "values": ["off", "on"], "value": on_off(printer.tool_detail()) },
-        { "name": "readonly", "values": ["off", "on"], "value": on_off(agent.readonly()) },
-        // The fourth switch, and the only one whose "on" spends something the person cannot see: what a
-        // peer writes here starts reaching the model. It is on the page because the page is a person's
-        // door -- and it shows its value for the same reason the others do, so a session that is
-        // relaying says so rather than looking like every other session.
-        { "name": "hear-peers", "values": ["off", "on"], "value": on_off(agent.hears_peers()) },
-        // The fifth switch, and the only one whose values are a ladder rather than a pair: the words
-        // are the levels flint asks in, so the page offers exactly what `/thinking` accepts. Whether
-        // the *endpoint* has the field is not something a switch can show, and the command says it.
-        {
-            "name": "thinking",
-            "values": crate::provider::Thinking::LEVELS,
-            "value": agent.thinking(),
-        },
-    ])
+    /// The word for a two-valued setting. `/detail` and `/readonly` both take `on` and `off`.
+    fn on_off(on: bool) -> String {
+        if on { "on" } else { "off" }.to_string()
+    }
+
+    /// The one sentence `/help` prints for a command, which is what a setting's help has to be.
+    ///
+    /// Looked up by `send` *and* class, because two rows share a `send` when one is the report and the
+    /// other the act: `/provider` lists the providers and `/provider <name>` switches to one, and a
+    /// setting that switches is the second. The lookup is by the row rather than by a sentence written
+    /// here, which is what `tests/cli_output.rs` holds: a description of a command that lives in two
+    /// places is one that will disagree with itself.
+    fn help_of(send: &str, on_page: OnPage, provider_cfg: &config::ProviderConfig) -> String {
+        COMMANDS
+            .iter()
+            .find(|row| row.send == send && row.on_page == on_page)
+            .map(|row| page_help(row, provider_cfg))
+            .unwrap_or_default()
+    }
+
+    let mut out = vec![
+        // ---- the endpoint and the brain: `model` --------------------------------------------
+        one(
+            "model",
+            "provider",
+            "select",
+            provider_cfg.name.clone(),
+            Some(cfg.providers.iter().map(|p| p.name.clone()).collect()),
+            "/provider",
+            help_of("/provider", OnPage::Selector, provider_cfg),
+        ),
+        one(
+            "model",
+            "model",
+            "select",
+            provider_cfg.model.clone(),
+            Some(provider_cfg.choices()),
+            "/model",
+            help_of("/model", OnPage::Selector, provider_cfg),
+        ),
+        // The reasoning ladder, whose values are the levels flint asks in, so the page offers exactly
+        // what `/thinking` accepts. Whether the *endpoint* has the field is not something a control
+        // can show, and the command says it when the level is set.
+        one(
+            "model",
+            "thinking",
+            "select",
+            agent.thinking().to_string(),
+            Some(
+                crate::provider::Thinking::LEVELS
+                    .iter()
+                    .map(|l| l.to_string())
+                    .collect(),
+            ),
+            "/thinking",
+            help_of("/thinking", OnPage::Toggles, provider_cfg),
+        ),
+        // ---- how this run behaves: `run` ------------------------------------------------------
+        one(
+            "run",
+            "verbose",
+            "select",
+            display::Verbosity::from_level(printer.verbosity()).word().to_string(),
+            Some(
+                display::Verbosity::ALL
+                    .iter()
+                    .map(|l| l.word().to_string())
+                    .collect(),
+            ),
+            "/verbose",
+            help_of("/verbose", OnPage::Toggles, provider_cfg),
+        ),
+        one(
+            "run",
+            "detail",
+            "select",
+            on_off(printer.tool_detail()),
+            Some(vec!["off".into(), "on".into()]),
+            "/detail",
+            help_of("/detail", OnPage::Toggles, provider_cfg),
+        ),
+        one(
+            "run",
+            "readonly",
+            "select",
+            on_off(agent.readonly()),
+            Some(vec!["off".into(), "on".into()]),
+            "/readonly",
+            help_of("/readonly", OnPage::Toggles, provider_cfg),
+        ),
+        // The switch whose "on" spends something the person cannot see: what a peer writes here
+        // starts reaching the model. It is on the page because the page is a person's door -- and it
+        // shows its value for the same reason the others do, so a session that is relaying says so
+        // rather than looking like every other session.
+        one(
+            "run",
+            "hear-peers",
+            "select",
+            on_off(agent.hears_peers()),
+            Some(vec!["off".into(), "on".into()]),
+            "/hear-peers",
+            help_of("/hear-peers", OnPage::Toggles, provider_cfg),
+        ),
+    ];
+    // ---- what it may spend, and how it runs commands: `limits` ------------------------------
+    //
+    // The four `/config set` takes, one row each rather than one form with a key to choose: a person
+    // looking for `max_steps` should find it, not a picker that has to be read first. The sentences are
+    // `CONFIG_KEYS`', which is the same list the refusal names and the listing prints -- so a key
+    // added there appears here, and a page cannot offer a key the command would refuse.
+    for (key, sentence) in CONFIG_KEYS {
+        let value = match *key {
+            "shell" => cfg.shell.clone(),
+            "shell_args" => cfg.shell_args.join(" "),
+            "max_steps" => cfg.max_steps.to_string(),
+            // An empty proxy is a setting with a meaning -- "no proxy" -- rather than an absent one,
+            // which is why this is the value and not a presence test.
+            "proxy" => cfg.proxy.clone().unwrap_or_default(),
+            // A key added to `CONFIG_KEYS` that nobody taught this loop about is shown empty rather
+            // than shown wrong; `a_config_key_reaches_the_settings_frame` in `tests/cli_output.rs`
+            // is what makes that a failing test rather than a puzzle for whoever looks next.
+            _ => String::new(),
+        };
+        // `max_steps` is the only one whose value is not a line of words, and the page draws its input
+        // from this word rather than deciding from the key's name.
+        let kind = if *key == "max_steps" { "number" } else { "text" };
+        out.push(one(
+            "limits",
+            key,
+            kind,
+            value,
+            None,
+            // The words before the value: `/config set <key> <value>`'s first two, with this row's own
+            // key already in them. The process hands over the words it will accept, rather than the
+            // page knowing the spelling of a `set`.
+            &format!("/config set {key}"),
+            (*sentence).to_string(),
+        ));
+    }
+    serde_json::Value::Array(out)
 }
 
 /// Milliseconds since a turn began, in the shape `turn.completed` reports them.
@@ -7474,6 +7739,73 @@ mod tests {
         assert_eq!(follow_up("queue hi"), None);
         assert_eq!(follow_up("tell me about /queue"), None);
         assert_eq!(follow_up("/queued"), None);
+    }
+
+    /// Every command the page may offer is either filed on one of the dialog's screens or named as
+    /// the palette's, and never both and never neither.
+    ///
+    /// Two lists and one table, and the test is the third thing that keeps them the same list. A row
+    /// that is filed nowhere is a command a person finds only by reading the whole `/` menu -- which
+    /// is a list of everything, and therefore of nothing in particular -- and a row that is both filed
+    /// and excused is a line in the table that two answers disagree about. The names below are
+    /// hand-written for that reason: a row that changes hands has to change a line here, which is the
+    /// review, and `the_page_files_every_settings_screen_the_process_hands_it` in `tests/web_view.rs`
+    /// is the other half -- the page has to be able to label every one of these words.
+    #[test]
+    fn every_row_the_page_offers_is_filed_or_is_the_palettes() {
+        /// The rows the dialog does not hold, by `send` and class.
+        ///
+        /// The two switches whose control the screen draws from the setting itself (`/provider <name>`
+        /// and `/model <name>` are the pickers on the model screen, spelled out), `/help` and `/queue`,
+        /// which are the palette's own furniture, and `/config set`, whose four keys are the four
+        /// settings on the limits screen -- a fifth key would appear there without this row changing.
+        const PALETTE: &[(&str, OnPage)] = &[
+            ("/help", OnPage::Panel),
+            ("/queue", OnPage::Form),
+            ("/config set", OnPage::Form),
+            ("/provider", OnPage::Selector),
+            ("/model", OnPage::Selector),
+        ];        const SCREENS: &[&str] = &["model", "run", "limits", "tools", "conversation", "work"];
+
+        let mut filed = 0;
+        for row in COMMANDS {
+            if row.on_page.class().is_none() {
+                continue;
+            }
+            let group = page_group(row);
+            let excused = PALETTE
+                .iter()
+                .any(|(send, on_page)| *send == row.send && *on_page == row.on_page);
+            assert!(
+                group.is_some() != excused,
+                "{} is {} -- a row is on a screen or in the palette, never both and never neither",
+                row.label,
+                if excused {
+                    "in the palette and filed on a screen"
+                } else {
+                    "in neither the palette nor any screen"
+                }
+            );
+            if let Some(group) = group {
+                assert!(
+                    SCREENS.contains(&group),
+                    "{} is filed under {group:?}, which the page has no screen for",
+                    row.label
+                );
+                filed += 1;
+            }
+        }
+        // A screen with nothing on it is a heading somebody opens to find nothing, and this is also
+        // what fails if the table loses its rows: an empty frame would pass the loop above.
+        assert!(filed > 20, "only {filed} rows are filed, so a screen is empty: {SCREENS:?}");
+        // And the palette is a list of rows, not of words: a name here that matches nothing would go
+        // on excusing nothing at all, silently, which is how this test would stop testing the rows.
+        for (send, on_page) in PALETTE {
+            assert!(
+                COMMANDS.iter().any(|row| row.send == *send && row.on_page == *on_page),
+                "{send} is excused by this test and is not a row any more"
+            );
+        }
     }
 
     /// `/config set` changes the settings the wizard changes, and refuses everything else by name.
