@@ -889,12 +889,17 @@ nobody can answer.
 | Typing in the field does not open the conversation | `tests/web_view.rs`, read | the form stops the click: the row behind it is the conversation, and for this row that is the conversation already open, so the press would send `/resume` for the row the name is being typed on |
 | Renaming refreshes the sidebar | `tests/cli_output.rs`, a real `--web` process | a `/name` line posted to `/message` puts `event: sessions` on the feed and the title in the session file; red without the `list_changed` call |
 
-**Not measured**: a browser, as ever. Nobody has opened this menu with a real pointer, so its position
+**Partly measured since, 2026-09-18.** The menu is opened with a real press on both kinds of row now: the
+run's own, whose rename field is typed into and whose send button carries the name to the run, and a
+fixture row's, whose *second* press carries that row's number and removes that file — which the directory
+listing witnesses, and which the terminal would have agreed with even if the wrong number had been sent.
+What is still reasoned rather than seen is the three things this paragraph named: the menu's position
 (`absolute`, against a `relative` row), its dismissal (the button toggles it, a `reset` clears it, and
-a click elsewhere does **not** close it) and its behaviour while the sidebar scrolls are reasoned
-rather than seen. The dismissal is the one worth watching in a real browser: the panel's choice list
+a click elsewhere does **not** close it) and its behaviour while the sidebar scrolls. The dismissal is the
+one worth watching in a real browser: the panel's choice list
 has an explicit `‹ commands` row to close it, and this menu has only its own button. The rename field
-adds a second thing to watch there: whether the field keeps the focus it was given while the sidebar
+adds two more halves that are still unmeasured, and for the same reason the harness presses the field's own
+send button rather than `Enter`: whether the field keeps the focus it was given while the sidebar
 re-reads itself (a `sessions` frame arrives the moment a rename is sent), and whether Enter in it is
 the submit a person expects rather than the row's own click.
 
@@ -1417,10 +1422,16 @@ bytes are held by six tests in `tests/cli_output.rs` and the island's reader by
 `scripts/web-view-test.js`; the drawing needs no new test, because it is `applyText`, which the page's own
 suite already covers line by line.
 
-**Not built here, and named on purpose:** `/export` from inside a running conversation. It needs its own
-answer to where the page goes while the terminal owns stdout, and the run's file is the wrong file to
-guess at half way through a turn. The door that exists is the one somebody with a finished conversation
-and a colleague needs.
+**Built since, 2026-09-18: the same door from inside a running conversation.** `/export <file>` writes this
+conversation out through the same `page_for_session` the CLI uses, so a page exported mid-conversation and
+one exported afterwards cannot drift — a test drives both for one conversation and asserts the bytes are
+*equal*. Where the page goes is the person's word and never a guess: a bare `/export` says what it needs
+rather than inventing a name in whatever directory the run happens to be in, because the file it landed on
+might be one somebody already had. This paragraph used to say the door was not built, and named the run's
+file as the wrong thing to guess at half way through a turn — which is exactly why the path is an argument
+here while the CLI's default is stdout. Three refusals are held with it: a `--no-session` run, a
+conversation nobody has spoken in yet, and a write that fails (reported, and the run carries on).
+`ROADMAP.md` §11 item 10 is the change.
 
 
 ## 15. The cursor is a position in the session file

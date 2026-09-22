@@ -524,8 +524,14 @@ not hidden (flint cannot know which rungs an endpoint has without asking it), no
 automatically, and **a `task` child starts at the config's level rather than its parent's** — the endpoint
 travels to a child because a child is the same endpoint, while a level is a choice about *this*
 conversation; a profile or the config is how a person gives a child one. The switch question §3.10 leaves
-open is still open and unchanged by this: flint still re-sends a stored `reasoning` string verbatim to
-whatever endpoint the person switched to, because it speaks one protocol and has no signed blob to replay.
+open was answered afterwards, and the answer was not this one: **as of 2026-09-18 flint sends no
+`reasoning` to any endpoint, local or hosted** — `provider::wire_messages` strips the field at the request
+boundary and is the one place that decides it (`ROADMAP.md` §9). The session file still carries the whole
+turn, because the file is the record and the page draws it; what this paragraph said — that a stored
+`reasoning` string goes back verbatim to whatever endpoint the person switched to, because flint speaks one
+protocol and has no signed blob to replay — was true when it was written and is not now. A provider that
+later needs its reasoning returned (Anthropic's signed thinking blocks) gets that as a field beside
+`thinking_field`, never as a default.
 
 **The ninth of the twelve items taken from the reading of Pi is built: the page's reconnection cursor is a
 position in the session file.** It used to be a **frame count**, minted by `Live::next`, starting at 1 in
@@ -632,8 +638,10 @@ scripts/term-layout-test.js` and `node scripts/web-view-test.js` pass. The relea
 command list and a paragraph on what an export is, `docs/web-mode.md` **§14** (the full record, including
 the browser measurement), `docs/decisions.md` ("An export is the page, not a second reading of a
 conversation"), `docs/pi-agent-harness.md` §3.5 where the sketch was answered, and `AGENTS.md`'s rows for
-`src/main.rs`, `src/web.rs` and `tests/`. **Not built, and named in both places:** `/export` from inside a
-running conversation, which needs its own answer to where a page goes while the terminal owns stdout.
+`src/main.rs`, `src/web.rs` and `tests/`. **Not built at the time, and named in both places:** `/export` from inside a
+running conversation, which needs its own answer to where a page goes while the terminal owns stdout. That
+answer arrived on 2026-09-18 — `/export <file>`, the paragraph above — and the two places were corrected
+with it: `docs/web-mode.md` §14 now records the door rather than the gap, and so does this line.
 Three small asides rode along in the same commits: `--help` gained the verb and lost a stray misindented
 `who` line, and the ubuntu view-test failure above was made readable.
 
