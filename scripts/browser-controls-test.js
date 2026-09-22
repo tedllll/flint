@@ -424,16 +424,46 @@ const ROW = (line, screen) =>
 const ROWS_OF = (screen) =>
   `(document.getElementById("row-list-${screen}") || {}).textContent || ""`;
 
-/// The value of the `<select>` in the setting row named `key` on the screen `screen`.
+/// The value of the setting named `key` on the screen `screen`.
 ///
-/// By name rather than by id, and that is the point: a change sends a line, the run answers with a new
-/// state frame, and `paintSettings` rebuilds the rows -- so the node an id was tagged on is *gone* by
-/// the time the answer arrives. Measured the hard way: a claim that read the id back saw
-/// `Cannot read properties of null` and read it as "the picker never moved".
+/// A setting whose values are words is a row of choice buttons and the one in force is the pressed
+/// one, so this reads `aria-pressed` rather than a `<select>`'s `value` -- the select is gone, because
+/// a native one is the operating system's control (its size, its colours, and a list that opens *over*
+/// the dialog) and the page has no business handing a person one when the frame already named every
+/// word it takes. By name rather than by id, and that is the point: a change sends a line, the run
+/// answers with a new state frame, and `paintSettings` rebuilds the rows -- so the node an id was
+/// tagged on is *gone* by the time the answer arrives. Measured the hard way: a claim that read the id
+/// back saw `Cannot read properties of null` and read it as "the picker never moved".
 const VALUE_OF = (screen, key) =>
   `(() => { const row = Array.from(document.querySelectorAll("#fields-${screen} .setting"))
        .find((r) => (r.querySelector(".setting-name") || {}).textContent === ${JSON.stringify(key)});
-     const s = row ? row.querySelector("select") : null; return s ? s.value : null; })()`;
+     const on = row ? row.querySelector(".choices button[aria-pressed='true']") : null;
+     return on ? on.textContent.trim() : null; })()`;
+
+/// The words a setting offers, and which of them is in force; the words are the frame's.
+const CHOICES_OF = (screen, key) =>
+  `(() => { const row = Array.from(document.querySelectorAll("#fields-${screen} .setting"))
+       .find((r) => (r.querySelector(".setting-name") || {}).textContent === ${JSON.stringify(key)});
+     if (!row) return null;
+     const words = Array.from(row.querySelectorAll(".choices button"));
+     return { words: words.map((b) => b.textContent.trim()),
+              on: (words.find((b) => b.getAttribute("aria-pressed") === "true") || {}).textContent }; })()`;
+
+/// Tag the choice button *after* the one in force, so a claim can press a real key at it.
+///
+/// A word rather than a `<select>` plus ArrowDown: the control is five buttons now, and pressing one
+/// from the keyboard is a real path a person takes through it -- Tab to the word, Enter. What the
+/// claim must not do is set `aria-pressed` or call the page's own handler, because then it would be
+/// asserting that the page agrees with itself rather than that the run was told.
+const NEXT_CHOICE = (screen, key) =>
+  `(() => { const row = Array.from(document.querySelectorAll("#fields-${screen} .setting"))
+       .find((r) => (r.querySelector(".setting-name") || {}).textContent === ${JSON.stringify(key)});
+     if (!row) return null;
+     const words = Array.from(row.querySelectorAll(".choices button"));
+     const at = words.findIndex((b) => b.getAttribute("aria-pressed") === "true");
+     const target = words[(at + 1) % words.length];
+     if (!target) return null; target.id = "harness-choice";
+     return { word: target.textContent.trim(), disabled: target.disabled }; })()`;
 
 /// The scope of this harness, printed before anything is pressed.
 ///
@@ -444,11 +474,13 @@ const VALUE_OF = (screen, key) =>
 function announceScope() {
   console.log("driven in a real browser, each against the run's own stdout:");
   for (const door of [
-    "  the settings dialog: the door, the rail, a switch, an action button, the masked key field",
+    "  the settings dialog: the door in the sidebar's seat, the rail, a switch pressed as a word,",
+    "  an action button, the masked key field",
     "  a report read in the screen it was asked from, and a screen that holds only its own rows",
     "  the two-press destructive menu: a conversation's row, and the jobs panel's stop list",
     "  a conversation row's menu, including naming the one being written",
     "  the sidebar's drag handles, the arrow keys, and the double-click reset",
+    "  the panel's own hand: a drag, an arrow, and the width put back",
     "  the model picker from the keyboard",
     "  the composer's send button, and a line the run answers",
     "  a tool block's path buttons, and the preview panel: a grep hit, reload, Escape, a refusal",
@@ -626,17 +658,32 @@ async function main() {
       }
     };
 
+    // The door is the sidebar's *bottom seat*, which is where DSH's own settings trigger sits and
+    // what was asked for here: it was the last control on the header's line, and a control that
+    // changes the process was the one thing there that was not a fact about the conversation. So it
+    // is measured where it is -- inside the sidebar, in the seat under the list, at the bottom -- and
+    // the header is measured to hold no control at all, which is the state this round arrived at.
     const door = await page.js(
-      `(() => ({ shown: !document.getElementById("settings-open").hidden,
-                 dialog: document.getElementById("settings").hidden,
-                 mask: document.getElementById("settings-mask").hidden,
-                 header: !!document.querySelector(".head-line #settings-open"),
-                 raw: !!document.querySelector(".head-line select, .head-line input, .head-line .setting") }))()`
+      `(() => { const seat = document.getElementById("side-foot");
+         const sidebar = document.getElementById("sidebar");
+         const list = document.getElementById("sessions");
+         const seatBox = seat.getBoundingClientRect();
+         const listBox = list.getBoundingClientRect();
+         return { shown: !document.getElementById("settings-open").hidden,
+                  dialog: document.getElementById("settings").hidden,
+                  mask: document.getElementById("settings-mask").hidden,
+                  inSeat: !!document.querySelector("#side-foot #settings-open"),
+                  inSidebar: sidebar.contains(seat),
+                  below: Math.round(seatBox.top) >= Math.round(listBox.bottom) - 2,
+                  header: !!document.querySelector(".head-line #settings-open"),
+                  raw: !!document.querySelector(".head-line select, .head-line input, .head-line .setting") }; })()`
     );
     check(
-      "the header offers one door, and what is behind it starts shut",
-      !!door && door.shown === true && door.dialog === true && door.mask === true && door.header === true && door.raw === false,
-      `header: ${JSON.stringify(door)}`
+      "the settings door is the sidebar's bottom seat, and what is behind it starts shut",
+      !!door && door.shown === true && door.dialog === true && door.mask === true &&
+        door.inSeat === true && door.inSidebar === true && door.below === true &&
+        door.header === false && door.raw === false,
+      `door: ${JSON.stringify(door)}`
     );
 
     await page.click("#settings-open");
@@ -696,22 +743,34 @@ async function main() {
     const started = before();
     // The switch that is moved is chosen by *name*, not by position: a row added to the run screen
     // above it must not silently change which command this claim presses.
-    const was = await page.js(
-      `(() => { const row = Array.from(document.querySelectorAll("#fields-run .setting"))
-           .find((r) => (r.querySelector(".setting-name") || {}).textContent === "verbose");
-         if (!row) return null; const s = row.querySelector("select"); s.id = "harness-switch";
-         return s.value; })()`
-    );
+    const was = await page.js(VALUE_OF("run", "verbose"));
+    const words = await page.js(CHOICES_OF("run", "verbose"));
     check(
-      "a switch is a labelled control on the screen it belongs to",
-      typeof was === "string" && was.length > 0,
-      `verbose: ${JSON.stringify(was)}`
+      "a switch is a labelled control on the screen it belongs to, offering the run's own words",
+      typeof was === "string" && was.length > 0 && !!words && words.words.length > 1 &&
+        words.words.includes(words.on),
+      `verbose: ${JSON.stringify(was)} of ${JSON.stringify(words)}`
     );
-    // Keyboard rather than a synthetic `change`: a native select opened by a pointer is an OS
-    // widget the protocol cannot reach into, and an ArrowDown on the focused select is the same
-    // path a person's key takes -- a real input event, not a script setting a value.
-    await page.js(`document.getElementById("harness-switch").focus(); true`);
-    await page.key("ArrowDown", 40);
+    // A press rather than a synthetic `change`: the words are real buttons now, so the honest path is
+    // the pointer's own -- and a *focused* button is what makes the other one available, which is why
+    // the focus is read back before the press. (The keyboard's Enter is not sent here: a `<button>`'s
+    // activation on Enter is the browser's own default action and the protocol's raw key event does
+    // not carry it, so a claim about it would be a claim about Chrome rather than about this page.
+    // What the page has to get right is that the word is a real, focusable, uncovered button.)
+    const target = await page.js(NEXT_CHOICE("run", "verbose"));
+    check(
+      "and the word beside the one in force is pressable, and reachable by Tab",
+      !!target && target.disabled === false && target.word !== was,
+      `next word: ${JSON.stringify(target)}, in force: ${JSON.stringify(was)}`
+    );
+    await page.js(`document.getElementById("harness-choice").focus(); true`);
+    const focused = await page.js(`document.activeElement && document.activeElement.id`);
+    check(
+      "and a word takes the keyboard like any other control",
+      focused === "harness-choice",
+      `focused: ${JSON.stringify(focused)}`
+    );
+    await page.click("#harness-choice");
     const moved = await page
       .waitFor(
         `${VALUE_OF("run", "verbose")} !== ${JSON.stringify(was)} && ${VALUE_OF("run", "verbose")}`,
@@ -1118,26 +1177,26 @@ async function main() {
     );
 
     // ---- a picker, from the keyboard ---------------------------------------
-    // The `model` screen's settings are drawn from the state frame as `<select>`s. A native select's
-    // *open list* belongs to the operating system and no protocol can reach into it -- that is the
-    // residue §11 keeps -- but the keyboard is the path a person takes through it, and it is
-    // drivable: focus, ArrowDown, and the value changes as a real input event. What matters is that
-    // the change is not merely painted: the run is told, and the model in force is the one pressed
-    // for. The dialog is opened for it and shut after, because a picker behind a mask is a picker
-    // nobody can press -- which is the whole trade the dialog makes.
+    // The `model` screen's settings are drawn from the state frame as the run's own words, one button
+    // per model. A native `<select>` used to be here and its *open list* belonged to the operating
+    // system, which no protocol can reach into -- that residue is gone with the select: every word the
+    // run named is a button on the page, so the whole path is drivable. What matters is that the
+    // change is not merely painted: the run is told, and the model in force is the one pressed for.
+    // The dialog is opened for it and shut after, because a picker behind a mask is a picker nobody
+    // can press -- which is the whole trade the dialog makes.
     await openSettings("model");
-    const pickerBefore = await page.js(
-      `(() => { const row = Array.from(document.querySelectorAll("#fields-model .setting"))
-           .find((r) => (r.querySelector(".setting-name") || {}).textContent === "model");
-         if (!row) return null; const s = row.querySelector("select"); s.id = "harness-picker";
-         return { value: s.value, options: Array.from(s.options).map((o) => o.value) }; })()`
-    );
+    const pickerBefore = await page.js(CHOICES_OF("model", "model"));
     const beforePicker = before();
-    await page.js(`document.getElementById("harness-picker").focus(); true`);
-    await page.key("ArrowDown", 40);
+    const pickerWord = await page.js(NEXT_CHOICE("model", "model"));
+    check(
+      "the model picker offers the run's own words, with one of them in force",
+      !!pickerBefore && pickerBefore.words.length > 1 && !!pickerWord && pickerWord.disabled === false,
+      `words: ${JSON.stringify(pickerBefore)}, next: ${JSON.stringify(pickerWord)}`
+    );
+    await page.click("#harness-choice");
     const pickerAfter = await page
       .waitFor(
-        `${VALUE_OF("model", "model")} !== ${JSON.stringify(pickerBefore && pickerBefore.value)} &&
+        `${VALUE_OF("model", "model")} !== ${JSON.stringify(pickerBefore && pickerBefore.on)} &&
          ${VALUE_OF("model", "model")}`,
         "the model picker to move",
         25
@@ -1149,10 +1208,10 @@ async function main() {
       switched = flint.text().slice(beforePicker);
     }
     check(
-      "a picker moves from the keyboard and the run is told which model",
+      "pressing a word moves the picker, and the run is told which model",
       !!pickerBefore && typeof pickerAfter === "string" && !pickerAfter.startsWith("threw:") &&
         switched.includes(`ok model ${pickerAfter}`),
-      `page: ${JSON.stringify(pickerBefore && pickerBefore.value)} -> ${JSON.stringify(pickerAfter)}, ` +
+      `page: ${JSON.stringify(pickerBefore && pickerBefore.on)} -> ${JSON.stringify(pickerAfter)}, ` +
         `terminal: ${JSON.stringify(switched.slice(-200))}`
     );
     await closeSettings();
@@ -1444,6 +1503,63 @@ async function main() {
       console.log(`        screenshot: ${file}`);
     }
 
+    // ---- the panel's own hand ----------------------------------------------
+    // The panel was the one boundary with nothing to pull: a fixed `min(720px, 45vw)` beside a
+    // transcript that can be a long line of prose or a wide file, and the width a reader wants is the
+    // one thing about it that cannot be guessed from here. So it gets the same hand the other two
+    // boundaries have, and the claims are the same three gestures -- a real pointer drag, the arrow
+    // keys, and a double-click to put it back -- made the same way, against the style rather than
+    // against a frame, because a width is the page's own and the run is not told about it.
+    //
+    // The hand's *presence* is part of the claim: a grip drawn over a closed panel would be a control
+    // onto nothing, which is why `openPreview` unhides it and `closePreview` hides it again.
+    const gripState = () =>
+      page.js(
+        `(() => { const hand = document.getElementById("preview-grip");
+           const panel = document.getElementById("preview");
+           const h = hand.getBoundingClientRect(), p = panel.getBoundingClientRect();
+           const raw = document.getElementById("app").style.getPropertyValue("--preview");
+           return { hidden: hand.hidden, width: Math.round(h.width), gap: Math.round(p.left - h.left),
+                    now: hand.getAttribute("aria-valuenow"), set: raw, px: parseFloat(raw) || null,
+                    panel: Math.round(p.width) }; })()`
+      );
+    const gripBefore = await gripState();
+    check(
+      "an open panel has a hand of its own, in the layout between the reading and the file",
+      !!gripBefore && gripBefore.hidden === false && gripBefore.width >= 3 &&
+        gripBefore.gap >= 0 && gripBefore.gap <= 12 && gripBefore.panel > 100,
+      `hand: ${JSON.stringify(gripBefore)}`
+    );
+    const previewHeld = await page.drag("#preview-grip", -80);
+    const gripAfter = await gripState();
+    check(
+      "and dragging it left widens the panel, so a wide file stops wrapping",
+      previewHeld === true && gripAfter.hidden === false && gripAfter.px !== null &&
+        gripAfter.px > (gripBefore.px || 0) + 40 && gripAfter.panel > gripBefore.panel,
+      `dragging: ${previewHeld}, --preview: ${JSON.stringify(gripBefore)} -> ${JSON.stringify(gripAfter)}`
+    );
+    check(
+      "and the hand says how wide the panel is, for a reader who cannot see the drag",
+      gripAfter.now !== null && Math.abs(Number(gripAfter.now) - gripAfter.panel) <= 2,
+      `aria-valuenow: ${JSON.stringify(gripAfter.now)}, measured: ${gripAfter.panel}`
+    );
+    await page.js(`document.getElementById("preview-grip").focus(); true`);
+    await page.key("ArrowLeft", 37);
+    const gripNudged = await gripState();
+    check(
+      "the arrow keys move this boundary too, the same rule as the other two",
+      gripNudged.px !== null && gripNudged.px > (gripAfter.px || 0) + 8 &&
+        gripNudged.panel > gripAfter.panel,
+      `--preview: ${JSON.stringify(gripAfter)} -> ${JSON.stringify(gripNudged)}`
+    );
+    await page.doubleClick("#preview-grip");
+    const gripReset = await gripState();
+    check(
+      "and a double-click puts the panel's width back rather than leaving a number behind",
+      gripReset.set === "" && gripReset.panel !== gripNudged.panel,
+      `--preview after the double-click: ${JSON.stringify(gripReset)}`
+    );
+
     // A file that changed under the reader: the reload button is the one control that re-reads it,
     // and what it must show is the new bytes rather than the ones the page already had.
 
@@ -1556,15 +1672,18 @@ async function main() {
       `hint: ${JSON.stringify(notOpened)}`
     );
 
-    // Escape, from wherever the reader is: the panel closes and the transcript is where it was.
+    // Escape, from wherever the reader is: the panel closes and the transcript is where it was. The
+    // hand goes with it -- a grip left behind over a shut panel is a control onto nothing, and it
+    // would take the pointer events of whatever ends up under it.
     await page.key("Escape", 27);
     const closed = await page.js(
       `({ hidden: document.getElementById("preview").hidden,
+          hand: document.getElementById("preview-grip").hidden,
           transcript: (document.getElementById("doc") || {}).textContent.length })`
     );
     check(
       "Escape closes the panel and leaves the reading alone",
-      !!closed && closed.hidden === true && closed.transcript > 0,
+      !!closed && closed.hidden === true && closed.hand === true && closed.transcript > 0,
       `after Escape: ${JSON.stringify(closed)}`
     );
 

@@ -117,40 +117,9 @@
      failed job is legible. */
   .chip.failed .dot { background: var(--bad); }
   .chip.done .dot { background: var(--ok); opacity: .8; }
-  /* The run's own settings, as controls, one row each: the key on the left, what changing it means
-     beside it, and the control on the right. The key column is fixed and the sentence is not, because
-     a column of prose would put every control at a different place down the screen -- this shape is
-     DSH's, and it is a reading order rather than a markup decision. */
-  .setting { display: flex; align-items: baseline; gap: 10px; padding: 3px 0; }
-  .setting-name { flex: 0 0 auto; width: 12ch; color: var(--fg); }
-  .setting-help { flex: 1 1 auto; min-width: 0; color: var(--dim); font-size: 12.5px; }
-  /* A choice: the words come from the frame, and a control with one choice is disabled rather than
-     hidden -- it still says what is in force, which is the half that matters. */
-  .setting select {
-    flex: 0 0 auto; font: inherit; font-size: 12.5px; color: var(--fg); background: var(--panel);
-    border: 1px solid var(--line); border-radius: 5px; padding: 2px 6px; max-width: 26ch;
-  }
-  .setting select:hover:enabled { border-color: var(--user); }
-  .setting select:disabled { color: var(--dim); cursor: default; }
-  /* A value that is a line rather than a choice: an input and a press. The input's `type` is the
-     frame's `kind`, so a number is a number because the process said so rather than because this
-     page recognised the name; the button is disabled while the box holds what is already in force,
-     because there is nothing to save then. */
-  .setting form { display: flex; flex: 0 0 auto; align-items: baseline; gap: 6px; }
-  .setting input {
-    font: inherit; font-size: 12.5px; color: var(--fg); background: none; border: 0;
-    border-bottom: 1px solid var(--line); padding: 1px 2px; width: 20ch;
-  }
-  .setting input:focus { outline: none; border-bottom-color: var(--user); }
-  .setting button {
-    font: inherit; font-size: 12.5px; color: var(--fg); background: var(--panel);
-    border: 1px solid var(--line); border-radius: 5px; padding: 2px 8px; cursor: pointer;
-  }
-  .setting button:hover:enabled { border-color: var(--user); }
-  .setting button:disabled { color: var(--dim); cursor: default; }
   /* What a screen is for, in this page's own words: one line under the section's name. The *names*
      are the page's furniture too -- `SETTINGS_PANES` -- and what is inside each screen is not. */
-  .pane-note { color: var(--dim); font-size: 12.5px; margin: 0 0 8px; }
+  .pane-note { color: var(--dim); font-size: 12.5px; margin: 0; }
   /* The command panel: a reference the page keeps to itself, collapsed until it is asked for. It
      is the one thing on this page that is not the conversation, so it does not take a row of the
      transcript -- and the terminal is where somebody typed `/help`, which is the whole reason §8
@@ -246,60 +215,162 @@
   .panel .reading { white-space: pre-wrap; margin: 4px 0 0; }
   .meta { color: var(--dim); font-size: 12.5px; word-break: break-all; }
   .meta span { margin-right: 14px; white-space: nowrap; }
-  /* The settings dialog. Fixed and centred over the page, with a mask behind it, and `hidden` is what
-     toggles it -- not `<dialog>`/`showModal`, for the reason §10 already records: the stub DOM the
-     Node harness runs has neither, and a control whose behaviour can only be checked in a browser is
-     a control most of its behaviour is not checked on. The mask is a sibling rather than a `::before`
-     so a press on it can be a press on an element. */
+  /* The settings dialog, in the shape DSH's own settings panel has: a wide panel centred over the
+     page, the places down its left under the dialog's name, the open place on the right, and one
+     button that leaves. The shape is taken rather than invented because it is one a person already
+     knows how to read -- the rail says where you are, the page says what is here, and there is
+     nothing else on screen to work out first. Fixed and centred with a mask behind it, and `hidden`
+     is what toggles it -- not `<dialog>`/`showModal`, for the reason §10 already records: the stub DOM
+     the Node harness runs has neither, and a control whose behaviour can only be checked in a browser
+     is a control most of its behaviour is not checked on. The mask is a sibling rather than a
+     `::before` so a press on it can be a press on an element. */
   .mask {
-    position: fixed; inset: 0; z-index: 30; background: rgba(0, 0, 0, .45);
-    backdrop-filter: blur(2px);
+    position: fixed; inset: 0; z-index: 30; background: rgba(0, 0, 0, .5);
+    backdrop-filter: blur(3px);
   }
   .mask[hidden] { display: none; }
+  /* A `height` rather than a `max-height`, so the *page* inside scrolls and the frame around it does
+     not: a dialog that grew with its contents would move its own close button down the screen every
+     time a screen gained a row. `100vw - 48px` is what keeps a strip of mask visible on a small
+     window, which is the whole of how a person knows this is a panel and not the page. */
   .settings {
-    position: fixed; z-index: 31; top: 8vh; left: 50%; transform: translateX(-50%);
-    width: min(760px, 92vw); max-height: 84vh; display: flex; flex-direction: column;
-    background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 10px;
-    box-shadow: 0 18px 50px rgba(0, 0, 0, .5); overflow: hidden;
+    position: fixed; z-index: 31; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    width: min(860px, 100vw - 48px); height: min(760px, 100vh - 48px);
+    display: flex; background: var(--panel); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 24px;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, .55); overflow: hidden;
   }
   .settings[hidden] { display: none; }
-  .settings-head {
-    display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
-    padding: 10px 14px; border-bottom: 1px solid var(--line);
+  /* The rail: the dialog's own name, then one cell per place. A cell is a full 40px row with a fill
+     behind it rather than a line of text, because the rail is the one control that stays on screen
+     while the pages change under it and a row is a target a pointer does not have to aim at.
+     `aria-current` carries the same fact as the fill to a reader. */
+  .settings-nav {
+    flex: 0 0 auto; width: 190px; padding: 22px 12px 0;
+    display: flex; flex-direction: column; gap: 16px;
+    border-right: 1px solid var(--line);
   }
-  .settings-head h2 { margin: 0; font-size: 13px; font-weight: 600; }
-  .settings-head button {
-    font: inherit; font-size: 12.5px; color: var(--dim); background: none; border: 0; padding: 0;
-    cursor: pointer;
+  .settings-title { padding: 0 12px; font-size: 15px; font-weight: 600; }
+  .settings-list { display: flex; flex-direction: column; gap: 4px; }
+  .settings-list button {
+    font: inherit; font-size: 13.5px; text-align: left; color: var(--dim);
+    height: 40px; padding: 0 12px; border: 0; border-radius: 12px; background: none; cursor: pointer;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  .settings-head button:hover { color: var(--user); }
-  /* Two columns: the sections down the left, the one that is open on the right. `minmax(0, 1fr)` for
-     the reading column's own reason -- a long path in a settings row must not widen the dialog. */
-  .settings-body { display: grid; grid-template-columns: 132px minmax(0, 1fr); min-height: 0; }
-  .settings-nav { display: flex; flex-direction: column; gap: 2px; padding: 10px 8px; border-right: 1px solid var(--line); }
-  .settings-nav button {
-    font: inherit; font-size: 12.5px; text-align: left; color: var(--dim); background: none;
-    border: 0; border-radius: 5px; padding: 4px 8px; cursor: pointer;
+  .settings-list button:hover { color: var(--fg); background: rgba(255, 255, 255, .05); }
+  .settings-list button[aria-current="true"] { color: var(--fg); background: rgba(255, 255, 255, .08); }
+  /* The page column: a bar over the page holding the one control the dialog keeps at its top right,
+     the page itself, and the facts about this conversation in the foot where they belong -- they are
+     not a setting, they are the same on every screen. `min-width: 0` for the reason the transcript
+     column has it: a long path in a row must not widen the panel. */
+  .settings-content { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+  .settings-bar {
+    flex: 0 0 auto; height: 54px; padding: 12px 16px 0;
+    display: flex; justify-content: flex-end; align-items: center;
   }
-  .settings-nav button:hover { color: var(--fg); }
-  /* The open section, marked by weight and colour rather than by a box: the rail is a list of names,
-     and the one in force is the one in full ink. `aria-current` carries the same fact to a reader. */
-  .settings-nav button[aria-current="true"] { color: var(--fg); background: rgba(255, 255, 255, .06); font-weight: 600; }
-  .settings-panes { padding: 12px 14px; overflow: auto; min-height: 0; }
+  .settings-bar button {
+    font: inherit; font-size: 12.5px; color: var(--dim); background: none; border: 0;
+    padding: 4px 10px; border-radius: 8px; cursor: pointer;
+  }
+  .settings-bar button:hover { color: var(--fg); background: rgba(255, 255, 255, .06); }
+  /* The one scroll region in the dialog. The rows used to carry their own `max-height` because they
+     lived in the header, where a list that grew without bound pushed the composer off the screen;
+     inside a fixed panel whose bar and foot do not move, the page scrolling is the same guarantee
+     with one rule instead of a bound guessed per list. */
+  #settings-panes { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0 26px 26px; }
   .pane[hidden] { display: none; }
-  /* The facts about the conversation on screen, under the screens rather than on one of them: they
-     are not a setting, they are the same for every screen, and `paint` writes them from the frame on
-     every paint. A line of its own and a hairline above it, so it reads as the footnote it is. */
-  .settings > .meta { padding: 8px 14px 12px; border-top: 1px solid var(--line); }
-  /* The commands pane holds what the header's `commands` panel used to, with the same bound: a list
-     that grows without bound must never push the dialog's own controls off the screen. The measurement
-     behind that rule is on `.panel[open] .body`; this is the same list in a different host, so it gets
-     the same `max-height` rather than a new one. */
-  /* The rows of a screen hold what the header's `commands` panel used to, with the same bound: a
-     list that grows without bound must never push the dialog's own controls off the screen. The
-     measurement behind that rule is on `.panel[open] .body`; this is the same list in a different
-     host, so it gets the same `max-height` rather than a new one. */
-  .settings-panes .panel .body { margin: 0; max-height: 62vh; overflow-y: auto; }
+  /* The page's head: what this place is called and what it is for, in the page's own words. */
+  .pane-title { margin: 0; font-size: 17px; font-weight: 600; }
+  /* A group of rows: the heading is the class they share, so the destructive pair sits at the bottom
+     under its own word rather than eight rows down a flat list. Same words as the `/` menu's groups,
+     and for the same reason -- a launcher and a screen both have to answer "what does this row do?" */
+  .group { margin: 16px 0 0; }
+  .group-title {
+    margin: 0; padding: 0 0 4px; color: var(--dim); font-size: 11.5px;
+    letter-spacing: .1em; text-transform: uppercase;
+  }
+  /* One row: what it is on the left, what changing it means under that, the control on the right. The
+     label and its sentence are *stacked* rather than put in two columns, because a fixed key column is
+     a width guessed for the longest key while the sentence is prose: stacked, every row is the same
+     two lines whether its sentence is four words or twenty, and the controls line up down the page.
+     The hairline is the row's top, so the first row of a group has none -- which is what makes the
+     heading above it read as a heading. Both shapes are scoped to the dialog by an id: `.row` is also
+     the jobs dropdown's row and the `/` menu's, and those are two other shapes at another size. */
+  #settings-panes .setting {
+    display: flex; align-items: center; gap: 16px;
+    padding: 11px 2px; border-top: 1px solid var(--line);
+  }
+  #settings-panes .row, #settings-panes form.field {
+    display: flex; flex-direction: column; gap: 1px; align-items: flex-start;
+    margin: 0; padding: 10px 2px; width: 100%; text-align: left;
+    border: 0; border-top: 1px solid var(--line);
+    background: none; color: inherit; font: inherit;
+  }
+  #settings-panes form.field { flex-direction: row; align-items: center; gap: 8px; }
+  #settings-panes .fields > :first-child,
+  #settings-panes .group-rows > :first-child { border-top: 0; }
+  #settings-panes .setting-text {
+    flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px;
+  }
+  #settings-panes .setting-name, #settings-panes .row code { color: var(--fg); }
+  #settings-panes .setting-help, #settings-panes .row span {
+    color: var(--dim); font-size: 12.5px; min-width: 0;
+  }
+  /* A row this page has no control for, and the row that says where the control is instead. */
+  #settings-panes .row.reference { cursor: help; }
+  #settings-panes .row.reference code, #settings-panes .row.reference span { color: var(--dim); opacity: .75; }
+  #settings-panes button.row { cursor: pointer; }
+  #settings-panes button.row:hover { background: rgba(255, 255, 255, .04); }
+  #settings-panes button.row:hover code, #settings-panes button.row:hover span { color: var(--user); }
+  #settings-panes button.row.danger:hover code,
+  #settings-panes button.row.danger:hover span { color: var(--bad); }
+  /* A choice, as the words themselves: one small press per value the frame named, the one in force
+     filled in. A `<select>` is the same fact behind a control the OS draws, at the OS's size and in
+     the OS's colours, and it opens *over* the panel -- the one part of this dialog that was never
+     this page's. A single value is still drawn, and disabled: it says what is in force, which is the
+     half that matters, and it says that there is nothing to choose between. */
+  #settings-panes .choices {
+    flex: 0 0 auto; display: flex; gap: 2px; padding: 2px;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
+  }
+  #settings-panes .choice {
+    font: inherit; font-size: 12.5px; color: var(--dim); background: none; border: 0;
+    border-radius: 8px; padding: 3px 10px; white-space: nowrap; cursor: pointer;
+  }
+  #settings-panes .choice:hover:enabled { color: var(--fg); }
+  #settings-panes .choice[aria-pressed="true"] { color: var(--fg); background: rgba(255, 255, 255, .1); }
+  #settings-panes .choice:disabled { cursor: default; }
+  /* A value that is a line rather than a choice: a box and a press. The box's `type` is the frame's
+     `kind`, so a number is a number because the process said so rather than because this page
+     recognised the key's name, and the press is dead while the box holds what is already in force --
+     there is nothing to save then, and sending it back would print a change that did not happen. */
+  #settings-panes form.setting-edit { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+  #settings-panes form.setting-edit input.value { width: 20ch; }
+  #settings-panes input.value {
+    font: inherit; font-size: 13px; color: var(--fg); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 9px; padding: 6px 10px;
+    flex: 1 1 auto; min-width: 0;
+  }
+  #settings-panes input.value:focus { outline: none; border-color: var(--user); }
+  #settings-panes button.send {
+    font: inherit; font-size: 12.5px; color: var(--fg); background: rgba(255, 255, 255, .06);
+    border: 1px solid var(--line); border-radius: 9px; padding: 6px 12px;
+    white-space: nowrap; cursor: pointer;
+  }
+  #settings-panes button.send:hover:enabled { border-color: var(--user); }
+  #settings-panes button.send:disabled { color: var(--dim); cursor: default; opacity: .6; }
+  /* A press that is not a row: the way back out of a reading and out of a confirmation, and the two
+     of them are the same control because they are the same act -- what is on the screen now is not
+     what was asked for. */
+  #settings-panes .back {
+    font: inherit; font-size: 12.5px; color: var(--dim); background: none; border: 0;
+    padding: 10px 2px 0; cursor: pointer;
+  }
+  #settings-panes .back:hover { color: var(--user); }
+  #settings-panes .reading { white-space: pre-wrap; margin: 8px 0 0; }
+  .settings-content > .meta {
+    flex: 0 0 auto; padding: 10px 26px; border-top: 1px solid var(--line);
+  }
   /* Two columns: the conversations on the left, this one on the right. A grid rather than
      floats or flex, because the sidebar has to be a fixed width and the transcript has to be
      the rest -- and `minmax(0, 1fr)` is what stops a long unbroken line in the transcript from
@@ -310,27 +381,30 @@
      when the status line is showing. A grid row cannot overlap anything. */
   .app {
     display: grid;
-    /* Three columns: the conversations, the hand that resizes them, and the transcript. The
-       width is a variable so that hand can move it, and `min(var(--side), 60vw)` is what stops
-       a widened sidebar from eating the transcript on a narrow window -- a clamp in CSS rather
-       than a listener on every resize. The 5px column is the grab area: a hairline seam is a
-       pixel hunt, and the sidebar's own border is still the line you see.
-       The fourth column is the file preview, and it is a column rather than a panel floating over
-       the reading: measured in a browser, a fixed panel covered the very block the path was pressed
-       in, so the second path in a turn could not be pressed at all without closing the first. A
-       column narrows the transcript instead, which is what DSH's own preview does. */
-    grid-template-columns: min(var(--side, 250px), 60vw) 5px minmax(0, 1fr) auto;
+    /* Five columns: the conversations, the hand that resizes them, the transcript, the hand that
+       resizes the file preview, and the preview itself beyond it. The width is a variable so
+       that a hand can move it, and `min(var(--side), 60vw)` is what stops a widened sidebar from
+       eating the transcript on a narrow window -- a clamp in CSS rather than a listener on every
+       resize. The 5px column is the grab area: a hairline seam is a pixel hunt, and the sidebar's
+       own border is still the line you see. Both preview columns are `auto` so that they collapse
+       to nothing when the panel is closed and the hand that belongs to it is hidden with it.
+       The preview is a column rather than a panel floating over the reading: measured in a browser,
+       a fixed panel covered the very block the path was pressed in, so the second path in a turn
+       could not be pressed at all without closing the first. A column narrows the transcript
+       instead, which is what DSH's own preview does. */
+    grid-template-columns: min(var(--side, 250px), 60vw) 5px minmax(0, 1fr) auto auto;
     grid-template-rows: minmax(0, 1fr) auto;
     height: 100vh;
   }
-  .app.plain { grid-template-columns: minmax(0, 1fr) auto; }
+  .app.plain { grid-template-columns: minmax(0, 1fr) auto auto; }
   /* The grip has no visible width of its own, only a highlight on hover so that it is
      discoverable at all, and the resize cursor. Every cursor on the page becomes that one
      while a drag is running: the pointer is captured, so the moves keep arriving here while
      the cursor itself travels over the transcript, and without this the page flickers between
      two cursors for the whole drag. */
-  #grip, #read-grip { cursor: col-resize; }
-  #grip:hover, #read-grip:hover, body.dragging #grip, body.dragging #read-grip {
+  #grip, #read-grip, #preview-grip { cursor: col-resize; }
+  #grip:hover, #read-grip:hover, #preview-grip:hover,
+  body.dragging #grip, body.dragging #read-grip, body.dragging #preview-grip {
     background-color: var(--user);
   }
   body.dragging { user-select: none; }
@@ -350,10 +424,15 @@
     background-repeat: no-repeat;
   }
   #read-grip:hover { background-image: none; }
-  .app.plain #grip, .app.plain #read-grip { display: none; }
+  .app.plain #grip, .app.plain #read-grip, .app.plain #preview-grip { display: none; }
+  /* The sidebar is a column: the head, the list, and the seat at the foot. The list scrolls and the
+     seat does not, which is the whole reason the element is a flex column rather than the one
+     scrolling box it was -- a control at the bottom of a scrolling box scrolls away from the bottom,
+     which is where it was put. */
   aside {
     background: var(--panel); border-right: 1px solid var(--line);
-    overflow-y: auto; min-height: 0; padding: 12px 0 14px;
+    min-height: 0; padding: 12px 0 0;
+    display: flex; flex-direction: column;
   }
   .side-head {
     display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
@@ -367,7 +446,21 @@
   }
   #new-conversation:hover { border-color: var(--user); }
   #new-conversation:disabled { color: var(--dim); border-color: var(--line); cursor: default; }
-  #sessions { list-style: none; margin: 0; padding: 0; }
+  #sessions { list-style: none; margin: 0; padding: 0; flex: 1 1 auto; overflow-y: auto; min-height: 0; }
+  /* The run's door, at the foot of the list rather than on the header line. DSH's settings trigger is
+     the sidebar's bottom seat, and this page had it beside the conversation's name for one round --
+     the header is where the conversation and its work are read, and a control that changes the
+     *process* was the one thing on that line that was not a fact about the conversation. It is the
+     height and the hover fill of a rail cell, because it is the same kind of thing: a place to go. */
+  .side-foot { flex: 0 0 auto; padding: 8px 10px 10px; border-top: 1px solid var(--line); }
+  .side-foot[hidden] { display: none; }
+  #settings-open {
+    font: inherit; font-size: 13px; text-align: left; color: var(--fg);
+    width: 100%; height: 38px; padding: 0 10px; cursor: pointer;
+    background: none; border: 0; border-radius: 10px;
+  }
+  #settings-open:hover { background: rgba(255, 255, 255, .06); }
+  #settings-open[hidden] { display: none; }
   /* One row per conversation, and the label ellipsised rather than wrapped: a list of
      conversations is for telling apart at a glance, and a row that wraps to two lines makes
      the list half as long for no more information. The flex row with `min-width: 0` on the
@@ -558,18 +651,30 @@
   }
   a.link:hover, a.link:focus { text-decoration-style: solid; }
   /* The file, opened beside the conversation. A column of the layout, not a panel over it -- see
-     the grid above for the measurement that settled it -- and deliberately not resizable: it has one
-     width, and the reader closes it rather than negotiating with it. DSH's page opens a file
-     reference in a document preview beside the conversation; this is that idea with none of the
-     machinery: no tabs, no renderer registry, one route and this panel. */
+     the grid above for the measurement that settled it -- and it is as wide as the reader dragged it,
+     with the default it starts at when nobody has. `var(--preview, ...)` rather than a `min()` around
+     both, because the default is what the *window* has room for and a width somebody dragged is a
+     decision that outranks it. The hand to its left is what moves it: the panel had no hand for one
+     round, which made the one column of the page whose width a person might want a fixed one. DSH's
+     page opens a file reference in a document preview beside the conversation; this is that idea with
+     none of the machinery: no tabs, no renderer registry, one route and this panel. */
   #preview {
-    grid-column: 4; grid-row: 1;
-    width: min(720px, 45vw);
+    grid-column: 5; grid-row: 1;
+    width: var(--preview, min(720px, 45vw));
     display: flex; flex-direction: column; min-height: 0;
     background: var(--panel); border-left: 1px solid var(--line);
   }
-  .app.plain #preview { grid-column: 2; }
+  .app.plain #preview { grid-column: 3; }
   #preview[hidden] { display: none; }
+  /* The preview's own hand. Its column is `auto`, so the width has to be declared here: an empty
+     div in an `auto` track is 0px wide, and a grip with no width is a grip no pointer can land on --
+     measured in a browser, where the two claims about it (a drag, and a double-click to put the width
+     back) both failed against a hand of width 0 while the trace read `width: 0`. The other two hands
+     sit in a fixed 5px track and need no rule of their own. Declaring it here rather than making the
+     track 5px keeps the `auto` collapse: with no panel open the hand is hidden and both tracks are
+     0px, so a page reading a transcript loses nothing to a control that is not there. */
+  #preview-grip { grid-column: 4; grid-row: 1; width: 5px; }
+  #preview-grip[hidden] { display: none; }
   .preview-head {
     display: flex; gap: 10px; align-items: baseline;
     padding: 8px 12px; border-bottom: 1px solid var(--line); font-size: 12.5px;
@@ -681,6 +786,15 @@
       <button id="new-conversation" type="button" title="start a new conversation">+ new</button>
     </div>
     <ul id="sessions"><li class="waiting">reading the list…</li></ul>
+    <!-- The run's own door, in the seat at the foot of the sidebar. Everything that changes state --
+         the endpoint, the switches, the run's own one-press actions and the commands that take an
+         argument -- lives behind it, in the dialog below; the seat is DSH's own place for its
+         settings trigger. It is hidden until a frame arrives, because a page opened from a dropped
+         file has no run and therefore no settings: a door that opens an empty dialog is a promise
+         this page cannot keep. -->
+    <div class="side-foot" id="side-foot" hidden>
+      <button id="settings-open" type="button" aria-haspopup="dialog" title="this run's settings" hidden>settings</button>
+    </div>
   </aside>
   <!-- The hand between the two columns. Its own grid column rather than a strip positioned
        over the seam: positioned, it would paint under the transcript and its hit area would
@@ -710,39 +824,44 @@
           <summary id="jobs-summary">jobs</summary>
           <div class="body" id="job-list"></div>
         </details>
-        <!-- The one control the header keeps, and it is a door rather than a setting: everything that
-             changes state -- the endpoint, the switches, the run's own one-press actions and the
-             commands that take an argument -- lives behind it, in the dialog below. The header says
-             *whose* conversation this is and *what work is running*, and nothing else; §19 of
-             `docs/web-mode.md` is the reasoning, and the shape is DSH's: a settings seat, not a row
-             of raw controls taking the reading column's width. -->
-        <button id="settings-open" type="button" aria-haspopup="dialog" title="this run's settings" hidden>settings</button>
+        <!-- The header keeps no control at all, and that is the decision: everything that changes state
+             -- the endpoint, the switches, the run's own one-press actions and the commands that take
+             an argument -- lives behind the door in the sidebar's foot, in the dialog below. The header
+             says *whose* conversation this is and *what work is running*, which are the two facts the
+             reading under it is about; §19 of `docs/web-mode.md` is why, and the door's seat is DSH's
+             own shape: a sidebar foot, never a row of raw controls across the reading column. -->
       </div>
       <!-- The settings dialog: a centred overlay with a mask rather than a row in the header.
            `role="dialog"`/`aria-modal` because that is what it is -- while it is open the page behind
            it is not the thing being used -- and it is closed by three doors (its own button, the mask,
            Escape) because a modal with one way out is a trap.
+           The dialog's name is the rail's own head, which is what `aria-labelledby` points at: it is
+           the one piece of this panel that is always on screen, and a title inside the scrolling page
+           is a title a person has scrolled past.
       -->
       <div class="mask" id="settings-mask" hidden></div>
       <div class="settings" id="settings" role="dialog" aria-modal="true" aria-labelledby="settings-title" hidden>
-        <div class="settings-head">
-          <h2 id="settings-title">settings</h2>
-          <button id="settings-close" type="button" title="close (Esc)">close</button>
+        <nav class="settings-nav" id="settings-nav" aria-label="settings sections">
+          <div class="settings-title" id="settings-title">settings</div>
+          <!-- One cell per screen, built by `showSettingsPanes` when the dialog opens. Which screens
+               exist and what is on each of them is the frame's answer -- a row carries the screen it
+               belongs on, and a setting carries its own -- and `SETTINGS_PANES` is only this page's
+               names for them and the order they read in. -->
+          <div class="settings-list" id="settings-list"></div>
+        </nav>
+        <div class="settings-content">
+          <div class="settings-bar">
+            <button id="settings-close" type="button" title="close (Esc)">close</button>
+          </div>
+          <div id="settings-panes"></div>
+          <!-- The facts about the conversation on screen: its cwd, its id, when it was started, and
+               what the last prompt cost. Not a setting, and the same frame the transcript is drawn
+               from -- a dropped file has no run and therefore no settings at all, and this line is then
+               its only account of which model wrote it. `paint` writes it, so it must exist whether or
+               not a screen is open. It sits in the foot of the page column rather than under the rail
+               as well, because the rail is the dialog's furniture and these are the conversation's. -->
+          <div class="meta" id="meta"></div>
         </div>
-        <div class="settings-body">
-          <nav class="settings-nav" id="settings-nav" aria-label="settings sections"></nav>
-          <!-- One section per screen, built by `showSettingsPanes` when the dialog opens. Which
-               screens exist and what is on each of them is the frame's answer -- a row carries the
-               screen it belongs on, and a setting carries its own -- and `SETTINGS_PANES` is only
-               this page's names for them and the order they read in. -->
-          <div class="settings-panes" id="settings-panes"></div>
-        </div>
-        <!-- The facts about the conversation on screen: its cwd, its id, when it was started, and
-             what the last prompt cost. Not a setting, and the same frame the transcript is drawn
-             from -- a dropped file has no run and therefore no settings at all, and this line is then
-             its only account of which model wrote it. `paint` writes it, so it must exist whether or
-             not a screen is open. -->
-        <div class="meta" id="meta"></div>
       </div>
     </header>
 
@@ -788,6 +907,13 @@
        and out of the composer's way. -->
   <div id="status" hidden></div>
 
+  <!-- The hand for the preview's width, and it is a column of the grid rather than a strip positioned
+       over the seam, for the reason the list's hand is: positioned, its hit area would travel with the
+       pointer instead of staying put. It is hidden with the panel, because a hand with nothing behind
+       it would resize a column nobody can see; reachable by keyboard as well, because dragging is not
+       the only way to want a file wider. -->
+  <div id="preview-grip" role="separator" aria-orientation="vertical" tabindex="0" title="drag to resize"
+       aria-label="resize the file preview" aria-valuemin="280" aria-valuemax="1100" hidden></div>
   <!-- A file a tool block named, opened beside the conversation. Its own column of the grid rather
        than a panel over the reading, and drawn here -- inside the app -- so that is true by
        construction. Hidden until a path is pressed; the column it would occupy is gone while it is
@@ -1525,33 +1651,43 @@ function sessionsFrom(text) {
     }));
 }
 
-/// One `<select>`: the options a setting can take, and the one it is on.
+/// One setting that is a choice, as the words themselves.
 ///
-/// The value is set *after* the options, and the current one is added to the list when the frame
-/// does not mention it -- a provider's `model` field is offered by `/model` whether or not it is
-/// repeated in `models`, so a picker built from `models` alone would sit on whichever option came
-/// first and then *send* it the moment anything else on the page was touched. A select whose value
-/// is not among its options keeps the first one, silently: that is a control that lies about the
-/// run, which is the whole class of bug this page's controls exist to avoid.
-function fillSelect(select, options, current) {
-  if (!select) return;
-  const wanted = current === undefined || current === null ? "" : String(current);
-  const named = options.map(String).filter((name) => name !== "");
-  if (wanted && !named.includes(wanted)) named.unshift(wanted);
-  // Options are removed one by one rather than with `textContent = ""`: the one-liner is what a
-  // browser wants, and this also has to work under the stub DOM in `scripts/web-view-test.js`,
-  // where it would leave the old options in place and make every assertion here meaningless.
-  while (select.firstChild) select.removeChild(select.firstChild);
-  for (const name of named) {
-    const option = el("option", "", name);
-    option.value = name;
-    option.selected = name === wanted;
-    select.appendChild(option);
+/// A press per value the frame named, with the one in force filled in, rather than a `<select>`: a
+/// select is the same fact behind a control the OS draws, at the OS's size and in the OS's colours,
+/// and it opens *over* the panel -- which is why no setting is drawn with one and why the one select
+/// left in this dialog is an *answer* being given rather than a value being set (the peer a `/say`
+/// goes to, in the form that asks for it).
+///
+/// The current value is added to the list when the frame does not repeat it, which is the rule the
+/// select needed and for the same reason: a provider's `model` field is offered by `/model` whether or
+/// not it is repeated in `models`, so a control built from `models` alone would show whichever value
+/// came first and *send* it the moment anything else on the page was touched. A list with one word in
+/// it is drawn and disabled rather than hidden: it says what is in force, which is the half that
+/// matters, and being dead says there is nothing to choose between.
+function choiceControl(doc, send, help, choices, value) {
+  const words = Array.isArray(choices)
+    ? choices.map(String).filter((word) => word.trim() !== "")
+    : [];
+  if (value && !words.includes(value)) words.unshift(value);
+  const box = el("div", "choices");
+  box.title = help;
+  for (const word of words) {
+    const button = el("button", "choice", word);
+    button.type = "button";
+    // `aria-pressed` rather than a class, because it is the same fact to a reader as the fill is to
+    // the eye -- and the harness reads it back the same way rather than by matching colours.
+    button.setAttribute("aria-pressed", word === value ? "true" : "false");
+    button.disabled = words.length < 2;
+    button.addEventListener("click", async () => {
+      // A refused change puts the control back to what is in force, because a control that quietly did
+      // nothing is worse than one that says it could not. The frame that comes back is the one that
+      // says what happened, and the terminal is where the reason is printed.
+      if (!(await sendText(send + " " + word))) showState(doc);
+    });
+    box.appendChild(button);
   }
-  select.value = wanted;
-  // A control with one choice is not a choice. Disabled rather than hidden, because it still has
-  // something to say: which one is in force.
-  select.disabled = named.length < 2;
+  return box;
 }
 
 /// The screens of the settings dialog, in the order they are read.
@@ -1614,33 +1750,34 @@ function screenOf(command) {
 function drawSettings(doc, key, box) {
   while (box.firstChild) box.removeChild(box.firstChild);
   const all = doc.state && Array.isArray(doc.state.settings) ? doc.state.settings : [];
+  let drawn = 0;
   for (const setting of all) {
     if (!setting || setting.group !== key || typeof setting.key !== "string") continue;
     box.appendChild(settingRow(doc, setting));
+    drawn += 1;
   }
+  // A screen with nothing set on it draws no container rather than an empty one, because the gap it
+  // would leave is between the page's head and its first group -- where a person reads it as a page
+  // that failed to load rather than as a fact about this run.
+  box.hidden = drawn === 0;
 }
 
-/// One setting, as a row: its name, what changing it means, and the control on the right.
+/// One setting, as a row: its name, what changing it means under it, and the control on the right.
 function settingRow(doc, setting) {
   const send = typeof setting.send === "string" ? setting.send : "";
   const help = typeof setting.help === "string" ? setting.help : "";
   const value = setting.value === undefined || setting.value === null ? "" : String(setting.value);
   const row = el("div", "setting");
-  row.appendChild(el("span", "setting-name", setting.key));
-  row.appendChild(el("span", "setting-help", help));
+  // The name and its sentence are one box rather than two cells of the row, so they stack: a fixed
+  // name column is a width guessed for the longest name, and the sentence beside it is prose that then
+  // has to fit whatever is left. Stacked, every row is two lines and every control is at the same
+  // place down the page.
+  const text = el("div", "setting-text");
+  text.appendChild(el("span", "setting-name", setting.key));
+  text.appendChild(el("span", "setting-help", help));
+  row.appendChild(text);
   if (setting.kind === "select") {
-    // A choice: the words are the frame's, and the current one is added to the list when the frame
-    // does not repeat it -- see `fillSelect`, which is the same rule the header's pickers use.
-    const select = el("select", "");
-    select.title = help;
-    fillSelect(select, setting.choices || [], value);
-    select.addEventListener("change", async (e) => {
-      // A refused change puts the control back to what is in force, because a control that quietly
-      // did nothing is worse than one that says it could not. The frame that comes back is the one
-      // that says what happened, and the terminal is where the reason is printed.
-      if (!(await sendText(send + " " + e.target.value))) showState(doc);
-    });
-    row.appendChild(select);
+    row.appendChild(choiceControl(doc, send, help, setting.choices, value));
     return row;
   }
   // A value that is a line rather than a choice: an input and a press. There is no `change` event on
@@ -1673,7 +1810,7 @@ function settingRow(doc, setting) {
   return row;
 }
 
-/// One screen's rows: the commands the frame files on it.
+/// One screen's commands, grouped by what each row does.
 ///
 /// The list is drawn from the frame and never assembled here, so a row cannot offer a command the
 /// terminal does not take. The report rows are pressable, and what a press does is ask the process
@@ -1685,10 +1822,17 @@ function settingRow(doc, setting) {
 /// and the input's `type` comes from the frame, so a credential is masked because the process said
 /// it was one.
 ///
+/// The class is also the grouping, and that is the one thing here the page decides: `this conversation`
+/// is eleven rows in a run with nothing open, and eleven rows in one list is a list a person reads
+/// twice to find `/delete`. Under their classes they are four or five short lists, and the destructive
+/// pair is at the bottom under its own word. Which screen a row is on is still the frame's, and the
+/// words for the classes are the menu's own (`MENU_GROUPS`) rather than a second set invented here.
+///
 /// One reading at a time on the whole dialog rather than one per screen, because a screen is a place
 /// and a reading is a thing being looked at: `doc.reading` is that, `doc.readingGroup` is which
-/// screen it belongs to, and every other screen goes on showing its own rows.
-function drawRows(doc, key, panel, list) {
+/// screen it belongs to, and every other screen goes on showing its own rows. A reading is drawn
+/// *instead of* the groups rather than inside one: it is an answer to a press, not a class of row.
+function drawRows(doc, key, list) {
   while (list.firstChild) list.removeChild(list.firstChild);
   const commands = doc.state && Array.isArray(doc.state.commands) ? doc.state.commands : [];
   const rows = commands.filter(
@@ -1696,8 +1840,8 @@ function drawRows(doc, key, panel, list) {
   );
   // Hidden when there is nothing to show: a screen of settings with no commands under it is right
   // (the `model` screen is three pickers and four provider rows, and a run may have neither), and an
-  // empty panel is a promise this page cannot keep.
-  panel.hidden = rows.length === 0 && !(doc.reading && doc.readingGroup === key);
+  // empty box is a promise this page cannot keep.
+  list.hidden = rows.length === 0 && !(doc.reading && doc.readingGroup === key);
   if (doc.reading && doc.readingGroup === key) {
     // A listing being read, which replaces this screen's rows until the reader goes back. The name
     // comes from what was asked for rather than from the answer's own first line, so the heading is
@@ -1713,7 +1857,30 @@ function drawRows(doc, key, panel, list) {
     list.appendChild(el("div", "reading", doc.readingText || "reading\u2026"));
     return;
   }
-  for (const command of rows) drawCommandRow(doc, key, command, list);
+  // One group per class, in the menu's own order -- the same words, because the launcher and the
+  // screen are answering the same question about a row ("what does this do?") and a page that called
+  // the same five classes by two sets of names would be teaching a person two vocabularies. A class
+  // this page has no word for -- a command added to the process since this page was written -- is
+  // drawn under no heading rather than dropped: what the frame offers is not this page's to lose, and
+  // a new class in the process must not silently hide a row from the person who came looking for it.
+  const groups = MENU_GROUPS.slice();
+  const known = groups.map(([className]) => className);
+  for (const command of rows) {
+    const className = String(command.class || "");
+    if (!known.includes(className) && !groups.some(([name]) => name === className)) {
+      groups.push([className, ""]);
+    }
+  }
+  for (const [className, title] of groups) {
+    const inGroup = rows.filter((command) => String(command.class || "") === className);
+    if (inGroup.length === 0) continue;
+    const group = el("div", "group");
+    if (title) group.appendChild(el("h3", "group-title", title));
+    const box = el("div", "group-rows");
+    for (const command of inGroup) drawCommandRow(doc, key, command, box);
+    group.appendChild(box);
+    list.appendChild(group);
+  }
 }
 
 /// One command row, in the shape its class calls for.
@@ -1894,14 +2061,12 @@ function drawCommandRow(doc, key, command, list) {
 /// is kept between frames -- a listing held from a moment ago would be a second copy of a fact the
 /// process owns (see `askReport`).
 function paintSettings(doc) {
-  const panes = document.getElementById("settings-panes");
-  if (!panes) return;
+  if (!document.getElementById("settings-panes")) return;
   for (const [key] of SETTINGS_PANES) {
     const box = document.getElementById("fields-" + key);
     if (box) drawSettings(doc, key, box);
-    const panel = document.getElementById("rows-" + key);
     const list = document.getElementById("row-list-" + key);
-    if (panel && list) drawRows(doc, key, panel, list);
+    if (list) drawRows(doc, key, list);
   }
 }
 
@@ -2277,19 +2442,25 @@ function rowText(row) {
 /// handed over. The mark is transient and the page's own: a class on the row, and a scroll to it.
 ///
 /// Walked rather than queried (`querySelectorAll` on an element is not in the stub DOM), and the walk
-/// is the shape this page built: `#row-list-<screen>` holds one row per command the frame filed on that
-/// screen, and the rows are its children.
+/// is the shape this page built: `#row-list-<screen>` holds one group per class, a group holds its rows
+/// in a `group-rows` box, and the rows are that box's children. The box is found by class rather than
+/// by position, because the heading is its previous sibling and a group the page has no word for has
+/// no heading at all.
 function markCommandRow(command) {
   const list = document.getElementById("row-list-" + screenOf(command));
   if (!list || typeof command.send !== "string") return;
-  // The rows are the list's own children: a form is a `<form>`, a report is a button, a reference row
-  // is a div, and every one of them carries the line it would send as its first child's text. The
-  // walk is over the children rather than a `querySelectorAll`, which the stub DOM does not have.
-  for (const row of Array.from(list.children || [])) {
-    if (!rowText(row).includes(command.send)) continue;
-    row.className = String(row.className || "") + " pointed";
-    if (typeof row.scrollIntoView === "function") row.scrollIntoView({ block: "center" });
-    return;
+  for (const group of Array.from(list.children || [])) {
+    const box = Array.from(group.children || []).find((child) => child.className === "group-rows");
+    if (!box) continue;
+    // Every row this page draws carries the line it would send as its first child's text -- a `code`
+    // and a `span`, a field and a `button.send`, an answer and a `save` -- so reading the children is
+    // the same answer in a browser and under the stub DOM.
+    for (const row of Array.from(box.children || [])) {
+      if (!rowText(row).includes(command.send)) continue;
+      row.className = String(row.className || "") + " pointed";
+      if (typeof row.scrollIntoView === "function") row.scrollIntoView({ block: "center" });
+      return;
+    }
   }
 }
 
@@ -2302,8 +2473,12 @@ function showState(doc) {
   const state = doc.state;
   // The door goes with what is behind it: a page opened from a dropped file has no run and therefore
   // no settings, and a settings button that opens an empty dialog is a promise this page cannot keep.
+  // The seat around it goes too, or a page with no run shows an empty strip with a hairline over it at
+  // the foot of the list -- which reads as a row that failed to load rather than as nothing to say.
   const door = document.getElementById("settings-open");
+  const seat = document.getElementById("side-foot");
   if (door) door.hidden = !state;
+  if (seat) seat.hidden = !state;
   // Closing a dialog whose run has gone away, because the dialog is now empty: the frame says the
   // process has no state, and a modal over a page with nothing in it is worse than no modal.
   if (!state && settingsOpen()) closeSettings();
@@ -2323,22 +2498,22 @@ function settingsOpen() {
   return !!dialog && dialog.hidden === false;
 }
 
-/// The rail and the screens, built once when the dialog opens.
+/// The rail and the pages, built once when the dialog opens.
 ///
-/// Built rather than written into the page, because what is *on* a screen is the frame's answer: a
-/// section holds whatever the process filed on it, so the two halves of every screen are its, and
-/// this function attaches the page's names for the places (`SETTINGS_PANES`) to containers with the
-/// ids the painters look for.
+/// Built rather than written into the page, because what is *on* a page is the frame's answer: a page
+/// holds whatever the process filed on it, so the two halves of every page are its, and this function
+/// attaches the page's names for the places (`SETTINGS_PANES`) to containers with the ids the painters
+/// look for.
 ///
 /// Rebuilt only when the dialog opens, which is the one moment the order could have changed: a rail
-/// redrawn on every state frame would take the focus off the section somebody is reading, and a rail
-/// does not depend on the frame at all. The empty screens are filled by `paintSettings`, which the
-/// frame that arrived while the dialog was closed has already been through.
+/// redrawn on every state frame would take the focus off the place somebody is reading, and a rail does
+/// not depend on the frame at all. The empty pages are filled by `paintSettings`, which the frame that
+/// arrived while the dialog was closed has already been through.
 function showSettingsPanes() {
-  const nav = document.getElementById("settings-nav");
+  const rail = document.getElementById("settings-list");
   const panes = document.getElementById("settings-panes");
-  if (!nav || !panes) return;
-  while (nav.firstChild) nav.removeChild(nav.firstChild);
+  if (!rail || !panes) return;
+  while (rail.firstChild) rail.removeChild(rail.firstChild);
   while (panes.firstChild) panes.removeChild(panes.firstChild);
   const state = doc.state;
   for (const [key, label, note] of SETTINGS_PANES) {
@@ -2346,27 +2521,25 @@ function showSettingsPanes() {
     button.type = "button";
     button.setAttribute("aria-current", key === settingsPane ? "true" : "false");
     button.addEventListener("click", () => showSettingsPane(key));
-    nav.appendChild(button);
+    rail.appendChild(button);
 
     const pane = el("section", "pane");
     pane.id = "pane-" + key;
+    // The page's own head, then what is on it: the settings a person came to change, and under them
+    // the commands they can do it with. The two containers are what `paintSettings` fills, and both
+    // are built even when the frame has nothing for them -- an empty container is cheaper than a
+    // special case in the painter, and each hides itself when it is empty.
+    pane.appendChild(el("h2", "pane-title", label));
     pane.appendChild(el("p", "pane-note", note));
-    // The settings first, then the rows: what a person came to change, and under it what they can do
-    // about it. The ids are what `paintSettings` fills, and both are built even when the frame has
-    // nothing for them -- an empty container is cheaper than a special case in the painter, and the
-    // panel hides itself when it has no rows (see `drawRows`).
     const fields = el("div", "fields");
     fields.id = "fields-" + key;
     // A page with no run behind it has no settings at all, and the door is hidden then anyway; this
-    // is what keeps the sections from appearing as four hundred empty pixels if it ever is not.
+    // is what keeps the pages from appearing as four hundred empty pixels if it ever is not.
     if (!state) fields.hidden = true;
     pane.appendChild(fields);
-    const panel = el("div", "panel");
-    panel.id = "rows-" + key;
-    const body = el("div", "body");
-    body.id = "row-list-" + key;
-    panel.appendChild(body);
-    pane.appendChild(panel);
+    const rows = el("div", "rows");
+    rows.id = "row-list-" + key;
+    pane.appendChild(rows);
     panes.appendChild(pane);
   }
 }
@@ -2383,8 +2556,11 @@ function showSettingsPane(name) {
     const pane = document.getElementById("pane-" + known);
     if (pane) pane.hidden = known !== name;
   }
-  const nav = document.getElementById("settings-nav");
-  const buttons = nav ? Array.from(nav.children || []) : [];
+  // The rail's cells are the list's own children in `SETTINGS_PANES` order, which is what makes the
+  // index do the matching here rather than a second lookup: the dialog's name is the rail's *first*
+  // child, so this walks the list and not the nav.
+  const rail = document.getElementById("settings-list");
+  const buttons = rail ? Array.from(rail.children || []) : [];
   buttons.forEach((button, at) => {
     const known = SETTINGS_PANES[at] ? SETTINGS_PANES[at][0] : "";
     if (button.setAttribute) button.setAttribute("aria-current", known === name ? "true" : "false");
@@ -2996,10 +3172,11 @@ function describePeer(peer) {
 
 /// Fill the peer picker, keeping the pid as the value and the description as the label.
 ///
-/// Not `fillSelect`, and the difference is the point of the row: what is *sent* is a pid and what is
-/// *read* is who that pid is, so a helper that makes those the same string cannot express it. The
-/// options are removed one at a time for the reason `fillSelect` does it — the stub DOM in
-/// `scripts/web-view-test.js` has no `textContent = ""`.
+/// Not the settings' own control, and the difference is the point of the row: what is *sent* is a pid
+/// and what is *read* is who that pid is, so a control that makes those the same string cannot express
+/// it -- and this one is an answer inside a form rather than a value in force on a screen. The options
+/// are removed one at a time because the stub DOM in `scripts/web-view-test.js` has no
+/// `textContent = ""`.
 function fillPeerSelect(select, peers, note) {
   if (!select) return;
   while (select.firstChild) select.removeChild(select.firstChild);
@@ -3228,6 +3405,17 @@ async function openPreview(path, line) {
   preview = { path: path, line: line || 0, view: previewView(path, line) };
   const panel = document.getElementById("preview");
   if (panel) panel.hidden = false;
+  // The hand goes with the panel, and in the same two places: a hand with nothing behind it would
+  // resize a column nobody can see, and its 5px would be a strip of the page that does nothing. Its
+  // reported width is read here rather than at boot, because at boot the panel is closed and an
+  // unopened column measures zero -- a reader would be told the panel it just opened is 0px wide.
+  const hand = document.getElementById("preview-grip");
+  if (hand) {
+    hand.hidden = false;
+    if (typeof panel.getBoundingClientRect === "function") {
+      hand.setAttribute("aria-valuenow", String(Math.round(panel.getBoundingClientRect().width)));
+    }
+  }
   paintPreviewHead();
   await readPreview();
 }
@@ -3240,6 +3428,8 @@ function closePreview() {
   showPicture(null);
   const panel = document.getElementById("preview");
   if (panel) panel.hidden = true;
+  const hand = document.getElementById("preview-grip");
+  if (hand) hand.hidden = true;
 }
 
 /// The path, split so the file's own name stays in full ink while the directories give way.
@@ -3973,9 +4163,9 @@ function paintJobs(list) {
   const body = document.getElementById("job-list");
   if (!panel || !summary || !body) return;
   panel.hidden = listedJobs.length === 0;
-  // Removed one by one rather than with `textContent = ""`, for the reason `fillSelect` gives: the
-  // one-liner is what a browser wants, and the stub DOM in `scripts/web-view-test.js` would leave
-  // the old chips in place -- which would make a check about the counts meaningless, and did.
+  // Removed one by one rather than with `textContent = ""`: the one-liner is what a browser wants, and
+  // the stub DOM in `scripts/web-view-test.js` would leave the old chips in place -- which would make a
+  // check about the counts meaningless, and did.
   while (body.firstChild) body.removeChild(body.firstChild);
   while (summary.firstChild) summary.removeChild(summary.firstChild);
   const live = listedJobs.filter(jobIsLive);
@@ -4654,6 +4844,24 @@ if (typeof document !== "undefined" && document.getElementById) {
     dragBoundary(readHand, setRead, () => app.style.removeProperty("--read"));
     readHand.setAttribute("aria-valuenow", String(Math.round(reading.getBoundingClientRect().width)));
 
+    // The file panel's width, and it is the one hand of the three whose column is to the *right* of
+    // the boundary: the width is measured from the panel's own right edge, which does not move, rather
+    // than from the boundary's position in the window. 280px is narrow enough to read a line of prose
+    // in and the window minus 420px is what the transcript keeps, so the list's hand and this one
+    // cannot between them squeeze the reading away -- each clamps against the window, and the middle
+    // column is what is left. Nothing is remembered across reloads, the same as the other two: a width
+    // that outlives the run is a preference nobody asked to have saved.
+    const previewHand = document.getElementById("preview-grip");
+    const previewPanel = document.getElementById("preview");
+    const setPreview = (boundaryX) => {
+      const box = previewPanel.getBoundingClientRect();
+      const widest = Math.max(280, Math.min(1100, window.innerWidth - 420));
+      const w = Math.round(Math.min(Math.max(box.right - boundaryX, 280), widest));
+      app.style.setProperty("--preview", w + "px");
+      previewHand.setAttribute("aria-valuenow", String(w));
+    };
+    dragBoundary(previewHand, setPreview, () => app.style.removeProperty("--preview"));
+
     document.getElementById("new-conversation").addEventListener("click", async (e) => {
       // Disabled while it is in flight, because a second click before the process answers would
       // start a second conversation and leave the sidebar showing whichever won the race.
@@ -4805,7 +5013,7 @@ if (typeof module !== "undefined" && module.exports) {
     // dialog drew -- or find the row it was handed.
     doc,
     sessionsFrom, messageBody, resumeLine, streamingAnswer, carryStreaming, setStreamingAnswer,
-    paint, feedTrouble, tokenRefused, feedTrace, debugFeed, applyState, showState, fillSelect,
+    paint, feedTrouble, tokenRefused, feedTrace, debugFeed, applyState, showState, choiceControl,
     // The dialog's own drawing: the settings as controls, the rows as controls, and the painter that
     // does both for every screen. Exported because all three are pure functions of a frame over a
     // stub DOM -- which is how the Node harness checks what a screen holds without a browser.

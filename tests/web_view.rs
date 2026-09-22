@@ -631,10 +631,12 @@ fn the_composer_can_stop_the_turn_it_is_watching() {
 ///   silence. That failure would look exactly like the feature not being built.
 #[test]
 fn the_settings_are_the_runs_own_lines_and_nothing_else() {
-    let markup = from("<div class=\"settings-body\">", 8);
+    let markup = from("<div class=\"settings\" id=\"settings\"", 20);
     assert!(
-        markup.contains("id=\"settings-nav\"") && markup.contains("id=\"settings-panes\""),
-        "the settings dialog has no rail and no place to draw a screen into: {markup}"
+        markup.contains("id=\"settings-nav\"")
+            && markup.contains("id=\"settings-panes\"")
+            && markup.contains("id=\"settings-title\""),
+        "the settings dialog has no rail, no place to draw a page into, or no name: {markup}"
     );
 
     // Built from the frame, which is the whole rule: the key, the value in force, the words a
@@ -664,18 +666,26 @@ fn the_settings_are_the_runs_own_lines_and_nothing_else() {
     }
 
     // What each control sends: one line, composed of the frame's `send` and nothing else. A choice
-    // sends `send + " " + value` -- the same composition `/provider <name>` has always been -- and a
-    // line typed into a box sends `send + " " + what is in the box`, trimmed so that a stray space
-    // cannot make an empty setting look like a change.
-    let choice = from("select.addEventListener(\"change\"", 6);
+    // sends `send + " " + value` -- the same composition `/provider <name>` has always been, and the
+    // value is one of the words the frame listed rather than anything this page knows -- and a line
+    // typed into a box sends `send + " " + what is in the box`, trimmed so that a stray space cannot
+    // make an empty setting look like a change.
+    let choice = from("function choiceControl(doc, send, help, choices, value)", 30);
     assert!(
-        choice.contains("sendText(send + \" \" + e.target.value)"),
+        choice.contains("sendText(send + \" \" + word)"),
         "a choice must send the frame's own line with the word that was chosen: {choice}"
     );
     assert_eq!(
         choice.matches("sendText(").count(),
         1,
         "a choice sends exactly one thing: {choice}"
+    );
+    // The words are the frame's, and a value the frame did not list is *shown* rather than invented:
+    // the control is built from `setting.choices` and nothing else (see `choiceControl`).
+    let row = from("function settingRow(doc, setting)", 50);
+    assert!(
+        row.contains("setting.choices"),
+        "a setting's words have to come from the frame: {row}"
     );
     let typed = from("form.addEventListener(\"submit\"", 6);
     assert!(
@@ -788,11 +798,11 @@ fn the_command_panel_is_drawn_from_the_frame() {
     // inside it. The needle is the builder rather than a pane in the markup, because the screens are
     // built rather than written -- what is written is the rail, the container they go into, and the
     // page's own names for them.
-    let built = from("function showSettingsPanes()", 40);
+    let built = from("function showSettingsPanes()", 46);
     for (needed, why) in [
-        ("settings-nav", "the rail"),
-        ("settings-panes", "the container the screens are built into"),
-        ("\"fields-\" + key", "the settings a screen holds"),
+        ("settings-list", "the rail's own list, under the dialog's name"),
+        ("settings-panes", "the container the pages are built into"),
+        ("\"fields-\" + key", "the settings a page holds"),
         ("\"row-list-\" + key", "and the command rows, under them"),
     ] {
         assert!(
@@ -803,10 +813,20 @@ fn the_command_panel_is_drawn_from_the_frame() {
 
     // Built from the frame: the list, and which screen each row of it belongs on. The second is what
     // this round added, and it is what lets the dialog be six short screens rather than one column.
-    let drawn = from("function drawRows(doc, key, panel, list)", 60);
+    let drawn = from("function drawRows(doc, key, list)", 70);
     for (needed, why) in [
         ("state.commands", "the list of commands"),
         ("command.group === key", "the screen the frame filed the row on"),
+        // The class is the *grouping inside* a screen, and it is the menu's own words rather than a
+        // second set: a launcher and a screen are answering the same question about a row, and two
+        // vocabularies for one set of five classes is a page teaching a person both.
+        ("command.class", "which class the row belongs to"),
+        ("MENU_GROUPS", "the words those classes are called, shared with the `/` menu"),
+        // A class this build has never heard of is drawn under no heading rather than dropped: the
+        // Node harness found exactly that hole -- a row of an unknown class simply vanished from the
+        // screen -- when the grouping was written, and a page that hides a command it does not
+        // recognise is the worst version of a page that knows a command's name.
+        ("groups.push([className, \"\"])", "an unfamiliar class is still drawn"),
     ] {
         assert!(
             drawn.contains(needed),
@@ -1233,7 +1253,7 @@ fn a_row_the_panel_cannot_press_says_where_its_control_is() {
     );
 }
 
-/// The run's settings live in a dialog, and the header keeps one door onto them.
+/// The run's settings live in a dialog, and the door onto them is in the sidebar's foot.
 ///
 /// Asked for after using the page: *the controls are laid out raw on the surface, and they should be
 /// in settings* — modelled on DSH, where a settings seat holds what changes the run and the header
@@ -1241,23 +1261,28 @@ fn a_row_the_panel_cannot_press_says_where_its_control_is() {
 /// the failure mode is a slow one: a row added straight back into the header, or a control left
 /// behind outside the dialog, is invisible in a diff and only shows up as a header that has grown
 /// back into the reading column. So the header's own slice of the markup is asserted to hold the
-/// name, the work, and the door — and nothing else.
+/// name and the work — and nothing else.
+///
+/// The door moved one more step, and for the reason DSH's own trigger is where it is: it was the last
+/// control on the header's line, and a control that changes the *process* was the one thing there that
+/// was not a fact about the conversation. It is now the sidebar's bottom seat — a place of its own, out
+/// of the reading, and where a person already goes to choose what they are looking at.
 #[test]
-fn the_runs_controls_live_in_a_dialog_and_the_header_keeps_one_door() {
+fn the_runs_controls_live_in_a_dialog_and_the_header_keeps_no_door() {
     let html = view();
     // The header's top line, as bytes: from the name to the end of its own div.
-    let head = from("<div class=\"head-line\">", 40);
+    let head = from("<div class=\"head-line\">", 30);
     let head = head.split("<!-- The settings dialog").next().unwrap_or(&head);
-    for needed in ["id=\"title\"", "id=\"jobs\"", "id=\"settings-open\""] {
+    for needed in ["id=\"title\"", "id=\"jobs\""] {
         assert!(
             head.contains(needed),
             "the header's line must still carry {needed}: {head}"
         );
     }
     // The controls that used to be laid out on this line, none of which may come back: the two
-    // pickers, the switches, the one-press actions, and the command list. `id="meta"` is on the list
-    // for the other reason -- the facts about the conversation belong in the dialog's foot, not
-    // beside the name.
+    // pickers, the switches, the one-press actions, the command list, and the door itself.
+    // `id="meta"` is on the list for the other reason -- the facts about the conversation belong in
+    // the dialog's foot, not beside the name.
     for moved in [
         "id=\"pick-provider\"",
         "id=\"pick-model\"",
@@ -1265,6 +1290,7 @@ fn the_runs_controls_live_in_a_dialog_and_the_header_keeps_one_door() {
         "id=\"actions\"",
         "id=\"meta\"",
         "id=\"command-list\"",
+        "id=\"settings-open\"",
     ] {
         assert!(
             !head.contains(moved),
@@ -1274,8 +1300,19 @@ fn the_runs_controls_live_in_a_dialog_and_the_header_keeps_one_door() {
     // The screens are built rather than written, so what the markup must carry is the rail and the
     // container they are built into -- inside the dialog, which is checked below.
 
-    // The door is a door, and it is shut until the page has a run to describe -- the same rule the
-    // controls themselves followed, because a dialog with nothing in it is worse than no dialog.
+    // The door is a door, it sits in the sidebar's own seat, and it is shut until the page has a run
+    // to describe -- the same rule the controls themselves followed, because a dialog with nothing in
+    // it is worse than no dialog. The seat's own `hidden` is the other half: without it, a page with
+    // no run shows an empty strip with a hairline over it where a row should be.
+    let seat = html
+        .find("class=\"side-foot\"")
+        .expect("the sidebar has no seat for the door");
+    let sidebar_at = html.find("<aside id=\"sidebar\"").expect("the sidebar is in the page");
+    let door_at = html.find("id=\"settings-open\"").expect("the page never draws the door");
+    assert!(
+        sidebar_at < seat && seat < door_at,
+        "the door must be inside the sidebar's own foot, not somewhere else on the surface"
+    );
     let door = from("id=\"settings-open\"", 1);
     assert!(
         door.contains("aria-haspopup=\"dialog\""),
@@ -1285,10 +1322,14 @@ fn the_runs_controls_live_in_a_dialog_and_the_header_keeps_one_door() {
         door.contains("hidden"),
         "the door ships closed, like the controls it replaced: {door}"
     );
-    let shown = from("const door = document.getElementById(\"settings-open\");", 2);
+    let shown = from("const door = document.getElementById(\"settings-open\");", 4);
     assert!(
         shown.contains("door.hidden = !state"),
         "the door is offered exactly when the frame describes a run: {shown}"
+    );
+    assert!(
+        shown.contains("seat.hidden = !state"),
+        "and the seat goes with it, or the page shows an empty strip where the door would be: {shown}"
     );
 
     // The dialog says what it is -- the attributes are the difference between a modal and a panel
@@ -1299,7 +1340,7 @@ fn the_runs_controls_live_in_a_dialog_and_the_header_keeps_one_door() {
         "the dialog must be a labelled modal: {dialog}"
     );
     assert!(
-        from("<h2 id=\"settings-title\">", 1).contains("settings"),
+        from("id=\"settings-title\"", 1).contains("settings"),
         "the label the dialog points at must be the dialog's own heading"
     );
     let dialog_at = html

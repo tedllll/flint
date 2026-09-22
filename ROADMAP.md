@@ -2099,10 +2099,15 @@ where prose and tree disagree is item 3.**
     `--no-session` run refuses it in the sentence every other door uses, a conversation nobody has
     spoken in yet says there is nothing to export, and a write that fails is reported rather than
     ending the run — the difference from `flint export`, which returns an error because it *is* the run.
-11. **One cosmetic thing, recorded because a survey should be honest about the tail.** §8's page groups
-    in the commands panel are still the *classes* the round that built them was working through rather
-    than a task a person would name. Low value, no behaviour; listed only so the next reader knows it
-    was seen and judged not worth a round on its own.
+11. **One cosmetic thing, recorded because a survey should be honest about the tail — *answered
+    2026-09-22*.** §8's page groups in the commands panel were the *classes* the round that built them was
+    working through rather than a task a person would name. The person asked for the split directly in
+    those terms ("cut it the way the page is used, like DSH's"), so the panel's rows are now the dialog's
+    six **places** — `model`, `this run`, `limits`, `tools`, `this conversation`, `background work` —
+    filed by the process, and the classes stayed where a class is the right question: the `/` menu's
+    grouping, and (since the round that rebuilt the dialog's chrome) the headings *inside* a screen, where
+    "what does this row do?" is answered once in the menu's own five words rather than in a second
+    vocabulary. §22 and §25 of `docs/web-mode.md`.
 
 12. **The largest item, and the only one that is a decision rather than a task: the one place the plan
     of record contradicts a plan document — *decided 2026-09-18, and declined*.** `## Not doing, and why`

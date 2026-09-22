@@ -257,6 +257,38 @@ const viewer = loadViewer();
 const doc = (text) => viewer.applyText(viewer.newDoc(), text);
 const kinds = (d) => d.blocks.map((b) => b.kind);
 
+// The dialog's shape, in one place. It has moved twice under these checks -- the settings rows became
+// a text block with a control beside them, and a screen's command rows moved inside a group per class
+// -- and a check that spells the walk out has to be edited every time, which is how an assertion
+// quietly ends up examining nothing. So: a setting row is a name, what changing it means, and the
+// control; a screen's rows are the groups in `#row-list-<screen>`, and a group holds its rows in a
+// `group-rows` box under a heading it may not have.
+const settingsOf = (page, screen) => page.__node("fields-" + screen).children;
+const controlOf = (row) => row.children[1];
+const namesOf = (page, screen) =>
+  settingsOf(page, screen).map((row) => row.children[0].children[0].textContent);
+const helpsOf = (page, screen) =>
+  settingsOf(page, screen).map((row) => row.children[0].children[1].textContent);
+const wordsOf = (control) => control.children.map((choice) => choice.textContent);
+const chosenOf = (control) => {
+  const on = control.children.find((choice) => choice.getAttribute("aria-pressed") === "true");
+  return on ? on.textContent : null;
+};
+// Everything on a screen's row list. While a reading is open this *is* the reading -- the way back,
+// the line that was asked for, and the answer -- because an answer is not a class of row and replaces
+// the groups rather than sitting inside one. Otherwise its children are the groups.
+const listOf = (page, screen) => page.__node("row-list-" + screen).children;
+const groupsOf = (page, screen) => listOf(page, screen);
+const rowsBox = (group) =>
+  group.children.find((child) => child.className === "group-rows") || { children: [] };
+const rowsOf = (page, screen) => groupsOf(page, screen).flatMap((group) => rowsBox(group).children);
+const headingsOf = (page, screen) =>
+  groupsOf(page, screen).map((group) => {
+    const title = group.children.find((child) => child.className === "group-title");
+    return title ? String(title.textContent) : "";
+  });
+const labelsOf = (page, screen) => rowsOf(page, screen).map((row) => String(row.children[0].textContent));
+
 console.log("the viewer over a session file");
 
 // The exact shape `docs/session-format.md` documents, including a name appended later (the
@@ -485,6 +517,7 @@ check("a state frame becomes a control per setting, on the screen the frame name
   eq(d.state, null, "a page with no frame has no state");
   page.showState(d);
   eq(page.__node("fields-model").children.length, 0, "a document with no state draws no settings");
+  eq(page.__node("fields-model").hidden, true, "and the empty block is not drawn at all");
   eq(page.__node("fields-run").children.length, 0, "on any screen");
 
   page.applyState(d, JSON.stringify({
@@ -499,25 +532,29 @@ check("a state frame becomes a control per setting, on the screen the frame name
     ],
   }));
 
-  const model = page.__node("fields-model");
-  eq(model.children.map((r) => r.children[0].textContent), ["provider", "model"],
+  eq(namesOf(page, "model"), ["provider", "model"],
      "the settings the frame filed on that screen, in the frame's order");
-  eq(model.children.map((r) => r.children[1].textContent), ["switch endpoint", "switch model"],
+  eq(helpsOf(page, "model"), ["switch endpoint", "switch model"],
      "each row says what changing it means");
-  const providers = model.children[0].children[2];
-  eq(providers.tag, "select", "a choice is a select");
-  eq(providers.children.map((o) => o.value), ["stub", "other"], "the words the frame named");
-  eq(providers.value, "stub", "set to what is in force");
-  eq(providers.disabled, false, "two providers is a choice");
-  eq(providers.title, "switch endpoint", "and explains itself on hover");
-  eq(page.__node("fields-run").children.map((r) => r.children[0].textContent), ["verbose"],
+  // The control is the words themselves: one press per value the frame named, with the one in force
+  // filled in. A `<select>` was the same fact behind a control the OS drew, which is why no setting
+  // is drawn with one any more.
+  const providers = controlOf(settingsOf(page, "model")[0]);
+  eq(providers.className, "choices", "a choice is the frame's own words as presses");
+  eq(wordsOf(providers), ["stub", "other"], "the words the frame named");
+  eq(chosenOf(providers), "stub", "marked as the one in force");
+  eq(providers.children[0].disabled, false, "two providers is a choice");
+  eq(providers.children[0].tag, "button", "and each word is pressable");
+  eq(providers.title, "switch endpoint", "and the control explains itself on hover");
+  eq(namesOf(page, "run"), ["verbose"],
      "a setting goes on the screen the frame named, not on the first one");
-  eq(page.__node("fields-run").children[0].children[2].value, "full", "showing what is in force");
+  eq(chosenOf(controlOf(settingsOf(page, "run")[0])), "full", "showing what is in force");
 
   // A frame that has gone away takes the settings with it: a control showing a value nothing is
   // reporting any more is the one thing this page must not leave behind.
   page.applyState(d, JSON.stringify({ type: "state" }));
   eq(page.__node("fields-model").children.length, 0, "a frame with no settings draws none");
+  eq(page.__node("fields-model").hidden, true, "and hides the block rather than leaving it empty");
   eq(page.__node("fields-run").children.length, 0, "and takes the old ones away");
 });
 
@@ -536,10 +573,10 @@ check("a setting whose value is a line is a form, and its kind is the frame's wo
         send: "/config set shell", help: "the shell the bash tool runs" },
     ],
   }));
-  const rows = page.__node("fields-limits").children;
-  eq(rows.map((r) => r.children[2].tag), ["form", "form"], "a line is typed into a form");
-  const steps = rows[0].children[2];
-  const shell = rows[1].children[2];
+  const rows = settingsOf(page, "limits");
+  eq(rows.map((r) => controlOf(r).tag), ["form", "form"], "a line is typed into a form");
+  const steps = controlOf(rows[0]);
+  const shell = controlOf(rows[1]);
   eq(steps.children.map((n) => n.tag), ["input", "button"], "an input and a press");
   eq(steps.children[0].type, "number", "the frame said number");
   eq(shell.children[0].type, "text", "and the frame said text");
@@ -557,10 +594,10 @@ check("a setting whose value is a line is a form, and its kind is the frame's wo
   eq(steps.children[1].disabled, true, "and putting it back takes the press away again");
 });
 
-// The case that made `fillSelect` more than three lines: `/model` offers a provider's own `model`
-// whether or not it is repeated in `models`, so a frame can name a current value that is not among
-// the alternatives. A `<select>` whose value is not one of its options keeps the *first* option
-// instead, silently -- and then sends it as soon as anything else on the page is touched.
+// The case that made the old `fillSelect` more than three lines, and it outlived the select: `/model`
+// offers a provider's own `model` whether or not it is repeated in `models`, so a frame can name a
+// current value that is not among the alternatives. A control built from `choices` alone would show
+// whichever word came first and then *send* it the moment anything else on the page was touched.
 check("a value the frame does not list is still the one shown", () => {
   const d = viewer.newDoc();
   viewer.applyState(d, JSON.stringify({
@@ -568,9 +605,9 @@ check("a value the frame does not list is still the one shown", () => {
     settings: [{ group: "model", key: "model", kind: "select", value: "hand-written",
       choices: ["stub-a", "stub-b"], send: "/model", help: "switch model" }],
   }));
-  const models = viewer.__node("fields-model").children[0].children[2];
-  eq(models.children.map((o) => o.value), ["hand-written", "stub-a", "stub-b"], "options");
-  eq(models.value, "hand-written", "the value in force");
+  const models = controlOf(settingsOf(viewer, "model")[0]);
+  eq(wordsOf(models), ["hand-written", "stub-a", "stub-b"], "the words, with what is in force first");
+  eq(chosenOf(models), "hand-written", "the value in force");
 });
 
 check("a picker with one choice says so by being unusable", () => {
@@ -580,7 +617,9 @@ check("a picker with one choice says so by being unusable", () => {
     settings: [{ group: "model", key: "provider", kind: "select", value: "solo",
       choices: ["solo"], send: "/provider", help: "switch endpoint" }],
   }));
-  eq(viewer.__node("fields-model").children[0].children[2].disabled, true, "one provider is not a choice");
+  const control = controlOf(settingsOf(viewer, "model")[0]);
+  eq(wordsOf(control), ["solo"], "the one word the frame named is still drawn");
+  eq(control.children[0].disabled, true, "and it is dead: one provider is not a choice");
 });
 
 check("the header says which model wrote this only when there is no state to say it", () => {
@@ -627,16 +666,16 @@ check("the frame's rows are drawn on the screens it names, and only there", () =
       { label: "/delete <n|id>", send: "/delete", help: "delete one", class: "danger", group: "conversation" },
     ],
   }));
-  eq(page.__node("rows-limits").hidden, false, "a screen with rows on it is offered");
-  eq(page.__node("row-list-limits").children.map((r) => r.children[0].textContent), ["/config"],
+  eq(page.__node("row-list-limits").hidden, false, "a screen with rows on it is offered");
+  eq(rowsOf(page, "limits").map((r) => r.children[0].textContent), ["/config"],
      "a report row is on the screen the frame filed it on");
-  eq(page.__node("row-list-run").children.map((r) => r.children[0].textContent), ["/reload"],
+  eq(rowsOf(page, "run").map((r) => r.children[0].textContent), ["/reload"],
      "and an action on its own");
-  eq(page.__node("row-list-conversation").children.map((r) => r.children[0].textContent),
+  eq(rowsOf(page, "conversation").map((r) => r.children[0].textContent),
      ["/resume <n|id>", "/name [text]", "/delete <n|id>"],
      "the frame's order, kept inside the screen");
-  eq(page.__node("rows-model").hidden, true, "a screen the frame filed nothing on is not offered");
-  eq(page.__node("row-list-tools").children.length, 0, "and holds no row of somebody else's");
+  eq(page.__node("row-list-model").hidden, true, "a screen the frame filed nothing on is not offered");
+  eq(rowsOf(page, "tools").length, 0, "and holds no row of somebody else's");
 
   // A frame whose rows carry no screen at all: the dialog is empty rather than showing every row on
   // the first screen, which would be this page deciding where a row belongs -- the one thing the
@@ -646,7 +685,7 @@ check("the frame's rows are drawn on the screens it names, and only there", () =
     commands: [{ label: "/config", send: "/config", help: "show shell", class: "panel" }],
   }));
   for (const [key] of page.SETTINGS_PANES) {
-    eq(page.__node("rows-" + key).hidden, true, "a row with no screen is shown on none of them: " + key);
+    eq(page.__node("row-list-" + key).hidden, true, "a row with no screen is shown on none of them: " + key);
   }
 });
 
@@ -668,7 +707,7 @@ check("a report row is pressable on its screen and the other rows are not", () =
       { label: "/resume <n|id>", send: "/resume", help: "switch to one of them", class: "selector", group: "conversation" },
     ],
   }));
-  const reports = page.__node("row-list-limits").children;
+  const reports = rowsOf(page, "limits");
   eq(reports.map((r) => r.tag), ["button"], "a report row is a control");
   eq(reports[0].type, "button", "and not a submit button, which would reload the page");
   eq(reports[0].className, "row", "and is not marked as reference");
@@ -678,7 +717,7 @@ check("a report row is pressable on its screen and the other rows are not", () =
     "it still says what to type and what it does"
   );
   eq(
-    page.__node("row-list-conversation").children[0].tag,
+    rowsOf(page, "conversation")[0].tag,
     "div",
     "a selector is still only a row: this page has nothing to choose from yet"
   );
@@ -697,7 +736,7 @@ check("a row that carries values offers one line per value", () => {
       { label: "/config", send: "/config", help: "show shell", class: "panel", group: "tools" },
     ],
   }));
-  const reports = page.__node("row-list-tools").children;
+  const reports = rowsOf(page, "tools");
   eq(
     reports.map((r) => r.children[0].textContent),
     ["/skills [name]", "/skills alpha", "/skills beta", "/config"],
@@ -720,13 +759,13 @@ check("a row that takes a field gets one, and only the rows the frame marks", ()
       { label: "/config edit", send: "/config edit", help: "change shell", class: "form", group: "limits" },
     ],
   }));
-  const forms = page.__node("row-list-conversation").children;
+  const forms = rowsOf(page, "conversation");
   eq(
     forms.map((n) => n.tag),
     ["form"],
     "a row with answers gets a form"
   );
-  const named = page.__node("row-list-model").children;
+  const named = rowsOf(page, "model");
   eq(named.map((n) => n.tag), ["form"], "on the screen the frame filed it on");
   eq(
     [forms[0], named[0]].map((f) => f.children[0].tag + ":" + f.children[0].type),
@@ -742,7 +781,7 @@ check("a row that takes a field gets one, and only the rows the frame marks", ()
   // A form row the frame does *not* mark is a row of reference, which is the half that says the field
   // comes from the frame rather than from the class: `/config edit` asks its questions at the
   // terminal, and a page that drew it a box would send a line nobody there can answer.
-  const wizard = page.__node("row-list-limits").children;
+  const wizard = rowsOf(page, "limits");
   eq(wizard.map((n) => n.tag), ["div"], "the wizard stays a row of reference");
 });
 
@@ -766,7 +805,7 @@ check("a row that takes several answers asks for each of them", () => {
         group: "model", fields: addFields },
     ],
   }));
-  const forms = page.__node("row-list-model").children;
+  const forms = rowsOf(page, "model");
   eq(forms.length, 2, "both rows are drawn");
   const add = forms[1];
   eq(
@@ -818,7 +857,7 @@ check("a destructive row opens its choices rather than sending", () => {
         group: "conversation", from: "sessions" },
     ],
   }));
-  const closed = page.__node("row-list-model").children;
+  const closed = rowsOf(page, "model");
   eq(closed.map((n) => n.tag), ["button"], "the row is pressable");
   eq(
     closed.map(says),
@@ -833,7 +872,7 @@ check("a destructive row opens its choices rather than sending", () => {
   // disturb the rest of the dialog.
   d.confirm = { send: "/provider rm" };
   page.paintSettings(d);
-  const open = page.__node("row-list-model").children;
+  const open = rowsOf(page, "model");
   eq(open.map((n) => n.tag), ["button", "button", "button"], "a way back and two candidates");
   eq(
     open.map(says),
@@ -843,7 +882,7 @@ check("a destructive row opens its choices rather than sending", () => {
   eq(open[0].className, "back", "the way back is marked as one");
   eq(open[1].className, "row danger", "and the ones that send are marked as destructive");
   eq(
-    page.__node("row-list-conversation").children.map(says),
+    rowsOf(page, "conversation").map(says),
     ["/delete <n|id>"],
     "the other screen still has its own rows"
   );
@@ -852,7 +891,7 @@ check("a destructive row opens its choices rather than sending", () => {
   // than an empty list that looks like a list with nothing in it.
   d.confirm = { send: "/delete" };
   page.paintSettings(d);
-  const empty = page.__node("row-list-conversation").children;
+  const empty = rowsOf(page, "conversation");
   eq(
     empty.map(says),
     ["\u2039 back", "nothing to choose from"],
@@ -879,7 +918,7 @@ check("a row this page cannot press says where its control is", () => {
         class: "unheard-of", group: "tools" },
     ],
   }));
-  const offered = page.__node("row-list-model").children;
+  const offered = rowsOf(page, "model");
   eq(offered[0].tag, "button", "a switch with values is a control");
   eq(offered[0].className, "row", "not a reference row");
   eq(offered[0].title, "switch to one", "and keeps the frame's own help");
@@ -888,23 +927,23 @@ check("a row this page cannot press says where its control is", () => {
 
   // Everything else is reference: a row that says what the command is, dressed so that it cannot be
   // mistaken for the control it is not -- and saying, on hover, where that control actually is.
-  const conversation = page.__node("row-list-conversation").children[0];
+  const conversation = rowsOf(page, "conversation")[0];
   eq(conversation.tag, "div", "the selector with nothing to offer is not pressable");
   eq(conversation.className, "row reference", "it is marked as reference");
   eq(conversation.title, "this one is a conversation on the left", "and names the one home it has");
-  eq(page.__node("row-list-model").children[2].tag, "div", "a form row with no field is reference too");
+  eq(rowsOf(page, "model")[2].tag, "div", "a form row with no field is reference too");
   eq(
-    page.__node("row-list-model").children[2].title,
+    rowsOf(page, "model")[2].title,
     "this one is typed in the terminal -- it asks questions",
     "a form the terminal asks about is the terminal's"
   );
   eq(
-    page.__node("row-list-tools").children[0].title,
+    rowsOf(page, "tools")[0].title,
     "this one is typed in the terminal",
     "and a class this page has never met is not guessed at"
   );
   eq(
-    page.__node("row-list-tools").children[0].children.map((n) => n.textContent),
+    rowsOf(page, "tools")[0].children.map((n) => n.textContent),
     ["/something <x>", "a row of a class this page has not met"],
     "and it still reads like a row"
   );
@@ -924,7 +963,7 @@ check("a listing being read replaces its own screen's rows, and the way back res
   d.readingGroup = "limits";
   d.readingText = "config: /tmp/config.toml\n  verbose          = on";
   page.paintSettings(d);
-  const drawn = page.__node("row-list-limits").children;
+  const drawn = listOf(page, "limits");
   eq(drawn[0].tag, "button", "the way back is a control");
   eq(drawn[1].textContent, "/config", "the heading is what was asked for");
   eq(drawn[2].textContent.includes("config.toml"), true, "and the listing is the process's own text");
@@ -932,13 +971,14 @@ check("a listing being read replaces its own screen's rows, and the way back res
   // appended to a list nobody is looking at. The other screen is untouched: a reading belongs to the
   // row that asked for it.
   eq(drawn.length, 3, "the rows are replaced rather than added to");
-  eq(page.__node("row-list-tools").children.length, 1, "and another screen keeps its own rows");
+  eq(rowsOf(page, "tools").length, 1, "and another screen keeps its own rows");
   d.reading = null;
   d.readingGroup = "";
   page.paintSettings(d);
-  const back = page.__node("row-list-limits").children;
+  const back = rowsOf(page, "limits");
   eq(back.length, 1, "going back draws the rows again");
-  eq(back[0].children[0].textContent, "/config", "with the report row in it");
+  eq(labelsOf(page, "limits"), ["/config"], "with the report row in it, under its class again");
+  eq(headingsOf(page, "limits"), ["reports"], "and the grouping is back with it");
 });
 
 check("a report frame fills the screen only for what is being read", () => {
@@ -986,16 +1026,20 @@ check("the frame's action rows become buttons on the screen it names", () => {
       { label: "/reload", send: "/reload", help: "re-read the config file", class: "button", group: "run" },
     ],
   }));
-  const box = page.__node("row-list-run");
-  eq(box.children.map((b) => b.children[0].textContent), ["/reload"], "one button per action on that screen");
-  eq(box.children[0].title, "re-read the config file", "the help is the tooltip");
-  eq(box.children[0].type, "button", "a button that cannot submit anything");
-  eq(box.children[0].className, "row action", "marked as an action rather than a report");
-  eq(
-    page.__node("row-list-conversation").children[0].children[0].textContent,
-    "/new",
-    "and the frame's own order is kept inside a screen"
-  );
+  const buttons = rowsOf(page, "run");
+  eq(buttons.map((b) => b.children[0].textContent), ["/reload"], "one button per action on that screen");
+  eq(buttons[0].title, "re-read the config file", "the help is the tooltip");
+  eq(buttons[0].type, "button", "a button that cannot submit anything");
+  eq(buttons[0].className, "row action", "marked as an action rather than a report");
+  // The class is also the heading, and the words are the `/` menu's own: a launcher and a screen are
+  // answering the same question about a row, and two sets of names for five classes is a page
+  // teaching a person both. The frame's order is kept *inside* a group -- the groups are the classes,
+  // in the menu's order, which is what puts the destructive pair at the bottom of a long screen.
+  eq(headingsOf(page, "run"), ["actions"], "under the class's own word");
+  eq(labelsOf(page, "conversation"), ["/new", "/delete <n|id>"],
+     "a screen of two classes reads as its classes, each in the frame's order");
+  eq(headingsOf(page, "conversation"), ["actions", "destructive"],
+     "with the rows that destroy work last, under their own word");
 });
 
 check("a state frame with no actions in it takes the buttons away", () => {
@@ -1005,8 +1049,8 @@ check("a state frame with no actions in it takes the buttons away", () => {
     type: "state", provider: "stub", model: "m", providers: [],
     commands: [{ label: "/reload", send: "/reload", help: "re-read the config file", class: "button", group: "run" }],
   }));
-  eq(page.__node("row-list-run").children.length, 1, "a button while the frame lists an action");
-  eq(page.__node("rows-run").hidden, false, "and the screen it is on is offered");
+  eq(rowsOf(page, "run").length, 1, "a button while the frame lists an action");
+  eq(page.__node("row-list-run").hidden, false, "and the screen it is on is offered");
   // A frame with only reports in it: nothing to press on that screen. A panel is not a button --
   // pressing one would send a command into the terminal, which is the one place §8 says a report
   // should not go.
@@ -1014,8 +1058,8 @@ check("a state frame with no actions in it takes the buttons away", () => {
     type: "state", provider: "stub", model: "m", providers: [{ name: "stub", models: ["m"] }],
     commands: [{ label: "/config", send: "/config", help: "show shell, steps, proxy", class: "panel", group: "limits" }],
   }));
-  eq(page.__node("row-list-run").children.length, 0, "no action rows, no buttons");
-  eq(page.__node("rows-run").hidden, true, "and a screen with nothing left on it is not offered");
+  eq(rowsOf(page, "run").length, 0, "no action rows, no buttons");
+  eq(page.__node("row-list-run").hidden, true, "and a screen with nothing left on it is not offered");
 });
 
 console.log("where the lines come from");
@@ -1821,7 +1865,9 @@ check("the dialog opens and closes as a dialog, and the keyboard goes with it", 
 // files anything on is a heading over an empty pane, and `tests/web_view.rs` holds the other side of
 // that pair.
 check("the rail offers one screen per place, and shows one at a time", () => {
-  const rail = viewer.__node("settings-nav");
+  // The dialog's own name is the rail's first child, so the cells live in the list under it: the
+  // checks below walk the list and not the nav, which is what the page does too (`showSettingsPane`).
+  const rail = viewer.__node("settings-list");
   eq(
     viewer.SETTINGS_PANES.map(([key]) => key),
     ["model", "run", "limits", "tools", "conversation", "work"],
@@ -2072,7 +2118,7 @@ check("taking a row does exactly what its dispatch says", () => {
   eq(page.__node("message").value, "", "a form row leaves the line empty, not holding the query");
   eq(page.settingsOpen(), true, "it opens the dialog");
   eq(page.__node("pane-model").hidden, false, "at the screen the row's subject belongs to");
-  const marked = page.__node("row-list-model").children
+  const marked = rowsOf(page, "model")
     .filter((r) => String(r.className).includes("pointed"))
     .map((r) => r.textContent);
   eq(marked.length, 1, "and the row it was about is marked on that screen: " + JSON.stringify(marked));

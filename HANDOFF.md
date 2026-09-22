@@ -32,9 +32,11 @@ reconstruct it:
 The gate as the last session left it — re-measured after the page slices at the top of
 `## What was just done`, on a tree with the untracked verification record held aside (that file and no
 other is the one thing `cargo test` disagrees with; see the paragraph after this one) — re-measured
-again on 2026-09-18, after the tool-payload round and that session's three commits, and re-measured a
+again on 2026-09-18, after the tool-payload round and that session's three commits, re-measured a
 third time on **2026-09-22**, after the two page rounds at the top of `## What was just done` (the
-preview's line numbers, then the settings screens and the `toggles` field's removal): `cargo test`
+preview's line numbers, then the settings screens and the `toggles` field's removal), and re-measured a
+fourth time the same day after the round above it (DSH's settings shape, the sidebar seat, the panel's
+hand): `cargo test`
 **681 passing, 1 ignored** across the 14 suites (lib 382 — 368 of it before the tool-payload round, so
 that round added 14 — bin 8, `agent_loop` 34, `balance` 7, `cli_output` 113, `json_output` 41, `say` 6,
 `search_tool` 4, `task` 17, `term_capture` 20 + 1 ignored, `tty_hangup` **0 on Windows** and 3 on Unix
@@ -46,7 +48,7 @@ ubuntu job's total is larger and is *not* quoted here as if it were this number 
 more step of that same CI job** — `examples/python/test_call.py` and `examples/mcp/test_mcp.py`, each
 resolving the binary `cargo test` just built for itself and refusing a pass that came from an installed
 `flint` on `PATH`; the
-browser harness run by hand at **101/101 claims held**, printing the list of drives and not-drives it is
+browser harness run by hand at **109/109 claims held**, printing the list of drives and not-drives it is
 bounded by. The release binary on `PATH` is the tree's (`flint --version` → `flint 0.1.0`, exit 0, and
 its SHA-256 is the one `target/release/flint.exe` was built with).
 
@@ -1818,6 +1820,94 @@ picker, type `/config` into the composer, and see whether the answer lands in th
 the block is drawn — then open the `commands` panel and read it against `/help` in the terminal.
 
 ## What was just done
+
+### The settings dialog in DSH's shape, the door in the sidebar's seat, and a hand on the preview — 2026-09-22
+
+**Asked for directly, in one message: *the settings are still bad — read DSH's own for reference — the
+preview on the right cannot be dragged to resize it*, and then one more sentence about where the door
+goes: *put the settings at the bottom left*.** Three faults of three different kinds — a page that looked
+like settings without being one, a control that was simply missing, and a seat — and it is a page round
+with no Rust behind it beyond three retargeted policy tests.
+
+**DSH's own settings surface was read, not remembered.** Its `settings-general` client bundle and its
+theme bundle were opened in the installed harness
+(`AppData\Roaming\npm\node_modules\@deepseek-ai\dsh\node_modules\@deepseek-ai\dsh-client-ui-*/lib/client.js`)
+and the numbers came from there: an `800px` panel `min(800px, 100vh - 48px)` tall at `32px` radius with a
+prominent shadow; a `188px` nav column with a `16px/500` title over `40px` cells at `12px` radius; a `54px`
+content header with a `28px` round close and one scrolling options region; theme groups as
+`border-bottom` + `gap: 8px` + `padding: 16px 0` with a `14px` title; and a trigger that lives in the
+sidebar's **bottom seat** at `42px`. flint kept its own palette, tokens and lowercase vocabulary and took
+the *shape*: a titled rail with real cells, a heading over each group, one scrolling page, and a control
+that is the page's rather than the operating system's. §25 of `docs/web-mode.md` is the record.
+
+**The `<select>`s are gone from every setting, and that is the change that makes this a *settings*
+surface rather than a form.** A native select is the OS's control — its size, its colours in a dark page,
+and a list that opens *over* the dialog it is in — and it cannot be driven by any protocol, which is why
+§11 had carried "a picker from the keyboard" as an unreachable residue for three rounds. The words were
+already in the frame (`choices`), so each setting is now one **button per word** with the one in force
+pressed (`aria-pressed`), a single word is one dead button, and a value the frame reports but does not
+list is drawn as one more button and pressed rather than silently replaced by the first of the others. The
+dialog has exactly one `<select>` left, and it is not a setting: `/say --to`'s peer picker, where an
+answer is being *given* and the OS list is the right shape. The residue went with the widget.
+
+**A screen's command rows are grouped by their class, under the `/` menu's own five words.** The groups
+are `MENU_GROUPS` — not a second vocabulary, because a launcher and a screen are answering the same
+question about a row ("what does this do?") — and the order is the menu's, which is what puts the
+destructive rows at the bottom of a long screen without anybody deciding to.
+
+**The Node harness found a hole in that grouping, and it was a row disappearing.** The first version drew
+one group per *known* class plus one untitled group for rows with no class at all; a row whose class the
+page had never heard of — a command added to the process after this page was written — went into neither
+and **vanished from the screen**. `a row this page cannot press says where its control is` failed with
+`Cannot read properties of undefined (reading 'title')`, and the fix is a group per unfamiliar class,
+untitled, in the frame's order. It is the same rule the report fallback follows one level up, and
+`tests/web_view.rs` now pins it (`groups.push([className, ""])`) so it cannot be tidied away.
+
+**The preview got the third hand — and a defect only a laid-out page could show.** The panel is a grid
+column, so its boundary takes the same three gestures through the same `dragBoundary` helper the other two
+use: a pointer drag, the arrows (`16px`, `48px` with `Shift`), a double-click to put the width back, and a
+clamp of `280px … min(1100px, window.innerWidth - 420px)` so neither hand can squeeze the transcript away.
+`openPreview` unhides the hand and writes its `aria-valuenow` from the panel's measured width;
+`closePreview` hides it, because a grip over a shut panel is a control onto nothing that would eat the
+pointer events of whatever lands under it. The defect: the hand's grid track is `auto` (so both preview
+columns collapse to nothing when no panel is open), and **an empty `div` in an `auto` track is 0px
+wide** — the drag returned `false` because the press landed on the transcript beside it and the
+double-click never reached the hand, while nothing in the page's own state was wrong. The browser harness
+printed `width: 0`; the fix is one CSS line. A claim that says a hand works is not a claim that it is
+*in the layout*, and the new claims assert both (5px wide, 0–12px from the panel's edge, hidden again
+after `Escape`).
+
+**The door moved to the sidebar's bottom seat, and the header now keeps no control at all.** It was the
+last thing on the header's line and the only one there that was not a fact about the conversation. The
+seat (`.side-foot`, `#side-foot`) ships `hidden` with the door — an empty strip with a hairline over it is
+worse than nothing — and `paintSettings`' `showState` toggles both. The Rust policy test was renamed
+(`the_runs_controls_live_in_a_dialog_and_the_header_keeps_no_door`) and now asserts the door is inside the
+sidebar's own foot and *not* in the header, plus the seat's own `hidden`; the browser harness asserts the
+seat sits at or below the bottom of the conversation list.
+
+**What the harnesses cost this round, and one thing about the harness itself.** Three Rust policy tests
+were retargeted at the new chrome — one of them *better* than before, since
+`the_settings_are_the_runs_own_lines_and_nothing_else` now pins `sendText(send + " " + word)` inside
+`choiceControl` and `setting.choices` inside `settingRow` rather than a window that spanned two functions.
+The Node harness's ~25 row lookups moved to group-aware helpers (`settingsOf`/`rowsOf`/`headingsOf`/
+`labelsOf`/`listOf`) in one place, with `listOf` kept apart because a **reading replaces a screen's groups
+rather than sitting in one**. And the browser harness's two `<select>` claims had to be rewritten twice:
+`VALUE_OF` reads `aria-pressed` now, `CHOICES_OF`/`NEXT_CHOICE` describe the words, and — measured, not
+assumed — **a `<button>` cannot be pressed by a raw `Input.dispatchKeyEvent` for Enter**: button
+activation on Enter is the browser's own default action and the protocol's raw key event does not carry it,
+so the claim presses the word with a real click and asserts separately that the word is focusable, which is
+the half of the keyboard path this page owns.
+
+**The gate**: `cargo test` **681 passing, 1 ignored** (unchanged: no Rust test was added or removed — three
+were retargeted), `cargo clippy --all-targets -- -D warnings` silent, `term-layout-test.js`,
+`web-view-test.js` and both `examples/` doors green, and `scripts/browser-controls-test.js` by hand at
+**109/109 claims held** (was 101: seven claims added around the door's seat, the words and the panel's
+hand, and one more for the focus half). `docs/web-mode.md` gained §25 (the DSH read, the table of what
+changed, the dropped-class and width-0 defects, the claim table) and §22 now points at it; §11's three
+touched rows were rewritten, including the residue paragraph that named the native `<select>`, which
+this round removed. `docs/features.md` §12.3 and §12.5 follow: the door's row moved to the sidebar, the
+two `<select>` rows became the words-as-buttons rows, the three grips are named, and the standing
+`<select>` residue now names the one select that is left.
 
 ### The settings are screens now, and the preview numbers its lines — 2026-09-22
 

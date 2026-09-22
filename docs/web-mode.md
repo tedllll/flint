@@ -16,9 +16,10 @@ which is what makes the page a **composer** and gives it a sidebar. §11 records
 measured in a browser versus what has not, and as of 2026-09-17 that includes every control §8
 built: the switches, the panel, the buttons, the forms and the destructive rows have all been
 driven with real input events, and driving them found two defects. What is left is not a level but
-a polish list, named at the end of §11: a native `<select>`'s open popup, which is the operating
-system's, and the page's own long-answer and reconnection measurements. §8's "not doing" is still not
-being done.
+a polish list, named at the end of §11: the page's own long-answer and reconnection measurements —
+and the one widget that *was* on that list, a native `<select>`'s open popup, is gone with §25, which
+replaced the last `<select>` on the settings surface with the frame's own words as buttons. §8's
+"not doing" is still not being done.
 
 The token goes in two different places, and the difference is deliberate: `?token=` is accepted
 on `/` alone, because that is the URL `--web` prints and the only one a person pastes into an
@@ -47,8 +48,8 @@ reading would have. The same has since been done to every control in §8 — dri
 DevTools protocol by `scripts/browser-controls-test.js`, which found two more defects, one of
 them a page with no controls on it at all — and then, in the same harness, to the sidebar's own `⋯`
 menu, both drag grips and a picker from the keyboard, which were §11's last "reasoned rather than
-seen" residue. What remains unmeasured is one widget and one section, named at the end of §11: a
-native `<select>`'s open popup, and the page's long answers and reconnection. The *listener*'s own questions — §4's boundary, §6's routes, backpressure and
+seen" residue — and, in §25, the settings door's own seat and the preview's third hand. What remains
+unmeasured is one section, named at the end of §11: the page's long answers and reconnection. The *listener*'s own questions — §4's boundary, §6's routes, backpressure and
 reconnection — were measured in the macOS pass this file records, and the phrasing above used to
 say they were unmeasured "because the listener does not exist yet", which stopped being true when
 it was built.
@@ -621,9 +622,9 @@ way as everything else in this section, against a real `--web` process:
 | The page is told the state | `/events` read as it arrives, on connect | carried, once, as a named frame — and re-derived then dropped when unchanged, because the REPL asks on every line and a frame per line would rebuild a picker under whoever is choosing from it |
 | A page that opens later is told it | a *second* `/events` connection, after the state had already been announced | carried from the snapshot. A client with no cursor is not replayed the ring at all, so on connect is the only chance it gets |
 | The page can change it | `POST /message` with `/model stub-other`, the route the picker uses | the feed carried `"model":"stub-other"` a moment later: the command the picker composes is the terminal's own, and the frame describes the run that command made |
-| The pickers are drawn right | the page's real `applyState` under Node, over the stub DOM | options in, the value in force selected, a single-option picker disabled. The case that needed care: a current value the frame does not list — a provider's own `model` is offered by `/model` whether or not it is repeated in `models` — where a `<select>` keeps its first option and would then *send* it |
-| A setting can be switched from the page | `POST /message` with `/verbose full`, the line the switch composes | the feed carried `"name":"verbose"…"value":"full"` a moment later. The frame carries each toggle as a name, the values that name takes and the value in force, so the page holds no list of its own — not the toggles, not the words, and not which one is on |
-| The switches are drawn right | `showToggles` under Node, over the stub DOM | one labelled switch per toggle in the frame, each holding that toggle's values with the value in force selected; a frame with no toggles in it removes them rather than leaving values behind that nothing is reporting |
+| The settings are drawn right | the page's real `applyState` under Node, over the stub DOM | one row per setting the frame sent, on the screen it named, each row a name, what changing it means and a control: a choice is one button per word the frame listed with the one in force pressed (and a single word means a disabled button), a typed value is a form with the frame's own `kind` as the input's type. The case that needed care: a current value the frame does not list — a provider's own `model` is offered by `/model` whether or not it is repeated in `models` — which is drawn as one more word and *pressed*, rather than quietly becoming the first of the others and then being sent |
+| A setting can be switched from the page | `POST /message` with `/verbose full`, the line the control composes | the feed carried `"name":"verbose"…"value":"full"` a moment later. The frame carries each setting as a key, the values that key takes and the value in force, so the page holds no list of its own — not the settings, not the words, and not which one is on |
+| A frame with no settings in it takes them away | the same function, over the stub DOM | the rows are removed and the block is `hidden`, rather than left holding values nothing is reporting any more |
 
 **Measured in a browser since, 2026-09-17** — see `The later controls, in a real browser` at the end of
 this section, which drives the header with a real font and a real window: the switches, the pickers and
@@ -963,7 +964,10 @@ window, and real input events: `Input.dispatchMouseEvent` at each element's own 
 
 The same harness then closed the residue this section used to carry — the sidebar's own `⋯` menu, both
 drag grips, and a picker from the keyboard — so it is 34 claims rather than 20 and no control of the
-page's is left asserted-but-undriven. Those are the last six rows of the table below.
+page's is left asserted-but-undriven. Those are the last six rows of the table below. §22 then made the
+switches and the pickers *settings* rather than header controls and §25 made them words rather than
+`<select>`s, so those rows have been retargeted twice; the harness is **109 claims** as §25 leaves it,
+and the number is a date rather than a promise.
 
 **Every claim is checked against the run's stdout, not against the page.** That is the whole method: a
 click that sent nothing leaves the page looking exactly like a click that worked, so the witness has to
@@ -974,7 +978,7 @@ traffic, which is what turned the first failure from "the controls never appeare
 | Claim | How | Result |
 |---|---|---|
 | The switches are drawn from the run's own state | the header, read from the page | `verbose`, `detail`, `readonly`, `hear-peers` — the frame's four, in its order |
-| A switch moves the control and the run together | `ArrowDown` on the focused `readonly` select | the page's value changed *and* the run printed `/verbose full …` — the same line the keyboard path sends, because a native select opened by a pointer is an OS widget no protocol can reach into |
+| A switch moves the control and the run together | a real click on the word beside the one in force, on the `this run` screen | the page's pressed word changed *and* the run printed the line that word composes. The control is a row of the frame's own words since §25, so the press is the pointer's — a `<button>`'s activation on Enter is the browser's own default action and a raw protocol key event does not carry it, so a claim about that would be a claim about Chrome; what *is* asserted is that the word is a real, focusable, uncovered button and that the run was told |
 | The panel opens with a click, and lists the run's commands | a real click on `commands`, then the panel's text | open, with rows from all five classes including `/config`, `/provider key`, `/delete <n|id>` and `/name`; the form rows appear as their submit buttons, which is why the check reads text rather than `code` elements |
 | The run's actions are buttons in the header | the same frame, `#actions` | `/new` and `/reload` — not rows in the panel, which is the design and was worth writing down |
 | A report is answered in the panel and nowhere else | a real click on `/config`, then the panel and the run's stdout | the listing was drawn in the panel and the terminal gained **not one byte** — the quiet-answer channel, seen from a browser for the first time |
@@ -987,7 +991,8 @@ traffic, which is what turned the first failure from "the controls never appeare
 | The second press in a row's menu carries that row's number | a real click on the `/delete` row of a conversation the harness created | that session file was gone from `sessions/`, read off the directory rather than the page — the terminal would agree with a menu that had sent the wrong number and been refused |
 | The sidebar's hand takes a real drag, and the arrow keys and a double-click belong to the same control | a pointer press, four moves with `buttons: 1`, a release; then `ArrowRight` on the focused hand; then two press/release pairs with `clickCount` 1 and 2 | `--side` grew by the drag, grew by 16 with the arrow, and the double-click removed the property rather than leaving a number — with `body.dragging` asserted *during* the drag, which is the page saying it accepted it. Mutation-checked: neutering the page's `pointermove` handler fails this row and the one below it (32/34) while the arrow-key and double-click claims still pass, so the two halves are independent |
 | The reading hand is the same control on the other boundary | the same gestures on `#read-grip`, dragging left | `--read` shrank by the drag, and its double-click reset its own width — and, as the check asserts, nobody else's |
-| A picker moves from the keyboard, and the run is told which model | focus `#pick-model`, `ArrowDown` | the page's value changed *and* the run printed `ok model …` for that value. The open *popup* is still the OS's and still unreachable, which is the residue below |
+| The panel's own hand is the third boundary, and §25 added it | the same gestures on `#preview-grip`, dragging left, then the arrow keys, then two clicks | `--preview` grew by the drag *and the panel with it*, grew by 16 with the arrow, and the double-click removed the property; `aria-valuenow` is asserted to agree with the panel's measured width, the hand is asserted to be **in the layout** (width 5px, 0–12px from the panel's left edge), and it is asserted **hidden again** once `Escape` closes the panel. Measured the hard way first: an `auto` grid track with an empty div in it is a hand of width **0**, which no pointer can land on — both the drag and the double-click claims failed against it while the fault was read as "the hand does not work" |
+| A picker is pressed, and the run is told which model | a real click on the word beside the one in force, on the `model` screen | the page's pressed word changed *and* the run printed `ok model …` for that value. The open *popup* is no longer a residue at all: the words are buttons on the page since §25, so there is no OS widget left in this claim |
 
 **Two defects, and both were unreachable from the source.** The first: a run with `--web` that has not
 been spoken to yet answered **500** on `/session` — the run names its session when it starts, the *file*
@@ -1008,11 +1013,12 @@ hand inside it is positioned against it) and a *static* composer paints below it
 tree order puts the later sibling back on top, and a number would only be a number to escalate against
 the sidebar's own menu. The harness's check was red before the fix and is the reason to believe it.
 
-**What this does not cover, and it is one widget and one section now.** A native `<select>`'s open
-*popup* belongs to the operating system, so no protocol can reach into it; the picker itself is driven
-from the keyboard, which is the path a person takes through it, and what it sends is checked against the
-run. Long answers and reconnection, which are §11's own performance section and were measured on macOS
-over a different harness, are the other half — and the composer at the *keyboard* was measured in the
+**What this does not cover — and the widget it used to name is gone.** A native `<select>`'s open *popup*
+belonged to the operating system, so no protocol could reach into it; §25 removed the last `<select>`
+from the settings surface (the words are buttons now), so there is no widget left here that a claim has
+to reason about rather than drive. What is left is scope rather than a gap: long
+answers and reconnection, which are §11's own performance section and were measured on macOS
+over a different harness, and the composer at the *keyboard*, which was measured in the
 earlier pass, with the button driven here.
 
 ### A saved prompt, readable and sendable — measured, 2026-09-17
@@ -1993,7 +1999,7 @@ picture, so that number is what this process and the tab hold in memory at once.
 `blob:`. The page makes that URL itself, from bytes it fetched with a header, so it is not a second way
 in — and the alternative that needed no widening (`data:`) was refused above for a reason of its own.
 
-## 22. The settings dialog: the header keeps a door — **built**
+## 22. The settings dialog: six screens — **built; §25 rebuilds its chrome and moves the door to the sidebar**
 
 The second half of the same request §17 and §18 came from, and the half that was a complaint rather than
 a request: *the page is weak, the controls are laid out raw on the surface, and some of it should be in
@@ -2002,8 +2008,14 @@ holds a picker per provider, a switch per toggle, a button per action and a refe
 commands has stopped being a header and become the top of the reading column. The reading is what the
 page is for; everything else is furniture.
 
-**What moved, and what stayed.** The header's line is now the conversation's name, the jobs chips, and
-one `settings` button. Behind the button: the two pickers, the five switches, the run's own action
+> **What in this section has moved since.** The screens, the `group` field and the page's ownership of
+> the *names* are as written here. The **chrome** — the rail, the rows, and the controls on them — was
+> rebuilt on DSH's own shape in §25, and the door is no longer on the header's line: it is the sidebar's
+> bottom seat. Read both; where they disagree about furniture, §25 is the later measurement.
+
+**What moved, and what stayed.** The header's line was the conversation's name, the jobs chips, and
+one `settings` button (since §25 it is the name and the chips, and the button is the sidebar's bottom
+seat). Behind the button: the two pickers, the five switches, the run's own action
 buttons, its `cwd`/id/creation line, and the command list. The chips stayed because they are *status* —
 "2 running" is what the header is for — and the name stayed because it is the one thing that says whose
 conversation this is. The line between the two is not "important versus unimportant": it is **state you
@@ -2102,7 +2114,7 @@ accident.
 
 | Claim | Where it was measured | What came back |
 |---|---|---|
-| The header keeps a door and nothing else | `tests/web_view.rs::the_runs_controls_live_in_a_dialog_and_the_header_keeps_one_door` | the header's own bytes carry the name, the jobs panel and the door; the pickers, switches, actions, `meta` and command rows are asserted **absent** from it and **present** after the dialog opens |
+| The header holds what identifies the conversation and nothing else | `tests/web_view.rs::the_runs_controls_live_in_a_dialog_and_the_header_keeps_no_door` | the header's own bytes carry the name and the jobs panel; the pickers, switches, actions, `meta`, command rows **and the door** are asserted **absent** from it, and the door is asserted to be inside the sidebar's own foot (see §25) |
 | It is a modal, and everything that changes state is inside it | the same test | `role="dialog"`, `aria-modal="true"`, `aria-labelledby` pointing at the dialog's own heading, and the rail, the container, the close button and `meta` asserted to be past the dialog's own offset in the file |
 | Three doors, and one Escape order | the same test | the close button, the mask and `dismissTopmost` are all wired, and the modal is asked about *before* the preview in that function |
 | One screen at a time | the same test | six named screens in the rail, and `showSettingsPane` shuts the others; a screen the rail does not offer changes nothing |
@@ -2111,7 +2123,7 @@ accident.
 | The menu hands a row off to its own screen | the same two | a `form` row opens the dialog at the row's screen and marks the row there; a report row's reading lands on the row's screen, or the first screen for a row the frame does not file |
 | The dialog opens and closes with the keyboard | `scripts/web-view-test.js` | shut on load, `openSettings` builds the screens, unhides it with the mask and focuses `close`; `closeSettings` refocuses the door |
 | One `Escape` puts away the thing in front | `scripts/web-view-test.js` | with the dialog and the panel both open, the first press closes the dialog and leaves the panel; the second closes the panel; with nothing open it does nothing |
-| The screens are really behind the door, and the page is untouched | `scripts/browser-controls-test.js` against a live run | the door ships hidden then visible, the dialog opens with the mask and the focus, six screens are built with settings and rows already in them, the run's rows are asserted *inside* the dialog, one screen shows at a time, a row is pressed on the screen it belongs to — and the geometry of the page behind is identical to the pixel |
+| The screens are really behind the door, and the page is untouched | `scripts/browser-controls-test.js` against a live run | the door ships hidden then visible **in the sidebar's seat, under the conversation list**, the dialog opens with the mask and the focus, six screens are built with settings and rows already in them, the run's rows are asserted *inside* the dialog, one screen shows at a time, a row is pressed on the screen it belongs to — and the geometry of the page behind is identical to the pixel |
 
 **Not built, and named where it is.** Nothing else from §19's plan is missing: the `/` trigger menu it
 designed is built and recorded in §23, and the `form` rows are already in the right place for it — a
@@ -2305,3 +2317,101 @@ Markdown renderer". Nothing about the file changes: `GET /file` still serves the
 refuses what it refused, and the reading exists only in the panel. §20's closing sentence — that the
 preview's contents are the file and not a transformation of it — is now true of *one* of two views rather
 than of the only one, and the toggle is the sentence.
+## 25. The dialog in DSH's own shape, and a hand on the preview — **built**
+
+Asked for directly, after using the page: *the settings are still bad — read DSH's own for reference —
+and the preview on the right cannot be dragged to resize it*, plus one more sentence about where the door
+belongs: *put the settings at the bottom left*. Three faults, one round, and each is a different kind:
+the first is a page that looked like settings without being one, the second is a control that was simply
+missing, and the third is a seat.
+
+**What "still bad" meant, read off DSH's own panel rather than remembered.** The dialog already had
+DSH's *geometry* from §22 — a centred modal, a rail down the left, one screen at a time — and none of its
+*quality*. It was a rail of six buttons over a column of rows, each row a label, a sentence, and a native
+`<select>` or a one-line form; the command rows were a flat list under the settings with no headings at
+all. DSH's own surface was read for this (its `settings-general` client bundle: the panel is
+`800px` wide, `height: min(800px, 100vh - 48px)`, `border-radius: 32px` with a prominent shadow; the nav
+is a `188px` column with a `16px/500` title and `40px` cells at `12px` radius; the content is a `54px`
+header with a `28px` round close and one scrolling options region; its trigger is a `42px` cell in the
+sidebar's **bottom seat**). flint keeps its own palette, its own lowercase vocabulary and its own tokens —
+what it took is the *shape*: a real rail cell set, a heading over each group, and a control that is the
+page's rather than the operating system's.
+
+| What changed | What it was | What it is now |
+|---|---|---|
+| The door | the last control on the header's line | the **sidebar's bottom seat**, its own row under the conversation list, and the seat is `hidden` with the door (an empty strip with a hairline over it is worse than nothing) |
+| The rail | six buttons in a bare `div` | a titled, `190px` column: `settings` at `15px/600` over a list of `40px` cells at `12px` radius, the one in force filled, the whole set inside a bordered column |
+| A setting's control | a native `<select>`, or a form | the frame's own words as **buttons**, the one in force pressed (`aria-pressed`), and a single word is one disabled button; a typed value is still a form, with the frame's `kind` as the input's type |
+| The command rows | one flat list of rows per screen | a **group per class**, in the `/` menu's own order, each under its class's word (`reports`, `actions`, `selectors`, `forms`, `destructive`) |
+| The rows themselves | a control with two bare spans | a text block (name at `13.5px`, help at `12px` dim) and the control beside it, separated by a hairline that the first row of a group does not get |
+| The panel's width | `min(720px, 45vw)`, fixed | `var(--preview)`, set by a **hand** between the reading and the file, with the same gestures the other two boundaries have |
+
+**The class is the group, and the words are the menu's.** §11's rule for the `/` menu is that the frame's
+five classes already say what a press would do; the same five say how a *screen* should be read, so the
+groups are `MENU_GROUPS` — one vocabulary, not two. A page that invented its own headings ("commands",
+"reports and tools") would be teaching a person a second set of names for the same five things, which is
+exactly the drift this repository spends its comments preventing. The order is the menu's order too, which
+is what puts the destructive rows at the bottom of a long screen without anybody deciding to.
+
+**An unfamiliar class is drawn, not dropped — and the Node harness is what found it.** The first version
+of the grouping filtered rows by the classes the page knows and drew one untitled group for rows with
+*no* class; a row whose class the page has never heard of (a command added to the process after this page
+was written) went into neither and **vanished from the screen**. The harness's `a row this page cannot
+press says where its control is` failed with `Cannot read properties of undefined`, and the fix is a
+group per unknown class, untitled, in the frame's order. It is the same rule the report fallback follows
+one level up: what the frame offers is not this page's to lose, and a page that hides a command it does
+not recognise is the worst version of a page that knows a command's name.
+
+**Why the `<select>`s went, and the one that stayed.** A native `<select>` is the operating system's
+control: its own size, its own colours in a dark page, and a list that opens *over* the dialog it is in.
+It also cannot be driven by any protocol, which is the residue §11 carried for three rounds as "a picker
+from the keyboard" — with the words already in the frame, the honest control is the words themselves, one
+press each, and the residue disappears with the widget. The dialog has exactly one `<select>` left and it
+is not a setting: the peer picker in `/say`'s form, which is *an answer being given* rather than a value
+being set, and where the OS list is the right shape.
+
+**The preview's hand, and the defect only a browser could find it had.** The panel is a grid column
+(`§12`), so the boundary between the reading and the file is a boundary like the sidebar's, and it takes
+the same three gestures through the same `dragBoundary` helper the other two use: a pointer drag, the
+arrow keys (`16px`, `48px` with `Shift`), and a double-click to put the width back. It is clamped to
+`280px … min(1100px, window.innerWidth - 420px)` so that neither hand can squeeze the transcript to
+nothing — the same argument as `min(var(--side), 60vw)`, in JS because the number depends on the window
+and on where the panel's own right edge is. `openPreview` unhides the hand and writes its `aria-valuenow`
+from the panel's measured width; `closePreview` hides it again, because a grip left over a shut panel is
+a control onto nothing that would eat the pointer events of whatever ends up under it.
+
+The defect is worth recording as a type, not an incident. The hand's grid track is `auto` (so that both
+preview columns collapse to nothing when no panel is open, which is what keeps a reading page from losing
+5px to a control that is not there) — and **an empty `div` in an `auto` track is 0px wide**. The page
+looked right, the claims read right, and the harness said `width: 0`: the drag returned `false` because
+the pointer press landed on the transcript beside it, and the double-click never reached the hand at all.
+The fix is one line in the CSS (`width: 5px`), and the reason it took a browser to see is that *nothing
+in the page's own state is wrong* — there is no frame, no value, no node that says "the hand is zero
+wide"; only a laid-out box does.
+
+**What the harnesses found, in order.** The Node harness found the dropped class (above). The Rust policy
+tests found the three places the markup is grepped and had to be retargeted at the new chrome — one of
+them *better* than it was: `the_settings_are_the_runs_own_lines_and_nothing_else` now pins
+`sendText(send + " " + word)` in `choiceControl` and `setting.choices` in `settingRow`, which is the
+composition rule stated where it is composed rather than in a window that spans two functions. The
+browser harness found the width-0 hand, and one thing about *itself*: a claim that a `<button>` can be
+pressed by a raw `Input.dispatchKeyEvent` for Enter does not hold — button activation on Enter is the
+browser's own default action and the protocol's raw key event does not carry it — so the two claims that
+used to press a `<select>` with `ArrowDown` now press the word with a real click and assert that it is
+focusable, which is the half of the keyboard path this page actually owns.
+
+| Claim | Where it was measured | What came back |
+|---|---|---|
+| The door is the sidebar's bottom seat | `tests/web_view.rs::the_runs_controls_live_in_a_dialog_and_the_header_keeps_no_door`, and the browser harness | the door's own bytes are inside the sidebar's foot, the header still carries the name and the jobs panel and **not** the door, the seat and the door ship `hidden` and are shown together when the frame describes a run — and in a browser the seat's top is at or below the bottom of the list above it |
+| A choice sends the frame's line and nothing else | `tests/web_view.rs`, over the page's bytes | `choiceControl` contains exactly one `sendText(send + " " + word)`, and the words come from `setting.choices` |
+| The words are the frame's, including the value in force | `scripts/web-view-test.js` | the words in order, the one in force pressed, a single word a disabled button, and a value the frame did not list drawn *first* and pressed |
+| A screen's rows are grouped by their class, in the menu's order | the same harness | the group headings are `reports`/`actions`/`destructive` for the classes present, the frame's order is kept inside a group, and a class the page has never seen is drawn untitled rather than dropped |
+| A reading still replaces its own screen's rows | the same harness | the way back, the heading and the answer are the screen's row list *instead of* the groups, and going back draws the groups again under their headings |
+| The panel's hand is in the layout, and works | `scripts/browser-controls-test.js` against a live run | width `5px` and 0–12px from the panel's left edge, `--preview` grows by the drag *and the panel with it*, grows by `16` with the arrow, `aria-valuenow` agrees with the measured width, the double-click removes the property, and `Escape` hides the hand with the panel |
+
+**The gate, after all of it.** `cargo test` 681 passed / 1 ignored (the pty test, Unix only) across its
+suites — unchanged, since this round retargeted three tests rather than adding any; `cargo clippy
+--all-targets -- -D warnings` silent; `node scripts/term-layout-test.js`,
+`node scripts/web-view-test.js`, `python examples/python/test_call.py` and `python examples/mcp/test_mcp.py`
+all green; and `scripts/browser-controls-test.js` **109/109** in headless Chrome on Windows — a hand run,
+because it needs a real browser.

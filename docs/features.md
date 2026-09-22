@@ -764,24 +764,28 @@ name, no toggle name and no provider list of its own, so a control that appears 
 really has. That is a policy (`tests/web_view.rs`), not a style: a second reader of the same state can
 disagree with the process.
 
-The header keeps **one** control — a door — and everything that changes the run is behind it, in a
+Everything that changes the run lives behind **one door**, in a
 settings dialog cut into **six screens** — `model`, `this run`, `limits`, `tools`, `this conversation`,
 `background work` — one at a time, from a rail on the left. The cuts are the places a person goes
 rather than the classes of thing a row is: which screen a row lands on is decided by the **process**
 (each row carries a `group`, filed by `page_group` in `src/main.rs`), and the page owns only the screen
-names, their order and their one-line notes (§22 of `docs/web-mode.md` is the reasoning and the
-measured record). A header holding the raw controls is a header that takes the reading column's width
-for furniture, which is what this replaced.
+names, their order and their one-line notes. *Within* a screen the rows are grouped by their **class**,
+under the same five words the `/` menu uses (`reports`, `actions`, `selectors`, `forms`, `destructive`).
+The door is the sidebar's **bottom seat** — its own row under the conversation list, where DSH's own
+settings trigger sits — because a control that changes the process is not a fact about the conversation,
+which is all the header carries (§22 and §25 of `docs/web-mode.md` are the reasoning and the measured
+record). A header holding the raw controls is a header that takes the reading column's width for
+furniture, which is what this replaced.
 
 | Area | Control | What pressing it does |
 |---|---|---|
 | header | the conversation's name, above everything | not a control: the session file's own newest `title` event, else the label `GET /sessions` chose (the newest name, else the first thing said, else `(empty)`). Clipped with the whole of it in the tooltip |
 | header | the status chips | not controls either: `N running` (or `N stopping`), `N subagent(s)`, `N failed`, `N done`, counted from `GET /jobs` by kind. The whole line is **hidden when there is no work**, and a failure is never folded into `done` |
-| header | `#settings-open` | the one door: opens the settings dialog, and is **hidden when no `state` frame has arrived** — a page opened from a dropped file has no run to describe |
+| sidebar | `#settings-open`, in the foot under the conversation list | the one door: opens the settings dialog, and is **hidden when no `state` frame has arrived** — a page opened from a dropped file has no run to describe. The seat around it is hidden with it, so a page with no run shows no empty strip |
 | settings | `#settings-close`, the mask, `Escape` | three ways out of the same dialog: its own `close` button, a press anywhere on the mask, and `Escape`. Closing returns the keyboard to `#settings-open`, and opening moves it to `#settings-close` |
 | settings | the rail (`model`, `this run`, `limits`, `tools`, `this conversation`, `background work`) | one screen at a time, built from the page's own list when the dialog opens; the one in force is marked `aria-current="true"` and the others are `hidden`, so a row on another screen cannot be pressed at all. A screen name is the page's own word for *a place it put things* — what is inside it still comes from the frame |
-| settings | the `model` screen: the provider and model `<select>`s, and the thinking ladder | sends `/provider <name>` / `/model <name>` / `/thinking <level>`; a refusal reverts the picker from the frame. The ladder is drawn here rather than with the other four switches because whether the endpoint has a reasoning field is a property of the *endpoint*, which is what this screen is about |
-| settings | `this run`: one `<select>` per switch | sends `/<switch> <value>` — `verbose`, `detail`, `readonly`, `hear-peers` |
+| settings | any setting whose values are words (`model`, `this run`) | one **button per word the frame listed**, with the one in force pressed (`aria-pressed="true"`); a press sends the frame's own line — `/provider <name>`, `/model <name>`, `/thinking <level>`, `/<switch> <value>`. A word the frame did not list but reports as the value in force is drawn as one more button and pressed, never silently replaced by the first of the others. A setting with a single word is one dead button. There is no `<select>` in a setting: the words *are* the control |
+| settings | a setting whose value is a line (`shell`, `shell_args`, `max_steps`, `proxy`) | a one-line form whose input type is the frame's own `kind`, and a `save` button that is disabled until the value differs from the one in force |
 | settings | one action button, on the screen the frame filed it on | sends the frame's own line — `/reload` and `/say` on `this run`, `/new` and the rest on `this conversation` |
 | settings | the dialog's foot (`#meta`) | not a control: the loaded conversation's model, `cwd`, provider, id, creation time and last usage — the line the header used to carry, under every screen rather than on one |
 | settings | a **report** row | sends nothing: it asks for a *reading* (`POST /report`) and shows the answer in place of **that screen's** rows, with a `‹ back` button. The screen travels with the request, so an answer cannot arrive under another heading |
@@ -789,7 +793,7 @@ for furniture, which is what this replaced.
 | settings | a **destructive** row | first press opens its choices and sends nothing; the second press sends `<send> <value>`. The choices are the list the frame names: conversations (the sidebar's numbers), providers (their names), or jobs (the pids the jobs panel is showing). With nothing to choose from it says `nothing to choose from` |
 | settings | a **form** row (`/provider add`, `/provider key`, `/config set`, `/import`, `/export`, `/name`, `/queue`) | one field per argument the frame declares; a `password` field is drawn masked and emptied after a send; an answer the frame does not mark optional must be filled or the line is not sent |
 | settings | a row the page draws no control for | a reference row, titled with where its control actually is — `a conversation on the left` for `/resume <n\|id>`, `typed in the terminal -- it asks questions` for the forms the page cannot fill. The page says where *it* put things; the frame says what exists |
-| settings | `/say`'s `--to` picker | the options are the live runs sharing this directory, fetched from `GET /peers`: `(everyone here)` first, then `pid N · <model> · <read-only> · here now` — or, with nobody here, the fact that it waits in the file |
+| settings | `/say`'s `--to` picker | a `<select>` (the only one left on the page, because an answer being *given* is where the OS's own list is the right shape): the live runs sharing this directory, fetched from `GET /peers`: `(everyone here)` first, then `pid N · <model> · <read-only> · here now` — or, with nobody here, the fact that it waits in the file |
 | header | the jobs panel | the chips above it are its summary; the panel itself is one row per job this run started: kind, what was asked, how long it has been going (ticking once a second), and its exit code in words once it ends. Pressing a row opens its log or the child's own conversation in the preview. A job that has been asked to stop counts as `running`/`stopping` — it is still spending time — and is not offered in the `/jobs stop` menu a second time |
 | sidebar | `+ new` | sends `/new`; disabled for the round trip so one click cannot start two conversations |
 | sidebar | a conversation row | sends `/resume <n>` — the current row does nothing |
@@ -813,12 +817,12 @@ for furniture, which is what this replaced.
 | preview | `source`, `rendered` (`button#preview-render`) | switches a `.md`/`.markdown`/`.mdown`/`.mkd`/`.mdx` file between the page's **reading** of it and the file's own bytes. Only drawn for a file whose name says Markdown that was read as text; the label names the view a press would show, `aria-pressed` names the one in force, and the note beside the path ends in `· rendered` when a reading is on screen. A press **re-reads the route** rather than keeping a copy of the bytes (§24 of `docs/web-mode.md`) |
 | preview | — | the reading is block-level only: headings (ATX and setext), fenced code with its language, nested bulleted/numbered lists, blockquotes, thematic breaks, pipe tables with the alignment their divider asks for, and paragraphs (their wrapped lines joined with a space). **Inline syntax is not parsed** — `**bold**`, `` `code` `` and `[text](url)` are the characters the file holds — and raw HTML is text, because this page never assigns markup. Anything the reader does not recognise is a paragraph, never a guess |
 | preview | — | a `.md` file **without** a line opens rendered, and **with** a line opens raw (`previewView`): a `grep` hit or a compiler error names a line, and "line 412" has no meaning in a reading. A file with any other extension is text, and a picture is neither |
-| layout | the two grip handles | drag to resize the sidebar and the reading column; `ArrowLeft`/`ArrowRight` move the boundary by 16 px (48 with Shift); a **double-click puts the width back to the stylesheet's**. Neither width is persisted |
+| layout | the three grip handles | drag to resize the sidebar, the reading column and the **file preview**; `ArrowLeft`/`ArrowRight` move the boundary by 16 px (48 with Shift); a **double-click puts the width back to the stylesheet's**. No width is persisted. The preview's hand exists only while the panel does — it is unhidden with the panel and hidden again when the panel closes, so there is never a grip onto nothing |
 | anywhere | `Escape` | puts away **one** thing, front to back: the `/` menu first (it lives in the composer, where the keyboard already is), then the settings dialog, then the preview panel, then the jobs list. One press per thing, and the order is a function rather than three listeners, so "which one does this close?" has an answer that can be read (`dismissTopmost`). With nothing open it does nothing |
 
 The page handles exactly six keys itself: `Enter` in the textarea (and in the `/` menu, where the two
 arrows move the mark), the two arrows on a focused grip, and that one `Escape` order. Everything else —
-a `<summary>` opening, a `<select>`, `Tab`, typing — is the browser's own behaviour.
+a `<summary>` opening, `/say`'s peer `<select>`, `Tab`, typing — is the browser's own behaviour.
 
 ### 12.4 What the page deliberately cannot do
 
@@ -865,7 +869,9 @@ that understood JavaScript would be a second parser to be wrong about.
   `source`, or when it was opened at a line, so the reading is never the only thing the panel can show; a
   real OS-level launch is never performed by a test (the command lines are
   asserted, the spawn is not driven); a
-  native `<select>`'s open popup belongs to the operating system and no test can reach into it; the tab's
+  native `<select>`'s open popup belongs to the operating system and no test can reach into it — one
+  `<select>` is left on the page, `/say`'s peer picker, and it is the reason that residue is still
+  written here at all; the tab's
   own title is not updated (the exported page's is); and `POST /log` writes a line on every boot of a
   served page, whether or not `?debug=1` is used.
 
