@@ -101,3 +101,37 @@ jobs:
           node --version
           node scripts/term-layout-test.js
           node scripts/web-view-test.js
+
+      # And the two doors that are not Rust at all: the Python caller and the MCP server. They are
+      # shipped surfaces -- `AGENTS.md` names both, and an editor or a parent agent is what uses them
+      # -- and until this step none of the three checks above touched a line of either. `test_call.py`
+      # drives `flint_call.py` end to end against a stub provider and reads the request bodies back
+      # out of the stub; `test_mcp.py` speaks JSON-RPC at `flint_server.py`, which spawns a real flint
+      # and would otherwise be checked only on the machine that wrote it.
+      #
+      # Both are stdlib-only and take their own free port, so nothing is installed for this and no
+      # key is needed. `python` rather than `python3`: the two runners disagree about which name
+      # exists -- ubuntu has `python3` and windows has `python` -- and this step would otherwise be
+      # one platform's. The version is printed for the same reason as Node's above: a check that
+      # failed on a runner's interpreter and passed on a developer's is a difference worth being able
+      # to read off the log.
+      #
+      # The binary under test is `cargo test`'s own build, two steps up: `CARGO_BIN_EXE_flint` is what
+      # `tests/` spawn, so it is there, and both scripts choose it themselves (`flint_call._binary`,
+      # `test_mcp.flint_binary`), print which one they ran and refuse to pass on an installed `flint`
+      # from `PATH` instead -- the wrong-reason pass those two files exist to catch, and one that a
+      # bare `flint` in this step's environment would have walked straight into.
+      #
+      # Nothing is exported to them on purpose. `$PWD` in the windows job's bash is an MSYS path
+      # (`/d/a/flint/flint`), and a native Windows Python cannot open one, so `FLINT_BIN="$PWD/..."`
+      # would name a file the check cannot spawn. It would work anyway, because MSYS rewrites
+      # environment variables that look like paths on the way out to a non-MSYS program -- which is
+      # the reason not to do it: a guarantee that rides on a compatibility shim is worse than the
+      # check resolving the path in its own language.
+      - name: The Python caller and the MCP server
+        shell: bash
+        run: |
+          PY=$(command -v python3 || command -v python)
+          "$PY" --version
+          "$PY" examples/python/test_call.py
+          "$PY" examples/mcp/test_mcp.py

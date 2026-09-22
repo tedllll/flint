@@ -88,6 +88,19 @@ test: `a_background_command_is_a_job_the_page_can_watch_end`, "cannot connect to
 127.0.0.1:43443 for /jobs: Connection refused". Both are a run that is gone before the test is finished
 with it, and both messages said only the symptom.
 
+**The second of those two flakes has since been traced to the same defect, by ancestry rather than by a
+reproduction.** `git merge-base --is-ancestor 7e6ef58 fef238f` and the same for `3dad8ee` both hold: the
+commit that discarded the poll (`7e6ef58`, 2026-09-15, "a line that was already waiting no longer erases
+the question") is an ancestor of *both* pushes that flaked (2026-09-18), so every sighting of the class —
+the broken pipe and the refused `/jobs` connection alike — happened in a tree carrying a `--web` run that
+could die by that panic. It fits the symptoms exactly, because both are what a *dead process* looks like
+from outside: a write to its stdin is a broken pipe and a read of its listener is `ECONNREFUSED`, which is
+the same sentence the diagnostic commit wrote for itself ("a run that is gone cannot answer"). What is
+still not reproduced is the *jobs* test's death specifically, so this is recorded as the likeliest cause
+with its evidence rather than as a closure: if that test fails on ubuntu again, the annotation now carries
+the run's own status and stderr, and the question to ask it is whether the child's panic is
+`` `async fn` resumed after completion``.
+
 **One of those two flakes is now reproduced and fixed, and the fix is one line of reasoning.** The fourth
 outing of the class arrived on the push that added Markdown to the preview — a commit that touches no Rust
 at all — and this time the annotation carried the child's own panic instead of the symptom:
@@ -1905,6 +1918,31 @@ why it took four sightings — and it is not a race once it happens, because a f
 always panics. This is the first of the two recorded CI flakes to be *explained* rather than merely
 tolerated; the other ("Connection refused" in the jobs test) is still open and still unexplained.
 
+**Then the queue of record was empty, so the next round is the one §9 named — "whatever using it turns
+up" — and what using the *gate* turned up was the last two unchecked doors.** With `docs/features.md`
+verified against the build, the page's own plan (§19–§24) built to the end of its list, and every item in
+§11 either built or answered, the remaining surfaces with nothing automatic behind them were
+`examples/python/test_call.py` and `examples/mcp/test_mcp.py`: the Python caller and the MCP server, both
+named in `AGENTS.md` as shipped doors, neither touched by `cargo test` — the MCP server is pure Python, so
+no test had ever read a line of it. They are now a step in the same CI job as everything else, and the
+step was **watched red twice before it was trusted, both mutations reverted**: renaming the tool in
+`flint_server.py` fails "named for what it does", and renaming the `--json` stream's own `type` key in
+`src/ndjson.rs` fails `test_call.py` with `KeyError: 'type'` — one break in the door and one in the
+program, because a check that only catches its own fixture is not a check.
+
+**And writing it found a check that had been passing for the wrong reason, which is the part worth
+reading.** `test_mcp.py` resolved the binary it tests with `shutil.which("flint") or "flint"`, so on this
+machine it ran `C:\Users\<me>\bin\flint.exe` — the **installed release**, rebuilt after every commit and
+therefore one commit behind the tree — while `target\debug\flint.exe` was the build under test. That is
+exactly the trap `flint_call._binary` documents in its own docstring ("a check that runs yesterday's
+installed flint passes for the wrong reason… this file's session-layout expectations were first written
+while `PATH` still held a build from before the layout changed"), and the fix is that same rule: `FLINT_BIN`
+first, then the checkout's build, then `PATH`. It was watched red first — the new claim, section 0 of the
+check, failed with `chose C:\Users\<me>\bin\flint.EXE; this checkout has …\target\debug\flint.exe` — and
+both scripts now print the binary they ran, because a log that does not name it cannot tell a right-reason
+pass from a wrong-reason one afterwards. The Python caller's rule was already right; its half is the claim
+that keeps it right if somebody simplifies `_binary` later.
+
 **The gate, as of this session's head.** `cargo test` **664 passed / 0 failed / 1 ignored** (the ignored
 one is `tests/term_capture.rs::measured_cost_of_streaming_an_answer`, deliberately ignored; `web_view` is
 37 and the bin's own tests are 7 — the new one is the crash fix above); `cargo clippy --all-targets -- -D
@@ -1917,7 +1955,18 @@ DOM had passed). **One existing claim was seen red once and green on the runs ei
 nothing changed in between** — `a hit's line travels with the path` — and the detail line was lost to a
 `Select-Object -Last 14` on the way out, so what it said is not recorded; it is the same
 unreproduced-class flake as the two CI ones above, and it is written here rather than smoothed over
-because a harness that is red once is a harness somebody should re-run before believing a green.
+because a harness that is red once is a harness somebody should re-run before believing a green. That
+re-run happened at the start of the next session and came back **93/93 claims held**, which is the
+evidence that the once-red claim was a flake rather than a defect.
+**CI now runs the two example checks as well as the tests, clippy and the two headless Node harnesses** —
+`examples/python/test_call.py` and `examples/mcp/test_mcp.py`, one more step in the same job, both
+platforms, stdlib-only, each resolving the binary `cargo test` just built for itself rather than taking
+one from the environment. That step was watched
+red twice before it was trusted (a renamed MCP tool, and the `--json` stream's own `type` key renamed in
+`src/ndjson.rs`), and building it found that `test_mcp.py` had been resolving its binary as
+`shutil.which("flint")` — the *installed release* on this machine, not the checkout's build. Both scripts
+now use `flint_call._binary`'s rule and both say which binary they ran. `ROADMAP.md` §11 item 1 carries
+the long form.
 CI is green on the pushed heads.
 
 **The standing duty is done for both pushed heads.** `target\release\flint.exe` and

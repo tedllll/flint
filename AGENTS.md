@@ -264,6 +264,9 @@ So, when working in this repository:
 cargo test                      # the lib, the loop, raw CLI bytes, the terminal
 cargo clippy --all-targets      # expected to be silent, and worth keeping that way
 node scripts/term-layout-test.js
+node scripts/web-view-test.js
+python examples/python/test_call.py   # the Python caller, against its own stub
+python examples/mcp/test_mcp.py        # the MCP server, spoken to over JSON-RPC
 ```
 
 **Silent here is not silent everywhere, and that has cost a red CI twice.** A lint that depends on a
@@ -286,7 +289,13 @@ curl -s "https://api.github.com/repos/tedllll/flint/check-runs/<id>/annotations"
 
 The job log needs a token and is not worth chasing; the annotations carry the panic.
 
-A push runs the first two on Linux and Windows (`.github/workflows/ci.yml`). The runner's log
+A push runs all six on Linux and Windows (`.github/workflows/ci.yml`), the last two as one step. Those
+two resolve the binary `cargo test` just built for themselves — `flint_call._binary` and
+`test_mcp.flint_binary` — print which one they ran, and refuse a pass that came from an installed
+`flint` on `PATH`, so the log answers which flint it was; nothing is exported to them, because the
+windows job's `$PWD` is an MSYS path a native Windows Python cannot open. Only
+`scripts/browser-controls-test.js` is left to a person: it needs a real browser. The
+runner's log
 cannot be downloaded without a token, so a failing job re-emits the failing test's name and its
 panic as check annotations — `GET /repos/tedllll/flint/actions/runs/<run>/jobs` for the job ids,
 then `/check-runs/<id>/annotations` for the reason. Read that before guessing from the tree.

@@ -1881,6 +1881,22 @@ where prose and tree disagree is item 3.**
    already there and a second job would spend minutes to add a minute. Nothing is installed: Node is on
    both runners. `browser-controls-test.js` stays by hand — it needs a real browser — and `AGENTS.md`
    still says so where the three are listed.
+   **Built since, 2026-09-18, because the same argument had one more case: the two doors that are not
+   Rust at all.** `examples/python/test_call.py` (the `flint_call.py` caller, driven end to end against
+   its own stub provider) and `examples/mcp/test_mcp.py` (JSON-RPC spoken at `flint_server.py`, which
+   spawns a real flint) were each checked only on the machine that wrote them, and neither is touched by
+   `cargo test` — the MCP server is pure Python, so *nothing* automatic had ever read a line of it. They
+   are now one more step in the same job, both platforms, stdlib-only, no key and no install (`python`
+   is chosen as `python3` or `python` because the two runners disagree about which name exists), each
+   checking the binary `cargo test` just built for itself and saying so. **Watched red twice before it was
+   trusted, both mutations reverted**: renaming the tool in `flint_server.py` fails "named for what it
+   does" with `flint_ask_broken`, and renaming the `--json` stream's own `type` key in `src/ndjson.rs`
+   fails `examples/python/test_call.py` with `KeyError: 'type'` — one break in the door, one in the
+   program, because a check that only catches its own fixture is not a check. Writing the step found a
+   third thing worth keeping: `test_mcp.py` resolved its binary with `shutil.which("flint") or "flint"`,
+   which on this machine is the **installed release** (`C:\Users\<me>\bin\flint.exe`) rather than the
+   checkout's build — the wrong-reason pass `flint_call._binary` was written to refuse. It now uses that
+   same rule, and both checks print which binary they ran and assert it is this checkout's.
 2. **Stale sentences, found by checking claims instead of reading them — all four now corrected
    (2026-09-18).**
    This is a class, not an incident, and it is the finding that says the most about the repository: four
