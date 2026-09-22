@@ -666,6 +666,16 @@ pub struct Compaction {
     pub from: u64,
 }
 
+/// The opening words every summary starts with, written down once.
+///
+/// It has to be a string a *reader* can recognise rather than a flag on the message: the fold travels
+/// through the file (a summary written by `/import` is a `chat` line like any other), so the only
+/// thing two runs can agree on is what the summary says about itself. The line after it says who
+/// asked for it, because a model reading this has to be able to tell flint's digest of the earlier
+/// conversation from something the person typed.
+pub const SUMMARY_MARK: &str =
+    "[the conversation before this point, summarized by flint at the person's request]";
+
 /// What a folded prefix becomes in the conversation: one message, in the summary's own words.
 ///
 /// A `user` message rather than a `system` one, because a system message in the middle of a
@@ -673,9 +683,20 @@ pub struct Compaction {
 /// everywhere. The framing says what it is: a summary that reads like something the person said is a
 /// summary the model will try to answer.
 pub fn compacted_message(summary: &str) -> Message {
-    Message::user(format!(
-        "[the conversation before this point, summarized by flint at the person's request]\n\n{summary}"
-    ))
+    Message::user(format!("{SUMMARY_MARK}\n\n{summary}"))
+}
+
+/// Whether a message is a fold's summary rather than something the person asked.
+///
+/// Asked by the two readers that count questions -- `/fork`'s list and the values the page is offered
+/// -- because a summary is a `user` message by construction (see [`compacted_message`]) and neither
+/// reader may offer a cut in front of a digest the person never wrote. `None` for a message that is
+/// not a user message at all, which is the common case.
+pub fn is_summary(message: &Message) -> bool {
+    match message {
+        Message::User { content } => content.starts_with(SUMMARY_MARK),
+        _ => false,
+    }
 }
 
 /// Each line of a file with the byte offset it starts at.

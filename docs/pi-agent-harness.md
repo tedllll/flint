@@ -168,6 +168,20 @@ frame is built, so the browser offers the questions of *this* conversation as bu
 mechanism `/skills` and `/prompt` use for their names — the page composes `/<name> <value>`, which is
 why the value is the ordinal and not the question's text.
 
+**What that counterpart turned out to be worth, written after somebody used the page (2026-09-22).** A
+row of question *numbers* in the settings dialog is a question list with the questions taken out, and
+the place a person decides they want a different answer is the answer in front of them — so the page now
+draws **fork from here** under every answer a cut would keep, which sends the frame's own `/fork <n>`.
+The pairing is the interesting part and it is the difference Pi's tree does not have to solve: Pi knows
+the leaf id of every entry, so its selector can name a node; flint's page has a *file* while the command
+counts the *history*, and a `/compact` makes them different lengths. So the frame carries the questions
+twice — their numbers and their first lines — and the page pairs its own turns with them from the bottom
+(where a fold's dropped prefix cannot reach), believing a pairing only when that turn's text is the
+question named and is the only one that reads that way. The value is still the ordinal; the *label* is
+what makes it a question. `docs/web-mode.md` §26 is the measured record, including the three faults it
+found in the terminal's own list (a fold's summary counted as a question, `n == 1` refused where it
+keeps the summary, a `--no-session` run offered cuts it would refuse).
+
 ### 3.2 A follow-up message, as distinct from an interruption
 
 Flint already does something Pi has no name for: a plain line typed while the model is working is

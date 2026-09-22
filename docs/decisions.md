@@ -89,9 +89,34 @@ whose call was left behind is a request the provider rejects. A question is also
 person can *name* at the prompt, which is why `/fork` takes the ordinal of a question rather than a
 message index: a count of chat lines is not a thing anybody knows about their own conversation, and the
 list `/fork` prints is what makes the number choosable. The alternatives were refused for their own
-reasons — cutting at the *first* question leaves a conversation with nothing in it (an empty file in the
-list that looks real, which is why `/new` is that act instead), and a bare `/fork` that cut at "the last
-exchange" would throw work away without being asked, which is the surprise `/sessions` exists to avoid.
+reasons — a bare `/fork` that cut at "the last exchange" would throw work away without being asked, which
+is the surprise `/sessions` exists to avoid — and the one that *looked* refused for a reason and was not
+is cutting in front of the first question: with nothing folded that leaves an empty conversation (an
+empty file in the list that looks real, which is why `/new` is that act instead), so the copy is built
+and refused only when it is **empty**, which is exactly the case a `/compact` changes: after a fold the
+first question the run still holds has the summary in front of it, and cutting there is the branch a
+person wants — the digest, ready for that question to be asked again.
+
+**A fold's summary is not one of the questions.** It is written as a `chat` line with the person's role,
+because that is the only shape every endpoint accepts, so anything counting questions by role counted it
+too — and the count is what `/fork <n>` takes, which is what the page's buttons and `--fork`'s list
+hand a person. So the marker that says "this line is a summary" is one constant
+(`session::SUMMARY_MARK`), written by the code that composes the message and read by the one function
+that answers "what are this conversation's questions", and nowhere else: two copies of that sentence is
+how the count and the list would drift apart again.
+
+**The page is told the questions twice — numbered and named — and pairs them itself.** The page cannot
+count the run's questions (a fold is a fact about the history, and the page reads a file) and the
+process may not count the page's turns (that is the page's own scrollback, and it would need a second
+bookkeeping of every message ever written), so `/fork`'s row carries the numbers the command takes
+*and* their first lines, and the page puts a **fork from here** button on the answer above the question
+it can point at. Pointing at it means: paired from the bottom of both lists together, where a fold's
+dropped prefix cannot reach; believed only when the turn's own first line is the question named; and
+believed only when that turn is the *only* one that reads that way. Two alike questions therefore mark
+nothing rather than guessing, the first value is never a button (nothing the run still holds is in front
+of it), and a turn in flight takes the buttons away because the run's list is one question behind the
+page's drawing until the turn ends — the dialog's labelled list is the fallback that always works,
+which is what makes refusing the rest honest.
 
 **Where a conversation came from is a sentence on its own line.** A copied conversation — imported or
 forked — says so when it is named to a person, on the `resumed` line and under `/resume`: `this

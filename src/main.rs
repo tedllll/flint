@@ -502,15 +502,22 @@ fn origin_note(loaded: &session::LoadedSession) -> String {
 /// a question asked at the prompt. What is *not* here is a tool result or an assistant message, because
 /// a fork cannot land on one without leaving a call without its result.
 ///
+/// Nor a fold's summary, which is a `User` message only because endpoints disagree about a `system`
+/// message in the middle of a conversation (`session::compacted_message`). Counting it was a defect a
+/// person could see: after `/compact`, `/fork` listed the digest as question 1 and numbered every real
+/// question one higher than the transcript they were reading -- and the page, which is offered these
+/// same questions as values, would have drawn a branch button for a cut that keeps nothing.
+///
 /// The first line rather than the whole message: a question can be a pasted document, and this list is
 /// for choosing between them -- `util::preview` is what says "there is more of this" without printing
-/// it.
+/// it. The page is given the same string as a value's label, which is why the clipping has to stay one
+/// rule rather than two: `web/view.html` compares a question against it instead of clipping again.
 fn questions(history: &[event::Message]) -> Vec<(usize, String)> {
     history
         .iter()
         .enumerate()
         .filter_map(|(at, message)| match message {
-            event::Message::User { content } => {
+            event::Message::User { content } if !session::is_summary(message) => {
                 Some((at, util::preview(content, QUESTION_PREVIEW)))
             }
             _ => None,
@@ -4783,22 +4790,28 @@ async fn handle_command(
                 ));
                 return Ok(Flow::Continue);
             }
-            if n == 1 {
-                // Cutting at the first question leaves a conversation with nothing in it, which is not
-                // a conversation: an empty file would sit in the list looking like one, and the first
-                // thing typed into it would be the first thing ever said. `/new` is that act.
-                printer.term().line(format_args!(
-                    "{yellow}nothing to keep:{reset} cutting at the first question would leave an \
-                     empty conversation (/new starts one)"
-                ));
-                return Ok(Flow::Continue);
-            }
             let cut = asked[n - 1].0;
             let copy: Vec<event::Message> = agent.history()[..cut]
                 .iter()
                 .filter(|m| !matches!(m, event::Message::System { .. }))
                 .cloned()
                 .collect();
+            // Nothing to keep, read off the copy rather than tested as `n == 1`, and the difference is a
+            // fold: cutting in front of the first question a compacted run still holds keeps the summary
+            // (`session::compacted_message`), which is a branch with something in it -- the digest, ready
+            // for the question being asked again. The old test refused that by name, so the refusal was
+            // false exactly there, and true only of a conversation that had never been folded.
+            //
+            // An empty one is refused because it is not a conversation: an empty file would sit in the
+            // list looking like one, and the first thing typed into it would be the first thing ever
+            // said. `/new` is that act.
+            if copy.is_empty() {
+                printer.term().line(format_args!(
+                    "{yellow}nothing to keep:{reset} cutting at question {n} would leave an empty \
+                     conversation (/new starts one)"
+                ));
+                return Ok(Flow::Continue);
+            }
             let kept = copy.len();
             let cwd = agent.cwd().clone();
             let provider = provider::Provider::new(provider_cfg.clone())?;
@@ -5801,6 +5814,12 @@ fn page_commands(
             if let Some(from) = row.from {
                 json["from"] = serde_json::json!(from.word());
             }
+            // What to call each value, on the one row whose values are not their own names. Omitted
+            // when there are none, like `values`: a frame carrying `"labels": []` on twenty-eight rows
+            // would be saying "nothing to call this" twenty-eight times.
+            if !row.labels.is_empty() {
+                json["labels"] = serde_json::json!(row.labels);
+            }
             // Which settings screen the row is on, and omitted when it is on none: a row the dialog
             // does not file is one the `/` menu still offers, and the absence is the whole of what the
             // page needs to know about it.
@@ -5835,6 +5854,15 @@ struct PageRow {
     /// may *type* for the reader, and the route refuses it, because running a provider switch with the
     /// terminal quiet would start a local engine without printing a word anywhere.
     values: Vec<String>,
+    /// What to call each of those values, when the value alone does not say it.
+    ///
+    /// Empty on every row but `/fork`, whose values are question numbers: the number says where a cut
+    /// falls and nothing about what is being cut, so the question's own first line travels beside it.
+    /// The page uses the pair in two ways and they are the same fact read twice -- the settings
+    /// screen draws the label on the button, and the transcript finds the turn the value cuts in front
+    /// of by matching it (`web/view.html`'s `isTheQuestion`). One list, so a page cannot label a value
+    /// it was not given.
+    labels: Vec<String>,
     /// The answers this row's line is made of, when the page may ask for them.
     ///
     /// The table's own list, in the table's own order, because what the page sends is
@@ -5864,6 +5892,16 @@ fn page_rows(
     provider_cfg: &config::ProviderConfig,
     agent: &agent::Agent,
 ) -> Vec<PageRow> {
+    // Read once for the frame rather than once per row that wants it: `/fork`'s values are the
+    // questions' numbers and its labels are their first lines, and the two lists are the same list.
+    // Empty for a run that keeps no conversation: it has questions in its history and no file to cut a
+    // branch out of, so every value would be a press answered by the refusal the terminal's own `/fork`
+    // gets first, and the page must not offer one that cannot work.
+    let asked = if agent.no_session() {
+        Vec::new()
+    } else {
+        questions(agent.history())
+    };
     COMMANDS
         .iter()
         .filter_map(|row| {
@@ -5895,10 +5933,21 @@ fn page_rows(
                     // a picker rather than a number to remember: the frame is rebuilt as the
                     // conversation moves, so the buttons are the questions the run has been asked. The
                     // value is the ordinal alone -- the page composes `/<name> <value>`, and a label
-                    // carrying the question's text would be sent as part of the command line.
-                    ("/fork", _) => (1..=questions(agent.history()).len())
-                        .map(|n| n.to_string())
-                        .collect(),
+                    // carrying the question's text would be sent as part of the command line. The text
+                    // travels beside it, as `labels`, and that is the pair the transcript uses: the
+                    // process says *which* question a value cuts at, in the question's own first line,
+                    // and the page finds that question among the turns it drew. A position would be the
+                    // page's own coordinate -- a line number it counted -- and the number of turns
+                    // before the run's first question is a fact about a file this frame is not reading.
+                    ("/fork", _) => (1..=asked.len()).map(|n| n.to_string()).collect(),
+                    _ => Vec::new(),
+                },
+                // What to call each value, for the rows whose values do not say it themselves. Empty
+                // for every other row: a model's name or a skill's name is already the word to press,
+                // and only a question needs saying. The two lists are built from one read of `asked`,
+                // which is what keeps them the same length by construction.
+                labels: match (row.send, row.on_page) {
+                    ("/fork", _) => asked.iter().map(|(_, line)| line.clone()).collect(),
                     _ => Vec::new(),
                 },
                 args: row.args,

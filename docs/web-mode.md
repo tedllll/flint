@@ -2415,3 +2415,89 @@ suites — unchanged, since this round retargeted three tests rather than adding
 `node scripts/web-view-test.js`, `python examples/python/test_call.py` and `python examples/mcp/test_mcp.py`
 all green; and `scripts/browser-controls-test.js` **109/109** in headless Chrome on Windows — a hand run,
 because it needs a real browser.
+
+## 26. Cutting a branch from an answer — **built**
+
+Asked for directly, after using the page: *the conversation branching came from Pi, where you can split
+off from a node — and there is no way to do that in the web view; I want to branch from one of the AI's
+answers.* The command existed in both doors and only one of them could be used: `/fork [n]` in the
+terminal lists the questions and cuts in front of the one you name, while the page offered a row of
+**numbers** in the settings dialog, which is a question list with the questions taken out, and nothing at
+all in the transcript — the place a person is actually looking when they decide they want a different
+answer to *that* question.
+
+**The one hard part is that the two sides count different lists.** `/fork n` counts questions in the
+run's *history*, and the page has drawn `chat` lines out of a *file*. Those are the same list only while
+nothing has been folded: `/compact` replaces a prefix of the messages with one summary, so after it the
+run holds fewer questions than the file has, and the page cannot know how many went — that is a fact
+about the run's history, and the page may not read it (§11: the frame is the page's only channel). Nor
+may the process count the page's turns for it: a "drawn index" per question is the process handing back
+the page's own scrollback, and it would need a second bookkeeping of every message the writer ever wrote
+to compute. So neither side counts for the other; the two lists are **paired**.
+
+**What one pairing is.** The frame's `/fork` row now carries the questions twice: `values` (the numbers
+the command takes) and `labels` (their first lines, `util::preview`'s own clipping — the same string the
+terminal's list prints). `branchPoints` in the page walks the run's labels and the page's own user turns
+**from the bottom together**, and believes a pairing only when that turn's first line is the question the
+label names and is the only turn there that reads that way. From the bottom because that is where the two
+agree: a fold drops a prefix and never the newest question, so the run's list is a *suffix* of what the
+page drew. Where they disagree the page draws nothing — no button is a missing convenience, and a button
+on the wrong answer cuts a branch somewhere nobody pointed at, which is a new file the person would have
+to read to discover.
+
+Three more rules, each a way this can be wrong:
+
+- **The first value is never a button.** `/fork 1` cuts in front of the question the run has held
+  longest, and nothing the run still holds comes before it — so the answer the page drew above it is a
+  fold's tail (or nothing), and a button there would promise a branch that does not contain it.
+- **A question that reads the same twice is skipped, not guessed at.** Two turns matching one label is
+  two answers a person could have meant, and the page has no way to tell the folded one from the held
+  one; the numbers in the dialog's list are what disambiguate that, so the transcript says nothing and
+  the labelled list still works.
+- **A turn in flight takes the buttons away.** The frame is built between turns, so while an answer
+  streams the run's list is one question behind the page's drawing and *every* pairing is out of step.
+  Refusing them all is the honest drawing, and it is why this round did not need a rule about which turn
+  is "the one being asked".
+
+**The state frame is what carries the list, so it is also what draws the buttons** — and that was a
+defect the Node harness found rather than a detail: `showState` repainted the settings and the panel's
+header, and the transcript only repainted on a transcript event. A page that had just loaded reads
+`/session`, draws the conversation, and then waits for exactly the frame that names the questions — so
+the buttons would have appeared only after the next answer moved the transcript, which is the one moment
+they are wanted. `showState` now paints the transcript as well (the given document, not the page's own —
+a state that arrived for another one has to draw there).
+
+**Three defects in the terminal half came out of building this**, and each is the same fault seen from
+the page: a control offered for something that will be refused.
+
+| What was wrong | What it did | What it is now |
+|---|---|---|
+| a fold's summary counted as a question | `/fork` with no argument listed `1. [the conversation before this point, summarized by flint at the person's request] …` and numbered every real question one higher than the transcript; `--fork` at startup and the page's own values were one out of step with it too | `session::is_summary` (one marker constant, `SUMMARY_MARK`, next to the message that writes it) and `questions()` skips it |
+| `n == 1` refused by name | cutting in front of the first question a compacted run still holds keeps the **summary**, which is a branch with something in it — the digest, ready for the question being re-asked — and the refusal was false exactly there | the copy is built and refused only when it is **empty** |
+| a `--no-session` run offered the questions | the frame carried `/fork` values whose every press answered with `this run keeps no conversation (--no-session)`; the terminal checks that *first* and lists nothing, so the two doors disagreed | `page_rows` builds the list empty when `no_session()` |
+
+**What was measured, and where.**
+
+| Claim | Where it was measured | What came back |
+|---|---|---|
+| A fold's digest is not a question, and cutting in front of the first real one keeps it | `tests/cli_output.rs::a_compacted_conversation_forks_from_the_questions_it_still_holds` | the list is `1. the kept question` and `(1 question`; `/fork 1` prints `1 message kept, cut at question 1 of 1: the kept question` and the branch's file holds the summary and not the question. Watched red first: with the summary counted, the captured screen reads `1. [the conversation before this point …` / `2. the kept question` / `nothing to keep: cutting at question 1 would leave an empty conversation` |
+| A `--no-session` run is offered no cut, on a question it does hold | `tests/cli_output.rs::a_run_that_keeps_no_conversation_offers_the_page_no_cut` | the frame under test is fetched by moving a setting (`/verbose off`), so its arrival is certain; without the guard the same frame carries `"labels":["why does the socket close early"]`. Watched red first |
+| The frame carries the questions beside their numbers | `tests/cli_output.rs::the_page_is_offered_the_arguments_a_command_takes` | `"labels":["why does the socket close early","what about the retry path"]` for `/fork`, alongside `"values":["1","2"]` |
+| Where a button may be drawn, and what it sends | `scripts/web-view-test.js`, eight claims | the settings list labels each value; exactly one button, under the answer a cut keeps; the line is the frame's `send` plus the frame's value; a frame that arrives on its own draws the button (watched red first: with the `showState` paint removed, the claim fails and the button never appears); over a fold the *folded* answer is left alone and the held one is marked; a turn in flight empties the transcript of buttons; two questions that read alike mark only the third; a repaint keeps the untouched answers' nodes |
+| The page's half of the rules | `tests/web_view.rs::the_branch_button_is_drawn_from_the_frame_and_verified_against_the_turn` | the row is found by the frame's `send` and the line composed from it; labels and values must line up in length; the pairing is text-checked and must be the only one; the first value is skipped; the mark is part of `paint`'s comparison; and a state frame paints the transcript |
+| The whole interaction, in a browser | `scripts/browser-controls-test.js`, four new claims | with one question there is no button anywhere; after a second question exactly one appears, under the answer the cut keeps, naming that question; pressing it makes the run print `cut at question 2 of 2: and the tests`; and the page is then drawing the branch — the second question is *gone*, which is the `reset` frame plus `GET /session` doing what §15 says |
+
+**The gate, after this round.** `cargo test` **684 passed / 1 ignored** (the pty test, Unix only) across
+its 14 suites — 681 before the round, plus two `cli_output` tests and one `web_view` policy test;
+`cargo clippy --all-targets -- -D warnings` silent; `node scripts/term-layout-test.js` and
+`node scripts/web-view-test.js` (nine claims added to the transcript section, all green) — both run by
+CI; both Python doors green; and `scripts/browser-controls-test.js` **113/113** in headless Chrome on
+Windows (was 109, with four claims for this round: the absent button, the button under the right answer,
+the press and what the run printed, and the branch the page is left reading), by hand, because it needs
+a real browser.
+
+**What is deliberately not here.** A button for *branching from a question* rather than from an answer:
+the cut keeps what is in front of the question, so the honest place for it is the answer that survives —
+the same reason `--fork` takes a question *number* and not a message. Nor a branch button on the newest
+answer, which would mean "ask this again in the same conversation" and is a different act. Nor a way to
+un-fold, which the file allows by hand and the page has no reason to offer.

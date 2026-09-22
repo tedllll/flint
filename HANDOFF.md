@@ -36,19 +36,20 @@ again on 2026-09-18, after the tool-payload round and that session's three commi
 third time on **2026-09-22**, after the two page rounds at the top of `## What was just done` (the
 preview's line numbers, then the settings screens and the `toggles` field's removal), and re-measured a
 fourth time the same day after the round above it (DSH's settings shape, the sidebar seat, the panel's
-hand): `cargo test`
-**681 passing, 1 ignored** across the 14 suites (lib 382 — 368 of it before the tool-payload round, so
-that round added 14 — bin 8, `agent_loop` 34, `balance` 7, `cli_output` 113, `json_output` 41, `say` 6,
+hand), and re-measured a fifth time the same day, after the branch-cut round at the top of that section
+(`cargo test` run in full, and the browser harness by hand): `cargo test`
+**684 passing, 1 ignored** across the 14 suites (lib 382 — 368 of it before the tool-payload round, so
+that round added 14 — bin 8, `agent_loop` 34, `balance` 7, `cli_output` 115, `json_output` 41, `say` 6,
 `search_tool` 4, `task` 17, `term_capture` 20 + 1 ignored, `tty_hangup` **0 on Windows** and 3 on Unix
 — the suite is `#![cfg(unix)]`, and the library carries a few `#[cfg(unix)]` tests of its own, so the
-ubuntu job's total is larger and is *not* quoted here as if it were this number — `web_view` 39,
+ubuntu job's total is larger and is *not* quoted here as if it were this number — `web_view` 40,
 `who` 10, and the doc-tests 0);
 `cargo clippy --all-targets -- -D warnings` silent; the two headless Node harnesses green
 (`term-layout-test.js`, `web-view-test.js`) **and run by CI**; **both `examples/` doors green, as one
 more step of that same CI job** — `examples/python/test_call.py` and `examples/mcp/test_mcp.py`, each
 resolving the binary `cargo test` just built for itself and refusing a pass that came from an installed
 `flint` on `PATH`; the
-browser harness run by hand at **109/109 claims held**, printing the list of drives and not-drives it is
+browser harness run by hand at **113/113 claims held**, printing the list of drives and not-drives it is
 bounded by. The release binary on `PATH` is the tree's (`flint --version` → `flint 0.1.0`, exit 0, and
 its SHA-256 is the one `target/release/flint.exe` was built with).
 
@@ -1820,6 +1821,73 @@ picker, type `/config` into the composer, and see whether the answer lands in th
 the block is drawn — then open the `commands` panel and read it against `/help` in the terminal.
 
 ## What was just done
+
+### A branch cut from an answer, in the page — 2026-09-22
+
+**Asked for directly: *the conversation branching came from Pi, where you can split off from a node —
+and there is no way to do it in the web view; I want to branch from one of the AI's answers.*** The
+command was already in both doors; what was missing was the page's half, and building it turned out to
+be two rounds in one: the page needed a way to *point at a turn*, and the terminal's question list
+turned out to be wrong in three places that only a page could see. §26 of `docs/web-mode.md` is the
+record.
+
+**The hard part is that the two sides count different lists, and neither may count for the other.**
+`/fork n` counts questions in the run's *history*; the page has drawn `chat` lines out of a *file*. A
+`/compact` replaces a prefix of the messages with one summary, so after it the run holds fewer questions
+than the file has — and how many went is a fact about the run's history the page may not read (§11: the
+frame is its only channel). Nor may the process count the page's turns: a per-question "drawn index"
+would be the process handing back the page's own scrollback, and it would need a second bookkeeping of
+every message the writer ever wrote, threaded through `SessionWriter`, `load`, `seed` and every
+`/compact`. So the frame carries the questions **twice** — `values` (the numbers the command takes) and
+`labels` (their first lines, `util::preview`'s own clipping, the same string the terminal's list prints)
+— and the page **pairs** the two lists with its own user turns *from the bottom together*, where they
+agree (a fold drops a prefix and never the newest question). A pairing is believed only when that turn's
+first line *is* the question the label names **and** it is the only turn that reads that way; the first
+value is never a button (it cuts in front of everything the run still holds); and while a turn streams
+every pairing is one question out of step, so no buttons are drawn at all — the dialog's labelled list
+still names every question, which is why that was allowed to stay the fallback.
+
+**Three defects in the terminal's own question list came out of it, and all three are the same fault
+seen from the page: a control offered for something that would be refused.** A fold's summary was
+counted as a question (it is a `user` message, so endpoints accept it) — `/fork` with no argument listed
+`1. [the conversation before this point, summarized by flint at the person's request] …` and numbered
+every real question one higher than the transcript; `questions()` now skips it through
+`session::is_summary`, one marker constant beside the message that writes it. `n == 1` was refused by
+name, which is exactly wrong after a fold: cutting in front of the first question a compacted run still
+holds keeps the **summary**, so the branch is the digest ready for the question being re-asked — the
+copy is now built, and refused only when it is empty. And a `--no-session` run was offered the questions
+in its state frame while the terminal checks `no_session()` *first* and lists nothing, so the two doors
+disagreed about a command whose every press answers `this run keeps no conversation`.
+
+**One more defect, and the Node harness found it in the page: a state frame did not paint the
+transcript.** `showState` repainted the settings and the panel's header, and the transcript only moved on
+a transcript event — but the questions arrive in exactly that frame, so a page that had just loaded drew
+the conversation and then waited for the next answer before any button appeared, which is the one moment
+they are wanted. `showState` now paints (the document it was handed, not the page's own). Watched red
+first: with that line removed, the Node claim fails and the button never appears.
+
+**What is held where.** `tests/cli_output.rs` gained two: a hand-built file with a `compact` line, whose
+question list is `1. the kept question`, whose `/fork 1` prints `1 message kept, cut at question 1 of 1:
+the kept question`, and whose branch holds the summary and not the question — watched red first, with
+the captured screen showing `1. [the conversation before this point …` / `2. the kept question` /
+`nothing to keep: cutting at question 1 would leave an empty conversation`; and a `--no-session` run,
+whose frame is fetched by moving a setting (`/verbose off`) so its arrival is certain, and which carries
+no `labels` — also watched red. `tests/web_view.rs` gained the policy test for where a button may be
+drawn and what line it sends. `scripts/web-view-test.js` gained nine claims (the labelled settings rows,
+the button only under an answer a value keeps, a frame alone being enough to draw it, no buttons at all
+with one question, a folded question left unmarked, a turn in flight, two alike questions, a repaint's
+node identity, and a label the page cannot match). And `scripts/browser-controls-test.js` gained four, in
+a real browser against a real run: **no button while one question leaves nothing to cut, exactly one
+under the answer the cut keeps once a second question exists, a press that makes the run print `cut at
+question 2 of 2: and the tests`, and the page left reading the branch — the second question is gone from
+the transcript, which is the `reset` frame and `GET /session` doing their work.** That harness is now
+**113/113** (was 109).
+
+**The gate**: `cargo test` **684 passing, 1 ignored** (681 + two `cli_output` + one `web_view`),
+`cargo clippy --all-targets -- -D warnings` silent, `term-layout-test.js`, `web-view-test.js` and both
+`examples/` doors green, and the browser harness by hand at 113/113. `docs/features.md` §5.5's `/fork`
+row and §12.3's two rows follow the moved surfaces (the labelled selector buttons, the transcript's
+`fork from here`), and §12.5's claim count is now the measured 113.
 
 ### The settings dialog in DSH's shape, the door in the sidebar's seat, and a hand on the preview — 2026-09-22
 

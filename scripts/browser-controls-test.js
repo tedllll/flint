@@ -2447,6 +2447,85 @@ async function main() {
       `terminal gained: ${JSON.stringify(slashReloaded.slice(0, 160))}`
     );
 
+    // ---- cutting a branch from an answer ------------------------------------
+    // The one command whose argument is a question *in this conversation*, and the one thing the page
+    // cannot count for itself: `/fork n` counts questions in the run's history, while the page has drawn
+    // `chat` lines out of a file. A `/compact` makes those two lists different lengths -- it drops a
+    // prefix of the questions and never the newest one -- so the page pairs its own turns with the
+    // run's questions *from the bottom*, where the two agree, and believes a pairing only when the
+    // turn's own first line is the question the frame named (`branchPoints`, and `labels` in the frame).
+    //
+    // The claim is made against the run's stdout and then against the transcript the page is drawing,
+    // not against the button: a button that cut somewhere else would look exactly the same.
+    //
+    // One question is not a choice, and this is the state the run has been in since the first prompt:
+    // the frame offers `/fork 1`, which cuts in front of everything the run holds, so there is nothing
+    // for a button to sit on. That is the negative half, and it is what makes the button below mean
+    // something rather than being drawn for every turn.
+    const barsNow = () =>
+      page.js(
+        `Array.from(document.querySelectorAll("#doc .turn")).map((turn) => ({
+           kind: turn.className,
+           branch: (turn.querySelector("button.branch") || {}).title || "",
+         }))`
+      );
+    check(
+      "an answer with nothing after it that could be cut keeps no button",
+      (await barsNow()).every((turn) => !turn.branch),
+      `turns: ${JSON.stringify(await barsNow())}`
+    );
+
+    const beforeSecond = before();
+    await page.js(`document.getElementById("message").focus(); true`);
+    await page.send("Input.insertText", { text: "and the tests" });
+    await page.click("#send");
+    const drewBranch = await page
+      .waitFor(
+        `document.querySelectorAll("#doc .turn.assistant button.branch").length === 1`,
+        "the branch button under the answer a cut would keep",
+        60
+      )
+      .catch(() => null);
+    const bars = await barsNow();
+    const marked = bars.filter((turn) => turn.branch);
+    check(
+      "the button lands under the answer the cut keeps, once there is a question to cut in front of",
+      drewBranch !== null && marked.length === 1 &&
+        marked[0].kind.includes("assistant") && marked[0].branch.includes("and the tests"),
+      `turns: ${JSON.stringify(bars)} | terminal gained: ` +
+        JSON.stringify(flint.text().slice(beforeSecond).slice(0, 200))
+    );
+
+    const beforeFork = before();
+    await page.click("#doc .turn.assistant button.branch");
+    let forked = "";
+    for (let i = 0; i < 30 && !forked.includes("forked:"); i += 1) {
+      await sleep(200);
+      forked = flint.text().slice(beforeFork);
+    }
+    check(
+      "pressing it cuts the conversation where the button said it would",
+      forked.includes("forked:") && forked.includes("cut at question 2 of 2: and the tests"),
+      `run printed: ${JSON.stringify(forked.slice(0, 400))}`
+    );
+
+    // And the page is now reading the branch: the second question is gone from the transcript, which
+    // is what a `reset` frame plus `GET /session` is for. Read as the *transcript* rather than as the
+    // run's stdout, because the half a person sees is the page's.
+    const branched = await page
+      .waitFor(
+        `!document.getElementById("doc").textContent.includes("and the tests")`,
+        "the page drawing the branch",
+        60
+      )
+      .catch(() => null);
+    check(
+      "and the page is left reading the branch rather than the conversation it was cut from",
+      branched !== null,
+      `transcript: ` +
+        JSON.stringify((await page.js(`document.getElementById("doc").textContent`)).slice(0, 300))
+    );
+
   } finally {
     page.close();
     chrome.child.kill();

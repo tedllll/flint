@@ -641,6 +641,16 @@
     border-bottom: 1px dotted var(--dim);
   }
   button.path:hover, button.path:focus { color: var(--user); border-bottom-color: var(--user); }
+  /* The one control under an answer: cut a new conversation from here. Drawn like a path -- quiet
+     text with a dotted underline -- because this is a reading surface and the words are the point;
+     it is only under the answers the page can point at, which is `branchPoints`'s whole job. */
+  .turn-tools { margin-top: 6px; }
+  button.branch {
+    font: inherit; font-size: 12.5px; color: var(--dim); background: none; border: 0;
+    padding: 0; margin: 0; cursor: pointer;
+    border-bottom: 1px dotted var(--dim);
+  }
+  button.branch:hover, button.branch:focus { color: var(--user); border-bottom-color: var(--user); }
   /* An address on the web: the one thing on this page that is a link, because it is the one thing
      with somewhere to go. A path is a button instead (`button.path`), since a file has no address a
      browser may open from a page served over http. Dotted like a path so that the two read as the
@@ -2013,12 +2023,22 @@ function drawCommandRow(doc, key, command, list) {
     }
     return;
   }
-  const values = Array.isArray(command.values)
-    ? command.values.filter((value) => typeof value === "string" && value.trim())
-    : [];
+  const values = Array.isArray(command.values) ? command.values : [];
+  // What each value is *of*, for the one row that needs it: a question's number says where a cut falls
+  // and nothing about what is being cut, so `/fork`'s buttons carry the question's own first line. The
+  // lists are index-aligned by the process (`page_rows` builds them from one read), and a row whose
+  // labels are short of its values simply says the help twice.
+  const labels = Array.isArray(command.labels) ? command.labels : [];
   const offered = [];
-  if (className === "panel" && send) offered.push({ label: command.label, line: send });
-  for (const value of values) offered.push({ label: send + " " + value, line: send + " " + value });
+  if (className === "panel" && send) offered.push({ label: command.label, line: send, note: "" });
+  values.forEach((value, at) => {
+    if (typeof value !== "string" || !value.trim()) return;
+    offered.push({
+      label: send + " " + value,
+      line: send + " " + value,
+      note: labels[at] || "",
+    });
+  });
   if (offered.length === 0) {
     // Nothing this page can send: a row of reference, marked and dimmed so that it cannot be
     // mistaken for the control it is not, and carrying the one thing it can usefully say --
@@ -2048,7 +2068,7 @@ function drawCommandRow(doc, key, command, list) {
       else sendText(item.line);
     });
     row.appendChild(el("code", "", item.label));
-    row.appendChild(el("span", "", help));
+    row.appendChild(el("span", "", item.note || help));
     list.appendChild(row);
   }
 }
@@ -2488,6 +2508,15 @@ function showState(doc) {
   // The preview's open control reads the same frame -- a run whose guard just went on must not go
   // on offering to start a program. Repainted only when a path is open, which is when it is drawn.
   if (preview) paintPreviewHead();
+  // And the transcript, because one thing it draws comes from this frame: the branch buttons, whose
+  // values are the run's own list of questions (`branchPoints`). Without this a page that has just
+  // loaded would draw the conversation and no way to cut from it, until the next answer moved the
+  // transcript -- and the frame carrying the list is the event a loaded page is waiting for, so the
+  // one thing missing would be the one thing the frame was for. Painted here rather than queued
+  // through `schedulePaint`, which would paint the page's own document: this function takes the
+  // document it draws, and a state that arrived for another one has to draw there. A frame arrives
+  // once per turn rather than once per delta, so there is nothing to coalesce.
+  paint(doc);
 }
 
 /// Which screen is open. The page's own state, like the preview's path: nothing outside reads it.
@@ -2883,12 +2912,127 @@ function schedulePaint() {
   });
 }
 
+/// Whether a turn the page drew is the question a value's label names.
+///
+/// The label is `util::preview` in the process: a question's first line, trimmed, clipped at 64
+/// characters, with `" ..."` after it when the question had more than one line or a longer first line.
+/// The page is handed the clipped string and does not clip again -- what is mirrored here is the
+/// *comparison*, and the ellipsis is what tells the two cases apart. The page needs it because the
+/// only thing linking a value to a turn is that the run and the page are looking at the same question:
+/// the value is a number, and the number the terminal counts from is the run's own history, not this
+/// page's scrollback (see `branchPoints`).
+///
+/// Everywhere the two rules disagree the answer is no. A question with no button is a missing
+/// convenience; a button on the wrong answer would cut a branch somewhere the person did not point at,
+/// and the branch is a new file they would have to read to find that out.
+function isTheQuestion(text, label) {
+  const body = String(text == null ? "" : text).replace(/\r\n/g, "\n");
+  const first = (body.split("\n")[0] || "").trim();
+  // A trailing newline is not a second line: `str::lines` in the process does not count it either, so
+  // a question the person ended with a newline is still one line to the run.
+  const lines = (body.slice(-1) === "\n" ? body.slice(0, -1) : body).split("\n").length;
+  if (label.length > 4 && label.slice(-4) === " ...") {
+    // Clipped. The label kept a prefix of the first line and said there was more of this question:
+    // either the line went on past the label, or there are lines after it.
+    const head = label.slice(0, -4);
+    return first.slice(0, head.length) === head && (first.length > head.length || lines > 1);
+  }
+  // Whole: the run kept all of it, so the turn has to be exactly that one line.
+  return first === label && lines === 1;
+}
+
+/// Which answers carry a branch button: block index to the line that button sends and the question it
+/// cuts in front of.
+///
+/// The frame's `/fork` row is this conversation's own questions -- `values` their numbers, `labels`
+/// their first lines -- and the page has drawn those questions, so this pairs the two lists **from the
+/// end**. From the end because that is where they agree: a `/compact` drops a prefix of the questions
+/// and keeps every one after it, so the run's list is a suffix of what the page drew, and the newest
+/// question is never the one that went. Pairing from the front would be a page deciding for itself how
+/// much of the file the run has folded away, which is a fact about the run's history and not about the
+/// text on screen.
+///
+/// Three rules, and each of them is about not lying:
+///
+/// * A pairing is believed only when the turn's own text is the question the label names, **and** it
+///   is the only turn there that does. Without that check the page would be assuming its last N
+///   questions are the run's N -- false after a fold, and false after an `/import` of a folded
+///   conversation -- and it would hang the button on the wrong answer. With it, a page that has lost
+///   the thread draws no buttons, which is the honest drawing.
+/// * The frame's first value is skipped. It cuts in front of the question the run has held the
+///   longest, and nothing the run still holds comes before it: what the page drew there is a fold's
+///   tail (or nothing at all), and a button on that answer would promise a branch that does not
+///   contain it.
+/// * A turn in flight puts the two lists one question apart -- the frame is built between turns, so
+///   the run does not know the question being asked yet -- and the check above then refuses every
+///   pairing. That is the honest answer rather than a wrong one: the settings dialog's own list names
+///   every question and works while an answer streams.
+function branchPoints(doc) {
+  const marks = new Map();
+  const commands = doc.state && Array.isArray(doc.state.commands) ? doc.state.commands : [];
+  const row = commands.find((command) => command && command.send === "/fork");
+  if (!row) return marks;
+  const values = Array.isArray(row.values) ? row.values : [];
+  const labels = Array.isArray(row.labels) ? row.labels : [];
+  // One list, and long enough that there is something to cut in front of.
+  if (labels.length !== values.length || values.length < 2) return marks;
+  const turns = [];
+  doc.blocks.forEach((block, at) => {
+    if (block.kind === "user") turns.push(at);
+  });
+  // How many of the drawn turns each label names. A label that names more than one is one this page
+  // cannot point at: two questions that read the same are two answers a person could have meant.
+  const named = new Map();
+  for (const at of turns) {
+    for (const label of labels) {
+      if (isTheQuestion(doc.blocks[at].text, label)) {
+        named.set(label, (named.get(label) || 0) + 1);
+      }
+    }
+  }
+  for (let i = 1; i < labels.length; i++) {
+    const label = labels[i];
+    if (named.get(label) !== 1) continue;
+    const question = turns[turns.length - labels.length + i];
+    if (question === undefined || !isTheQuestion(doc.blocks[question].text, label)) continue;
+    // The answer this cut keeps: the last one above the question, and nothing is marked if a
+    // question comes first -- a turn that was steered before it answered has no answer to cut from.
+    for (let at = question - 1; at >= 0; at--) {
+      if (doc.blocks[at].kind === "user") break;
+      if (doc.blocks[at].kind === "assistant") {
+        // The line from the frame's own `send` and one of the values it offered, the same composition
+        // every other control on this page uses: the page never spells a command name into a cut.
+        marks.set(at, { line: row.send + " " + values[i], label });
+        break;
+      }
+    }
+  }
+  return marks;
+}
+
+/// The one control under an answer: cut a new conversation from here.
+///
+/// The line is composed the way every other line this page sends is -- the frame's own `send` and one
+/// of the values it offered -- so the page never spells a command name into a branch. What the button
+/// means is what `/fork n` means: the branch keeps everything up to and including this answer and
+/// drops what came after, which is how a question gets asked again.
+function branchBar(line, label) {
+  const bar = el("div", "turn-tools");
+  const button = el("button", "branch", "fork from here");
+  button.type = "button";
+  button.title = "start a new conversation that keeps everything up to and including this answer"
+    + (label ? " — cut in front of “" + label + "”" : "");
+  button.addEventListener("click", () => sendText(line));
+  bar.appendChild(button);
+  return bar;
+}
+
 /// One block as an element. Pure: it reads the block and builds a node.
 ///
 /// Split out of `paint` so that `paint` can decide *which* blocks to rebuild rather than
 /// rebuilding all of them. Everything this returns is text through `textContent`, which is the
 /// policy the tests check.
-function renderBlock(block) {
+function renderBlock(block, branch) {
   if (block.kind === "tool") return toolBlock(block);
   if (block.kind === "notice") return el("div", "notice " + (block.level || ""), block.text);
   if (block.kind === "damage") {
@@ -2931,6 +3075,9 @@ function renderBlock(block) {
   const body = el("div", "body");
   for (const node of linkNodes(block.text, true)) body.appendChild(node);
   turn.appendChild(body);
+  // The branch control, when this answer is one a value cuts from. Handed in rather than looked up
+  // here so that `renderBlock` stays a pure function of its arguments.
+  if (branch) turn.appendChild(branchBar(branch.line, branch.label));
   return turn;
 }
 
@@ -3000,14 +3147,27 @@ function paint(doc) {
     const gone = painted.pop();
     if (gone.node.parentNode === root) root.removeChild(gone.node);
   }
+  // Which answers carry a branch button, recomputed from this frame's blocks and this state. Part of
+  // the comparison below rather than a property of a block: the value a button sends is a fact about
+  // the run's question list, and a fold or a new question can move it without the answer's own text
+  // changing a character.
+  const branches = branchPoints(doc);
   for (let i = 0; i < doc.blocks.length; i++) {
     const block = doc.blocks[i];
     const existing = painted[i];
-    if (existing && existing.rev === block.rev && existing.node.parentNode === root) continue;
-    const node = renderBlock(block);
+    const branch = branches.get(i) || null;
+    if (
+      existing &&
+      existing.rev === block.rev &&
+      existing.fork === (branch ? branch.line : null) &&
+      existing.node.parentNode === root
+    ) {
+      continue;
+    }
+    const node = renderBlock(block, branch);
     if (existing && existing.node.parentNode === root) root.replaceChild(node, existing.node);
     else root.appendChild(node);
-    painted[i] = { rev: block.rev, node };
+    painted[i] = { rev: block.rev, fork: branch ? branch.line : null, node };
   }
 
   // An answer that is arriving follows the bottom of the page only if the reader was already
@@ -5020,6 +5180,12 @@ if (typeof module !== "undefined" && module.exports) {
     drawSettings, settingRow, drawRows, drawCommandRow, paintSettings, screenOf, MENU_GROUPS,
     sessionRow, formLine,
     addressParts, asUrl, asPath, bytesLabel, previewNote, linkNodes, renderBlock, fileRoute,
+    // The branch control's half of the transcript: which answers a value cuts from, and the one
+    // comparison that ties a value's label to a turn the page drew. Both are pure -- a document and a
+    // frame in, marks out -- so the Node harness can check where the buttons land over a folded
+    // conversation, an imported one and a turn in flight, which is where a wrong button would be a
+    // branch cut somewhere nobody pointed at.
+    branchPoints, isTheQuestion,
     // The picture half of the panel: which route is asked, which names make it worth asking, and the
     // one piece of this page's own state that has to be let go of. Exported because all three are
     // pure or nearly so -- a name in, a decision out -- so the Node harness can hold the extension

@@ -2345,6 +2345,15 @@ argument, the cost and what flint has today are in the document, §3.
   under `children/`: a branch is not somebody's child, and writing `parent` would have hidden it from
   `/sessions`, the sidebar and `--continue`. The original keeps every byte, the branch's `meta` belongs
   to this run, and where it came from is read back on the startup `resumed` line and under `/resume`.
+  **The page's half landed 2026-09-22**, asked for after using it: a cut is now made from the answer it
+  keeps — **fork from here** under each answer `/fork n` would keep — and the settings row labels each
+  question instead of printing its number. The pairing is the part Pi does not have to do, because Pi
+  holds a tree of ids while flint's page holds a file and the command counts the history: the frame
+  carries the questions' first lines beside their numbers, the page pairs them with its own turns from
+  the bottom, and it marks an answer only when the turn's text is the question named and is the only one
+  that reads that way. Building it found three faults in the terminal's own list — a fold's summary
+  counted as a question, `n == 1` refused where it is the only thing that keeps the summary, and a
+  `--no-session` run offered cuts its own next press would refuse (`docs/web-mode.md` §26).
 - **A follow-up message that does not interrupt the turn — built, 2026-09-17.** A plain line typed
   mid-turn is steering and drops the in-flight request, by design; this is the second way to send one.
   `/queue <text>`, read in `run_turn`'s own poll loop *before* the classification that hands a command

@@ -87,6 +87,13 @@ was summarized away. More than one `compact` line is allowed and the last one wi
 `schema` and `thinking` do: compacting again folds everything before the newest question, summary and
 all.
 
+The summary line is a `user` message carrying that framing sentence at its start, and a reader that
+counts the person's questions has to know that: `/fork` takes the ordinal of a question, so a summary
+counted as one would number every real question one higher than the transcript shows. `session::is_summary`
+is the one place that sentence is recognised (`SUMMARY_MARK` is the constant it is written from), and it
+is the reason the marker is not paraphrased anywhere else — a second copy of it in a second file is how
+the list and the count drift apart.
+
 A whole conversation, then — a real one is longer, this is the shape:
 
 ```json

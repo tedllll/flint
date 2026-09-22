@@ -796,9 +796,18 @@ Three things about the view are deliberate, and each one was a decision rather t
 
   The command panel offers the arguments a command takes, and `/fork` is the one whose arguments are
   about *this conversation*: the questions asked in it, as buttons, rebuilt every time the frame is —
-  press the second one and the page sends `/fork 2`. The value is the number, not the question: the page
-  composes `/<name> <value>`, so a button carrying the question's own text would send it as part of the
-  line.
+  press the second one and the page sends `/fork 2`. Each button carries the question's own first line
+  beside its number, because a number says where the cut falls and nothing about what is being cut. The
+  value sent is the number, not the text: the page composes `/<name> <value>`, so a button carrying the
+  question's own text would send it as part of the line.
+
+  **And the cut can be made from the answer it keeps.** Under every answer `/fork n` would keep the
+  transcript draws **fork from here**, which sends that same line: the branch holds everything up to and
+  including that answer, and the page is left reading it. The page finds the answer by matching its own
+  turns against the questions the frame named — paired from the bottom, where a `/compact` cannot reach,
+  and only where the turn's text *is* the question and is the only turn that reads that way. Where it
+  cannot be sure it draws nothing, and the panel's labelled list is still there: a button on the wrong
+  answer would cut a branch nobody pointed at, which is worse than a missing button.
 
 What it shows is the conversation the process is in, read from the session file on disk, plus
 the live event stream — the same events `--json` writes, produced by the same code. So a tool
@@ -1343,10 +1352,12 @@ it was kept:
 ```
 
 `--fork <file>` at startup writes the same line without `kept`, because it copies the whole
-conversation rather than a prefix. `/fork 1` is refused (cutting at the first question would leave an
-empty conversation, which is what `/new` is for), as is a number past the end, and `--no-session`
-refuses the door like the others. A startup resume and `/resume` say where the branch came from
-underneath the line naming it.
+conversation rather than a prefix. A cut that would leave an empty conversation is refused (there is no
+conversation to branch into, which is what `/new` is for — in an unfolded conversation that is
+`/fork 1`, and after `/compact` the same cut keeps the digest and is allowed), as is a number past the
+end, and `--no-session` refuses the door like the others. A startup resume and `/resume` say where the
+branch came from underneath the line naming it. In the web view the same cut is a press: **fork from
+here** under each answer `/fork n` would keep, or the labelled question buttons in the settings dialog.
 
 ## Build from source
 

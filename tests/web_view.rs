@@ -1975,3 +1975,73 @@ fn a_readonly_run_is_never_offered_an_os_open() {
         "a file-mode page has no run behind it and must not offer the route: {head:?}"
     );
 }
+
+/// The branch button under an answer is drawn from the frame, over a turn the page drew itself.
+///
+/// A fork is the one command whose argument is a question *in this conversation*: the terminal's `/fork
+/// n` counts questions in the run's own history, and the page counts turns in a file it read. Those are
+/// not the same list the moment anything is folded away, so the button cannot be drawn by counting --
+/// and the page may not read the run's history to find out. What it is given instead is the pair: the
+/// value to send, and the question's own first line (`page_rows`' `labels`), which is how the two
+/// lists are tied together without either side guessing at the other's bookkeeping.
+///
+/// Four things have to hold, and each is a way a branch gets cut somewhere nobody pointed at:
+///
+/// * the row is the frame's (`send`), and the line is composed from that same string plus one of the
+///   values it offered -- never a `/fork` this file spelled into a cut of its own;
+/// * the first value is skipped, because it cuts in front of the question the run has held longest and
+///   nothing the run still holds comes before it: whatever the page drew there is a fold's tail;
+/// * a pairing is believed only when the turn's text is the question the label names, and it is the
+///   only turn that does -- a preference for drawing nothing over drawing the wrong answer;
+/// * the mark is part of what `paint` compares, or a fold or a new question would leave the buttons
+///   where they were and pointing at the wrong question.
+#[test]
+fn the_branch_button_is_drawn_from_the_frame_and_verified_against_the_turn() {
+    let plan = from("function branchPoints(doc)", 60);
+    assert!(
+        plan.contains("command.send === \"/fork\"") && plan.contains("row.send + \" \" + values[i]"),
+        "the line must be the frame's own `send` and one of its values: {plan:?}"
+    );
+    assert!(
+        plan.contains("labels.length !== values.length"),
+        "a row whose labels do not line up with its values is a row this page cannot read: {plan:?}"
+    );
+    assert!(
+        plan.contains("isTheQuestion(doc.blocks[question].text, label)")
+            && plan.contains("named.get(label) !== 1"),
+        "a pairing must be checked against the turn's own text, and against being the only one that \
+         reads that way: {plan:?}"
+    );
+    assert!(
+        plan.contains("for (let i = 1; i < labels.length; i++)"),
+        "the first value cuts in front of everything the run still holds and must not be offered: \
+         {plan:?}"
+    );
+
+    // The comparison itself is `util::preview`'s rule, mirrored: the label is what the run kept of a
+    // question, and the page decides whether a turn is that question. The ellipsis is the whole of the
+    // difference between "the line went on" and "there were more lines".
+    let compare = from("function isTheQuestion(text, label)", 14);
+    assert!(
+        compare.contains("\" ...\""),
+        "the ellipsis on a clipped label is what the comparison turns on: {compare:?}"
+    );
+
+    // And the mark has to be in the comparison `paint` makes, or it is only drawn once: this page
+    // reuses a node whose revision has not changed, so a fact that comes from the state frame has to
+    // be part of what "unchanged" means.
+    let paint = from("const branches = branchPoints(doc);", 18);
+    assert!(
+        paint.contains("existing.fork === (branch ? branch.line : null)"),
+        "a mark that changed has to rebuild the answer it is under: {paint:?}"
+    );
+
+    // The state frame is what carries the list, so it is also what draws the buttons: a page that has
+    // just loaded reads the conversation and then waits for exactly this frame, and drawing them only
+    // on the next transcript event would leave a fresh page with no way to cut from an answer.
+    let state = from("function showState(doc)", 30);
+    assert!(
+        state.contains("paint(doc);"),
+        "a state frame must draw the transcript it changes the buttons of: {state:?}"
+    );
+}

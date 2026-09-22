@@ -3688,14 +3688,103 @@ fn asking_for_the_questions_lists_them_and_writes_nothing() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// A fold takes the digest out of the question list, and a branch in front of the first surviving
+/// question keeps it.
+///
+/// Two defects with one cause: a fold's summary is a `user` message (`session::compacted_message`, and
+/// a `system` message in the middle of a conversation is accepted by some endpoints and refused by
+/// others), so `questions` counted the digest as question 1. `/fork` then listed "the conversation
+/// before this point, summarized by flint at the person's request" as a question and numbered every
+/// real question one higher than the transcript the person was reading -- and the cut in front of the
+/// first question the run still holds was refused as "nothing to keep" when the copy would have held
+/// the summary. That cut is what the page's first value is, so the page would have offered a branch
+/// button whose command always answered with a refusal.
+#[test]
+fn a_compacted_conversation_forks_from_the_questions_it_still_holds() {
+    let home = test_home("fork-after-compact", "http://127.0.0.1:1/v1");
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("working directory");
+    let sessions = home.join("sessions");
+
+    let kept = r#"{"type":"chat","message":{"role":"user","content":"the kept question"}}"#;
+    let mut body = String::new();
+    body.push_str(&meta_line("333-3"));
+    body.push('\n');
+    body.push_str(r#"{"type":"chat","message":{"role":"user","content":"the folded question"}}"#);
+    body.push('\n');
+    body.push_str(r#"{"type":"chat","message":{"role":"assistant","content":"the folded answer"}}"#);
+    body.push('\n');
+    body.push_str(kept);
+    body.push('\n');
+    body.push_str(r#"{"type":"chat","message":{"role":"assistant","content":"the kept answer"}}"#);
+    body.push('\n');
+    // The pointer computed the way a person editing this line by hand would: the byte offset of the
+    // line the fold keeps. `docs/session-format.md` is the promise that this is enough.
+    let from = body.find(kept).expect("the line the fold keeps");
+    body.push_str(&format!(
+        r#"{{"type":"compact","summary":"FOLDED SUMMARY","from":{from}}}"#
+    ));
+    write_session(&sessions, "333-3.jsonl", &[&body], 10);
+
+    let text = repl_of(
+        &home,
+        &work,
+        &["/resume 333-3", "/fork", "/fork 1", "/exit"],
+    );
+
+    assert!(
+        text.contains("1. the kept question"),
+        "the digest is still being listed as a question, or the questions are numbered from it: \
+         {text:?}"
+    );
+    assert!(
+        text.contains("1 question"),
+        "the list counts the digest as something the person asked: {text:?}"
+    );
+    assert!(
+        text.contains("1 message kept, cut at question 1 of 1: the kept question"),
+        "cutting in front of the first question a folded run holds was refused or cut elsewhere: \
+         {text:?}"
+    );
+
+    // The branch itself: one file more, and it holds the digest and nothing that came after it.
+    let written = jsonl_files(&sessions);
+    assert_eq!(
+        written.len(),
+        2,
+        "the fork did not write a conversation of its own: {written:?}"
+    );
+    let branch = written
+        .iter()
+        .find(|path| {
+            !path
+                .file_name()
+                .map(|n| n.to_string_lossy().contains("333-3"))
+                .unwrap_or(false)
+        })
+        .expect("the branch's file");
+    let carried = std::fs::read_to_string(branch).expect("the branch's file");
+    assert!(
+        carried.contains("FOLDED SUMMARY"),
+        "the branch dropped the summary the fold stands for: {carried}"
+    );
+    assert!(
+        !carried.contains("the kept question") && !carried.contains("the kept answer"),
+        "the branch kept what the cut was in front of: {carried}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 /// Three refusals, and each of them is a decision rather than an error path.
 ///
-/// Cutting at the first question leaves a conversation with nothing in it -- a file that would sit in
-/// the list looking real, which is the same fault the empty import is refused for. A number past the
-/// end is answered with the range rather than an empty copy. And a run that promised to keep nothing
-/// does not create a conversation: the check is the same sentence every other door gets, and it is
-/// checked *first*, before anything has been said -- so `--no-session` is a property of the run and
-/// not of the file it was aimed at.
+/// Cutting in front of everything the run holds leaves a conversation with nothing in it -- a file that
+/// would sit in the list looking real, which is the same fault the empty import is refused for. In an
+/// unfolded conversation that is question 1; after a fold the same cut keeps the summary and is allowed
+/// (`a_compacted_conversation_forks_from_the_questions_it_still_holds`), which is why the refusal reads
+/// the copy rather than the number. A number past the end is answered with the range rather than an
+/// empty copy. And a run that promised to keep nothing does not create a conversation: the check is the
+/// same sentence every other door gets, and it is checked *first*, before anything has been said -- so
+/// `--no-session` is a property of the run and not of the file it was aimed at.
 #[test]
 fn a_fork_that_would_keep_nothing_is_refused() {
     let home = test_home("fork-refusals", "http://127.0.0.1:1/v1");
@@ -3726,7 +3815,8 @@ fn a_fork_that_would_keep_nothing_is_refused() {
 
     assert!(
         text.contains("nothing to keep"),
-        "cutting at the first question was allowed: {text:?}"
+        "cutting at the first question of an unfolded conversation was allowed, or the refusal no \
+         longer names the cut: {text:?}"
     );
     assert!(
         text.contains("no question 4") && text.contains("asked 1 question"),
@@ -3835,6 +3925,87 @@ fn forking_at_startup_records_where_the_copy_came_from() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// A run that keeps no conversation is offered no cut, even though it has questions.
+///
+/// The page's dialog is drawn from the frame, so a value in that frame is a button a person can press.
+/// A `--no-session` run has questions in its history and no file to cut a branch out of: `/fork` refuses
+/// it in the same words every other door gets, and the terminal checks that *first*, before listing
+/// anything. The frame has to say the same thing -- the page cannot know the run keeps no conversation,
+/// and a frame offering the questions would be offering presses whose only outcome is that refusal.
+///
+/// A question is asked first, because an empty list over an empty conversation would prove nothing.
+/// The frame under test is the one *after* that, and it is reached through a command that changes the
+/// frame on purpose (`/verbose off`, a setting the frame carries): a frame whose `commands` have not
+/// changed is dropped as unchanged, so waiting for "the next state frame" after a question would wait
+/// for a frame a correct build never sends -- twenty seconds of nothing, and an assertion that passed
+/// because it had no frame to look at. Asking for a frame that must come is what makes the absence of
+/// `labels` mean the absence of the pair a branch button is drawn from.
+#[tokio::test]
+async fn a_run_that_keeps_no_conversation_offers_the_page_no_cut() {
+    use std::io::Write;
+
+    let server = MockServer::start().await;
+    answer_once(&server).await;
+    let home = test_home("no-session-picker", &server.uri());
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("working directory");
+    let log = home.join("transcript.txt");
+    let errors = home.join("stderr.txt");
+    let mut child = binary()
+        .arg("--web")
+        .arg("--no-session")
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .current_dir(&work)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::fs::File::create(&log).expect("transcript file"))
+        .stderr(std::fs::File::create(&errors).expect("stderr file"))
+        .spawn()
+        .expect("failed to run flint");
+
+    let (port, token) = port_and_token(&wait_for_url(&log));
+    let mut watching = http_stream(port, "/events", &token);
+    let opening = read_until(&mut watching, "\"type\":\"state\"", 20);
+    let mut say = |line: &str| {
+        child
+            .stdin
+            .as_mut()
+            .expect("no stdin handle")
+            .write_all(line.as_bytes())
+            .expect("failed to write stdin");
+    };
+    say("why does the socket close early\n");
+    wait_for_requests(&server, 1).await;
+    let asked = read_until(&mut watching, "\"type\":\"turn.completed\"", 20);
+    // And now a frame that has to be sent: the setting it carries moves.
+    say("/verbose off\n");
+    let after = read_until(&mut watching, "\"type\":\"state\"", 20);
+    drop(watching);
+    drop(child.stdin.take());
+    let exited = wait_for_exit(&mut child, 20);
+    let _ = std::fs::remove_dir_all(&home);
+    assert!(exited, "flint did not exit");
+
+    assert!(
+        asked.contains("why does the socket close early"),
+        "the run never got the question this test is about, so the frame proves nothing: {asked:?}"
+    );
+    assert!(
+        after.contains("\"value\":\"off\"") && !after.contains("\"value\":\"on\""),
+        "the frame under test is not the one the command moved, so it proves nothing: {after:?}"
+    );
+    // `labels` is the field only `/fork`'s row carries, so its absence is the absence of the pair a
+    // branch button is drawn from -- and the assertion says nothing about key order within a row.
+    assert!(
+        !opening.contains("\"labels\""),
+        "a run with nothing asked yet was offered questions: {opening:?}"
+    );
+    assert!(
+        !after.contains("\"labels\""),
+        "a --no-session run offered the page cuts it would refuse, on a question it does hold: {after:?}"
+    );
+}
+
 /// The page is offered the arguments a command takes: a list to choose from, and a sentence to write.
 ///
 /// `/fork` is the one whose values are about *this conversation* rather than about the machine: the
@@ -3904,6 +4075,16 @@ async fn the_page_is_offered_the_arguments_a_command_takes() {
     assert!(
         commands.contains("\"values\":[\"1\",\"2\"]"),
         "the row does not carry the questions this conversation was asked: {commands:?}"
+    );
+    // And what those numbers are *of*: a value that is a question number says nothing about what is
+    // being cut, so the question's own first line travels beside it -- the settings screen draws it on
+    // the button, and the transcript finds the turn to hang the branch button on by matching it. The
+    // two lists are one read of `questions`, so they cannot come apart.
+    assert!(
+        commands.contains(
+            "\"labels\":[\"why does the socket close early\",\"what about the retry path\"]"
+        ),
+        "the page is given the question numbers without the questions: {commands:?}"
     );
     // The other kind of argument a command takes: a sentence, which the page composes into
     // `/queue <text>`. Without this row the page would have no way to send a follow-up at all -- a

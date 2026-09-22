@@ -2540,6 +2540,221 @@ check("the peer picker sends a pid and shows who it is", () => {
   eq(select.firstChild.value, "", "and it is still the broadcast");
 });
 
+console.log("cutting a branch from an answer");
+
+// A conversation the page drew, and the frame that names its questions. Both are needed for a branch
+// button: the value to send comes from the frame (`/fork`'s `values`), and *where* to draw it comes
+// from the page's own transcript, tied to the value by the question's first line (`labels`).
+//
+// The fold is why the tie is by text and not by counting: after `/compact` the run holds fewer
+// questions than the file has `chat` lines, so the page's Nth question and the run's Nth question are
+// not the same question -- and the page cannot know how many were folded away without reading the
+// run's history, which it may not do. The lists are paired from the end, where they agree, and each
+// pairing is believed only when the turn's own text is the question the label names.
+const forkFrame = (page, target, labels, values) => {
+  const d = target || page.newDoc();
+  page.applyState(d, JSON.stringify({
+    type: "state", provider: "stub", model: "m", providers: [{ name: "stub", models: ["m"] }],
+    commands: [
+      { label: "/fork [n]", send: "/fork", help: "start a new conversation cut at question n",
+        class: "selector", group: "conversation", values: values || labels.map((_, i) => String(i + 1)),
+        labels },
+    ],
+  }));
+  return d;
+};
+const chat = (role, content) =>
+  `{"type":"chat","message":{"role":"${role}","content":${JSON.stringify(content)}}}`;
+// Two questions asked and answered. The transcript the page has when there is nothing else in the
+// file: no fold, no import, and the newest question is the one at the bottom.
+const TWO_TURNS = [
+  chat("user", "why does the socket close early"),
+  chat("assistant", "because the peer half-closes"),
+  chat("user", "what about the retry path"),
+  chat("assistant", "it retries twice, then gives up"),
+].join("\n");
+
+check("a question's number is labelled with the question, in the settings list too", () => {
+  const page = loadViewer();
+  const d = forkFrame(page, null, ["why does the socket close early", "what about the retry path"]);
+  page.showState(d);
+  const rows = rowsOf(page, "conversation");
+  eq(labelsOf(page, "conversation"), ["/fork 1", "/fork 2"], "one row per question, by number");
+  // The second half of the row is the question itself rather than the help printed twice: "start a
+  // new conversation cut at question n" under `/fork 1` and again under `/fork 2` says nothing about
+  // which question is which, which is the whole of what this row is for.
+  eq(
+    rows.map((row) => String(row.children[1].textContent)),
+    ["why does the socket close early", "what about the retry path"],
+    "each value says what it is of"
+  );
+});
+
+check("the answers a value cuts from carry the button, and the rest do not", () => {
+  const page = loadViewer();
+  const d = forkFrame(page, page.applyText(page.newDoc(), TWO_TURNS),
+    ["why does the socket close early", "what about the retry path"]);
+  page.paint(d);
+  const turns = page.__node("doc").children.filter((n) => n.className.indexOf("turn ") === 0);
+  eq(turns.length, 4, "two questions and two answers");
+  const tools = turns.map((turn) => turn.children.find((child) => child.className === "turn-tools"));
+  // The button is under the *first* answer: `/fork 2` cuts in front of the second question, so the
+  // branch keeps everything up to and including the first answer. The newest answer has none --
+  // cutting in front of nothing is not a cut at all -- and neither has the first question's, because
+  // the value that would name it (`/fork 1`) keeps no answer: the run has held nothing before it.
+  eq(tools.map((bar) => (bar ? bar.children[0].textContent : null)),
+    [null, "fork from here", null, null], "one button, under the answer it keeps");
+  const button = tools[1].children[0];
+  eq(button.title.indexOf("keeps everything up to and including this answer") > 0, true, "what it does");
+  eq(button.title.indexOf("what about the retry path") > 0, true, "and which question it cuts in front of");
+  // The line the mark composes: the frame's own `send` and one of the values it offered, like every
+  // other control on this page. The press itself is checked in a browser
+  // (`scripts/browser-controls-test.js`), where a click is real.
+  eq(page.branchPoints(d).get(1).line, "/fork 2", "the line a press would send");
+});
+
+check("a state frame is enough on its own to draw the cut it carries", () => {
+  // The frame is what names the questions, so it is what draws the buttons -- and a page that has
+  // just loaded reads the conversation and then waits for exactly this frame. Drawing the buttons
+  // only on the next transcript event would mean a freshly opened page showed no way to cut from an
+  // answer until an answer arrived, which is the one moment the buttons are wanted.
+  const page = loadViewer();
+  const d = page.applyText(page.newDoc(), TWO_TURNS);
+  page.paint(d);
+  const bar = () =>
+    page.__node("doc").children[1].children.find((child) => child.className === "turn-tools");
+  eq(bar(), undefined, "with no frame yet there is nothing to cut");
+  forkFrame(page, d, ["why does the socket close early", "what about the retry path"]);
+  ok(bar() !== undefined, "the frame that names the questions draws the button by itself");
+  eq(bar().children[0].title.indexOf("what about the retry path") > 0, true, "and it names one");
+});
+
+check("a frame that offers no cut draws no buttons at all", () => {
+  const page = loadViewer();
+  const d = page.applyText(page.newDoc(), TWO_TURNS);
+  page.applyState(d, JSON.stringify({
+    type: "state", provider: "stub", model: "m", providers: [], commands: [],
+  }));
+  page.paint(d);
+  eq(page.branchPoints(d).size, 0, "nothing to cut in front of");
+  const tools = page.__node("doc").children.map((turn) =>
+    turn.children.find((child) => child.className === "turn-tools"));
+  eq(tools.filter(Boolean).length, 0, "and nothing is drawn");
+});
+
+check("a question the run no longer holds is not marked with the button above it", () => {
+  // What `/compact` leaves: the file still has the folded question and its answer, and the run holds
+  // the two after it plus the digest standing in for the first. The page cannot tell how much was
+  // folded -- that is a fact about the run's history, not about the text on screen -- so it pairs the
+  // question list from the end and believes a pairing only when the turn's text is the question the
+  // label names. The button then lands on the answer the cut keeps, and the folded answer above it,
+  // which the branch does not contain, is left alone: a button there would promise a branch holding
+  // an answer it dropped.
+  const page = loadViewer();
+  const d = forkFrame(page, page.applyText(page.newDoc(), [
+    chat("user", "the folded question"),
+    chat("assistant", "the folded answer"),
+    chat("user", "what about the retry path"),
+    chat("assistant", "it retries twice, then gives up"),
+    chat("user", "and the timeout"),
+    chat("assistant", "thirty seconds"),
+  ].join("\n")), ["what about the retry path", "and the timeout"]);
+  page.paint(d);
+  const turns = page.__node("doc").children;
+  const marked = turns
+    .map((turn, at) => {
+      const bar = turn.children.find((child) => child.className === "turn-tools");
+      return bar ? at + " " + bar.children[0].title : null;
+    })
+    .filter(Boolean);
+  eq(marked.length, 1, "one cut, over a fold");
+  ok(marked[0].indexOf("3 ") === 0, "the button is on the held answer, not the folded one");
+  ok(marked[0].indexOf("and the timeout") > 0, "and it names the question it cuts in front of");
+});
+
+check("a turn in flight takes the buttons away rather than moving them", () => {
+  const page = loadViewer();
+  const d = forkFrame(page, page.applyText(page.newDoc(), TWO_TURNS),
+    ["why does the socket close early", "what about the retry path"]);
+  page.paint(d);
+  page.applyLine(d, `{"type":"turn.started","prompt":"and the timeout"}`);
+  page.paint(d);
+  const tools = page.__node("doc").children.map((turn) =>
+    turn.children.find((child) => child.className === "turn-tools"));
+  // The frame is built between turns, so the run does not know the third question yet: its list is
+  // one question behind the page's drawing, and pairing it from the end would put `/fork 2` on the
+  // answer to the *first* question. Refusing every pairing is the honest drawing; the settings list
+  // still names all three questions and works.
+  eq(tools.filter(Boolean).length, 0, "no button is left pointing one question off");
+});
+
+check("two questions that read alike are not pointed at, and the others still are", () => {
+  const page = loadViewer();
+  const repeated = [
+    chat("user", "carry on"),
+    chat("assistant", "the first answer"),
+    chat("user", "carry on"),
+    chat("assistant", "the second answer"),
+    chat("user", "and the tests"),
+    chat("assistant", "they pass"),
+  ].join("\n");
+  const d = forkFrame(page, page.applyText(page.newDoc(), repeated),
+    ["carry on", "carry on", "and the tests"]);
+  page.paint(d);
+  const turns = page.__node("doc").children;
+  const marked = turns
+    .map((turn, at) => (turn.children.find((c) => c.className === "turn-tools") ? at : -1))
+    .filter((at) => at >= 0);
+  // Only the third question's button: "carry on" appears twice, so a press cannot say which answer
+  // the person meant, and the page says nothing rather than guessing. The value is still offered in
+  // the dialog, where the numbers tell the two apart.
+  eq(marked, [3], "the ambiguous question is skipped, the rest are marked");
+  eq(turns[3].children.find((c) => c.className === "turn-tools").children[0].title.indexOf("and the tests") > 0,
+    true, "and the button that is drawn names the right question");
+});
+
+check("a repaint leaves the buttons alone until the questions move", () => {
+  const page = loadViewer();
+  const d = forkFrame(page, page.applyText(page.newDoc(), TWO_TURNS),
+    ["why does the socket close early", "what about the retry path"]);
+  page.paint(d);
+  const first = page.__node("doc").children[1];
+  // Painting is incremental, and the mark is part of what a node was built from: a repaint that
+  // rebuilt every answer would throw away a selection and an open reasoning box on each delta.
+  page.paint(d);
+  ok(page.__node("doc").children[1] === first, "an unchanged answer keeps its node");
+  // A question asked since: `/fork 3` cuts in front of the new one, so the button under the second
+  // answer is new, and the one under the first still means what it meant (`/fork 2`) and is left
+  // alone -- the same node, not a rebuilt copy of it.
+  page.applyLine(d, chat("user", "and the tests"));
+  page.applyLine(d, chat("assistant", "they pass"));
+  forkFrame(page, d, ["why does the socket close early", "what about the retry path", "and the tests"]);
+  page.paint(d);
+  const turns = page.__node("doc").children;
+  const bar = (at) => turns[at].children.find((c) => c.className === "turn-tools");
+  ok(turns[1] === first, "an answer whose cut did not move keeps its node");
+  eq(bar(1).children[0].title.indexOf("what about the retry path") > 0, true, "and the same question");
+  eq(bar(3).children[0].title.indexOf("and the tests") > 0, true, "the new cut names the new question");
+  eq(bar(5), undefined, "the newest answer is never cut from");
+});
+
+check("a label the page cannot match is not a button", () => {
+  eq(viewer.isTheQuestion("why does the socket close early", "why does the socket close early"), true,
+    "the same question");
+  eq(viewer.isTheQuestion("why does the socket close early?", "why does the socket close early"), false,
+    "a longer question is a different question");
+  eq(viewer.isTheQuestion("  why does the socket close early\n", "why does the socket close early"), true,
+    "the label is trimmed, like the run's own preview");
+  const long = "x".repeat(80);
+  eq(viewer.isTheQuestion(long, "x".repeat(64) + " ..."), true, "a clipped first line");
+  eq(viewer.isTheQuestion("x".repeat(64), "x".repeat(64) + " ..."), false,
+    "the ellipsis means the question is longer than the label");
+  eq(viewer.isTheQuestion("first line\nsecond line", "first line ..."), true,
+    "more lines than the label shows is what the ellipsis says");
+  eq(viewer.isTheQuestion("first line", "first line ..."), false,
+    "a single short line is not a clipped one");
+});
+
 if (failures) {
   console.log(`\n${failures} failed`);
   process.exit(1);
