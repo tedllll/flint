@@ -1981,13 +1981,13 @@ expression, and `+` binds tighter than `if`/`else` — so on Linux the `else` br
 product failure. Written 2026-09-15 (`f12fcaa`) and green on the machine that wrote it, that check had
 been Windows-only for three days while claiming to check a door both platforms have. `ROADMAP.md` §11
 item 1 carries the long form, the expression itself and the fix.
-**CI, as this file is being written:** green on the pushed heads up to `67c0cac`; `test (ubuntu-latest)`
-was red in that one step on `686411c` and on `915c2a8` — the first run with no annotation at all, the
-second with the traceback but not the reason — which is how the config-precedence bug above was found.
-The step now carries each check's own `FAIL` lines as annotations, and **the head that carries the fix is
-the first one that can be green on both runners: read its `test (ubuntu-latest)` before believing any
-line above it.** That head's ubuntu job *was* green — the fixed config made the whole file pass on Linux
-for the first time — and its windows job then found the third thing in the same step: the runner's Python
+**CI, at the end of this session: green on `afcee85`, all seven checks, which is the first head whose
+`test (ubuntu-latest)` *and* `test (windows-latest)` both passed the example-check step.** The four heads
+before it were red in that one step, on one runner or the other — `686411c` and `915c2a8` on ubuntu (the
+first run with no annotation at all, the second with the traceback but not the reason, which is how the
+config-precedence bug above was found), then `0a3b8f4` on windows — and each round bought one fix: the
+`FAIL` lines as annotations, the config written per platform, the UTF-8 stdout. The windows round's
+finding is the third: the runner's Python
 encodes a redirected stdout as `cp1252`, both checks print Chinese fixture text in their `FAIL` details,
 and so `check()` itself raised `UnicodeEncodeError` — a crash in the harness that reads like a product
 failure, and one this machine cannot see because its code page is `gbk`. Reproduced here first by setting

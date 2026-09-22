@@ -1921,7 +1921,8 @@ where prose and tree disagree is item 3.**
    `flint_server.py` does the same one layer down, where the reason is a specification rather than a
    console: JSON-RPC over stdio *is* UTF-8, and a prompt typed in Chinese must not depend on the code
    page of the machine relaying it. Three findings from one step, all of them in the check rather than
-   the product — which is the direction a first run should fail in, and no reason to stop looking.
+   the product — which is the direction a first run should fail in, and no reason to stop looking. The
+   step is **green on both runners as of `afcee85`**, the first head for which that was true.
 2. **Stale sentences, found by checking claims instead of reading them — all five now corrected
    (2026-09-18).**
    This is a class, not an incident, and it is the finding that says the most about the repository: five
