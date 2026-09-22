@@ -324,9 +324,10 @@ pub struct Live {
     /// helps a client that says where it got to. So it is kept here and sent once on connect.
     ///
     /// It describes the *process* -- which provider and model are in force, what each provider
-    /// offers, the enumerable toggles -- and not the conversation, which is why `/new` and
-    /// `/resume` leave it alone: moving to another conversation changes nothing that is
-    /// configured. See [`Live::state`] for why it is a rendered string rather than a struct.
+    /// offers, the settings a person can change and the commands that may be offered -- and not the
+    /// conversation, which is why `/new` and `/resume` leave it alone: moving to another
+    /// conversation changes nothing that is configured. See [`Live::state`] for why it is a rendered
+    /// string rather than a struct.
     state: Mutex<String>,
     /// The session file this stream is about, so that a cursor can be read back out of it.
     ///
@@ -2402,7 +2403,8 @@ const SSE_ANSWER_SNAPSHOT: &str = "event: answer\n";
 /// What a page's controls could offer, as state rather than as change.
 ///
 /// The third of them, and the one a page needs before it can draw anything with a choice in it:
-/// which provider and model are in force, what each provider offers, and the toggles. Nothing
+/// which provider and model are in force, what each provider offers, and every setting a person can
+/// change with the words it takes. Nothing
 /// secret goes in it, which is why it is a frame a page can be handed on connect -- and why
 /// `/provider key` is a form and not a picker.
 const SSE_STATE_SNAPSHOT: &str = "event: state\n";

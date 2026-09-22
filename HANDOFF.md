@@ -25,26 +25,28 @@ reconstruct it:
 | 8. the page's cursor across a restart | **answered**, and its client half **built** — a reload rebuilds, a stale position is reported |
 | 9. three gaps the code named about itself | **all three closed** — the paste enable is tested (and moved into the run's own sink), `/say --to` is a page picker, the report-whitelist comment is true |
 | 10. `/export` from inside a conversation | **built** |
-| 11. the page's panel groups are classes, not tasks | seen and judged **not worth a round on its own** — cosmetic, no behaviour, recorded so nobody re-derives it |
+| 11. the page's panel groups are classes, not tasks | **answered 2026-09-22**, when the person asked directly for the settings dialog to be cut the way the page is *used*: the dialog's rail is six **places** (`model`, `this run`, `limits`, `tools`, `this conversation`, `background work`), the process files each row on one of them, and the classes stayed where they belong — the `/` menu's grouping. `docs/web-mode.md` §22 |
 | 12. `docs/sandbox.md` contradicts `## Not doing, and why` | **declined in writing, 2026-09-18**: asked whether to build a permission layer or keep the default, the answer was keep the default (all permissions). The `ROADMAP.md` bullet is unchanged, `docs/sandbox.md` now labels itself an argument that lost, and the contradiction is closed in favour of the plan of record. Nothing else in §11 waited on it, and nothing does now |
 | 13. the addresses in the page's text, pressable | **built 2026-09-18**, asked for directly: a web address is a link in a new tab, a path stays a button into the preview, and the scheme test is an allowlist. Its one named residue — no OS-level open — was **built one session later** as `POST /open` plus the panel's `open` control (see `## What was just done`) |
 
 The gate as the last session left it — re-measured after the page slices at the top of
 `## What was just done`, on a tree with the untracked verification record held aside (that file and no
-other is the one thing `cargo test` disagrees with; see the paragraph after this one) — and re-measured
-again on 2026-09-18, after the tool-payload round and this session's three commits: `cargo test`
-**678 passing, 1 ignored** across the 14 suites (lib 382 — 368 of it before that round, so the round
-added 14 — bin 7, `agent_loop` 34, `balance` 7, `cli_output` 113, `json_output` 41, `say` 6,
+other is the one thing `cargo test` disagrees with; see the paragraph after this one) — re-measured
+again on 2026-09-18, after the tool-payload round and that session's three commits, and re-measured a
+third time on **2026-09-22**, after the two page rounds at the top of `## What was just done` (the
+preview's line numbers, then the settings screens and the `toggles` field's removal): `cargo test`
+**681 passing, 1 ignored** across the 14 suites (lib 382 — 368 of it before the tool-payload round, so
+that round added 14 — bin 8, `agent_loop` 34, `balance` 7, `cli_output` 113, `json_output` 41, `say` 6,
 `search_tool` 4, `task` 17, `term_capture` 20 + 1 ignored, `tty_hangup` **0 on Windows** and 3 on Unix
 — the suite is `#![cfg(unix)]`, and the library carries a few `#[cfg(unix)]` tests of its own, so the
-ubuntu job's total is larger and is *not* quoted here as if it were this number — `web_view` 37,
+ubuntu job's total is larger and is *not* quoted here as if it were this number — `web_view` 39,
 `who` 10, and the doc-tests 0);
 `cargo clippy --all-targets -- -D warnings` silent; the two headless Node harnesses green
 (`term-layout-test.js`, `web-view-test.js`) **and run by CI**; **both `examples/` doors green, as one
 more step of that same CI job** — `examples/python/test_call.py` and `examples/mcp/test_mcp.py`, each
 resolving the binary `cargo test` just built for itself and refusing a pass that came from an installed
 `flint` on `PATH`; the
-browser harness run by hand at **93/93 claims held**, printing the list of drives and not-drives it is
+browser harness run by hand at **101/101 claims held**, printing the list of drives and not-drives it is
 bounded by. The release binary on `PATH` is the tree's (`flint --version` → `flint 0.1.0`, exit 0, and
 its SHA-256 is the one `target/release/flint.exe` was built with).
 
@@ -1816,6 +1818,73 @@ picker, type `/config` into the composer, and see whether the answer lands in th
 the block is drawn — then open the `commands` panel and read it against `/help` in the terminal.
 
 ## What was just done
+
+### The settings are screens now, and the preview numbers its lines — 2026-09-22
+
+**Two things asked for directly, in the order they were sent: the preview's code should carry the file's
+own line numbers, and the settings dialog's flat list of commands was wrong — split it the way the page
+is *used*, like DSH's, rather than wrapping the old controls in a box.** The first was one page edit
+(`babc641`+`5ee09a1`); the second is the round this session spent, and it is a page round with one Rust
+line behind it.
+
+**The settings dialog now has six screens, and the process decides which row is on which.** The first
+version had two sections — `run` and `commands` — which was the *page's* split: everything about the run
+on one side, everything it takes on the other. That is the old header with a lid on it. The screens are
+now the places a person actually goes: `model` (the endpoint and the model this run asks, including the
+thinking ladder, because whether an endpoint has a reasoning field is a property of the endpoint),
+`this run` (the other four switches, `/reload`, `/say`), `limits` (`/config`), `tools` (`/tools`,
+`/skills`, `/prompts`, `/agents`), `this conversation` (`/name`, `/usage`, `/compact`, `/export`,
+`/import`, `/sessions`, `/resume`, `/fork`, `/new`, `/archive`, `/delete`) and `background work`
+(`/jobs`, `/jobs stop <pid>`). Which screen a row lands on is **the process's** decision — every row
+carries a `group`, filed by `page_group` beside the command table in `src/main.rs` — and the page owns
+only the screen names, their order and their one-line notes. That is §8's rule kept exactly where it
+matters most: a page that decided which screen a command belongs on would be a page to edit every time a
+command is added.
+
+**Three lists are now tied together by tests rather than by care.** `the_page_files_every_settings_screen_the_process_hands_it`
+parses `page_group`'s arms out of `src/main.rs` and compares them, name for name, with the page's
+`SETTINGS_PANES`; a screen the process files rows on and the page does not draw (or the reverse) fails
+instead of silently losing rows. The third list is the frame itself, held by the existing
+`every_row_the_page_offers_is_filed_or_is_the_palettes`.
+
+**Two hand-offs had to move with the split, and both are about a press landing where the person is
+looking.** A report is read on the screen it was asked from — the answer replaces *that* screen's rows,
+with a `‹ back` above it — and the screen travels with the request, so a state frame arriving in between
+cannot move the reading under another heading. And the `/` menu hands a row off to the screen the frame
+filed it on, so a form row opens the dialog *at that row*; a row the frame does not file (`/help`,
+`/queue`, `/config set`, the two picker lines) is read on the first screen, which is the documented
+fallback rather than a silent nothing. The classes did not go away: `MENU_GROUPS` still groups the `/`
+menu by class, because "what does this row do?" is exactly the question a launcher has to answer.
+
+**One thing was deleted, and it is the point of the round.** `settings` had been drawn on the page while
+a derived `toggles` field was kept "for one commit" so the user's live app never lost its switches; the
+page reads `settings` now, so `fn toggles()` and the field are gone, and `tests/cli_output.rs` asserts
+the frame does **not** carry a second list of switches beside the settings they were derived from. The
+screens are also **built** rather than written into the markup (`showSettingsPanes` on open), because the
+screen list is the page's own and a second copy in the HTML is the drift this repository spends comments
+preventing — which is why the browser harness now waits for the *door* instead of a control.
+
+**What it cost, measured, and this is the part worth reading.** Sixteen claims in
+`scripts/browser-controls-test.js` were retargeted from "the row is somewhere in the dialog" to "the row
+is on the screen the frame filed it on" (`ROW(line, screen)`), two of them new: a row filed on `limits`
+is asserted *absent* from the conversation screen while that screen is up, and `/reload` is asserted to
+be a button on `this run` and not a row on `this conversation` — a page that put every action on one
+screen passed the old single-screen claim by accident. Running that harness found two of its own defects
+rather than the page's: a rail button tagged with an id containing a **space** (`#harness-section-this run`)
+is not a valid selector and read as "the rail has no such screen", and a switch's value read back **by
+id** after the change threw `Cannot read properties of null` — because the change sends a line, the run
+answers with a new state frame, and `paintSettings` rebuilds the rows, so the node the id was on is gone.
+Both now read the control by the *row's own name*, and the second is recorded in `VALUE_OF`'s comment
+because it is the shape every future "did the control move?" claim will have. Final: **101/101 claims
+held** in a real browser against a live run.
+
+**The gate**: `cargo test` **681 passing, 1 ignored** (was 678; `web_view` 37 → 39 — the screen-filing
+test is new, and the settings one replaced the pickers one), `cargo clippy --all-targets -- -D warnings`
+silent, both headless Node harnesses green, both `examples/` doors green, the browser harness by hand at
+101/101. `docs/web-mode.md` §22 was rewritten (the six screens, the three tied lists, the new measured
+table) and §11's "the panel groups are classes, not tasks" — the open question that round left behind —
+is answered there: the classes are right for a *list* and wrong for a *place to work*, so the dialog got
+places and the `/` menu kept classes. `docs/features.md` §12.3/§12.5 follow.
 
 **The context problem was the tool schemas, and they are now a tenth of what they were.** Reported
 as "the system prompt is too long"; measured, the system prompt is 3,273 characters and the thirteen

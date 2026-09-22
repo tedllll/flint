@@ -5727,44 +5727,10 @@ fn state_frame(
         "provider": provider.name,
         "model": provider.model,
         "settings": settings,
-        // The switches, in the shape the page's controls read *today*: `settings` above says the same
-        // things and more, and the page moves onto it in the next commit -- this field goes with the
-        // last reader, so that no commit in between leaves a run whose dialog lost its switches.
-        "toggles": toggles(&settings),
         "providers": providers,
         "commands": page_commands(cfg, provider, agent),
     })
     .to_string()
-}
-
-/// The five switches out of `settings`, in the shape the page's switches read today: a name, the
-/// words that name takes, and the value it is on.
-///
-/// Derived rather than listed a second time, because a frame that said a switch was `on` in one field
-/// and `full` in another would be one fact in two places -- the mistake the switch round existed to
-/// remove (§11). Deleted in the commit that draws the page's controls from `settings`, along with the
-/// `toggles` field itself: until then this is what keeps a run working across the change.
-fn toggles(settings: &serde_json::Value) -> serde_json::Value {
-    /// The settings that were switches before they were settings, in the order they were shown in.
-    const SWITCHES: [&str; 5] = ["verbose", "detail", "readonly", "hear-peers", "thinking"];
-    let all = settings.as_array().cloned().unwrap_or_default();
-    serde_json::Value::Array(
-        all.iter()
-            .filter(|setting| {
-                setting
-                    .get("key")
-                    .and_then(|key| key.as_str())
-                    .is_some_and(|key| SWITCHES.contains(&key))
-            })
-            .map(|setting| {
-                serde_json::json!({
-                    "name": setting.get("key"),
-                    "values": setting.get("choices"),
-                    "value": setting.get("value"),
-                })
-            })
-            .collect(),
-    )
 }
 
 /// The page's menu: the commands it may offer, in the shape a control is drawn from.

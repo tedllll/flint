@@ -245,7 +245,7 @@ Nine routes. No cookies, no HTTP/2, no TLS, no keep-alive, no streaming request 
 | `GET /jobs` | the `task` children and background commands this run started, as `{"jobs":[…]}` in the run's own order (running first, newest first) — for the header's jobs panel (§13). Each row carries `pid`, `kind`, what was asked, a status word, the exit code in words beside it, absolute epoch seconds for its start and end, and `path`: a child's conversation or a command's log |
 | *`event: sessions`* | not a route but its counterpart: the list has changed, re-read it |
 | *`event: jobs`* | the same for `GET /jobs`: a job started or ended, re-read it |
-| *`event: state`* | the run's own configuration: provider, model, what each provider offers, the toggles, and the command list with §8's class for each row — a row also carries `values` when the page may send that command with an argument the frame names (a *read* on a `panel` row, a line the page types for you on a `selector`), `fields` when the page may collect its answers (one entry per word the line wants, each with the input's kind, the argument's name, and whether the command works without it), and `from` when it destroys something and the argument is one of a list (§11) |
+| *`event: state`* | the run's own configuration: provider, model, what each provider offers, every setting with the words that change it and the screen it belongs on (`settings`, one list for the switches and the values alike), and the command rows with §8's class and the screen each is filed on (`group`) — a row also carries `values` when the page may send that command with an argument the frame names (a *read* on a `panel` row, a line the page types for you on a `selector`), `fields` when the page may collect its answers (one entry per word the line wants, each with the input's kind, the argument's name, and whether the command works without it), and `from` when it destroys something and the argument is one of a list (§11). There is no `toggles` field: `settings` says what the switches are, what they take and which one is on, and a second copy of that is one fact in two places (§22) |
 | `type: command` | what a command answered, on the same stream as the turn's events: `input` and `text` — which is also what a header button's answer arrives on. Carries `panel: true` when the page asked to read it rather than typing it, and `input` is the command's own `send` rather than the line in the one case the line carries a credential (§11) |
 
 **All nine are implemented.** `/session` and `/events` read the session path and the event feed
@@ -809,6 +809,13 @@ actions, selectors, forms, destructive — is unknown; the first person to open 
 press and others do not, which is why the reference rows are now marked and explain themselves on
 hover. Whether that is enough, or whether the groups should be ordered around a *task* (add a provider,
 set a key) rather than around §8's classes, is the open question this round leaves behind.
+
+**Answered, 2026-09-22, and the answer was the second half of the question.** Grouping around §8's
+classes was right for a *list* and wrong for a *place to work*: the classes say what a row does (read,
+send, ask, destroy) and a person arriving at the page knows what they came to change (the model, this
+run, this conversation). §22 keeps the classes — they are what the page draws a control *from* — and
+adds a screen per place, with `MENU_GROUPS` left holding the classes for the `/` menu, where "what does
+this row do?" is exactly the question a launcher has to answer.
 
 ### A form row asks for each answer the frame names — measured, 2026-09-15
 
@@ -2002,12 +2009,40 @@ buttons, its `cwd`/id/creation line, and the command list. The chips stayed beca
 conversation this is. The line between the two is not "important versus unimportant": it is **state you
 are watching** versus **state you are changing**, and only the second half belongs behind a door.
 
-**Panes, not a pile.** The dialog has a rail with two sections — `run` and `commands` — and one is shown
-at a time. Two, rather than one long scroll, because the two kinds of thing behind the door are genuinely
-different: what this run *is* (endpoint, switches, actions, its own facts) and what this run *takes*
-(the frame's commands, with their forms and their two-press destructive rows). A section name is the
-page's own word for a place it put things, like a group heading; nothing inside a pane is named by the
-page, so §8's rule still holds exactly as it did.
+**Screens, not a pile — and the second half of the same complaint.** The first version of the dialog
+had a rail with two sections, `run` and `commands`, which was the *page's* split: everything about the
+run on one side, everything the run takes on the other. A person using it said what was wrong with
+that in one sentence — the settings should be split the way the page is *used*, like DSH's, rather than
+wrapped up in one box. Two sections is not a design; it is the old header with a lid on it. So the
+screens are now the places a person actually goes, and they are cut by *what somebody came to do*:
+
+| Screen | What is on it |
+|---|---|
+| `model` | the endpoint and the model this run asks: the provider and model pickers, and every way to change either (`/provider add`, `/provider key`, `/provider rm`) |
+| `this run` | how it behaves while it works: the five switches, and the actions that affect this run (`/reload`, `/say`) |
+| `limits` | what it may spend, and how it runs a command: `/config` and `/config edit` |
+| `tools` | what it can use, and what it knows: `/tools`, `/skills`, `/prompts`, `/agents` |
+| `this conversation` | its name, its size, and the other conversations: `/name`, `/usage`, `/compact`, `/export`, `/import`, `/sessions`, `/resume`, `/fork`, `/new`, `/archive`, `/delete` |
+| `background work` | what this run left running: `/jobs`, `/jobs stop <pid>` |
+
+**The process files the rows; the page names its own furniture.** Six screens is not six names the page
+invented — that would be §8's rule broken at exactly the place it matters most, because a page that
+decided which screen a command belongs on would be a page that has to be edited every time a command is
+added. Each row the frame sends carries a `group`, and `page_group` in `src/main.rs` is the one place
+that decides it, beside the command table and for the same reason (the third copy of a fact is the copy
+that drifts). The page owns the *screen names, their order and their one-line notes* — its own words for
+places it put things, like a group heading — and it drops any row whose `group` names a screen it does
+not have, rather than inventing a home for it. Three lists are therefore tied together by construction
+and by tests: `page_group`'s vocabulary, the page's `SETTINGS_PANES`, and the frame the tests read.
+
+**The rail is a launcher, so it is the page's, and the reading follows the row.** Two things had to
+change with the split, and both are about a press landing where the person is looking. A report is read
+on the screen the row was asked from — the answer replaces *that* screen's rows, with a `‹ back` above
+it — rather than in a single panel that a press from any screen would fill. And the `/` menu hands a row
+off to the screen the frame filed it on, so a form row opens the dialog *at that row* rather than at
+whichever screen happens to be first. A row the page does not group — `/help`, `/queue`, `/config set`,
+and the two picker lines that are already controls — is read on the first screen, which is the honest
+fallback rather than a silent nothing.
 
 **`hidden`, not `<dialog>`/`showModal`.** §10 already recorded why the page has no `<dialog>`: the stub
 DOM the Node harness runs cannot express `showModal`, and a control whose behaviour is only checkable in
@@ -2015,6 +2050,13 @@ a browser is a control most of whose behaviour goes unchecked. The dialog is a `
 `role="dialog" aria-modal="true"` and a sibling mask, so the *three* doors a modal needs — its own close
 button, a press on the mask, `Escape` — are three ordinary handlers that the Node harness can call and
 the browser harness can press.
+
+**The screens are built, not written.** The markup holds the rail and one empty container; the six
+screens (`pane-<key>`, `fields-<key>`, `row-list-<key>`) are built when the dialog opens, because the
+screens are the page's own list and a second copy of it in the markup is the drift this repository
+spends its comments preventing. The cost is a real one and worth naming: nothing inside the dialog is in
+the document until somebody opens it, which is why the browser harness waits for the *door* rather than
+for a control, and why `openSettings` paints as well as builds.
 
 **Focus is the whole difference between a modal and a panel that happens to be on screen.** Opening moves
 the keyboard to the close button, and closing puts it back on the door it came from. Neither is visible
@@ -2041,23 +2083,44 @@ in a real browser.
 document's own `hidden` attributes at load, because a stub that starts every node visible cannot tell a
 dialog that ships closed from one that ships open — and every overlay on this page (the sidebar, the
 jobs panel, the preview, the dialog, the mask) ships closed. Three policy tests that grepped the old
-header markup were retargeted at the panes they now live in, and one of them (`the_command_panel...`)
-gained a *better* needle: the pane, rather than a window wide enough to span two siblings.
+header markup were retargeted at the screens they now live in, one of them (`the_command_panel...`)
+gained a *better* needle — the screen, rather than a window wide enough to span two siblings — and the
+split cost one more test that is worth its keep: `the_page_files_every_settings_screen_the_process_hands_it`
+reads `page_group`'s arms out of `src/main.rs` and compares them with the page's own `SETTINGS_PANES`,
+so a screen the process files rows on and the page does not draw (or the reverse) fails rather than
+silently losing rows.
+
+**The second round, measured.** Splitting the dialog into the six screens above changed nothing about
+what a *control* does, which is why the round is mostly a tightening: a screen that has been built and
+is not the one on top is `hidden`, so a row on another screen cannot be pressed at all — and the browser
+harness now presses every row through the screen it expects it on (`ROW(line, screen)`), which turns "the
+row is somewhere in the dialog" into "the row is where the frame filed it". Two claims are new rather
+than retargeted: a row filed on `limits` is asserted **absent** from the conversation screen while the
+conversation screen is up, and `/reload` is asserted to be a button on `this run` and *not* a row on
+`this conversation` — a page that put every action on one screen passed the old single-screen claim by
+accident.
 
 | Claim | Where it was measured | What came back |
 |---|---|---|
-| The header keeps a door and nothing else | `tests/web_view.rs::the_runs_controls_live_in_a_dialog_and_the_header_keeps_one_door` | the header's own bytes carry the name, the jobs panel and the door; the pickers, switches, actions, `meta` and command list are asserted **absent** from it and **present** after the dialog opens |
-| It is a modal, and everything that changes state is inside it | the same test | `role="dialog"`, `aria-modal="true"`, a label, and the four controls asserted to be past the dialog's own offset in the file |
+| The header keeps a door and nothing else | `tests/web_view.rs::the_runs_controls_live_in_a_dialog_and_the_header_keeps_one_door` | the header's own bytes carry the name, the jobs panel and the door; the pickers, switches, actions, `meta` and command rows are asserted **absent** from it and **present** after the dialog opens |
+| It is a modal, and everything that changes state is inside it | the same test | `role="dialog"`, `aria-modal="true"`, `aria-labelledby` pointing at the dialog's own heading, and the rail, the container, the close button and `meta` asserted to be past the dialog's own offset in the file |
 | Three doors, and one Escape order | the same test | the close button, the mask and `dismissTopmost` are all wired, and the modal is asked about *before* the preview in that function |
-| One section at a time | the same test | the rail's list is `SETTINGS_PANES` and `showSettingsPane` shuts the others; a section the rail does not offer changes nothing |
-| The dialog opens and closes with the keyboard | `scripts/web-view-test.js` | shut on load, `openSettings` unhides it with the mask and focuses `close`, `closeSettings` refocuses the door |
+| One screen at a time | the same test | six named screens in the rail, and `showSettingsPane` shuts the others; a screen the rail does not offer changes nothing |
+| The process decides which screen a row is on, and the page draws exactly those | `tests/web_view.rs::the_page_files_every_settings_screen_the_process_hands_it` | `page_group`'s vocabulary (parsed out of `src/main.rs`) is the page's `SETTINGS_PANES`, name for name |
+| A report is read on the screen it was asked from | `scripts/web-view-test.js`, and a real browser | the reading replaces that screen's rows with a `‹ back` above it; the ask carries the screen, so a frame arriving in between cannot move it under another heading |
+| The menu hands a row off to its own screen | the same two | a `form` row opens the dialog at the row's screen and marks the row there; a report row's reading lands on the row's screen, or the first screen for a row the frame does not file |
+| The dialog opens and closes with the keyboard | `scripts/web-view-test.js` | shut on load, `openSettings` builds the screens, unhides it with the mask and focuses `close`; `closeSettings` refocuses the door |
 | One `Escape` puts away the thing in front | `scripts/web-view-test.js` | with the dialog and the panel both open, the first press closes the dialog and leaves the panel; the second closes the panel; with nothing open it does nothing |
-| The controls are really behind the door, and the page is untouched | `scripts/browser-controls-test.js` against a live run | the door ships hidden then visible, the dialog opens with the mask and the focus, `#controls` is asserted to be *inside* it, one section shows at a time — and the geometry of the page behind is identical to the pixel |
+| The screens are really behind the door, and the page is untouched | `scripts/browser-controls-test.js` against a live run | the door ships hidden then visible, the dialog opens with the mask and the focus, six screens are built with settings and rows already in them, the run's rows are asserted *inside* the dialog, one screen shows at a time, a row is pressed on the screen it belongs to — and the geometry of the page behind is identical to the pixel |
 
 **Not built, and named where it is.** Nothing else from §19's plan is missing: the `/` trigger menu it
 designed is built and recorded in §23, and the `form` rows are already in the right place for it — a
 secret typed into a *dialog* is not typed into the transcript, which is the property that decision was
-made for.
+made for. One thing this round deliberately did **not** do: the two picker rows (`/provider <name>`,
+`/model <name>`) are still settings *and* still rows in the `/` menu, because the menu is a launcher for
+a line somebody types and the picker is the same line with the frame's own values offered — one act,
+two doors, and the settings control is the one that can be pressed without knowing the vocabulary.
+
 
 ## 23. The `/` menu: a launcher in the composer — **built**
 
@@ -2132,15 +2195,15 @@ settings → preview → jobs), and it is recorded there with the new count of k
 | The rows are the frame's, marked one at a time | `scripts/web-view-test.js`, calling `showMenu`/`menuStep` | the group headings are the page's own and the rows are the frame's; the mark starts on the first row, moves one row at a time past the headings, and wraps; `zzz` says `no command matches /zzz` and leaves the menu open for a backspace |
 | A page with no run offers no menu | `scripts/web-view-test.js` | with no `state` frame, `showMenu` leaves the box hidden |
 | What a row commits to is its class's answer | `scripts/web-view-test.js`, calling `menuDispatch` | report → `report`, action → `line`, selector → `line` or `values`, form → `dialog` **even when the row also carries values**, destructive → `line`, and nothing → `none` |
-| A form row never touches the line | `scripts/web-view-test.js` and `tests/web_view.rs` | taking it clears the query it was built from, opens the dialog on the commands section, and marks that one row; the branch itself contains no `setComposerText` *completion* — the one call in it is the clearing one, which is why the Node check fills the box first |
+| A form row never touches the line | `scripts/web-view-test.js` and `tests/web_view.rs` | taking it clears the query it was built from, opens the dialog on **the row's own screen** (`screenOf(command)`), and marks that one row; the branch itself contains no `setComposerText` *completion* — the one call in it is the clearing one, which is why the Node check fills the box first |
 | The menu page carries no command name | `tests/web_view.rs::the_slash_menu_is_a_launcher_drawn_from_the_frame` | the menu is inside the composer form and ships `hidden` with `role="listbox"`; its rows are built from `row.send`/`label`/`help`; and the four strings that would be a leaked list (`/provider key`, `/delete <n\|id>`, `/reload`, `inspect the config`) appear nowhere in the page — twice over, since the list test already checked them |
 | The menu never sends anything but a report | the same test | `takeMenuRow` holds no `fetch` of its own; the one request it can cause goes through `askReport`, and the dialog is opened before that call |
 | One `Escape`, and the menu is in front | `scripts/web-view-test.js` | with the menu and the dialog both open, the first press closes the menu and leaves the dialog; the next closes the dialog |
 | A real keystroke opens it, filters it, and a space closes it | `scripts/browser-controls-test.js` against a live run | `/` opens it on the real binary's own command list with one row marked; `usage` narrows it to `/usage` first; ` now` closes it and the box still holds `/usage now` |
 | The arrows move the mark, and not the caret | the same harness | `ArrowDown` moves the mark one row down while the box still reads `/` (which is what `preventDefault` buys), and `ArrowUp` brings it back |
 | `Escape` keeps what was typed | the same harness | the menu is shut and the box still holds `/` |
-| `Enter` on a report row reads it instead of sending it | the same harness | the reading is drawn where the list was (a `‹ commands` button and the answer), the box is empty, and **the terminal gained nothing** — the claim the `/report` route exists for |
-| `Enter` on a form row writes nothing | the same harness | the dialog opens on the commands section with exactly one row marked, and the box is still empty |
+| `Enter` on a report row reads it instead of sending it | the same harness | the reading is drawn where the rows were, on the screen the row's own `group` names (a `‹ back` button and the answer), the box is empty, and **the terminal gained nothing** — the claim the `/report` route exists for |
+| `Enter` on a form row writes nothing | the same harness | the dialog opens at that row's screen with exactly one row marked, and the box is still empty |
 | `Enter` on an action row completes the line and sends nothing | the same harness | the box reads `/reload`, the menu is shut, the terminal gained nothing — and the person's own press of `send` is what makes it print |
 ## 24. Markdown in the preview: a reading, with the file one press away — **built**
 

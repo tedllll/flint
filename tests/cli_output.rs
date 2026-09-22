@@ -6805,13 +6805,14 @@ async fn the_page_is_told_the_state_its_controls_would_show() {
          belongs on, which is what a control is drawn from and what the page must not carry a copy \
          of: {opening:?}"
     );
-    // And the five switches are still carried in the shape the page's switch controls read *today*,
-    // derived from the settings above rather than listed a second time. This assertion is deleted with
-    // the field, in the commit that draws those controls from `settings`: it is here so that the
-    // one-commit overlap cannot be a run whose dialog lost its switches.
+    // One channel for the switches, and it is this one: a `toggles` field derived from `settings`
+    // lived here for exactly one commit, so that the page's old controls kept working while the new
+    // ones were built. Both the field and that assertion went with the last reader, and this is what
+    // says so -- a frame that grew a second copy of the same switch would be one fact in two places,
+    // which is the mistake the switch round existed to remove.
     assert!(
-        opening.contains("{\"name\":\"verbose\",\"value\":\"on\",\"values\":[\"off\",\"on\",\"full\"]}"),
-        "the switches the page draws today do not follow the settings they are derived from: \
+        !opening.contains("\"toggles\""),
+        "the state carries a second list of switches beside the settings they are derived from: \
          {opening:?}"
     );
     assert!(

@@ -608,54 +608,92 @@ fn the_composer_can_stop_the_turn_it_is_watching() {
     );
 }
 
-/// The pickers are the run's own commands, with the choices laid out.
+/// The settings are the run's own commands, laid out as controls.
 ///
-/// §8's first control, and the reason the read channel came first: a picker cannot be drawn
-/// without knowing the options, and the page may not read `config.toml` for them -- a second
-/// reader of the same state is a second thing that can disagree with the process, which is not
-/// hypothetical here (`/config` prints the file's `readonly` beside the value in force, and they
-/// differ for a whole class of runs). So the options arrive in the `state` frame, and what is
-/// checked here is the half that has an answer in the source rather than in a browser: where the
-/// controls are offered, and what each one sends.
+/// §8's first control, and the reason the read channel came first: a control cannot be drawn without
+/// knowing the options, and the page may not read `config.toml` for them -- a second reader of the
+/// same state is a second thing that can disagree with the process, which is not hypothetical here
+/// (`/config` prints the file's `readonly` beside the value in force, and they differ for a whole
+/// class of runs). So the whole of a setting arrives in the `state` frame -- its key, its value, the
+/// words a choice takes, how to draw it, what changing it means, and the line that changes it -- and
+/// what is checked here is the half that has an answer in the source rather than in a browser: that
+/// the page composes the line from the frame's own `send` rather than from a name it knows, and that
+/// the controls live in screens the frame's `group` words decide.
 ///
-/// Three things have to hold, and each is a way this can be wrong rather than merely absent:
+/// Two things have to hold, and each is a way this can be wrong rather than merely absent:
 ///
-/// * the markup starts hidden, because a page opened from a dropped file has no process behind it
-///   and a picker with no options is a promise the page cannot keep;
-/// * each picker sends exactly one line -- `/provider <name>`, `/model <name>` -- through
-///   `sendText`, so the terminal and the page cannot come to disagree about what those mean;
+/// * the dialog starts hidden, because a page opened from a dropped file has no process behind it
+///   and a settings screen with nothing in it is a promise the page cannot keep;
+/// * every control sends exactly one line, and that line is the frame's `send` plus the value or the
+///   words typed -- so the terminal and the page cannot come to disagree about what it means;
 /// * the `state` frame is applied where it arrives, and not left to fall through to `applyLine`,
 ///   where a named frame's data would be read as a line of the run's vocabulary and skipped in
 ///   silence. That failure would look exactly like the feature not being built.
 #[test]
-fn the_pickers_offer_the_runs_own_commands() {
-    let markup = from("<div class=\"controls\" id=\"controls\" hidden>", 6);
+fn the_settings_are_the_runs_own_lines_and_nothing_else() {
+    let markup = from("<div class=\"settings-body\">", 8);
     assert!(
-        markup.contains("id=\"pick-provider\"") && markup.contains("id=\"pick-model\""),
-        "the settings dialog has no pickers to draw into: {markup}"
+        markup.contains("id=\"settings-nav\"") && markup.contains("id=\"settings-panes\""),
+        "the settings dialog has no rail and no place to draw a screen into: {markup}"
     );
 
-    for (id, command) in [("pick-provider", "/provider "), ("pick-model", "/model ")] {
-        // Three lines: the handler is one call and one statement, and a wider window would reach
-        // into the *other* picker's handler and count its `sendText` as this one's.
-        let handler = from(&format!("getElementById(\"{id}\").addEventListener"), 3);
-        let line = format!("sendText(\"{command}\" + e.target.value)");
+    // Built from the frame, which is the whole rule: the key, the value in force, the words a
+    // choice may take, the frame's word for how to draw it, and what changing it means.
+    let built = from("function drawSettings(doc, key, box)", 30);
+    for (needed, why) in [
+        ("state.settings", "the settings the process reports"),
+        ("setting.group !== key", "which screen a setting belongs on"),
+        ("setting.key", "the name of the setting"),
+    ] {
         assert!(
-            handler.contains(&line),
-            "the {id} picker must send `{command}<value>`: {handler}"
-        );
-        assert_eq!(
-            handler.matches("sendText(").count(),
-            1,
-            "the {id} picker sends exactly one thing: {handler}"
+            built.contains(needed),
+            "a screen is not drawn from the frame's `{needed}` ({why}): {built}"
         );
     }
+    let row = from("function settingRow(doc, setting)", 45);
+    for (needed, why) in [
+        ("setting.choices", "the words a choice takes, which the page must not carry itself"),
+        ("setting.value", "the value in force, which the page must not remember"),
+        ("setting.help", "what changing it means"),
+        ("setting.kind === \"number\"", "how to draw it, which only the frame knows"),
+    ] {
+        assert!(
+            row.contains(needed),
+            "a setting's control is not drawn from `{needed}` ({why}): {row}"
+        );
+    }
+
+    // What each control sends: one line, composed of the frame's `send` and nothing else. A choice
+    // sends `send + " " + value` -- the same composition `/provider <name>` has always been -- and a
+    // line typed into a box sends `send + " " + what is in the box`, trimmed so that a stray space
+    // cannot make an empty setting look like a change.
+    let choice = from("select.addEventListener(\"change\"", 6);
+    assert!(
+        choice.contains("sendText(send + \" \" + e.target.value)"),
+        "a choice must send the frame's own line with the word that was chosen: {choice}"
+    );
+    assert_eq!(
+        choice.matches("sendText(").count(),
+        1,
+        "a choice sends exactly one thing: {choice}"
+    );
+    let typed = from("form.addEventListener(\"submit\"", 6);
+    assert!(
+        typed.contains("const said = send + \" \" + input.value.trim();")
+            && typed.contains("sendText(said);"),
+        "a typed setting must send the frame's own line with what was typed: {typed}"
+    );
+    assert_eq!(
+        typed.matches("sendText(").count(),
+        1,
+        "a typed setting sends exactly one thing: {typed}"
+    );
 
     assert!(
         from("if (frame.event === \"state\")", 5).contains("applyState(doc, frame.data)"),
         "the state frame has to be applied where it arrives"
     );
-    // And the page's only source for those options is the frame: no route of its own, and no
+    // And the page's only source for those settings is the frame: no route of its own, and no
     // reading of the file the process owns.
     assert!(
         !view().contains("fetch(\"/config\""),
@@ -663,47 +701,36 @@ fn the_pickers_offer_the_runs_own_commands() {
     );
 }
 
-/// A toggle is a switch that shows its value, and the value it shows comes from the run.
+/// A switch is a setting, and neither its name nor the words it takes are the page's.
 ///
 /// §8 again, and the failure mode is specific: a control built from a list the page carries is a
-/// control that can offer a word the command refuses, or show a value the run is not on. Three
-/// of them matter here -- `/verbose on|off|full`, `/detail on|off` and `/readonly on|off` -- and
-/// the page knows none of those words: it is handed a name, the values that name takes and the
-/// value in force, and sends `/<name> <value>`. That is one command line, spelling and all, which
-/// is the rule the whole of §8 rests on.
+/// control that can offer a word the command refuses, or show a value the run is not on. That list
+/// used to be a channel of its own -- `state.toggles`, one row per switch, derived in `src/main.rs`
+/// so that the page never had to know `/verbose off|on|full` -- and the settings dialog replaced it:
+/// a switch is now one entry of `state.settings`, on the screen the frame files it on, with the words
+/// it takes beside it. This test is the other side of that: no second channel is left behind.
 #[test]
-fn the_toggles_are_switches_that_show_their_value() {
-    // The markup has to have somewhere to put them, inside the controls a state frame reveals.
-    let controls = from("<div class=\"controls\" id=\"controls\" hidden>", 10);
+fn a_switch_is_a_setting_and_not_a_word_the_page_knows() {
+    let html = view();
+    // One list of switches, and it is the frame's.
     assert!(
-        controls.contains("id=\"toggles\""),
-        "the settings dialog has nowhere to draw the switches: {controls}"
+        from("function drawSettings(doc, key, box)", 30).contains("state.settings"),
+        "the switches are not drawn from the frame's settings"
     );
-
-    // Built from the frame, not from a table in the page.
-    let built = from("function showToggles(doc)", 12);
-    for (needed, why) in [
-        ("toggle.name", "the command a switch sends"),
-        ("toggle.values", "the values that command takes"),
-        ("toggle.value", "the value in force"),
-    ] {
+    assert!(
+        !html.contains("state.toggles") && !html.contains("function toggles("),
+        "the page still reads a `toggles` field the frame no longer sends, so a switch can show a \
+         value the run is not on"
+    );
+    // And the page holds none of those words: which switches exist is the frame's answer, which is
+    // what lets `/thinking` be added to the terminal without touching this file. The needles carry
+    // their slash, so that `</details>` is not read as a switch called `/detail`.
+    for leaked in ["\"/verbose\"", "\"/detail\"", "\"/readonly\"", "\"/hear-peers\"", "\"/thinking\""] {
         assert!(
-            built.contains(needed),
-            "the switches are not drawn from the frame's `{needed}` ({why}): {built}"
+            !html.contains(leaked),
+            "the page carries `{leaked}` itself, so a switch can offer a word the command refuses"
         );
     }
-
-    // And what a change sends is the terminal's own line, composed from those two.
-    let handler = from("select.addEventListener(\"change\"", 3);
-    assert!(
-        handler.contains("sendText(\"/\" + toggle.name + \" \" + e.target.value)"),
-        "a switch must send the command it is named after: {handler}"
-    );
-    assert_eq!(
-        handler.matches("sendText(").count(),
-        1,
-        "a switch sends exactly one thing: {handler}"
-    );
 }
 
 /// A command's answer is a block in the transcript, with the line that asked for it.
@@ -743,42 +770,65 @@ fn a_command_answer_is_a_block_with_the_line_that_asked_for_it() {
     );
 }
 
-/// The command panel is drawn from the frame, and the page carries none of the list itself.
+/// The dialog's screens are drawn from the frame, and the page carries none of the list itself.
 ///
 /// §8's read channel, second half over the page's own bytes. Two things are checked, and the second
-/// is the one that matters: the panel is built from `state.commands`, and the page contains no
+/// is the one that matters: the rows are built from `state.commands`, and the page contains no
 /// command name of its own. A page that knew `/provider key <key>` would be a second copy of the
-/// terminal's grammar — it would go on offering a command that was renamed, in a panel whose whole
+/// terminal's grammar — it would go on offering a command that was renamed, in a dialog whose whole
 /// job is to say what there is.
+///
+/// The *arrangement* is the other half of this round's change: a row carries the screen the frame
+/// filed it on (`command.group`), so the page's own list of screens is only names for places and an
+/// order to read them in. `the_page_files_every_settings_screen_the_process_hands_it` below holds
+/// that pair together.
 #[test]
 fn the_command_panel_is_drawn_from_the_frame() {
-    // Somewhere to put it: the commands have a pane of their own inside the settings dialog, and the
-    // list is a child of it. The needle is the pane rather than the controls row, because the panel
-    // is no longer a sibling of the controls -- it moved to the other section when the header's raw
-    // controls became a dialog, and a window wide enough to span both would pass for the wrong
-    // reason if the pane were ever dropped.
-    let pane = from("<section class=\"pane\" id=\"pane-commands\" hidden>", 8);
-    assert!(
-        pane.contains("id=\"commands\"") && pane.contains("id=\"command-list\""),
-        "the dialog has nowhere to draw the command panel: {pane}"
-    );
-
-    // Built from the frame: every field of a row comes from the frame's own entry.
-    let built = from("function showCommands(doc)", 40);
+    // Somewhere to put it: one section per screen, built when the dialog opens, and the rows live
+    // inside it. The needle is the builder rather than a pane in the markup, because the screens are
+    // built rather than written -- what is written is the rail, the container they go into, and the
+    // page's own names for them.
+    let built = from("function showSettingsPanes()", 40);
     for (needed, why) in [
-        ("state.commands", "the list of commands"),
-        ("command.label", "what the row says to type"),
-        ("command.help", "what the row says it does"),
-        ("command.class", "which group the row belongs to"),
+        ("settings-nav", "the rail"),
+        ("settings-panes", "the container the screens are built into"),
+        ("\"fields-\" + key", "the settings a screen holds"),
+        ("\"row-list-\" + key", "and the command rows, under them"),
     ] {
         assert!(
             built.contains(needed),
-            "the panel is not drawn from the frame's `{needed}` ({why}): {built}"
+            "a screen is not built from `{needed}` ({why}): {built}"
         );
     }
 
-    // And the page holds no copy of the command list. These are the strings that would be in it if
-    // it did; the panel's *group* names are the page's own, and are checked above instead.
+    // Built from the frame: the list, and which screen each row of it belongs on. The second is what
+    // this round added, and it is what lets the dialog be six short screens rather than one column.
+    let drawn = from("function drawRows(doc, key, panel, list)", 60);
+    for (needed, why) in [
+        ("state.commands", "the list of commands"),
+        ("command.group === key", "the screen the frame filed the row on"),
+    ] {
+        assert!(
+            drawn.contains(needed),
+            "the rows are not drawn from the frame's `{needed}` ({why}): {drawn}"
+        );
+    }
+    // Wide enough to reach the branches that actually draw a label: the form branch comes first, and
+    // the rows that say what to type are below it.
+    let row = from("function drawCommandRow(doc, key, command, list)", 90);
+    for (needed, why) in [
+        ("command.label", "what the row says to type"),
+        ("command.help", "what the row says it does"),
+        ("command.class", "which kind of control the row gets"),
+    ] {
+        assert!(
+            row.contains(needed),
+            "a row is not drawn from the frame's `{needed}` ({why}): {row}"
+        );
+    }
+
+    // And the page holds no copy of the command list. These are the strings that would be in it if it
+    // did; the screen *names* are the page's own, and the test below holds those to the process's.
     let html = view();
     for leaked in ["/provider key", "/delete <n|id>", "/reload", "inspect the config"] {
         assert!(
@@ -789,39 +839,86 @@ fn the_command_panel_is_drawn_from_the_frame() {
     }
 }
 
+/// Every screen the process can file a row on is a screen the page has a name for, and no others.
+///
+/// The page's `SETTINGS_PANES` names the places and the order they read in; the process's
+/// `page_group` decides which place a row goes in. Neither file can see the other, and the failure is
+/// silent in both directions: a group the page has no name for is a row drawn nowhere (a screen the
+/// page cannot name is skipped rather than shown unlabelled), and a screen the process never files
+/// anything on is a heading over an empty pane. `tests/cli_output.rs` holds the frame's own
+/// vocabulary to `/help`; this is the page's half of the same fact, read out of the two files rather
+/// than out of a running process, so a rename on either side fails here instead of in a browser.
+#[test]
+fn the_page_files_every_settings_screen_the_process_hands_it() {
+    // What `page_group` can return: every arm of it is `=> "<word>"`, and the fallback returns `None`
+    // before the arms are bound, so the words are the whole vocabulary of screens.
+    let main = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
+        .expect("src/main.rs is in the checkout");
+    let at = main
+        .find("fn page_group(")
+        .expect("src/main.rs files every row on a screen");
+    let body = &main[at..];
+    let end = body
+        .find("\n}\n")
+        .expect("page_group is a top-level function and ends at column zero");
+    let mut groups: Vec<String> = Vec::new();
+    for arm in body[..end].split("=> \"").skip(1) {
+        let word = arm.split('"').next().unwrap_or("");
+        if !word.is_empty() {
+            groups.push(word.to_string());
+        }
+    }
+    groups.sort();
+    groups.dedup();
+    assert!(
+        groups.len() > 4,
+        "page_group files rows on {} screens, which is too few to be the dialog: {groups:?}",
+        groups.len()
+    );
+
+    // The page's own list, read the same way: one entry per line, each starting with its key.
+    let mut keys: Vec<String> = Vec::new();
+    for line in from("const SETTINGS_PANES = [", 10).lines().skip(1) {
+        let line = line.trim();
+        if !line.starts_with("[\"") {
+            continue;
+        }
+        keys.push(line[2..].split('"').next().unwrap_or("").to_string());
+    }
+    keys.sort();
+    assert_eq!(
+        keys, groups,
+        "the page's screens and the process's groups have drifted apart: a row filed on a screen the \
+         page cannot name is a row that is drawn nowhere"
+    );
+}
+
 /// The action buttons are drawn from the frame too, and send the row's own line.
 ///
 /// §8's first control, and the reason it is first: an action takes no argument, so there is nothing
 /// to ask for and nothing to confirm — the whole control is "send this line", which is what the
 /// composer already does. What is checked here is the part that can go wrong: the line is the
-/// frame's `send`, not a name this page reassembles, and a press that is refused puts the header
-/// back to what is in force rather than leaving a control that quietly did nothing.
+/// frame's `send`, not a name this page reassembles, and a press that is refused puts the screen back
+/// to what is in force rather than leaving a control that quietly did nothing.
 #[test]
 fn the_action_buttons_send_the_frames_own_line() {
-    let controls = from("<div class=\"controls\" id=\"controls\" hidden>", 20);
-    assert!(
-        controls.contains("id=\"actions\""),
-        "the header has nowhere to draw the actions: {controls}"
-    );
-
-    let drawn = from("function showActions(doc)", 30);
+    let drawn = from("if (className === \"button\" && send) {", 14);
     for (needed, why) in [
-        ("state.commands", "the list of commands"),
-        ("command.class !== \"button\"", "the class that makes a command an action"),
-        ("sendText(command.send)", "the line, taken from the frame rather than rebuilt here"),
-        ("showState(doc)", "putting the control back when the send is refused"),
+        ("el(\"button\", \"row action\")", "an action drawn as the control it is"),
+        ("sendText(send)", "the line, taken from the frame rather than rebuilt here"),
+        ("showState(doc)", "putting the screen back when the send is refused"),
+        ("command.label", "the button's own words"),
     ] {
         assert!(
             drawn.contains(needed),
             "the buttons are not drawn from `{needed}` ({why}): {drawn}"
         );
     }
-    // The label is the command's own words (`/reload`), which is what `/help` prints, and the help
-    // line is the tooltip: the row already carries both, and a page that shortened one would be
-    // inventing a second name for a command.
+    // The tooltip is the frame's help line, which the row already carries: a page that shortened it
+    // would be inventing a second name for a command.
     assert!(
-        drawn.contains("command.label") && drawn.contains("command.help"),
-        "a button is not labelled from the frame's own row: {drawn}"
+        drawn.contains("row.title = help"),
+        "a button says what it does with the frame's own help: {drawn}"
     );
 }
 
@@ -836,11 +933,11 @@ fn the_action_buttons_send_the_frames_own_line() {
 #[test]
 fn the_panel_reads_a_report_rather_than_sending_it() {
     // The row itself: only the class the frame marks, and the line comes from the frame.
-    let built = from("function showCommands(doc)", 180);
+    let built = from("function drawCommandRow(doc, key, command, list)", 200);
     for (needed, why) in [
         ("className === \"panel\"", "the class that makes a row readable"),
         ("command.send", "the line to ask for, taken from the frame rather than rebuilt here"),
-        ("askReport(doc, item.line)", "asking the process for the line the row offers"),
+        ("askReport(doc, item.line, key)", "asking the process for the line the row offers, on the screen it is on"),
         ("command.values", "the values the frame says this row may be given"),
         ("send + \" \" + value", "the line for one of them, composed from the frame's own strings"),
     ] {
@@ -852,13 +949,15 @@ fn the_panel_reads_a_report_rather_than_sending_it() {
 
     // The request: the route is what keeps the answer off the terminal, so a page that posted to
     // `/message` here would be a panel that printed into the terminal -- the exact thing §8's class
-    // exists to prevent.
-    let asked = from("async function askReport(doc, input)", 30);
+    // exists to prevent. The screen travels with the request because the answer belongs where the row
+    // was pressed, and a frame arriving in between must not move it under another heading.
+    let asked = from("async function askReport(doc, input, key)", 30);
     for (needed, why) in [
         ("fetch(\"/report\"", "the route that answers without printing"),
         ("messageBody(input)", "the line, in the same body shape the composer sends"),
-        ("doc.reading = input", "the panel showing what is being read"),
-        ("showCommands(doc)", "redrawing the panel rather than the transcript"),
+        ("doc.reading = input", "the screen showing what is being read"),
+        ("doc.readingGroup = key", "which screen that reading belongs to"),
+        ("paintSettings(doc)", "redrawing the dialog rather than the transcript"),
     ] {
         assert!(
             asked.contains(needed),
@@ -871,17 +970,17 @@ fn the_panel_reads_a_report_rather_than_sending_it() {
          {asked}"
     );
 
-    // And the answer: a `command` frame marked as a panel's fills the panel, and the unmarked shape
+    // And the answer: a `command` frame marked as a panel's fills the screen, and the unmarked shape
     // -- what a typed command produces -- still becomes a transcript block.
     let handled = from("case \"command\":", 20);
     for (needed, why) in [
-        ("ev.panel === true", "the mark that says this answer belongs in the panel"),
+        ("ev.panel === true", "the mark that says this answer belongs in the dialog"),
         ("doc.readingText", "filling the reading rather than appending to it"),
-        ("showCommands(doc)", "redrawing the panel"),
+        ("paintSettings(doc)", "redrawing the dialog"),
     ] {
         assert!(
             handled.contains(needed),
-            "a panel's answer is not put in the panel through `{needed}` ({why}): {handled}"
+            "a panel's answer is not put in the dialog through `{needed}` ({why}): {handled}"
         );
     }
     assert!(
@@ -904,7 +1003,7 @@ fn the_panel_reads_a_report_rather_than_sending_it() {
 /// hand the key back to every page watching -- is measured in `tests/cli_output.rs`.
 #[test]
 fn a_form_row_gets_a_field_and_sends_what_was_typed_into_it() {
-    let drawn = from("function showCommands(doc)", 130);
+    let drawn = from("function drawCommandRow(doc, key, command, list)", 130);
     for (needed, why) in [
         ("command.fields", "the frame saying this row takes answers, and of which kinds"),
         ("input.type = spec && spec.field === \"password\" ? \"password\" : \"text\"", "drawing each as the frame said rather than by guessing from the name"),
@@ -1046,7 +1145,7 @@ fn the_sidebar_renames_a_conversation_through_the_same_form_composition() {
 /// them.
 #[test]
 fn a_destructive_row_opens_its_choices_and_sends_on_the_second_press() {
-    let drawn = from("function showCommands(doc)", 175);
+    let drawn = from("function drawCommandRow(doc, key, command, list)", 175);
     for (needed, why) in [
         ("command.from === \"sessions\"", "the list the frame named, rather than a recognised command"),
         ("command.from === \"providers\"", "the other list, which comes from the state frame"),
@@ -1089,7 +1188,7 @@ fn a_destructive_row_opens_its_choices_and_sends_on_the_second_press() {
 fn a_switch_value_is_typed_rather_than_read() {
     let offered = from("for (const item of offered) {", 22);
     assert!(
-        offered.contains("if (className === \"panel\") askReport(doc, item.line);")
+        offered.contains("if (className === \"panel\") askReport(doc, item.line, key);")
             && offered.contains("else sendText(item.line);"),
         "the route a value takes is not the row's class, so a switch could be run with the terminal \
          quiet: {offered}"
@@ -1107,9 +1206,8 @@ fn a_switch_value_is_typed_rather_than_read() {
 /// *this page* puts its pickers and switches is the page's business; which commands exist is not.
 #[test]
 fn a_row_the_panel_cannot_press_says_where_its_control_is() {
-    let homes = from("const COMMAND_HOMES = {", 8);
+    let homes = from("const COMMAND_HOMES = {", 6);
     for (needed, why) in [
-        ("button:", "the header's buttons"),
         ("selector:", "the one selector the page cannot offer values for"),
         ("form:", "the terminal, for the ones that ask questions"),
     ] {
@@ -1118,6 +1216,12 @@ fn a_row_the_panel_cannot_press_says_where_its_control_is() {
             "`{needed}` has no home to name ({why}): {homes}"
         );
     }
+    // `button` and `panel` are absent on purpose: both are controls in the dialog now -- an action is
+    // a button on its screen, and a report is a row that is read -- so no row can ask for a home.
+    assert!(
+        !homes.contains("button:") && !homes.contains("panel:"),
+        "a class that has its own control must not name a home somewhere else: {homes}"
+    );
     let drawn = from("if (offered.length === 0) {", 14);
     assert!(
         drawn.contains("el(\"div\", \"row reference\")"),
@@ -1150,6 +1254,10 @@ fn the_runs_controls_live_in_a_dialog_and_the_header_keeps_one_door() {
             "the header's line must still carry {needed}: {head}"
         );
     }
+    // The controls that used to be laid out on this line, none of which may come back: the two
+    // pickers, the switches, the one-press actions, and the command list. `id="meta"` is on the list
+    // for the other reason -- the facts about the conversation belong in the dialog's foot, not
+    // beside the name.
     for moved in [
         "id=\"pick-provider\"",
         "id=\"pick-model\"",
@@ -1163,6 +1271,8 @@ fn the_runs_controls_live_in_a_dialog_and_the_header_keeps_one_door() {
             "{moved} is back in the header's line, which is the surface this change emptied: {head}"
         );
     }
+    // The screens are built rather than written, so what the markup must carry is the rail and the
+    // container they are built into -- inside the dialog, which is checked below.
 
     // The door is a door, and it is shut until the page has a run to describe -- the same rule the
     // controls themselves followed, because a dialog with nothing in it is worse than no dialog.
@@ -1181,21 +1291,25 @@ fn the_runs_controls_live_in_a_dialog_and_the_header_keeps_one_door() {
         "the door is offered exactly when the frame describes a run: {shown}"
     );
 
-    // The dialog says what it is -- the two attributes are the difference between a modal and a panel
+    // The dialog says what it is -- the attributes are the difference between a modal and a panel
     // that happens to be on screen -- and everything that changes state is *inside* it.
     let dialog = from("id=\"settings\" role=\"dialog\"", 1);
     assert!(
-        dialog.contains("aria-modal=\"true\"") && dialog.contains("aria-label=\"settings\""),
+        dialog.contains("aria-modal=\"true\"") && dialog.contains("aria-labelledby=\"settings-title\""),
         "the dialog must be a labelled modal: {dialog}"
+    );
+    assert!(
+        from("<h2 id=\"settings-title\">", 1).contains("settings"),
+        "the label the dialog points at must be the dialog's own heading"
     );
     let dialog_at = html
         .find("id=\"settings\" role=\"dialog\"")
         .expect("the dialog is in the page");
     for inside in [
-        "id=\"controls\"",
-        "id=\"command-list\"",
-        "id=\"settings-close\"",
         "id=\"settings-nav\"",
+        "id=\"settings-panes\"",
+        "id=\"settings-close\"",
+        "id=\"meta\"",
     ] {
         let at = html
             .find(inside)
@@ -1229,14 +1343,24 @@ fn the_runs_controls_live_in_a_dialog_and_the_header_keeps_one_door() {
         "the modal is over the panel, so one Escape must close it and leave the panel alone: {order}"
     );
 
-    // One section at a time, and a section is the page's own word for a *place it put things* -- not a
+    // One screen at a time, and a screen is the page's own word for a *place it put things* -- not a
     // command name, which is the frame's. The check is that the rail's list is the only list: a second
-    // hard-coded section somewhere would be a pane nothing can reach.
-    let rail = from("const SETTINGS_PANES = [", 6);
-    assert!(
-        rail.contains("[\"run\"") && rail.contains("[\"commands\""),
-        "the rail must offer the two kinds of thing behind the door: {rail}"
-    );
+    // hard-coded screen somewhere would be a pane nothing can reach. Which of them the frame can file
+    // a row on is `the_page_files_every_settings_screen_the_process_hands_it`; here it is the shape.
+    let rail = from("const SETTINGS_PANES = [", 8);
+    for (key, why) in [
+        ("[\"model\"", "the endpoint and the model"),
+        ("[\"run\"", "how the run behaves"),
+        ("[\"limits\"", "what it may spend"),
+        ("[\"tools\"", "what it can use"),
+        ("[\"conversation\"", "this conversation"),
+        ("[\"work\"", "the work it left running"),
+    ] {
+        assert!(
+            rail.contains(key),
+            "the rail must offer {key} ({why}): {rail}"
+        );
+    }
     let panes = from("function showSettingsPane(name)", 14);
     assert!(
         panes.contains("pane.hidden = known !== name"),
@@ -1361,9 +1485,17 @@ fn the_slash_menu_is_a_launcher_drawn_from_the_frame() {
     let take = from("async function takeMenuRow(doc, row)", 60);
     let sends = sites(&take, "fetch(");
     assert!(
-        sends.is_empty() && take.contains("askReport(doc, send)"),
+        sends.is_empty() && take.contains("askReport(doc, send, screenOf(command))"),
         "the menu may only send what a report row asks for, and only through the report's own \
          function: {sends:?}"
+    );
+    // And a row's own screen is what the dialog opens at, in both hand-offs: the reading belongs
+    // where the row was pressed, and the row a form was taken from has to be findable where the
+    // person is now looking.
+    assert_eq!(
+        take.matches("showSettingsPane(screenOf(command))").count(),
+        2,
+        "both hand-offs must open the screen the frame filed the row on: {take}"
     );
 
     // The arrows are the reason this is a menu, and `Escape` is the page's one order: the menu is in
@@ -1772,15 +1904,15 @@ fn a_path_opens_outside_the_page_only_through_the_route() {
 /// wrote -- would be that program running anyway, one click removed.
 ///
 /// So the page does not draw the control as available, and it does not decide that for itself: the
-/// toggle is in the state frame, printed by the terminal and drawn here from the same field. The
-/// route refuses regardless, because the page is not the authority -- but a live button that always
-/// bounced would be a worse answer than the one that says why before it is pressed.
+/// guard is a setting in the state frame, printed by the terminal and drawn here from the same field.
+/// The route refuses regardless, because the page is not the authority -- but a live button that
+/// always bounced would be a worse answer than the one that says why before it is pressed.
 #[test]
 fn a_readonly_run_is_never_offered_an_os_open() {
     let guard = from("function readonlyOn(state)", 10);
     assert!(
-        guard.contains("toggles") && guard.contains("\"readonly\""),
-        "the guard must be read from the frame's own toggle: {guard:?}"
+        guard.contains("state.settings") && guard.contains("\"readonly\""),
+        "the guard must be read from the frame's own settings: {guard:?}"
     );
 
     let head = from("function paintPreviewHead()", 20);
@@ -1790,7 +1922,7 @@ fn a_readonly_run_is_never_offered_an_os_open() {
     );
     assert!(
         head.contains("readonlyOn(doc"),
-        "and disabled from the frame's toggle rather than from a second opinion: {head:?}"
+        "and disabled from the frame's own setting rather than from a second opinion: {head:?}"
     );
     // A run with no page behind it -- a dropped session -- cannot open anything either: there is no
     // route to ask. That is `canSend`, which is the same flag every other route on this page reads.

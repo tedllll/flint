@@ -471,38 +471,90 @@ check("a command frame with no text in it paints nothing rather than `undefined`
   eq(rows[0].children[1].textContent, "", "an absent answer is empty, not the string undefined");
 });
 
-// The header's controls are drawn from the `state` frame, which is the page's only read channel:
-// it may not read `config.toml` itself, because a second reader of the same state can disagree
-// with the process -- the file says one thing while a run does another as soon as `--readonly` or
-// `/readonly` is involved. What is pinned here is the half with an answer in it: options in, the
-// option in force selected, and the states in which a picker should not be offered at all.
-check("a state frame becomes the header's two pickers, set to what is in force", () => {
-  const d = viewer.newDoc();
-  eq(d.state, null, "a page with no frame has no state");
-  viewer.showState(d);
-  eq(viewer.__node("controls").hidden, true, "a document with no state offers no controls");
+console.log("the settings the frame describes");
 
-  viewer.applyState(d, JSON.stringify({
+// The settings are drawn from the `state` frame, which is the page's only read channel: it may not
+// read `config.toml` itself, because a second reader of the same state can disagree with the process
+// the moment `--readonly` or `/readonly` is involved. What is pinned here is that the page adds no
+// vocabulary of its own: the key, the value in force, the words a choice takes, how to draw it, what
+// changing it means and which screen it goes on all come from the frame -- and a screen is a slice
+// of that one list rather than a list the page kept.
+check("a state frame becomes a control per setting, on the screen the frame names", () => {
+  const page = loadViewer();
+  const d = page.newDoc();
+  eq(d.state, null, "a page with no frame has no state");
+  page.showState(d);
+  eq(page.__node("fields-model").children.length, 0, "a document with no state draws no settings");
+  eq(page.__node("fields-run").children.length, 0, "on any screen");
+
+  page.applyState(d, JSON.stringify({
     type: "state",
-    provider: "stub",
-    model: "stub-other",
-    readonly: false,
-    verbose: "on",
-    detail: false,
-    providers: [
-      { name: "stub", models: ["stub-model", "stub-other"] },
-      { name: "other", models: [] },
+    settings: [
+      { group: "model", key: "provider", kind: "select", value: "stub", choices: ["stub", "other"],
+        send: "/provider", help: "switch endpoint" },
+      { group: "model", key: "model", kind: "select", value: "stub-other",
+        choices: ["stub-model", "stub-other"], send: "/model", help: "switch model" },
+      { group: "run", key: "verbose", kind: "select", value: "full", choices: ["off", "on", "full"],
+        send: "/verbose", help: "how much to narrate" },
     ],
   }));
 
-  const providers = viewer.__node("pick-provider");
-  const models = viewer.__node("pick-model");
-  eq(providers.children.map((o) => o.value), ["stub", "other"], "the providers on offer");
-  eq(providers.value, "stub", "the provider in force");
-  eq(models.children.map((o) => o.value), ["stub-model", "stub-other"], "the models on offer");
-  eq(models.value, "stub-other", "the model in force");
-  eq(viewer.__node("controls").hidden, false, "the controls are offered once there is a state");
+  const model = page.__node("fields-model");
+  eq(model.children.map((r) => r.children[0].textContent), ["provider", "model"],
+     "the settings the frame filed on that screen, in the frame's order");
+  eq(model.children.map((r) => r.children[1].textContent), ["switch endpoint", "switch model"],
+     "each row says what changing it means");
+  const providers = model.children[0].children[2];
+  eq(providers.tag, "select", "a choice is a select");
+  eq(providers.children.map((o) => o.value), ["stub", "other"], "the words the frame named");
+  eq(providers.value, "stub", "set to what is in force");
   eq(providers.disabled, false, "two providers is a choice");
+  eq(providers.title, "switch endpoint", "and explains itself on hover");
+  eq(page.__node("fields-run").children.map((r) => r.children[0].textContent), ["verbose"],
+     "a setting goes on the screen the frame named, not on the first one");
+  eq(page.__node("fields-run").children[0].children[2].value, "full", "showing what is in force");
+
+  // A frame that has gone away takes the settings with it: a control showing a value nothing is
+  // reporting any more is the one thing this page must not leave behind.
+  page.applyState(d, JSON.stringify({ type: "state" }));
+  eq(page.__node("fields-model").children.length, 0, "a frame with no settings draws none");
+  eq(page.__node("fields-run").children.length, 0, "and takes the old ones away");
+});
+
+// The other kind of setting: one whose value is a line rather than a choice. Two facts are pinned
+// here, and the second is what the frame carries `kind` for -- a number box refuses `many`, and the
+// page may not guess which box a key wants from the key's name.
+check("a setting whose value is a line is a form, and its kind is the frame's word", () => {
+  const page = loadViewer();
+  const d = page.newDoc();
+  page.applyState(d, JSON.stringify({
+    type: "state",
+    settings: [
+      { group: "limits", key: "max_steps", kind: "number", value: "100",
+        send: "/config set max_steps", help: "the runaway guard" },
+      { group: "limits", key: "shell", kind: "text", value: "cmd",
+        send: "/config set shell", help: "the shell the bash tool runs" },
+    ],
+  }));
+  const rows = page.__node("fields-limits").children;
+  eq(rows.map((r) => r.children[2].tag), ["form", "form"], "a line is typed into a form");
+  const steps = rows[0].children[2];
+  const shell = rows[1].children[2];
+  eq(steps.children.map((n) => n.tag), ["input", "button"], "an input and a press");
+  eq(steps.children[0].type, "number", "the frame said number");
+  eq(shell.children[0].type, "text", "and the frame said text");
+  eq(steps.children[0].value, "100", "the value in force is in the box");
+  eq(steps.children[1].textContent, "save", "the press says what it does");
+  eq(steps.children[1].disabled, true, "nothing to save until the box says something else");
+
+  // A changed box is a press that can be made, and the enable happens *inside* the page's own
+  // listener -- so the check delivers the event rather than assigning the property it sets.
+  steps.children[0].value = "200";
+  page.fire(steps.children[0], "input");
+  eq(steps.children[1].disabled, false, "a changed value can be saved");
+  steps.children[0].value = "100";
+  page.fire(steps.children[0], "input");
+  eq(steps.children[1].disabled, true, "and putting it back takes the press away again");
 });
 
 // The case that made `fillSelect` more than three lines: `/model` offers a provider's own `model`
@@ -512,10 +564,11 @@ check("a state frame becomes the header's two pickers, set to what is in force",
 check("a value the frame does not list is still the one shown", () => {
   const d = viewer.newDoc();
   viewer.applyState(d, JSON.stringify({
-    type: "state", provider: "stub", model: "hand-written",
-    providers: [{ name: "stub", models: ["stub-a", "stub-b"] }],
+    type: "state",
+    settings: [{ group: "model", key: "model", kind: "select", value: "hand-written",
+      choices: ["stub-a", "stub-b"], send: "/model", help: "switch model" }],
   }));
-  const models = viewer.__node("pick-model");
+  const models = viewer.__node("fields-model").children[0].children[2];
   eq(models.children.map((o) => o.value), ["hand-written", "stub-a", "stub-b"], "options");
   eq(models.value, "hand-written", "the value in force");
 });
@@ -523,11 +576,11 @@ check("a value the frame does not list is still the one shown", () => {
 check("a picker with one choice says so by being unusable", () => {
   const d = viewer.newDoc();
   viewer.applyState(d, JSON.stringify({
-    type: "state", provider: "solo", model: "only",
-    providers: [{ name: "solo", models: ["only"] }],
+    type: "state",
+    settings: [{ group: "model", key: "provider", kind: "select", value: "solo",
+      choices: ["solo"], send: "/provider", help: "switch endpoint" }],
   }));
-  eq(viewer.__node("pick-provider").disabled, true, "one provider is not a choice");
-  eq(viewer.__node("pick-model").disabled, true, "one model is not a choice");
+  eq(viewer.__node("fields-model").children[0].children[2].disabled, true, "one provider is not a choice");
 });
 
 check("the header says which model wrote this only when there is no state to say it", () => {
@@ -541,11 +594,13 @@ check("the header says which model wrote this only when there is no state to say
   eq(meta.children.map((s) => s.textContent), ["model deepseek-chat", "cwd C:\\work", "provider deepseek"], "with no state");
 
   viewer.applyState(d, JSON.stringify({
-    type: "state", provider: "stub", model: "stub-model", providers: [{ name: "stub", models: [] }],
+    type: "state",
+    settings: [{ group: "model", key: "model", kind: "select", value: "stub-model",
+      choices: [], send: "/model", help: "switch model" }],
   }));
   meta.children.length = 0;
   viewer.paint(d);
-  eq(meta.children.map((s) => s.textContent), ["cwd C:\\work"], "with a state, the pickers say it");
+  eq(meta.children.map((s) => s.textContent), ["cwd C:\\work"], "with a state, the screens say it");
 });
 
 check("a warning and an error read differently", () => {
@@ -553,122 +608,77 @@ check("a warning and an error read differently", () => {
   eq(d.blocks.map((b) => b.level), ["warning", "error"], "levels");
 });
 
-// A toggle is a switch that shows its current value rather than a button that blind-toggles, and
-// the value it shows has to be the one the *run* is on -- not the one the file last held, and not
-// one this page remembers. So the names, the values a toggle can take and the value it is on all
-// come from the frame, and the page adds nothing of its own: `/verbose` takes off|on|full today,
-// and a second copy of that list here is how a switch comes to offer a word the command refuses.
-check("each toggle in the frame becomes a switch showing what is in force", () => {
-  const d = viewer.newDoc();
-  viewer.applyState(d, JSON.stringify({
-    type: "state", provider: "stub", model: "stub-model",
-    providers: [{ name: "stub", models: ["stub-model"] }],
-    toggles: [
-      { name: "verbose", values: ["off", "on", "full"], value: "full" },
-      { name: "detail", values: ["off", "on"], value: "off" },
-    ],
-  }));
+console.log("the screens of the settings dialog");
 
-  const box = viewer.__node("toggles");
-  eq(box.children.length, 2, "one switch per toggle");
-  eq(box.children.map((l) => l.children[0].textContent), ["verbose", "detail"], "named for the command they send");
-  const switches = box.children.map((l) => l.children[1]);
-  eq(switches[0].children.map((o) => o.value), ["off", "on", "full"], "the values the command takes");
-  eq(switches[0].value, "full", "the value in force");
-  eq(switches[1].children.map((o) => o.value), ["off", "on"], "and the two-valued one");
-  eq(switches[1].value, "off", "showing off, which a bare on/off button could not");
-});
-
-check("a state frame with no toggles in it takes the switches away", () => {
-  const d = viewer.newDoc();
-  viewer.applyState(d, JSON.stringify({
-    type: "state", provider: "stub", model: "stub-model", providers: [],
-    toggles: [{ name: "verbose", values: ["off", "on", "full"], value: "on" }],
-  }));
-  eq(viewer.__node("toggles").children.length, 1, "a switch while the frame lists one");
-  // An older or narrower frame: the switches must go rather than stay behind showing values that
-  // nothing is reporting any more.
-  viewer.applyState(d, JSON.stringify({ type: "state", provider: "stub", model: "stub-model", providers: [] }));
-  eq(viewer.__node("toggles").children.length, 0, "none listed, none shown");
-});
-
-console.log("the panel of commands the frame describes");
-
-// §8's read channel, second half: the command list is what a menu — buttons, forms, confirmations —
-// is drawn from, and the page must not carry a copy of it. What is pinned here is the arrangement:
-// one group per class the page was taught, in a fixed order, with each row saying what to type and
-// what it does. The classes are §8's own, so the panel reads as the design does.
-check("the frame's command list becomes a panel, grouped by class", () => {
-  const page = loadViewer();
-  const d = page.newDoc();
-  page.applyState(d, JSON.stringify({
-    type: "state", provider: "stub", model: "m", providers: [{ name: "stub", models: ["m"] }],
-    toggles: [],
-    commands: [
-      { label: "/config", send: "/config", help: "show shell, steps, proxy", class: "panel" },
-      { label: "/reload", send: "/reload", help: "re-read the config file", class: "button" },
-      { label: "/resume <n|id>", send: "/resume", help: "switch to one of them", class: "selector" },
-      { label: "/name [text]", send: "/name", help: "name this conversation", class: "form" },
-      { label: "/delete <n|id>", send: "/delete", help: "delete one", class: "danger" },
-    ],
-  }));
-  eq(page.__node("commands").hidden, false, "a frame that lists commands offers the panel");
-  const groups = page.__node("command-list").children;
-  eq(
-    groups.map((g) => g.children[0].textContent),
-    ["reports", "actions", "selectors", "forms", "destructive"],
-    "one group per class, in the order §8 names them"
-  );
-  eq(
-    groups[0].children.slice(1).map((r) => r.children.map((c) => c.textContent)),
-    [["/config", "show shell, steps, proxy"]],
-    "a row says what to type and what it does"
-  );
-  eq(groups[4].children.length, 2, "the destructive group carries its own rows");
-});
-
-check("a state frame with no commands in it takes the panel away", () => {
-  const page = loadViewer();
-  const d = page.newDoc();
-  page.showState(d);
-  eq(page.__node("commands").hidden, true, "a document with no state offers no menu");
-  page.applyState(d, JSON.stringify({
-    type: "state", provider: "stub", model: "m", providers: [{ name: "stub", models: ["m"] }],
-  }));
-  // A frame from a build that did not carry them, or one whose list is empty: either way the panel
-  // goes rather than staying up with rows nothing is reporting any more.
-  eq(page.__node("commands").hidden, true, "a frame without a command list offers no menu");
-});
-
-// §8's second class, and the one with a route of its own. A report is *read* here rather than sent
-// into the transcript, because the terminal is where somebody typed `/help` and this page's reader
-// did not ask for a listing there. What is pinned here is which rows can be read and what the panel
-// does while one is: the line to ask for comes from the frame, and the answer arrives on the feed
-// marked as a panel's. That a press posts to `/report` rather than `/message` -- the whole
-// difference between reading and printing -- is asserted over the page's bytes in tests/web_view.rs
-// with the other compositions, since the stub DOM delivers no events.
-check("a report row is pressable and the other rows are not", () => {
+// §8's read channel, arranged for a person: the frame says which screen a command row belongs on
+// (`group`), so the dialog can be a set of short screens instead of one column of everything. What
+// is pinned here is that arrangement: a row is drawn on the screen the frame named, and a screen the
+// frame filed nothing on is not offered at all.
+check("the frame's rows are drawn on the screens it names, and only there", () => {
   const page = loadViewer();
   const d = page.newDoc();
   page.applyState(d, JSON.stringify({
     type: "state", provider: "stub", model: "m", providers: [{ name: "stub", models: ["m"] }],
     commands: [
-      { label: "/config", send: "/config", help: "show shell, steps, proxy", class: "panel" },
-      { label: "/help", send: "/help", help: "this message", class: "panel" },
-      { label: "/resume <n|id>", send: "/resume", help: "switch to one of them", class: "selector" },
+      { label: "/config", send: "/config", help: "show shell, steps, proxy", class: "panel", group: "limits" },
+      { label: "/reload", send: "/reload", help: "re-read the config file", class: "button", group: "run" },
+      { label: "/resume <n|id>", send: "/resume", help: "switch to one of them", class: "selector", group: "conversation" },
+      { label: "/name [text]", send: "/name", help: "name this conversation", class: "form", group: "conversation" },
+      { label: "/delete <n|id>", send: "/delete", help: "delete one", class: "danger", group: "conversation" },
     ],
   }));
-  const groups = page.__node("command-list").children;
-  const reports = groups[0].children.slice(1);
-  eq(reports.map((r) => r.tag), ["button", "button"], "a report row is a control");
+  eq(page.__node("rows-limits").hidden, false, "a screen with rows on it is offered");
+  eq(page.__node("row-list-limits").children.map((r) => r.children[0].textContent), ["/config"],
+     "a report row is on the screen the frame filed it on");
+  eq(page.__node("row-list-run").children.map((r) => r.children[0].textContent), ["/reload"],
+     "and an action on its own");
+  eq(page.__node("row-list-conversation").children.map((r) => r.children[0].textContent),
+     ["/resume <n|id>", "/name [text]", "/delete <n|id>"],
+     "the frame's order, kept inside the screen");
+  eq(page.__node("rows-model").hidden, true, "a screen the frame filed nothing on is not offered");
+  eq(page.__node("row-list-tools").children.length, 0, "and holds no row of somebody else's");
+
+  // A frame whose rows carry no screen at all: the dialog is empty rather than showing every row on
+  // the first screen, which would be this page deciding where a row belongs -- the one thing the
+  // `group` field exists to keep it from doing.
+  page.applyState(d, JSON.stringify({
+    type: "state", provider: "stub", model: "m", providers: [{ name: "stub", models: ["m"] }],
+    commands: [{ label: "/config", send: "/config", help: "show shell", class: "panel" }],
+  }));
+  for (const [key] of page.SETTINGS_PANES) {
+    eq(page.__node("rows-" + key).hidden, true, "a row with no screen is shown on none of them: " + key);
+  }
+});
+
+// A report is *read* here rather than sent into the transcript, because the terminal is where
+// somebody typed `/help` and this page's reader did not ask for a listing there. What is pinned here
+// is which rows can be read and what the screen does while one is: the line to ask for comes from the
+// frame, and the answer arrives on the feed marked as a panel's. That a press posts to `/report`
+// rather than `/message` -- the whole difference between reading and printing -- is asserted over the
+// page's bytes in tests/web_view.rs with the other compositions, since the stub DOM delivers no
+// events.
+check("a report row is pressable on its screen and the other rows are not", () => {
+  const page = loadViewer();
+  const d = page.newDoc();
+  page.applyState(d, JSON.stringify({
+    type: "state", provider: "stub", model: "m", providers: [{ name: "stub", models: ["m"] }],
+    commands: [
+      { label: "/config", send: "/config", help: "show shell, steps, proxy", class: "panel", group: "limits" },
+      { label: "/help", send: "/help", help: "this message", class: "panel", group: "tools" },
+      { label: "/resume <n|id>", send: "/resume", help: "switch to one of them", class: "selector", group: "conversation" },
+    ],
+  }));
+  const reports = page.__node("row-list-limits").children;
+  eq(reports.map((r) => r.tag), ["button"], "a report row is a control");
   eq(reports[0].type, "button", "and not a submit button, which would reload the page");
+  eq(reports[0].className, "row", "and is not marked as reference");
   eq(
     reports[0].children.map((c) => c.textContent),
     ["/config", "show shell, steps, proxy"],
     "it still says what to type and what it does"
   );
   eq(
-    groups[1].children[1].tag,
+    page.__node("row-list-conversation").children[0].tag,
     "div",
     "a selector is still only a row: this page has nothing to choose from yet"
   );
@@ -680,13 +690,14 @@ check("a row that carries values offers one line per value", () => {
   page.applyState(d, JSON.stringify({
     type: "state", provider: "stub", model: "m", providers: [{ name: "stub", models: ["m"] }],
     commands: [
-      { label: "/skills [name]", send: "/skills", help: "list skills", class: "panel", values: ["alpha", "beta"] },
+      { label: "/skills [name]", send: "/skills", help: "list skills", class: "panel",
+        group: "tools", values: ["alpha", "beta"] },
       // A frame that carries no values is drawn as one row, so this check also says the value rows come
       // from the frame rather than from the class: the second command here is a panel row too.
-      { label: "/config", send: "/config", help: "show shell", class: "panel" },
+      { label: "/config", send: "/config", help: "show shell", class: "panel", group: "tools" },
     ],
   }));
-  const reports = page.__node("command-list").children[0].children.slice(1);
+  const reports = page.__node("row-list-tools").children;
   eq(
     reports.map((r) => r.children[0].textContent),
     ["/skills [name]", "/skills alpha", "/skills beta", "/config"],
@@ -703,41 +714,36 @@ check("a row that takes a field gets one, and only the rows the frame marks", ()
     type: "state", provider: "stub", model: "m", providers: [{ name: "stub", models: ["m"] }],
     commands: [
       { label: "/name [text]", send: "/name", help: "name this conversation", class: "form",
-        fields: [{ field: "text", name: "text", optional: false }] },
+        group: "conversation", fields: [{ field: "text", name: "text", optional: false }] },
       { label: "/provider key <key>", send: "/provider key", help: "set the API key", class: "form",
-        fields: [{ field: "password", name: "key", optional: false }] },
-      { label: "/config edit", send: "/config edit", help: "change shell", class: "form" },
+        group: "model", fields: [{ field: "password", name: "key", optional: false }] },
+      { label: "/config edit", send: "/config edit", help: "change shell", class: "form", group: "limits" },
     ],
   }));
-  const forms = page.__node("command-list").children[0].children.slice(1);
+  const forms = page.__node("row-list-conversation").children;
   eq(
     forms.map((n) => n.tag),
-    ["form", "form", "div"],
-    "a row with answers gets a form; `/config edit` has none and stays a row of reference"
+    ["form"],
+    "a row with answers gets a form"
   );
+  const named = page.__node("row-list-model").children;
+  eq(named.map((n) => n.tag), ["form"], "on the screen the frame filed it on");
   eq(
-    forms.slice(0, 2).map((f) => f.children[0].tag + ":" + f.children[0].type),
+    [forms[0], named[0]].map((f) => f.children[0].tag + ":" + f.children[0].type),
     ["input:text", "input:password"],
     "the frame's word is the input's type, so a credential is masked because the process said so"
   );
   eq(
-    forms.slice(0, 2).map((f) => f.children[1].textContent),
+    [forms[0], named[0]].map((f) => f.children[1].textContent),
     ["/name", "/provider key"],
     "the button sends the row's own `send`, which is also what it says"
   );
   eq(forms[0].children[0].placeholder, "name this conversation", "one answer, so the help is what the field suggests");
-  // A form row the frame does *not* mark is still a row of reference, which is the half that says
-  // the field comes from the frame rather than from the class.
-  page.applyState(d, JSON.stringify({
-    type: "state", provider: "stub", model: "m", providers: [{ name: "stub", models: ["m"] }],
-    commands: [
-      { label: "/name [text]", send: "/name", help: "name this conversation", class: "form",
-        fields: [{ field: "text", name: "text", optional: false }] },
-      { label: "/config edit", send: "/config edit", help: "change shell", class: "form" },
-    ],
-  }));
-  const mixed = page.__node("command-list").children[0].children.slice(1);
-  eq(mixed.map((n) => n.tag), ["form", "div"], "the wizard stays a row of reference");
+  // A form row the frame does *not* mark is a row of reference, which is the half that says the field
+  // comes from the frame rather than from the class: `/config edit` asks its questions at the
+  // terminal, and a page that drew it a box would send a line nobody there can answer.
+  const wizard = page.__node("row-list-limits").children;
+  eq(wizard.map((n) => n.tag), ["div"], "the wizard stays a row of reference");
 });
 
 check("a row that takes several answers asks for each of them", () => {
@@ -755,14 +761,14 @@ check("a row that takes several answers asks for each of them", () => {
     type: "state", provider: "stub", model: "m",
     commands: [
       { label: "/provider key <key>", send: "/provider key", help: "set the API key for stub", class: "form",
-        fields: keyFields },
+        group: "model", fields: keyFields },
       { label: "/provider add <name> <base_url> [model]", send: "/provider add", help: "set up a new provider", class: "form",
-        fields: addFields },
+        group: "model", fields: addFields },
     ],
   }));
-  const forms = page.__node("command-list").children[0].children.slice(1);
+  const forms = page.__node("row-list-model").children;
   eq(forms.length, 2, "both rows are drawn");
-  const [key, add] = forms;
+  const add = forms[1];
   eq(
     add.children.map((n) => n.tag),
     ["input", "input", "input", "button"],
@@ -806,267 +812,146 @@ check("a destructive row opens its choices rather than sending", () => {
     type: "state", provider: "stub", model: "m",
     providers: [{ name: "stub", models: ["m"] }, { name: "other", models: ["x"] }],
     commands: [
-      { label: "/provider rm <name>", send: "/provider rm", help: "delete one", class: "danger", from: "providers" },
-      { label: "/delete <n|id>", send: "/delete", help: "delete one", class: "danger", from: "sessions" },
+      { label: "/provider rm <name>", send: "/provider rm", help: "delete one", class: "danger",
+        group: "model", from: "providers" },
+      { label: "/delete <n|id>", send: "/delete", help: "delete one", class: "danger",
+        group: "conversation", from: "sessions" },
     ],
   }));
-  const closed = page.__node("command-list").children[0].children.slice(1);
-  eq(closed.map((n) => n.tag), ["button", "button"], "both rows are pressable");
+  const closed = page.__node("row-list-model").children;
+  eq(closed.map((n) => n.tag), ["button"], "the row is pressable");
   eq(
     closed.map(says),
-    ["/provider rm <name>", "/delete <n|id>"],
+    ["/provider rm <name>"],
     "and closing the choices sends nothing: the line is not on any row yet"
   );
 
   // Opened, on the list this page already holds in `state`. The row being pressed says the whole
   // line, which is the point of two presses rather than one: the second press is the one that can
-  // be read before it is made.
+  // be read before it is made. The opened row's candidates *replace* that screen's rows, and the
+  // other destructive row is untouched on its own screen -- one row being open is not a reason to
+  // disturb the rest of the dialog.
   d.confirm = { send: "/provider rm" };
-  page.showCommands(d);
-  const open = page.__node("command-list").children[0].children.slice(1);
-  // The open row's candidates *replace* that row inside the list, and the other destructive row is
-  // still there below them: the panel is a list of what the terminal takes, and one row being open
-  // is not a reason to hide the rest.
-  eq(open.map((n) => n.tag), ["button", "button", "button", "button"], "a way back, two candidates, and the other row");
+  page.paintSettings(d);
+  const open = page.__node("row-list-model").children;
+  eq(open.map((n) => n.tag), ["button", "button", "button"], "a way back and two candidates");
   eq(
     open.map(says),
-    ["\u2039 commands", "/provider rm stub", "/provider rm other", "/delete <n|id>"],
+    ["\u2039 back", "/provider rm stub", "/provider rm other"],
     "each candidate is the line that would be sent"
   );
   eq(open[0].className, "back", "the way back is marked as one");
   eq(open[1].className, "row danger", "and the ones that send are marked as destructive");
+  eq(
+    page.__node("row-list-conversation").children.map(says),
+    ["/delete <n|id>"],
+    "the other screen still has its own rows"
+  );
 
   // The conversation row, on a page with no list to draw from -- which is the honest answer rather
   // than an empty list that looks like a list with nothing in it.
   d.confirm = { send: "/delete" };
-  page.showCommands(d);
-  const empty = page.__node("command-list").children[0].children.slice(1);
+  page.paintSettings(d);
+  const empty = page.__node("row-list-conversation").children;
   eq(
     empty.map(says),
-    ["/provider rm <name>", "\u2039 commands", "nothing to choose from"],
+    ["\u2039 back", "nothing to choose from"],
     "an empty list of candidates says so"
   );
 });
 
-check("a conversation's row carries its own actions behind one button", () => {
+check("a row this page cannot press says where its control is", () => {
   const page = loadViewer();
   const d = page.newDoc();
-  page.applyState(d, JSON.stringify({
-    type: "state", provider: "stub", model: "m",
-    providers: [{ name: "stub", models: ["m"] }],
-    commands: [
-      { label: "/archive <n|id>", send: "/archive", help: "file it away", class: "danger", from: "sessions" },
-      { label: "/delete <n|id>", send: "/delete", help: "delete one", class: "danger", from: "sessions" },
-      { label: "/provider rm <name>", send: "/provider rm", help: "delete one", class: "danger", from: "providers" },
-      { label: "/model <name>", send: "/model", help: "pick one", class: "selector" },
-    ],
-  }));
-  const session = { n: 3, id: "173-9", label: "the branch", current: false };
-  const says = (n) => (n.children[0] ? n.children[0].textContent : n.textContent);
-  const menuOf = (row) => row.children.find((n) => n.className === "menu");
-
-  const closed = page.sessionRow(d, session);
-  eq(closed.tag, "li", "a conversation is a list item");
-  eq(closed.children.map((n) => n.tag), ["span", "span", "button"], "the number, the label, and one button");
-  eq(closed.children[2].textContent, "\u22ef", "the button is the three dots, without a word");
-  eq(closed.children[2].title, "actions for this conversation", "and explains itself on hover");
-  eq(menuOf(closed), undefined, "closed: no menu is drawn");
-
-  // Opened, on the row the document names -- by id, because the numbers under a menu are positions
-  // and a list that shifted under it would aim the next press at the wrong conversation.
-  d.menu = { n: 3, id: "173-9" };
-  const open = page.sessionRow(d, session);
-  const menu = menuOf(open);
-  if (!menu) throw new Error("the open row has no menu");
-  eq(menu.children.map((n) => n.tag), ["button", "button"], "one row per action the frame offers");
-  eq(menu.children.map(says), ["/archive 3", "/delete 3"], "each row is the line it will send");
-  eq(menu.children.map((n) => n.className), ["row danger", "row danger"], "both of them destroy something");
-  eq(
-    menu.children.map((n) => n.children[1].textContent),
-    ["file it away", "delete one"],
-    "the description is the frame's own, not a word this page made up"
-  );
-
-  d.menu = { n: 3, id: "someone-else" };
-  eq(menuOf(page.sessionRow(d, session)), undefined, "a menu belongs to the row it names");
-
-  // The conversation you are in is offered them too, and the *terminal* is what refuses: its
-  // refusal explains itself ("/new starts a fresh one; then this one can be filed away"), and a
-  // page that hid the row would be deciding a rule it does not own. No rename field here, because
-  // this frame does not describe one: `/name` is not in the list at all, which is the case the
-  // check below pins from the other side.
-  d.menu = { n: 1, id: "111-1" };
-  const current = menuOf(page.sessionRow(d, { n: 1, id: "111-1", label: "this one", current: true }));
-  eq(current.children.length, 2, "the open conversation is offered them as well");
-
-  // A frame that offers no way to act on another conversation says so rather than drawing nothing:
-  // an empty menu is indistinguishable from a menu that failed to draw.
-  d.menu = { n: 3, id: "173-9" };
-  page.applyState(d, JSON.stringify({ type: "state", provider: "stub", model: "m", commands: [] }));
-  eq(menuOf(page.sessionRow(d, session)).children.map(says), ["nothing to do from here"], "an empty menu says so");
-});
-
-check("the conversation you are in can be renamed from its own row", () => {
-  const page = loadViewer();
-  const d = page.newDoc();
+  // A row the frame gave `values` is pressable wherever it sits: the rows are offered the names the
+  // run already knows, which is the whole point of them -- the reader should not have to read a name
+  // off one control and type it into another.
   page.applyState(d, JSON.stringify({
     type: "state", provider: "stub", model: "m",
     commands: [
-      { label: "/archive <n|id>", send: "/archive", help: "file it away", class: "danger", from: "sessions" },
-      {
-        label: "/name [text]", send: "/name", help: "name this conversation", class: "form",
-        fields: [{ field: "text", name: "text", optional: false }],
-      },
+      { label: "/model <name>", send: "/model", help: "switch to one", class: "selector",
+        group: "model", values: ["stub-model", "stub-other"] },
+      { label: "/resume <n|id>", send: "/resume", help: "switch to one of them", class: "selector",
+        group: "conversation" },
+      { label: "/provider add", send: "/provider add", help: "set up a new provider", class: "form",
+        group: "model" },
+      { label: "/something <x>", send: "/something", help: "a row of a class this page has not met",
+        class: "unheard-of", group: "tools" },
     ],
   }));
-  const menuOf = (row) => row.children.find((n) => n.className === "menu");
-  const formOf = (row) => menuOf(row).children.find((n) => n.tag === "form");
-
-  // The open conversation: its name is a field, and the field starts on what the row is called
-  // now -- a rename is usually a correction, and retyping the whole name to fix a word is not.
-  d.menu = { n: 1, id: "111-1" };
-  const current = page.sessionRow(d, { n: 1, id: "111-1", label: "the branch", current: true });
-  const form = formOf(current);
-  if (!form) throw new Error("the open conversation has no rename field");
-  eq(menuOf(current).children.map((n) => n.tag), ["button", "form"], "the actions, then the name");
-  eq(form.children.map((n) => n.tag), ["input", "button"], "one field and the command it sends");
-  eq(form.children[0].value, "the branch", "the field starts on the name in force");
-  eq(form.children[0].placeholder, "name this conversation", "and says what the frame says it is for");
-  eq(form.children[1].textContent, "/name", "the button says which command it sends");
-
-  // What a press does with what is in the field. The harness cannot see the POST -- `canSend` is
-  // only true on a page flint is serving, and this stub has no `location` -- so what is asserted
-  // here is the *decision* the handler makes with the field's contents, which is what the drawing
-  // owns: a name closes the menu behind it, and an emptied field leaves everything as it was.
-  // The line itself, composed by the same `formLine` the panel's forms use, is asserted over the
-  // page's own bytes in `tests/web_view.rs`.
-  form.children[0].value = "  the other branch  ";
-  page.fire(form, "submit", { preventDefault() {} });
-  eq(d.menu, null, "the menu closes behind the rename it sent");
-  eq(page.sent.length, 0, "the harness cannot send, so nothing was posted from here");
-
-  // An emptied field sends nothing, and the difference is visible: the handler returns before it
-  // closes the menu, so a cleared field is a press that did nothing. That matters because `/name`
-  // with no text *reports* the name, which is a different command, and nobody clearing this field
-  // asked to be told what the conversation is called.
-  d.menu = { n: 1, id: "111-1" };
-  const again = formOf(page.sessionRow(d, { n: 1, id: "111-1", label: "the branch", current: true }));
-  again.children[0].value = "   ";
-  page.fire(again, "submit", { preventDefault() {} });
-  ok(d.menu !== null, "an empty name was taken as a rename");
-
-  // A conversation with no name yet is not prefilled with the page's own placeholder for one: the
-  // word `(empty)` is this page's, and sending it would make it the conversation's actual name.
-  d.menu = { n: 2, id: "222-2" };
-  const unnamed = formOf(page.sessionRow(d, { n: 2, id: "222-2", label: "(empty)", current: true }));
-  eq(unnamed.children[0].value, "", "a nameless conversation has an empty field");
-
-  // Another conversation gets no rename field, and the reason is the terminal's own rule rather than
-  // the page's taste: `/name` names the conversation the run is *writing*, so a rename offered on
-  // another row would either rename the wrong conversation or would have to switch to it first --
-  // a second line whose refusal would leave the rename aimed at whatever was open.
-  d.menu = { n: 3, id: "173-9" };
-  const other = page.sessionRow(d, { n: 3, id: "173-9", label: "someone else's", current: false });
-  eq(menuOf(other).children.map((n) => n.tag), ["button"], "only the actions the frame offers");
-
-  // And the field is the *frame's*, not the page's: a run that does not describe what `/name` takes
-  // gets no field, because a control for a command nobody offered sends a line nobody can answer --
-  // the rule the destructive rows already follow, one level up.
-  d.menu = { n: 1, id: "111-1" };
-  page.applyState(d, JSON.stringify({
-    type: "state", provider: "stub", model: "m",
-    commands: [
-      { label: "/archive <n|id>", send: "/archive", help: "file it away", class: "danger", from: "sessions" },
-      { label: "/name [text]", send: "/name", help: "name this conversation", class: "form" },
-    ],
-  }));
-  const bare = menuOf(page.sessionRow(d, { n: 1, id: "111-1", label: "the branch", current: true }));
-  eq(bare.children.map((n) => n.tag), ["button"], "a command that says nothing about its answers gets no field");
-});
-
-check("a row the panel cannot press says where its control is", () => {
-  const page = loadViewer();
-  const d = page.newDoc();
-  page.applyState(d, JSON.stringify({
-    type: "state", provider: "stub", model: "m",
-    commands: [
-      { label: "/tools", send: "/tools", help: "list available tools", class: "panel" },
-      { label: "/new", send: "/new", help: "start a fresh conversation", class: "button" },
-      { label: "/model <name>", send: "/model", help: "switch to one", class: "selector", values: ["stub-model", "stub-other"] },
-      { label: "/resume <n|id>", send: "/resume", help: "switch to one of them", class: "selector" },
-      { label: "/provider add", send: "/provider add", help: "set up a new provider", class: "form" },
-    ],
-  }));
-  page.showCommands(d);
-  const drawn = page.__node("command-list").children;
-  // One group per class the frame sends, with the rows in the order the frame gave them. The
-  // switches are not here because they are not in the frame at all: their value is already a field
-  // of it, and one fact in two places is how the two come to disagree.
-  const rows = drawn.filter((n) => n.className === "group").map((g) => g.children.slice(1));
-  eq(rows.length, 4, "four groups, one per class the frame sends");
-  const [reports, actions, selectors, forms] = rows;
-
-  // The report row is pressable, and carries no "reference" mark.
-  eq(reports[0].tag, "button", "a report is a control");
-  eq(reports[0].className, "row", "and is not marked as reference");
-  eq(reports[0].title, "list available tools", "and explains itself with the frame's own help, not with a home");
-
-  // A row the frame gave `values` is pressable wherever it sits: the switch rows are offered the
-  // names the run already knows, which is the whole point of them -- the reader should not have to
-  // read a name off one control and type it into another.
-  eq(selectors[0].tag, "button", "a switch with values is a control");
-  eq(selectors[0].className, "row", "not a reference row");
-  eq(selectors[0].title, "switch to one", "and keeps the frame's own help");
-  eq(selectors[0].children.map((n) => n.textContent), ["/model stub-model", "switch to one"], "the first value, as the line it sends");
-  eq(selectors[1].children.map((n) => n.textContent), ["/model stub-other", "switch to one"], "and the second");
-  // ...while a selector the frame gave no values keeps saying where its own control is.
-  eq(selectors[2].tag, "div", "the selector with nothing to offer is not pressable");
-  eq(selectors[2].className, "row reference", "it is marked as reference");
-  eq(selectors[2].title, "this one is a conversation on the left", "and names the one home it has");
+  const offered = page.__node("row-list-model").children;
+  eq(offered[0].tag, "button", "a switch with values is a control");
+  eq(offered[0].className, "row", "not a reference row");
+  eq(offered[0].title, "switch to one", "and keeps the frame's own help");
+  eq(offered[0].children.map((n) => n.textContent), ["/model stub-model", "switch to one"], "the first value, as the line it sends");
+  eq(offered[1].children.map((n) => n.textContent), ["/model stub-other", "switch to one"], "and the second");
 
   // Everything else is reference: a row that says what the command is, dressed so that it cannot be
   // mistaken for the control it is not -- and saying, on hover, where that control actually is.
-  eq(actions[0].tag, "div", "an action is not pressable in the panel");
-  eq(actions[0].className, "row reference", "it is marked as reference");
-  eq(actions[0].title, "this one is a button in settings", "and says where its control is");
-  eq(forms[0].title, "this one is typed in the terminal -- it asks questions", "a form without a field is the terminal's");
-  eq(forms[0].children.map((n) => n.textContent), ["/provider add", "set up a new provider"], "and it still reads like a row");
+  const conversation = page.__node("row-list-conversation").children[0];
+  eq(conversation.tag, "div", "the selector with nothing to offer is not pressable");
+  eq(conversation.className, "row reference", "it is marked as reference");
+  eq(conversation.title, "this one is a conversation on the left", "and names the one home it has");
+  eq(page.__node("row-list-model").children[2].tag, "div", "a form row with no field is reference too");
+  eq(
+    page.__node("row-list-model").children[2].title,
+    "this one is typed in the terminal -- it asks questions",
+    "a form the terminal asks about is the terminal's"
+  );
+  eq(
+    page.__node("row-list-tools").children[0].title,
+    "this one is typed in the terminal",
+    "and a class this page has never met is not guessed at"
+  );
+  eq(
+    page.__node("row-list-tools").children[0].children.map((n) => n.textContent),
+    ["/something <x>", "a row of a class this page has not met"],
+    "and it still reads like a row"
+  );
 });
 
-check("a listing being read replaces the list, and the way back restores it", () => {
+check("a listing being read replaces its own screen's rows, and the way back restores them", () => {
   const page = loadViewer();
   const d = page.newDoc();
   page.applyState(d, JSON.stringify({
     type: "state", provider: "stub", model: "m", providers: [{ name: "stub", models: ["m"] }],
-    commands: [{ label: "/config", send: "/config", help: "show shell", class: "panel" }],
+    commands: [
+      { label: "/config", send: "/config", help: "show shell", class: "panel", group: "limits" },
+      { label: "/tools", send: "/tools", help: "list tools", class: "panel", group: "tools" },
+    ],
   }));
   d.reading = "/config";
+  d.readingGroup = "limits";
   d.readingText = "config: /tmp/config.toml\n  verbose          = on";
-  page.showCommands(d);
-  const drawn = page.__node("command-list").children;
+  page.paintSettings(d);
+  const drawn = page.__node("row-list-limits").children;
   eq(drawn[0].tag, "button", "the way back is a control");
   eq(drawn[1].textContent, "/config", "the heading is what was asked for");
   eq(drawn[2].textContent.includes("config.toml"), true, "and the listing is the process's own text");
-  // The list is gone while a listing is on screen: one surface, one reading -- and the answer that
-  // arrives later is put there by the frame, not appended to a list nobody is looking at.
-  eq(drawn.length, 3, "the list is replaced rather than added to");
+  // One surface, one reading -- and the answer that arrives later is put there by the frame, not
+  // appended to a list nobody is looking at. The other screen is untouched: a reading belongs to the
+  // row that asked for it.
+  eq(drawn.length, 3, "the rows are replaced rather than added to");
+  eq(page.__node("row-list-tools").children.length, 1, "and another screen keeps its own rows");
   d.reading = null;
-  page.showCommands(d);
-  const back = page.__node("command-list").children;
-  eq(back.length, 1, "going back draws the groups again");
-  eq(back[0].children.length, 2, "with the report row in it");
+  d.readingGroup = "";
+  page.paintSettings(d);
+  const back = page.__node("row-list-limits").children;
+  eq(back.length, 1, "going back draws the rows again");
+  eq(back[0].children[0].textContent, "/config", "with the report row in it");
 });
 
-check("a report frame fills the panel only for what is being read", () => {
+check("a report frame fills the screen only for what is being read", () => {
   const page = loadViewer();
   const d = page.newDoc();
   d.reading = "/tools";
+  d.readingGroup = "tools";
   d.readingText = "";
   page.applyLine(d, JSON.stringify({ type: "command", input: "/config", text: "shell = bash", panel: true }));
   eq(d.readingText, "", "an answer to a listing the reader moved on from is not shown");
   eq(d.blocks.length, 0, "and a report is not a transcript block either");
   page.applyLine(d, JSON.stringify({ type: "command", input: "/tools", text: "read, write", panel: true }));
-  eq(d.readingText, "read, write", "the answer to what is being read fills the panel");
+  eq(d.readingText, "read, write", "the answer to what is being read fills the screen");
   eq(d.blocks.length, 0, "still nothing in the transcript: that is the whole point of the class");
 });
 
@@ -1074,10 +959,10 @@ check("a command answer without the panel mark is still a transcript block", () 
   const page = loadViewer();
   const d = page.newDoc();
   // The same frame shape, one field short: this is what a typed `/config` produces, and it belongs
-  // in the transcript even while a panel is showing something else.
+  // in the transcript even while a screen is showing something else.
   d.reading = "/tools";
   page.applyLine(d, JSON.stringify({ type: "command", input: "/config", text: "shell = bash" }));
-  eq(d.readingText, "", "a typed answer is not put in the panel");
+  eq(d.readingText, "", "a typed answer is not put in the screen");
   eq(d.blocks.length, 1, "it is a block in the transcript");
   eq(d.blocks[0].kind, "command", "of the kind the transcript already drew");
 });
@@ -1085,26 +970,32 @@ check("a command answer without the panel mark is still a transcript block", () 
 console.log("the buttons the frame marks as actions");
 
 // §8's first control. The frame already says which commands are one action with no argument
-// (`class: "button"`), so the page's job is only to draw them where controls go and send the row's
-// own line. That the click sends `send` rather than a name put back together here is asserted over
-// the page's bytes in tests/web_view.rs, the same way the switches' `/<name> <value>` is: the stub
-// DOM has no event delivery, and inventing some would be testing the stub.
-check("the frame's action rows become buttons in the header", () => {
+// (`class: "button"`), so the page's job is only to draw them on the screen the frame named and send
+// the row's own line. That the click sends `send` rather than a name put back together here is
+// asserted over the page's bytes in tests/web_view.rs, the same way the settings' `send + " " +
+// value` is: the stub DOM has no click delivery, and inventing some would be testing the stub.
+check("the frame's action rows become buttons on the screen it names", () => {
   const page = loadViewer();
   const d = page.newDoc();
   page.applyState(d, JSON.stringify({
-    type: "state", provider: "stub", model: "m", providers: [], toggles: [],
+    type: "state", provider: "stub", model: "m", providers: [],
     commands: [
-      { label: "/config", send: "/config", help: "show shell, steps, proxy", class: "panel" },
-      { label: "/new", send: "/new", help: "start a fresh conversation", class: "button" },
-      { label: "/delete <n|id>", send: "/delete", help: "delete one", class: "danger" },
-      { label: "/reload", send: "/reload", help: "re-read the config file", class: "button" },
+      { label: "/config", send: "/config", help: "show shell, steps, proxy", class: "panel", group: "limits" },
+      { label: "/new", send: "/new", help: "start a fresh conversation", class: "button", group: "conversation" },
+      { label: "/delete <n|id>", send: "/delete", help: "delete one", class: "danger", group: "conversation" },
+      { label: "/reload", send: "/reload", help: "re-read the config file", class: "button", group: "run" },
     ],
   }));
-  const box = page.__node("actions");
-  eq(box.children.map((b) => b.textContent), ["/new", "/reload"], "one button per action, in the frame's order");
-  eq(box.children[0].title, "start a fresh conversation", "the help is the tooltip");
+  const box = page.__node("row-list-run");
+  eq(box.children.map((b) => b.children[0].textContent), ["/reload"], "one button per action on that screen");
+  eq(box.children[0].title, "re-read the config file", "the help is the tooltip");
   eq(box.children[0].type, "button", "a button that cannot submit anything");
+  eq(box.children[0].className, "row action", "marked as an action rather than a report");
+  eq(
+    page.__node("row-list-conversation").children[0].children[0].textContent,
+    "/new",
+    "and the frame's own order is kept inside a screen"
+  );
 });
 
 check("a state frame with no actions in it takes the buttons away", () => {
@@ -1112,16 +1003,19 @@ check("a state frame with no actions in it takes the buttons away", () => {
   const d = page.newDoc();
   page.applyState(d, JSON.stringify({
     type: "state", provider: "stub", model: "m", providers: [],
-    commands: [{ label: "/reload", send: "/reload", help: "re-read the config file", class: "button" }],
+    commands: [{ label: "/reload", send: "/reload", help: "re-read the config file", class: "button", group: "run" }],
   }));
-  eq(page.__node("actions").children.length, 1, "a button while the frame lists an action");
-  // A frame with only reports in it: nothing to press. A panel is not a button -- pressing one
-  // would send a command into the terminal, which is the one place §8 says a report should not go.
+  eq(page.__node("row-list-run").children.length, 1, "a button while the frame lists an action");
+  eq(page.__node("rows-run").hidden, false, "and the screen it is on is offered");
+  // A frame with only reports in it: nothing to press on that screen. A panel is not a button --
+  // pressing one would send a command into the terminal, which is the one place §8 says a report
+  // should not go.
   page.applyState(d, JSON.stringify({
     type: "state", provider: "stub", model: "m", providers: [{ name: "stub", models: ["m"] }],
-    commands: [{ label: "/config", send: "/config", help: "show shell, steps, proxy", class: "panel" }],
+    commands: [{ label: "/config", send: "/config", help: "show shell, steps, proxy", class: "panel", group: "limits" }],
   }));
-  eq(page.__node("actions").children.length, 0, "no action rows, no buttons");
+  eq(page.__node("row-list-run").children.length, 0, "no action rows, no buttons");
+  eq(page.__node("rows-run").hidden, true, "and a screen with nothing left on it is not offered");
 });
 
 console.log("where the lines come from");
@@ -1628,10 +1522,13 @@ check("the open control sends the run's own route, and the frame decides whether
   // And the guard: the page does not launch anything in a run whose own tools may not. The frame is
   // the source -- the same `readonly` toggle the header draws and the terminal prints -- so this is
   // checked against frames rather than against a run with its guard turned on mid-turn.
-  const guard = (value) => ({ toggles: [{ name: "readonly", values: ["off", "on"], value }] });
+  // A switch is a setting now, so the guard arrives as one key among the others on the `run` screen:
+  // `values: ["off", "on"]`, `value` saying which one is in force.
+  const guard = (value) => ({ settings: [{ group: "run", key: "readonly", kind: "select", value,
+    choices: ["off", "on"], send: "/readonly", help: "refuse writes" }] });
   eq(viewer.readonlyOn(guard("on")), true, "a run with the guard on");
   eq(viewer.readonlyOn(guard("off")), false, "and one with it off");
-  eq(viewer.readonlyOn({ toggles: [] }), false, "a frame with no such toggle offers it");
+  eq(viewer.readonlyOn({ settings: [] }), false, "a frame with no such setting offers it");
   eq(viewer.readonlyOn(null), false, "and so does a page with no state at all");
 });
 
@@ -1918,28 +1815,40 @@ check("the dialog opens and closes as a dialog, and the keyboard goes with it", 
   eq(viewer.settingsOpen(), false, "the page agrees again");
 });
 
-// One section at a time, and the rail is where the choice is made. The names are the page's own --
-// a pane is a place this page put things -- while what is *inside* a pane still comes from the frame.
-check("the rail shows one section at a time, and only a section it offers", () => {
+// One screen at a time, and the rail is where the choice is made. The names and the order are the
+// page's own -- a screen is a place this page put things -- while what is *inside* a screen comes
+// from the frame. Which is why the six are pinned here: a screen the page names and the frame never
+// files anything on is a heading over an empty pane, and `tests/web_view.rs` holds the other side of
+// that pair.
+check("the rail offers one screen per place, and shows one at a time", () => {
   const rail = viewer.__node("settings-nav");
-  const names = viewer.SETTINGS_PANES.map(([name]) => name);
-  ok(names.includes("run") && names.includes("commands"), "the panes: " + names.join(", "));
+  eq(
+    viewer.SETTINGS_PANES.map(([key]) => key),
+    ["model", "run", "limits", "tools", "conversation", "work"],
+    "the screens, in the order a person reads them: what answers, then how it works"
+  );
+  for (const [, label, note] of viewer.SETTINGS_PANES) {
+    ok(label && note, "every screen has a name and a line saying what is on it: " + label);
+  }
 
   viewer.openSettings();
-  eq(rail.children.length, viewer.SETTINGS_PANES.length, "one button per section");
-  eq(viewer.__node("pane-run").hidden, false, "the first section is the one shown");
-  eq(viewer.__node("pane-commands").hidden, true, "and the other is not");
+  const first = viewer.SETTINGS_PANES[0][0];
+  eq(rail.children.length, viewer.SETTINGS_PANES.length, "one button per screen");
+  eq(rail.children.map((b) => b.textContent), viewer.SETTINGS_PANES.map(([, label]) => label),
+     "named in the page's own words");
+  eq(viewer.__node("pane-" + first).hidden, false, "the first screen is the one shown");
+  eq(viewer.__node("pane-run").hidden, true, "and the others are not");
 
-  viewer.showSettingsPane("commands");
-  eq(viewer.__node("pane-commands").hidden, false, "the second section opens");
-  eq(viewer.__node("pane-run").hidden, true, "and the first closes -- one at a time, not a column");
-  eq(rail.children[1].getAttribute("aria-current"), "true", "the rail marks the one in force");
+  viewer.showSettingsPane("work");
+  eq(viewer.__node("pane-work").hidden, false, "another screen opens");
+  eq(viewer.__node("pane-" + first).hidden, true, "and the first closes -- one at a time, not a column");
+  eq(rail.children[5].getAttribute("aria-current"), "true", "the rail marks the one in force");
   eq(rail.children[0].getAttribute("aria-current"), "false", "and unmarks the one that was");
 
   // A name the rail does not offer leaves the dialog as it was: showing nothing at all would be a
   // blank settings pane, which reads as a page that has lost its settings.
-  viewer.showSettingsPane("a-section-this-page-never-offered");
-  eq(viewer.__node("pane-commands").hidden, false, "an unknown section changes nothing");
+  viewer.showSettingsPane("a-screen-this-page-never-offered");
+  eq(viewer.__node("pane-work").hidden, false, "an unknown screen changes nothing");
   viewer.closeSettings();
 });
 
@@ -1972,20 +1881,25 @@ console.log("the / menu in the composer");
 // A frame with one row of each class, so that every branch of the dispatch is reachable -- the menu's
 // whole job is to treat five classes differently, and a check with four of them would leave the one
 // that matters (a form, which must never fill the line) unexercised.
-const menuFrame = (page) => {
-  const d = page.newDoc();
+// The frame the menu is built from, as the process sends it: every row carries the screen the frame
+// filed it on, because that is what the menu's hand-offs read to open the dialog at the right place.
+// `target` is for the one check that has to drive the page's *own* document -- the dialog's painters
+// read it, and a detached one would draw into the same nodes and then be painted over.
+const menuFrame = (page, target) => {
+  const d = target || page.newDoc();
   page.applyState(d, JSON.stringify({
     type: "state", provider: "stub", model: "m", providers: [{ name: "stub", models: ["m"] }],
-    toggles: [],
     commands: [
-      { label: "/config", send: "/config", help: "show shell, steps, proxy", class: "panel" },
-      { label: "/reload", send: "/reload", help: "re-read the config file", class: "button" },
+      { label: "/config", send: "/config", help: "show shell, steps, proxy", class: "panel", group: "limits" },
+      { label: "/reload", send: "/reload", help: "re-read the config file", class: "button", group: "run" },
       { label: "/provider <name>", send: "/provider", help: "switch endpoint", class: "selector",
-        values: ["stub", "other"] },
-      { label: "/resume <n|id>", send: "/resume", help: "switch to one of them", class: "selector" },
+        group: "model", values: ["stub", "other"] },
+      { label: "/resume <n|id>", send: "/resume", help: "switch to one of them", class: "selector",
+        group: "conversation" },
       { label: "/provider key <key>", send: "/provider key", help: "save a key for one",
-        class: "form", fields: [{ field: "password" }] },
-      { label: "/delete <n|id>", send: "/delete", help: "delete one", class: "danger" },
+        class: "form", group: "model", fields: [{ field: "password" }] },
+      { label: "/delete <n|id>", send: "/delete", help: "delete one", class: "danger",
+        group: "conversation" },
     ],
   }));
   return d;
@@ -2100,7 +2014,7 @@ check("what a row commits to is decided by its class, and only its class", () =>
 // check is synchronous and still sees the request on the wire, the dialog open and the line written.
 check("taking a row does exactly what its dispatch says", () => {
   const page = loadViewer();
-  const d = menuFrame(page);
+  const d = menuFrame(page, page.doc);
   const take = (query, row) => page.takeMenuRow(d, row || page.menuRows(d, query)[0]);
   // The composer starts empty, and saying so is not a formality: "a form row does not touch the line"
   // is an assertion about the *absence* of a value, and a stub box whose `value` was never written is
@@ -2121,7 +2035,7 @@ check("taking a row does exactly what its dispatch says", () => {
   take("config");
   eq(page.__node("message").value, "", "the query the menu was built from is cleared, not sent");
   eq(page.settingsOpen(), true, "the reading is shown in the dialog");
-  eq(page.__node("pane-commands").hidden, false, "on the commands section");
+  eq(page.__node("pane-limits").hidden, false, "on the screen the frame filed that row on");
   page.closeSettings();
 
   // An action: the line, completed, and nothing sent. A keystroke in a menu should not decide anything.
@@ -2157,12 +2071,11 @@ check("taking a row does exactly what its dispatch says", () => {
   take(null, form);
   eq(page.__node("message").value, "", "a form row leaves the line empty, not holding the query");
   eq(page.settingsOpen(), true, "it opens the dialog");
-  eq(page.__node("pane-commands").hidden, false, "at the commands section");
-  const marked = page.__node("command-list").children
-    .flatMap((g) => g.children || [])
+  eq(page.__node("pane-model").hidden, false, "at the screen the row's subject belongs to");
+  const marked = page.__node("row-list-model").children
     .filter((r) => String(r.className).includes("pointed"))
     .map((r) => r.textContent);
-  eq(marked.length, 1, "and the row it was about is marked: " + JSON.stringify(marked));
+  eq(marked.length, 1, "and the row it was about is marked on that screen: " + JSON.stringify(marked));
   page.closeSettings();
 
   // A destructive row: the line, completed, one press short of doing anything.

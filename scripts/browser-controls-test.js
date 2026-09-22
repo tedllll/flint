@@ -407,12 +407,33 @@ async function attach(target) {
   return { send, js, waitFor, click, key, drag, doubleClick, close: () => ws.close() };
 }
 
-/// A row of the command panel by the line it would send, which is what the frame put in it.
-const ROW = (line) =>
-  `(() => { const rows = Array.from(document.querySelectorAll("#command-list button.row code"));
+/// A row of one screen of the dialog, by the line it would send -- which is what the frame put in it.
+///
+/// The screen is the caller's, and it has to be: the dialog is six short screens now rather than one
+/// long list, so a row is only in the document while the screen it was filed on is on top. Pressing a
+/// row on another screen is not possible (`hidden`), which is why every caller here names the screen
+/// it expects the row on -- and a row that moved to a different screen fails the claim rather than
+/// being found wherever it went.
+const ROW = (line, screen) =>
+  `(() => { const rows = Array.from(document.querySelectorAll("#row-list-${screen} button.row code"));
      const found = rows.find((c) => c.textContent.trim() === ${JSON.stringify(line)});
      if (!found) return null;
      found.closest("button").id = "harness-target"; return true; })()`;
+
+/// The rows of one screen, as text: what a claim about "the run's own list" reads.
+const ROWS_OF = (screen) =>
+  `(document.getElementById("row-list-${screen}") || {}).textContent || ""`;
+
+/// The value of the `<select>` in the setting row named `key` on the screen `screen`.
+///
+/// By name rather than by id, and that is the point: a change sends a line, the run answers with a new
+/// state frame, and `paintSettings` rebuilds the rows -- so the node an id was tagged on is *gone* by
+/// the time the answer arrives. Measured the hard way: a claim that read the id back saw
+/// `Cannot read properties of null` and read it as "the picker never moved".
+const VALUE_OF = (screen, key) =>
+  `(() => { const row = Array.from(document.querySelectorAll("#fields-${screen} .setting"))
+       .find((r) => (r.querySelector(".setting-name") || {}).textContent === ${JSON.stringify(key)});
+     const s = row ? row.querySelector("select") : null; return s ? s.value : null; })()`;
 
 /// The scope of this harness, printed before anything is pressed.
 ///
@@ -423,8 +444,8 @@ const ROW = (line) =>
 function announceScope() {
   console.log("driven in a real browser, each against the run's own stdout:");
   for (const door of [
-    "  the switches",
-    "  the command panel: opened, a report answered in it, an action button, the masked key field",
+    "  the settings dialog: the door, the rail, a switch, an action button, the masked key field",
+    "  a report read in the screen it was asked from, and a screen that holds only its own rows",
     "  the two-press destructive menu: a conversation's row, and the jobs panel's stop list",
     "  a conversation row's menu, including naming the one being written",
     "  the sidebar's drag handles, the arrow keys, and the double-click reset",
@@ -560,28 +581,35 @@ async function main() {
   const before = () => flint.text().length;
 
   try {
-    // The page is only interactive once the state frame has arrived: the controls, the switches and
-    // the command list are all drawn from it, and a click before it lands hits nothing.
-    await page.waitFor(`document.querySelectorAll("#toggles select").length > 0`, "the switches");
-    await page.waitFor(`document.querySelectorAll("#command-list .row").length > 0`, "the command list");
+    // The page is only interactive once the state frame has arrived: the door is offered then, and the
+    // dialog's screens are drawn from that same frame. The door is what is waited for here rather than
+    // a control, because the screens are *built* when the dialog opens -- there is nothing inside it
+    // to look for until somebody opens it.
+    await page.waitFor(`document.getElementById("settings-open").hidden === false`, "the settings door");
 
     // ---- the settings dialog -----------------------------------------------
     // Everything that changes the run is behind one door in the header, so this file opens it the way
     // a person does -- a press on the door, a press on the rail, a press on `close` -- and every claim
     // below is made *inside* it. That is the claim this whole section exists for: a header that had
     // kept the controls would pass each of those claims by accident, which is why the door is checked
-    // first, and why `#controls` is asserted to be inside the dialog rather than merely present.
+    // first, and why the settings and the rows are asserted to be inside the dialog rather than merely
+    // present.
+    //
+    // The screens are named the way the rail names them ("this run", "this conversation"), and the ids
+    // below are the page's own for the place behind each name: `pane-<key>`, `fields-<key>` and
+    // `row-list-<key>`, with the key the frame files on.
     const openSettings = async (section) => {
       if (await page.js(`document.getElementById("settings").hidden`)) {
         await page.click("#settings-open");
         await page.waitFor(`document.getElementById("settings").hidden === false`, "the settings dialog", 20);
       }
       if (section) {
-        // One id per section rather than one shared tag: the rail is drawn once and stays, so a
+        // One id per screen rather than one shared tag: the rail is drawn once and stays, so a
         // shared id would be left behind on the button pressed last time and `querySelector` would
         // find *that* one in document order -- which measured as "the commands pane never opened"
-        // and a press landing on a hidden field at 0,0.
-        const id = "harness-section-" + section;
+        // and a press landing on a hidden field at 0,0. The id is slugged because the rail's names
+        // have spaces in them ("this run") and a space is a descendant combinator in a selector.
+        const id = "harness-section-" + section.replace(/\s+/g, "-");
         const tagged = await page.js(
           `(() => { const b = Array.from(document.querySelectorAll("#settings-nav button"))
                 .find((x) => x.textContent.trim() === ${JSON.stringify(section)});
@@ -603,7 +631,7 @@ async function main() {
                  dialog: document.getElementById("settings").hidden,
                  mask: document.getElementById("settings-mask").hidden,
                  header: !!document.querySelector(".head-line #settings-open"),
-                 raw: !!document.querySelector(".head-line select, .head-line #toggles") }))()`
+                 raw: !!document.querySelector(".head-line select, .head-line input, .head-line .setting") }))()`
     );
     check(
       "the header offers one door, and what is behind it starts shut",
@@ -617,7 +645,11 @@ async function main() {
         `document.getElementById("settings").hidden === false
            ? { mask: document.getElementById("settings-mask").hidden === false,
                focused: document.activeElement ? document.activeElement.id : "",
-               run: document.getElementById("pane-run").hidden === false }
+               first: document.getElementById("pane-model").hidden === false,
+               rails: document.querySelectorAll("#settings-nav button").length,
+               screens: document.querySelectorAll("#settings-panes .pane").length,
+               settings: document.querySelectorAll("#fields-run .setting").length,
+               rows: document.querySelectorAll("#row-list-run .row").length }
            : null`,
         "the settings dialog",
         20
@@ -625,26 +657,36 @@ async function main() {
       .catch(() => null);
     check(
       "one press opens it, with the mask and the keyboard inside it",
-      !!opened && opened.mask === true && opened.run === true && opened.focused === "settings-close",
+      !!opened && opened.mask === true && opened.first === true && opened.focused === "settings-close",
+      `dialog: ${JSON.stringify(opened)}`
+    );
+    check(
+      "and every screen is built, with the settings and the rows the frame named already in them",
+      !!opened && opened.rails === 6 && opened.screens === 6 && opened.settings > 0 && opened.rows > 0,
       `dialog: ${JSON.stringify(opened)}`
     );
 
+    await openSettings("this run");
     const inside = await page.js(
       `(() => { const dialog = document.getElementById("settings");
-         const box = document.getElementById("controls");
-         const list = document.getElementById("command-list");
-         return { controls: dialog.contains(box), list: dialog.contains(list),
-                  drawn: box.hidden === false }; })()`
+         const box = document.getElementById("fields-run");
+         const list = document.getElementById("row-list-run");
+         return { settings: dialog.contains(box), rows: dialog.contains(list),
+                  drawn: box.hidden === false, up: document.getElementById("pane-run").hidden === false }; })()`
     );
     check(
-      "the run's controls are inside the dialog, and the frame has drawn them",
-      !!inside && inside.controls === true && inside.list === true && inside.drawn === true,
-      `controls: ${JSON.stringify(inside)}`
+      "the run's settings are inside the dialog, and the frame has drawn them",
+      !!inside && inside.settings === true && inside.rows === true && inside.drawn === true &&
+        inside.up === true,
+      `inside: ${JSON.stringify(inside)}`
     );
 
-    // ---- the switches ------------------------------------------------------
+    // ---- a switch, which is one setting among the others ---------------------
+    // The five switches are settings now, filed on the `run` screen with the words they take: the
+    // claim is the same one it always was -- the names come from the run, not from the page -- and it
+    // is made by reading the names off the rows rather than off a container of its own.
     const names = await page.js(
-      `Array.from(document.querySelectorAll("#toggles .toggle-name")).map((n) => n.textContent)`
+      `Array.from(document.querySelectorAll("#fields-run .setting-name")).map((n) => n.textContent)`
     );
     check(
       "the switches are drawn from the run's own state",
@@ -652,88 +694,118 @@ async function main() {
       `names: ${JSON.stringify(names)}`
     );
     const started = before();
-    const was = await page.js(`document.querySelector("#toggles select").value`);
+    // The switch that is moved is chosen by *name*, not by position: a row added to the run screen
+    // above it must not silently change which command this claim presses.
+    const was = await page.js(
+      `(() => { const row = Array.from(document.querySelectorAll("#fields-run .setting"))
+           .find((r) => (r.querySelector(".setting-name") || {}).textContent === "verbose");
+         if (!row) return null; const s = row.querySelector("select"); s.id = "harness-switch";
+         return s.value; })()`
+    );
+    check(
+      "a switch is a labelled control on the screen it belongs to",
+      typeof was === "string" && was.length > 0,
+      `verbose: ${JSON.stringify(was)}`
+    );
     // Keyboard rather than a synthetic `change`: a native select opened by a pointer is an OS
     // widget the protocol cannot reach into, and an ArrowDown on the focused select is the same
     // path a person's key takes -- a real input event, not a script setting a value.
-    await page.js(`document.querySelector("#toggles select").focus(); true`);
+    await page.js(`document.getElementById("harness-switch").focus(); true`);
     await page.key("ArrowDown", 40);
     const moved = await page
       .waitFor(
-        `document.querySelector("#toggles select").value !== ${JSON.stringify(was)} &&
-         document.querySelector("#toggles select").value`,
+        `${VALUE_OF("run", "verbose")} !== ${JSON.stringify(was)} && ${VALUE_OF("run", "verbose")}`,
         "the switch to move",
         25
       )
       .catch(() => null);
     // Both halves matter and they are different halves: the switch moved on the page, and the run
     // was told. A page that only moved its own control would leave the run on the old setting, and
-    // the run's own output is the only witness to which of those happened.
+    // the run's own output is the only witness to which of those happened. A thrown exception is an
+    // answer too (`js` reports it as a string), so it is excluded here rather than counted as a value.
     check(
       "a switch moves the control and the run together",
-      moved !== null && flint.text().length > started,
+      typeof moved === "string" && !moved.startsWith("threw:") && moved !== was &&
+        flint.text().length > started,
       `page: ${JSON.stringify(was)} -> ${JSON.stringify(moved)}, run printed: ` +
         JSON.stringify(flint.text().slice(started).slice(0, 200))
     );
 
     // ---- the run's own actions ---------------------------------------------
-    // An action is a button, not a row in the list: it takes no argument, and the list is a
-    // reference. The two are the same `send` string either way, which is the point -- and this one
-    // is in the *run* section, which is where the claim has to be made before the rail moves away
-    // from it (a hidden button can be found but not pressed).
+    // An action is a button, not a row of reference: it takes no argument, and the claim is that it is
+    // drawn on the screen the frame filed it on and nowhere else. `/reload` is the run's; `/new`
+    // belongs to this conversation, and a page that put every action on one screen would pass a claim
+    // that only looked for `/reload`.
     const actions = await page.js(
-      `Array.from(document.querySelectorAll("#actions button")).map((b) => b.textContent.trim())`
+      `Array.from(document.querySelectorAll("#row-list-run button.row.action"))
+         .map((b) => ((b.querySelector("code") || {}).textContent || "").trim())`
     );
+    const elsewhere = await page.js(`(${ROWS_OF("conversation")}).includes("/reload")`);
     check(
-      "the run's actions are buttons in its settings",
-      Array.isArray(actions) && actions.includes("/reload") && actions.includes("/new"),
+      "the run's actions are buttons on the run's own screen",
+      Array.isArray(actions) && actions.includes("/reload"),
       `actions: ${JSON.stringify(actions)}`
     );
+    check(
+      "and an action is not also drawn on another screen's rows",
+      elsewhere === false,
+      `the conversation screen carries /reload: ${JSON.stringify(elsewhere)}`
+    );
 
-    // ---- the commands, in their own section of the dialog ------------------
-    // The rail is how a person reaches them, and one section at a time is the whole point of the
-    // split: the claim is that pressing `commands` shows the run's list *and* shuts the run's
-    // settings, which a page that merely stacked everything in one scrolling column would fail.
-    await openSettings("commands");
+    // ---- the screens: one at a time, and each holds its own rows ------------
+    // The rail is how a person reaches them, and one screen at a time is the whole point of the
+    // split. The claim has two halves, and the second is the one this round added: the screen that is
+    // up holds the rows the frame filed on it, *and* a row filed elsewhere is not in it.
+    await openSettings("this conversation");
     const section = await page
       .waitFor(
-        `document.getElementById("pane-commands").hidden === false
+        `document.getElementById("pane-conversation").hidden === false
            ? { run: document.getElementById("pane-run").hidden,
                marked: document.querySelectorAll("#settings-nav button[aria-current='true']").length,
                rail: document.querySelectorAll("#settings-nav button").length }
            : null`,
-        "the commands section",
+        "the conversation screen",
         20
       )
       .catch(() => null);
     check(
-      "the rail shows one section at a time, and says which",
-      !!section && section.run === true && section.marked === 1 && section.rail === 2,
-      `sections: ${JSON.stringify(section)}`
+      "the rail shows one screen at a time, and says which",
+      !!section && section.run === true && section.marked === 1 && section.rail === 6,
+      `screens: ${JSON.stringify(section)}`
     );
-    const listed = await page.js(`document.getElementById("command-list").textContent || ""`);
-    // Named rows from four of the five classes, because "the list is there" is not the claim: the
-    // claim is that it is the *run's* list, drawn from the frame -- and a section with rows in it
-    // that had lost a class would still look like a list. Read as the section's text rather than as
-    // `code` elements, because a form row's own line is its submit button, not a label.
-    const wanted = ["/config", "/provider key", "/delete <n|id>", "/name", "/sessions"];
+    const listed = await page.js(ROWS_OF("conversation"));
+    const foreign = await page.js(ROWS_OF("limits"));
+    // Named rows from four of the classes, because "the rows are there" is not the claim: the claim is
+    // that they are the *run's* rows, drawn from the frame -- and a screen with rows in it that had
+    // lost a class would still look like a list. Read as the screen's text rather than as `code`
+    // elements, because a form row's own line is its submit button, not a label.
+    const wanted = ["/delete <n|id>", "/name", "/sessions", "/resume <n|id>"];
     check(
-      "the commands section lists the run's commands, across the classes",
+      "the conversation screen lists the run's rows, across the classes",
       wanted.every((line) => String(listed).includes(line)),
-      `missing: ${JSON.stringify(wanted.filter((line) => !String(listed).includes(line)))}`
+      `missing: ${JSON.stringify(wanted.filter((line) => !String(listed).includes(line)))}, ` +
+        `screen: ${JSON.stringify(String(listed).slice(0, 200))}`
+    );
+    check(
+      "and the rows filed on another screen are not on this one",
+      !String(listed).includes("/config") && String(foreign).includes("/config"),
+      `conversation: ${JSON.stringify(String(listed).slice(0, 200))}, ` +
+        `limits: ${JSON.stringify(String(foreign).slice(0, 200))}`
     );
 
-    // A report is read *here*: its answer belongs in the panel, and the terminal did not ask.
+    // A report is read *here*: its answer belongs in the screen it was asked from, and the terminal
+    // did not ask. `/config` is filed on `limits`, so the rail goes there first.
+    await openSettings("limits");
     const beforeReport = before();
-    await page.waitFor(ROW("/config"), "the /config row");
+    await page.waitFor(ROW("/config", "limits"), "the /config row");
     await page.click("#harness-target");
     const reading = await page.waitFor(
-      `(document.querySelector("#command-list .reading") || {}).textContent || ""`,
+      `(document.querySelector("#row-list-limits .reading") || {}).textContent || ""`,
       "the report's answer"
     );
     await sleep(300);
     check(
-      "a report is answered in the panel",
+      "a report is answered in the screen it was asked from",
       typeof reading === "string" && reading.includes("config"),
       `reading: ${JSON.stringify(String(reading).slice(0, 160))}`
     );
@@ -747,19 +819,18 @@ async function main() {
       fs.writeFileSync(path.join(where.home, "panel.png"), Buffer.from(shot.result.data, "base64"));
       console.log(`        screenshot: ${path.join(where.home, "panel.png")}`);
     }
-    await page.click("#command-list .back"); // back to the list
+    await page.click("#row-list-limits .back"); // back to the rows
     await sleep(300);
 
     // ---- an action button --------------------------------------------------
-    // An action is a button, not a row in the list: it takes no argument, and the list is a
-    // reference. The two are the same `send` string either way, which is the point. It sits in the
-    // *run* section, so the rail goes back there for this press -- a hidden button can be found by a
-    // selector and would then swallow the click, which is a failure this harness has already had once.
-    await openSettings("run");
+    // It sits on the *run* screen, so the rail goes back there for this press -- a hidden button can be
+    // found by a selector and would then swallow the click, which is a failure this harness has
+    // already had once.
+    await openSettings("this run");
     const beforeAction = before();
-    await page.js(`(() => { const b = Array.from(document.querySelectorAll("#actions button"))
-      .find((b) => b.textContent.trim() === "/reload");
-      if (!b) return null; b.id = "harness-action"; return b.textContent.trim(); })()`);
+    await page.js(`(() => { const b = Array.from(document.querySelectorAll("#row-list-run button.row.action"))
+      .find((b) => ((b.querySelector("code") || {}).textContent || "").trim() === "/reload");
+      if (!b) return null; b.id = "harness-action"; return true; })()`);
     await page.click("#harness-action");
     // Waited for rather than slept on, like the composer below it: how long a run takes to print a
     // line is the run's business, and a sleep would be a guess about this machine.
@@ -773,13 +844,13 @@ async function main() {
       reloaded.includes("reloaded"),
       `terminal gained: ${JSON.stringify(reloaded.slice(0, 200))}`
     );
-    // The run answered, so a fresh state frame has been drawn; the rail goes back to the commands for
-    // everything below, which is read off the list.
-    await openSettings("commands");
+    // The run answered, so a fresh state frame has been drawn; the rail goes to the model screen for
+    // the credential row below.
+    await openSettings("model");
 
     // ---- the masked credential field --------------------------------------
     const secret = "sk-not-a-real-key-0000";
-    const form = `(() => { const f = Array.from(document.querySelectorAll("#command-list form.field"))
+    const form = `(() => { const f = Array.from(document.querySelectorAll("#row-list-model form.field"))
         .find((f) => (f.querySelector("button.send") || {}).textContent === "/provider key");
       if (!f) return null; f.querySelector("input").id = "harness-input";
       f.querySelector("button.send").id = "harness-submit"; return f.querySelector("input").type; })()`;
@@ -817,12 +888,16 @@ async function main() {
     );
 
     // ---- the destructive row asks first ------------------------------------
+    // `/delete <n|id>` is filed on *this conversation*, so the rail goes there and the candidates are
+    // read out of that screen's rows -- which is also the check that one screen's two-press state does
+    // not spill into the others.
+    await openSettings("this conversation");
     const sessionsBefore = fs.readdirSync(path.join(where.home, "sessions")).sort();
     const beforeDanger = before();
-    await page.waitFor(ROW("/delete <n|id>"), "the /delete row");
+    await page.waitFor(ROW("/delete <n|id>", "conversation"), "the /delete row");
     await page.click("#harness-target");
     const candidates = await page.waitFor(
-      `document.querySelectorAll("#command-list button.row.danger").length`,
+      `document.querySelectorAll("#row-list-conversation button.row.danger").length`,
       "the candidates",
       25
     ).catch(() => 0);
@@ -838,7 +913,7 @@ async function main() {
       flint.text().slice(beforeDanger).trim() === "",
       `terminal gained: ${JSON.stringify(flint.text().slice(beforeDanger))}`
     );
-    await page.click("#command-list .back");
+    await page.click("#row-list-conversation .back");
     await sleep(300);
     const sessionsAfter = fs.readdirSync(path.join(where.home, "sessions")).sort();
     check(
@@ -1043,25 +1118,27 @@ async function main() {
     );
 
     // ---- a picker, from the keyboard ---------------------------------------
-    // The two `<select>`s in the run's settings are drawn from the state frame. A native select's
+    // The `model` screen's settings are drawn from the state frame as `<select>`s. A native select's
     // *open list* belongs to the operating system and no protocol can reach into it -- that is the
     // residue §11 keeps -- but the keyboard is the path a person takes through it, and it is
     // drivable: focus, ArrowDown, and the value changes as a real input event. What matters is that
     // the change is not merely painted: the run is told, and the model in force is the one pressed
     // for. The dialog is opened for it and shut after, because a picker behind a mask is a picker
     // nobody can press -- which is the whole trade the dialog makes.
-    await openSettings("run");
+    await openSettings("model");
     const pickerBefore = await page.js(
-      `(() => { const s = document.getElementById("pick-model");
-        return { value: s.value, options: Array.from(s.options).map((o) => o.value) }; })()`
+      `(() => { const row = Array.from(document.querySelectorAll("#fields-model .setting"))
+           .find((r) => (r.querySelector(".setting-name") || {}).textContent === "model");
+         if (!row) return null; const s = row.querySelector("select"); s.id = "harness-picker";
+         return { value: s.value, options: Array.from(s.options).map((o) => o.value) }; })()`
     );
     const beforePicker = before();
-    await page.js(`document.getElementById("pick-model").focus(); true`);
+    await page.js(`document.getElementById("harness-picker").focus(); true`);
     await page.key("ArrowDown", 40);
     const pickerAfter = await page
       .waitFor(
-        `document.getElementById("pick-model").value !== ${JSON.stringify(pickerBefore.value)} &&
-         document.getElementById("pick-model").value`,
+        `${VALUE_OF("model", "model")} !== ${JSON.stringify(pickerBefore && pickerBefore.value)} &&
+         ${VALUE_OF("model", "model")}`,
         "the model picker to move",
         25
       )
@@ -1073,8 +1150,9 @@ async function main() {
     }
     check(
       "a picker moves from the keyboard and the run is told which model",
-      pickerAfter !== null && switched.includes(`ok model ${pickerAfter}`),
-      `page: ${JSON.stringify(pickerBefore.value)} -> ${JSON.stringify(pickerAfter)}, ` +
+      !!pickerBefore && typeof pickerAfter === "string" && !pickerAfter.startsWith("threw:") &&
+        switched.includes(`ok model ${pickerAfter}`),
+      `page: ${JSON.stringify(pickerBefore && pickerBefore.value)} -> ${JSON.stringify(pickerAfter)}, ` +
         `terminal: ${JSON.stringify(switched.slice(-200))}`
     );
     await closeSettings();
@@ -1638,15 +1716,15 @@ async function main() {
     // offers only jobs that are still running, the line that goes out names the pid of the job that
     // was still running, that job reads `killed` afterwards rather than `failed`, and the run says
     // what it did -- which is the only witness that a real process ended rather than a row repainted.
-    // The stop's candidates are the pids the jobs panel is showing, and the row that sends is in the
-    // commands section of the dialog -- opened here the way a person would, since the dialog was shut
-    // after the geometry above.
-    await openSettings("commands");
-    await page.waitFor(ROW("/jobs stop <pid>"), "the /jobs stop row");
+    // The stop's candidates are the pids the jobs panel is showing, and the row that sends is on the
+    // *background work* screen of the dialog -- opened here the way a person would, since the dialog
+    // was shut after the geometry above.
+    await openSettings("background work");
+    await page.waitFor(ROW("/jobs stop <pid>", "work"), "the /jobs stop row");
     await page.click("#harness-target");
     const choice = await page
       .waitFor(
-        `(() => { const rows = Array.from(document.querySelectorAll("#command-list button.row.danger"));
+        `(() => { const rows = Array.from(document.querySelectorAll("#row-list-work button.row.danger"));
            const row = rows.find((r) => /60000/.test((r.querySelector("span") || {}).textContent || ""));
            if (!row) return null;
            row.id = "harness-stop";
@@ -2168,9 +2246,12 @@ async function main() {
     let slashReading = null;
     for (let i = 0; i < 25 && !slashReading; i += 1) {
       await sleep(200);
-      // The reading is drawn where the list was: a back button and the answer, which is the shape the
-      // panel uses for a report (a name from the question and the text from the process).
-      slashReading = await page.js(`(() => { const list = document.getElementById("command-list");
+      // The reading is drawn where the rows were, on the screen the frame filed the row on: a back
+      // button and the answer, which is the shape the dialog uses for a report (a name from the
+      // question and the text from the process). `/help` is a palette row with no screen of its own
+      // -- it is read rather than kept -- so its reading lands on the first screen, which is the
+      // documented fallback `screenOf` implements.
+      slashReading = await page.js(`(() => { const list = document.getElementById("row-list-model");
         if (!list || document.getElementById("settings").hidden) return null;
         const back = list.querySelector("button.back");
         const text = (list.querySelector(".reading") || {}).textContent || "";
@@ -2197,14 +2278,15 @@ async function main() {
 
     // A form row: the dialog, at the row, and the line untouched. This is the claim that a credential
     // cannot be typed into the transcript by a keystroke in a menu -- the value is not in the box, so
-    // it cannot be sent, and the masked field is the one that takes it.
+    // it cannot be sent, and the masked field is the one that takes it. `/name` is filed on *this
+    // conversation*, which is where the dialog opens and where the mark has to be.
     await page.js(`document.getElementById("message").value = ""; true`);
     await typedMenu("/name");
     await page.key(`Enter`, 13);
     let pointed = null;
     for (let i = 0; i < 20 && !pointed; i += 1) {
       await sleep(200);
-      pointed = await page.js(`(() => { const list = document.getElementById("command-list");
+      pointed = await page.js(`(() => { const list = document.getElementById("row-list-conversation");
         if (!list || document.getElementById("settings").hidden) return null;
         const marks = Array.from(list.querySelectorAll(".pointed"));
         return marks.length ? { marks: marks.length, text: marks[0].textContent } : null; })()`);

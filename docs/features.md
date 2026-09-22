@@ -765,9 +765,13 @@ really has. That is a policy (`tests/web_view.rs`), not a style: a second reader
 disagree with the process.
 
 The header keeps **one** control — a door — and everything that changes the run is behind it, in a
-settings dialog: the two pickers, the switches, the run's own action buttons, and the command list
-(§22 of `docs/web-mode.md` is the reasoning and the measured record). A header holding the raw
-controls is a header that takes the reading column's width for furniture, which is what this replaced.
+settings dialog cut into **six screens** — `model`, `this run`, `limits`, `tools`, `this conversation`,
+`background work` — one at a time, from a rail on the left. The cuts are the places a person goes
+rather than the classes of thing a row is: which screen a row lands on is decided by the **process**
+(each row carries a `group`, filed by `page_group` in `src/main.rs`), and the page owns only the screen
+names, their order and their one-line notes (§22 of `docs/web-mode.md` is the reasoning and the
+measured record). A header holding the raw controls is a header that takes the reading column's width
+for furniture, which is what this replaced.
 
 | Area | Control | What pressing it does |
 |---|---|---|
@@ -775,23 +779,25 @@ controls is a header that takes the reading column's width for furniture, which 
 | header | the status chips | not controls either: `N running` (or `N stopping`), `N subagent(s)`, `N failed`, `N done`, counted from `GET /jobs` by kind. The whole line is **hidden when there is no work**, and a failure is never folded into `done` |
 | header | `#settings-open` | the one door: opens the settings dialog, and is **hidden when no `state` frame has arrived** — a page opened from a dropped file has no run to describe |
 | settings | `#settings-close`, the mask, `Escape` | three ways out of the same dialog: its own `close` button, a press anywhere on the mask, and `Escape`. Closing returns the keyboard to `#settings-open`, and opening moves it to `#settings-close` |
-| settings | the rail (`run`, `commands`) | one section at a time; the one in force is marked `aria-current="true"`. A section is the page's own word for *a place it put things* — what is inside it still comes from the frame |
-| settings | `#pick-provider`, `#pick-model` | sends `/provider <name>` / `/model <name>`; a refusal reverts the picker from the frame |
-| settings | one `<select>` per toggle | sends `/<toggle> <value>` — `verbose`, `detail`, `readonly`, `hear-peers`, `thinking` |
-| settings | an action button | sends the frame's own line, e.g. `/reload`, `/new` |
-| settings | the run's `cwd`, session id and creation time | not controls: the `meta` line the header used to carry, in the run's own section |
-| settings | the command list, in five groups — `reports`, `actions`, `selectors`, `forms`, `destructive` | a **report** row sends nothing: it asks for a *reading* (`POST /report`) and shows the answer in place of the list, with a `‹ commands` button back. Any other row sends the line the frame gives it |
+| settings | the rail (`model`, `this run`, `limits`, `tools`, `this conversation`, `background work`) | one screen at a time, built from the page's own list when the dialog opens; the one in force is marked `aria-current="true"` and the others are `hidden`, so a row on another screen cannot be pressed at all. A screen name is the page's own word for *a place it put things* — what is inside it still comes from the frame |
+| settings | the `model` screen: the provider and model `<select>`s, and the thinking ladder | sends `/provider <name>` / `/model <name>` / `/thinking <level>`; a refusal reverts the picker from the frame. The ladder is drawn here rather than with the other four switches because whether the endpoint has a reasoning field is a property of the *endpoint*, which is what this screen is about |
+| settings | `this run`: one `<select>` per switch | sends `/<switch> <value>` — `verbose`, `detail`, `readonly`, `hear-peers` |
+| settings | one action button, on the screen the frame filed it on | sends the frame's own line — `/reload` and `/say` on `this run`, `/new` and the rest on `this conversation` |
+| settings | the dialog's foot (`#meta`) | not a control: the loaded conversation's model, `cwd`, provider, id, creation time and last usage — the line the header used to carry, under every screen rather than on one |
+| settings | a **report** row | sends nothing: it asks for a *reading* (`POST /report`) and shows the answer in place of **that screen's** rows, with a `‹ back` button. The screen travels with the request, so an answer cannot arrive under another heading |
+| settings | any other row | sends the line the frame gives it — the same line the `/` menu would complete, and the same one a person could type |
 | settings | a **destructive** row | first press opens its choices and sends nothing; the second press sends `<send> <value>`. The choices are the list the frame names: conversations (the sidebar's numbers), providers (their names), or jobs (the pids the jobs panel is showing). With nothing to choose from it says `nothing to choose from` |
 | settings | a **form** row (`/provider add`, `/provider key`, `/config set`, `/import`, `/export`, `/name`, `/queue`) | one field per argument the frame declares; a `password` field is drawn masked and emptied after a send; an answer the frame does not mark optional must be filled or the line is not sent |
+| settings | a row the page draws no control for | a reference row, titled with where its control actually is — `a conversation on the left` for `/resume <n\|id>`, `typed in the terminal -- it asks questions` for the forms the page cannot fill. The page says where *it* put things; the frame says what exists |
 | settings | `/say`'s `--to` picker | the options are the live runs sharing this directory, fetched from `GET /peers`: `(everyone here)` first, then `pid N · <model> · <read-only> · here now` — or, with nobody here, the fact that it waits in the file |
 | header | the jobs panel | the chips above it are its summary; the panel itself is one row per job this run started: kind, what was asked, how long it has been going (ticking once a second), and its exit code in words once it ends. Pressing a row opens its log or the child's own conversation in the preview. A job that has been asked to stop counts as `running`/`stopping` — it is still spending time — and is not offered in the `/jobs stop` menu a second time |
 | sidebar | `+ new` | sends `/new`; disabled for the round trip so one click cannot start two conversations |
 | sidebar | a conversation row | sends `/resume <n>` — the current row does nothing |
 | sidebar | a row's `⋯` menu | that conversation's destructive rows (`/archive <n>`, `/delete <n>`), each behind the same two-press rule, and — on the current row only — a `/name` field |
 | composer | the textarea + `#send` | sends the text; `Enter` sends, `Shift+Enter` is a newline. The box clears only on success, and only if it still holds what was sent |
-| composer | typing `/` as the first character | opens the **`/` menu** above the box — the frame's own `state.commands`, drawn like the settings list (a heading per class, a row per command with the line, its label and its help), and **closed on a page with no run**. It filters as you type after the slash (a prefix first, then a subsequence of the command name, then a word in its help, the frame's order breaking ties), and it closes the moment the line has a space in it — a menu over a sentence being written is covering the words |
+| composer | typing `/` as the first character | opens the **`/` menu** above the box — the frame's own `state.commands`, drawn with a heading per **class** (the menu's own grouping: reports, actions, selectors, forms, destructive) and a row per command with the line, its label and its help, and **closed on a page with no run**. The classes are the right grouping *here* — a launcher's question is "what does this row do?", where the dialog's screens answer "what did I come here to change?" (§22 of `docs/web-mode.md`). It filters as you type after the slash (a prefix first, then a subsequence of the command name, then a word in its help, the frame's order breaking ties), and it closes the moment the line has a space in it — a menu over a sentence being written is covering the words |
 | composer | `ArrowDown` / `ArrowUp` in the menu | moves the mark one row at a time, wrapping at both ends; the marked row is the one `Enter` takes, and hovering a row with the pointer moves the mark to it. A query with no match says `no command matches /<q>` rather than drawing an empty box |
-| composer | `Enter` in the menu | exactly what the marked row's **class** allows and no more. A **report** asks for its reading (`POST /report`) and shows it in the settings dialog's commands section: the query is **cleared** rather than left in the box (a report is read, and a leftover `/help` would send on the next `Enter` the very line the route exists to keep out of the transcript), the dialog opens as the reading is asked for, and nothing reaches the transcript. An **action** completes the line and sends nothing. A **selector** completes the line and, when the frame named values, offers them as a second list where taking one finishes the line. A **form** opens settings *at that row* and leaves the box **empty** — a credential typed into the composer is sent to the run and written into the session file, which is the whole reason that class has a dialog. A **destructive** row completes the line and stops there |
+| composer | `Enter` in the menu | exactly what the marked row's **class** allows and no more. A **report** asks for its reading (`POST /report`) and shows it in the settings dialog **on the screen the frame filed that row on** (the first screen for a row the frame does not file, like `/help`): the query is **cleared** rather than left in the box (a report is read, and a leftover `/help` would send on the next `Enter` the very line the route exists to keep out of the transcript), the dialog opens as the reading is asked for, and nothing reaches the transcript. An **action** completes the line and sends nothing. A **selector** completes the line and, when the frame named values, offers them as a second list where taking one finishes the line. A **form** opens settings *at that row* — the dialog's screen is the row's own, and the row is marked there — and leaves the box **empty**: a credential typed into the composer is sent to the run and written into the session file, which is the whole reason that class has a dialog. A **destructive** row completes the line and stops there |
 | composer | `Escape` in the menu | puts the menu away and leaves the text exactly as it was — a list closed is not a line cleared |
 | composer | the stop button | shown only while a turn runs; sends `/stop`, so a half-written message in the box survives |
 | transcript | a tool block | a `<details>`: the summary is the verb and the arguments, the body is the arguments and the output |
@@ -833,17 +839,20 @@ that understood JavaScript would be a second parser to be wrong about.
   reading position, in `sessionStorage`.
 - **Presence is read through `GET /peers`**, never derived from files by the page (`scan_in(` is
   forbidden).
-- **A row the page cannot press says where its control is** (`this one is a button in settings`,
-  `typed in the terminal`, …) rather than offering a control that would be refused.
+- **A row the page cannot press says where its control is** (`a conversation on the left`,
+  `typed in the terminal -- it asks questions`, …) rather than offering a control that would be refused.
+  The words are the page's own, because where *this* page put its controls is its business; which
+  commands exist is the process's.
 
 ### 12.5 Measured, and honestly not
 
-- **Driven in a real browser**: `scripts/browser-controls-test.js`, **93 claims** held, each checked
+- **Driven in a real browser**: `scripts/browser-controls-test.js`, **101 claims** held, each checked
   against the run's own stdout. It prints what it drives before it presses anything, and its "not driven
   here" list is part of the output: a report asked for mid-turn (measured in `tests/cli_output.rs`), the
   `/prompt` row's send button, an OS open that *succeeds* (it would start a program on this machine; the
   command lines are held by `src/web.rs`), a paste, an IME, a screen reader, two tabs, touch, a phone
-  viewport.
+  viewport. Every row it presses is named by the screen it expects the row on (`ROW(line, screen)`), so
+  a row that moved to another screen fails the claim instead of being found wherever it went.
 - **Pure functions**: `scripts/web-view-test.js` (the splitter, the frames, the form composition, the
   peer picker's text, the Markdown reading — `markdownBlocks` is lines in and blocks out with no DOM, so
   a fence, a nested list and a pipe table are checked without a browser — and `POST /open`'s body and
