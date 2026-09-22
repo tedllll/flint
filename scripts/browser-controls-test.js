@@ -31,7 +31,8 @@
 /// conversation row's menu, including naming the conversation being written; the sidebar's two drag
 /// handles, the arrow keys on the focused one and their double-click reset; the model picker from the
 /// keyboard; the composer's send button and a line the run answers; a tool block's path buttons; the
-/// preview panel (a grep hit's line, reload, Escape, a refusal in the route's own words, and the open
+/// preview panel (a grep hit's line, reload, Escape, a refusal in the route's own words, the line numbers
+/// of a file too tall and too wide to fit -- measured as geometry -- and the open
 /// control -- pressed against a path that is not there, because the press that works opens a viewer on
 /// the machine running this); and the jobs panel (a running job's clock, a finished row's exit code, a
 /// child's row opening its own conversation, output, and the stop's own two presses).
@@ -479,11 +480,14 @@ async function main() {
   // which of the two commands they are waiting for.
   const slow = `node -e "console.log('one'); setTimeout(() => console.log('two'), 15000)"`;
   const endless = `node -e "console.log('alive'); setTimeout(() => console.log('never'), 60000)"`;
-  // The bodies are read as requests arrive, so the last one can be written *after* the scratch
-  // directory exists. That matters for one claim: the prose names a real file by its absolute path,
-  // and the page has to be able to open it -- which a made-up path could not show.
+  // A file for the two claims about the gutter that no other fixture can carry: 300 lines is taller
+  // than the panel, and one of them is wider than it -- which is what a number per line has to
+  // survive, and what a single `<pre>` with a column beside it cannot do. Written by the scripted
+  // turn rather than by this harness, because the panel's only door is a path in a tool block.
+  const tall = Array.from({ length: 300 }, (_, at) => "line " + (at + 1)).join("\n") + "\n";
   const script = [
     toolCall("write", { path: "notes.txt", content: "one\ntwo\nthree\n" }),
+    toolCall("write", { path: "long.txt", content: tall.replace("line 2", "x".repeat(600)) }),
     toolCall("read", { path: "notes.txt" }),
     toolCall("read", { path: "gone.txt" }),
     toolCall("grep", { pattern: "two", path: "." }),
@@ -535,6 +539,9 @@ async function main() {
   // took the first body and the child the second -- so which one ends up in the parent's transcript
   // is a timing detail, and a claim that depended on it would be a claim that fails on a slower
   // machine. The words are the same either way; the child's own conversation is not what is read.
+  // The bodies are read as requests arrive, so the last one can be written *after* the scratch
+  // directory exists. That matters for one claim: the prose names a real file by its absolute path,
+  // and the page has to be able to open it -- which a made-up path could not show.
   const addresses = prose(
     "all done -- see https://example.com/flint for the page, " +
       `${path.join(where.cwd, "notes.txt")} for the file, ` +
@@ -1303,16 +1310,22 @@ async function main() {
     };
     const called = (text) => `b.textContent === ${JSON.stringify(text)}`;
     const theHit = `/^notes\\.txt:\\d+$/.test(b.title)`;
+    // The file's bytes are read off the *code* spans rather than off the container: the panel draws a
+    // number per line, so the container's own `textContent` is the numbers run together with the text,
+    // and what a person copies out is the code. That split is the claim, not an inconvenience.
+    const bodyOf = `Array.from(document.querySelectorAll("#preview-text .code")).map((c) => c.textContent).join("\\n")`;
+    const numbersOf = `Array.from(document.querySelectorAll("#preview-text .ln")).map((n) => n.textContent)`;
 
     const wasFolded = await folded("notes.txt");
     const pressed = await aim(called("notes.txt"), "harness-path");
     const readIt = await page
       .waitFor(
-        `document.getElementById("preview-text").textContent.includes("three")
+        `${bodyOf}.includes("three")
            ? { hidden: document.getElementById("preview").hidden,
                path: document.getElementById("preview-path").textContent,
                note: document.getElementById("preview-note").textContent,
-               body: document.getElementById("preview-text").textContent,
+               body: ${bodyOf},
+               numbers: ${numbersOf},
                url: location.pathname + (location.search.includes("token=") ? "?token=…" : "") }
            : null`,
         "the file's own bytes in the panel",
@@ -1321,8 +1334,13 @@ async function main() {
       .catch(() => null);
     check(
       "pressing a path shows the file the run just wrote",
-      pressed && !!readIt && readIt.body === "one\ntwo\nthree\n" && readIt.path === "notes.txt",
+      pressed && !!readIt && readIt.body === "one\ntwo\nthree" && readIt.path === "notes.txt",
       `panel: ${JSON.stringify(readIt)}`
+    );
+    check(
+      "and the lines are numbered with the file's own numbers, in a gutter beside them",
+      !!readIt && JSON.stringify(readIt.numbers) === JSON.stringify(["1", "2", "3"]),
+      `numbers: ${JSON.stringify(readIt && readIt.numbers)}`
     );
     check(
       "and the page stayed where it was: the file did not navigate it away",
@@ -1355,8 +1373,8 @@ async function main() {
     await page.click("#preview-reload");
     const reread = await page
       .waitFor(
-        `document.getElementById("preview-text").textContent.includes("five")
-           ? { body: document.getElementById("preview-text").textContent,
+        `${bodyOf}.includes("five")
+           ? { body: ${bodyOf}, numbers: ${numbersOf},
                note: document.getElementById("preview-note").textContent }
            : null`,
         "the file read again",
@@ -1365,8 +1383,13 @@ async function main() {
       .catch(() => null);
     check(
       "reload reads the file again rather than redrawing what it had",
-      !!reread && reread.body === "four\nfive\n" && reread.note === "10 bytes",
+      !!reread && reread.body === "four\nfive" && reread.note === "10 bytes",
       `panel: ${JSON.stringify(reread)}`
+    );
+    check(
+      "and the numbers follow the bytes it read again, rather than the file it had",
+      !!reread && JSON.stringify(reread.numbers) === JSON.stringify(["1", "2"]),
+      `numbers: ${JSON.stringify(reread && reread.numbers)}`
     );
 
     // The line a grep printed: the same file, opened where the hit was. It sits in the block's
@@ -1391,7 +1414,7 @@ async function main() {
       .waitFor(
         `document.getElementById("preview-note").textContent.startsWith("line")
            ? { note: document.getElementById("preview-note").textContent,
-               body: document.getElementById("preview-text").textContent }
+               body: ${bodyOf}, numbers: ${numbersOf} }
            : null`,
         "the line the hit was on",
         30
@@ -1399,7 +1422,7 @@ async function main() {
       .catch(() => null);
     check(
       "a hit's line travels with the path, and the panel opens there",
-      !!atLine && /^line \d+/.test(atLine.note) && atLine.body === "four\nfive\n",
+      !!atLine && /^line \d+/.test(atLine.note) && atLine.body === "four\nfive",
       `panel: ${JSON.stringify(atLine)}`
     );
 
@@ -1543,7 +1566,7 @@ async function main() {
         `({ hidden: document.getElementById("preview").hidden,
             path: document.getElementById("preview-path").textContent,
             note: document.getElementById("preview-note").textContent,
-            body: document.getElementById("preview-text").textContent,
+            body: ${bodyOf},
             listOpen: document.getElementById("jobs").open })`
       );
 
@@ -1553,8 +1576,8 @@ async function main() {
     await pressRow("command", "15000");
     const logShown = await page
       .waitFor(
-        `document.getElementById("preview-text").textContent.includes("one")
-           ? { body: document.getElementById("preview-text").textContent,
+        `${bodyOf}.includes("one")
+           ? { body: ${bodyOf},
                path: document.getElementById("preview-path").textContent,
                listOpen: document.getElementById("jobs").open }
            : null`,
@@ -1576,16 +1599,14 @@ async function main() {
     await pressRow("command", "15000");
     const whole = await page
       .waitFor(
-        `document.getElementById("preview-text").textContent.includes("two")
-           ? { body: document.getElementById("preview-text").textContent }
-           : null`,
+        `${bodyOf}.includes("two") ? { body: ${bodyOf} } : null`,
         "the rest of the log",
         30
       )
       .catch(() => null);
     check(
       "and the same row again shows the whole of what it printed",
-      !!whole && whole.body === "one\ntwo\n",
+      !!whole && whole.body === "one\ntwo",
       `panel: ${JSON.stringify(whole || (await readPanel()))}`
     );
 
@@ -1594,7 +1615,7 @@ async function main() {
     await pressRow("child");
     const childShown = await page
       .waitFor(
-        `(() => { const text = document.getElementById("preview-text").textContent;
+        `(() => { const text = ${bodyOf};
           if (!text.includes("say hi")) return null;
           return { path: document.getElementById("preview-path").textContent,
                    lines: text.split("\\n").length,
@@ -1753,7 +1774,7 @@ async function main() {
     const readByProse = await page
       .waitFor(
         `document.getElementById("preview-path").textContent === ${JSON.stringify(prosePath)}
-           ? { body: document.getElementById("preview-text").textContent,
+           ? { body: ${bodyOf},
                note: document.getElementById("preview-note").textContent }
            : null`,
         "the file the run's words named",
@@ -1762,7 +1783,7 @@ async function main() {
       .catch(() => null);
     check(
       "a path in the run's own words opens that file beside the conversation",
-      taggedProse === true && !!readByProse && readByProse.body === "four\nfive\n",
+      taggedProse === true && !!readByProse && readByProse.body === "four\nfive",
       `tagged: ${taggedProse}, panel: ${JSON.stringify(readByProse)}`
     );
 
@@ -1926,7 +1947,8 @@ async function main() {
         `(() => { const text = document.getElementById("preview-text");
            const md = document.getElementById("preview-md");
            if (!text || text.hidden) return null;
-           return { first: (text.textContent || "").split("\\n")[0],
+           return { first: (${bodyOf}).split("\\n")[0],
+                    numbers: ${numbersOf}.slice(0, 2),
                     rendered: md ? md.hidden : null,
                     button: document.getElementById("preview-render").textContent,
                     note: document.getElementById("preview-note").textContent }; })()`,
@@ -1937,6 +1959,7 @@ async function main() {
     check(
       "the switch shows the source, and says how to get the reading back",
       !!source && source.first === "# The notes" && source.rendered === true &&
+        JSON.stringify(source.numbers) === JSON.stringify(["1", "2"]) &&
         source.button === "rendered" && !String(source.note).includes("rendered"),
       `source: ${JSON.stringify(source)}`
     );
@@ -1979,6 +2002,57 @@ async function main() {
         notesAtLine.rendered === true && notesAtLine.button === "rendered" &&
         /^line \d+/.test(String(notesAtLine.note)),
       `button: ${JSON.stringify(lineButton)}, at line: ${JSON.stringify(notesAtLine)}`
+    );
+
+    // The gutter, measured rather than read: a file of three hundred lines, one of them six hundred
+    // characters wide. What the layout has to do -- and the reason a line is a row of its own with two
+    // children rather than one `<pre>` with a column of numbers beside it -- is keep the code column at
+    // one x even though the numbers differ in length, keep the numbers to its left, put a wrapped line's
+    // continuation in the code column rather than under the number, and leave that line's number beside
+    // its *first* visual line. Where a `grep` hit's line puts the scroll is the other half of this, and
+    // it is checked in `scripts/web-view-test.js` against injected geometry: the one fixture here that is
+    // taller than the panel has no line number to open it at, and a claim that read `scrollTop === 0`
+    // would be a claim about nothing.
+    await aim(called("long.txt"), "harness-long");
+    const tallFile = await page
+      .waitFor(`${bodyOf}.includes("line 300") ? true : null`, "the tall file in the panel", 30)
+      .catch(() => null);
+    const geometry = tallFile
+      ? await page.js(
+          `(() => {
+             const rows = Array.from(document.querySelectorAll("#preview-text .line"));
+             const box = (row, part) => row.querySelector(part).getBoundingClientRect();
+             return {
+               rows: rows.length,
+               numbers: [rows[0], rows[299]].map((r) => r.querySelector(".ln").textContent),
+               wideText: rows[1].querySelector(".code").textContent.length,
+               codeX: [box(rows[0], ".code").left, box(rows[1], ".code").left, box(rows[299], ".code").left],
+               numberLeft: box(rows[1], ".ln").left,
+               codeLeft: box(rows[1], ".code").left,
+               topGap: box(rows[1], ".ln").top - box(rows[1], ".code").top,
+               heights: [box(rows[0], ".code").height, box(rows[1], ".code").height],
+               selectable: getComputedStyle(rows[0].querySelector(".ln")).userSelect };
+           })()`
+        )
+      : null;
+    const spread = (xs) => Math.max(...xs) - Math.min(...xs);
+    check(
+      "a long file is numbered to its last line, and a number is not part of the text it numbers",
+      !!geometry &&
+        geometry.rows === 300 &&
+        JSON.stringify(geometry.numbers) === JSON.stringify(["1", "300"]) &&
+        geometry.wideText === 600 &&
+        geometry.selectable === "none",
+      `panel: ${JSON.stringify(geometry)}`
+    );
+    check(
+      "the code column is one column: a wrapped line continues in it, not under the number",
+      !!geometry &&
+        spread(geometry.codeX) < 1 &&
+        geometry.numberLeft < geometry.codeLeft &&
+        Math.abs(geometry.topGap) < 1 &&
+        geometry.heights[1] > geometry.heights[0] * 2,
+      `geometry: ${JSON.stringify(geometry)}`
     );
     await page.js(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); true`);
 

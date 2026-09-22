@@ -1139,11 +1139,11 @@ which is four shapes of path:
 | Claim | How | Result |
 |---|---|---|
 | A tool block's paths are buttons, and a grep hit carries its line | the blocks' `.path` buttons, after a scripted turn | four buttons; `notes.txt`, `gone.txt`, and one whose `title` is `notes.txt:2` — the line, in the tooltip rather than in the label |
-| Pressing a path shows the file the run just wrote | a real click, then the panel | `one\ntwo\nthree\n` — the *file's* bytes, read over `GET /file` from the run's cwd, not something the page worked out |
+| Pressing a path shows the file the run just wrote | a real click, then the panel | `one\ntwo\nthree` — the *file's* bytes, read over `GET /file` from the run's cwd, not something the page worked out (read as the code cells, the numbers being furniture) |
 | The page stays where it was | `location` after the press | `/?token=…`, unchanged: the file did not navigate the page |
 | The note says the size | the panel's header | `14 bytes` |
 | Pressing a path inside a block does not fold the block | the `details`' `open`, before and after | `false` both times: the press is `preventDefault`ed, so the block does not slide away under the file it just opened |
-| Reload reads the file again | the file rewritten on disk, then the button | `four\nfive\n` and `10 bytes` — the new bytes, not the ones the page already had |
+| Reload reads the file again | the file rewritten on disk, then the button | `four\nfive` and `10 bytes` — the new bytes, not the ones the page already had, and the numbers follow them |
 | A hit inside a block's output is there to press once the block is open | the grep block's `summary`, then the hit | closed → open, and only then was the hit's centre actually on screen — the check that found the fixed-panel defect |
 | A hit's line travels with the path | pressing `notes.txt:2` | the note reads `line 2`, and the file's bytes are beside it |
 | A path that is not there is refused in the route's own words | pressing `gone.txt` | the panel holds `nothing at gone.txt: …` with `HTTP 404` beside it, rather than an empty panel |
@@ -1153,6 +1153,47 @@ The panel's head has a fourth control since §16 — `open` — and the two clai
 run: the control is enabled and titled "open it where it lives" in a run that may, and pressing it against a
 path that is not there puts the *route's* refusal in the hint. The successful press is deliberately not
 driven: it would open a viewer on the machine running the harness.
+
+**The lines are numbered, and a number is a gutter rather than text.** Asked for directly after the first
+day of using the panel: *"代码文件在右侧的监视，现在没有在左边标注行号"* — a code file opened beside the
+conversation had no line numbers, so the one thing a `grep` hit's line number is *for* (finding that line by
+eye) was the one thing the panel did not offer. Four decisions carried it:
+
+- **Every text file, not only code.** The page does not ask whether a file is "code": it already refuses
+  that kind of guess for pictures (§21) and for Markdown (§24), and a third guess by extension would be a
+  third rule to be wrong about. A `.md` opened *rendered* has no numbers — a reading is not a listing — and
+  the raw view one press away has them, which is the split §24 already draws.
+- **A number is furniture, not text.** It is `aria-hidden` (a screen reader should read the code) and
+  `user-select: none` (a block copied out of the panel does not come out with `12\t` in front of it). The
+  bytes are in a `.code` node per line, so the container's own `textContent` is the numbers run together
+  with the file — which is why both harnesses read the code nodes. That is the claim, not an
+  inconvenience: what a person copies is the code.
+- **A line is a row, and the gutter is a `width`.** Each line is a flex row of `.ln` and `.code`, and the
+  gutter is `4ch` (the page is `border-box`, so that is three digits and a space) with the container
+  carrying `lines-4`/`lines-5`/`lines-6` when the file's last number needs the room. A `min-width` gutter
+  looks equivalent and is wrong in a way only a long file shows: the box grows with its own digits, so line
+  300 of a three-hundred-line file pushes its own code right while every other line stays put. And the row
+  is what puts a *wrapped* line's continuation in the code column: one `<pre>` with a column of numbers
+  beside it cannot do that at all.
+- **The scroll is the row's own position.** `scrollToLine` scrolled by `(line - 1) * line-height`, which is
+  right only while every line above the target is one visual line tall. With the numbers drawn, the reader
+  compares the number at the top of the panel against the one in the transcript, so a wrapped line above
+  the target made that comparison fail — and it now reads the row and subtracts the container's own top,
+  keeping the arithmetic as the fallback for a panel with no layout to measure (the Node harness, and a
+  browser before the first paint).
+
+Measured 2026-09-22, and the fixture is the claim: a file of three hundred lines, one of them six hundred
+characters wide, written by the scripted turn so that it arrives as a path in a tool block.
+
+| Claim | How | Result |
+|---|---|---|
+| A long file is numbered to its last line | the `.ln` nodes after pressing `long.txt` | 300 rows, `1` … `300`, and the 600-character line intact in its `.code` node |
+| A number is not part of the text it numbers | `getComputedStyle` on a gutter cell | `user-select: none` |
+| The code column is one column | the left edge of three code cells, and the two heights | within one pixel of each other; the wide line's box more than twice a single line's height; the number's right edge left of the code's left edge |
+| Opening at a line scrolls to that line's own row | injected geometry in `scripts/web-view-test.js`, where a wrapped row makes the two formulas disagree | the row's own position (`200`) rather than three line-heights (`60`) |
+
+The `min-width` mistake above was found by that measurement rather than by reading the CSS, which is the
+argument for measuring geometry at all: `spread(codeX) < 1` is a claim no byte-scan of the page can make.
 
 **Two residues, both deliberate.** A file that is not valid UTF-8 is refused rather than shown as
 replacement characters: a lossy conversion would print something no editor would show, and "this is not

@@ -576,6 +576,26 @@
     flex: 1 1 auto; margin: 0; padding: 10px 12px; overflow: auto;
     white-space: pre-wrap; word-wrap: break-word; font-size: 13px;
   }
+  /* A code file is read with its lines numbered, and the number is a gutter rather than part of the
+     text: it is the *file's* line, so a `grep` hit or a compiler error can be found by eye, and it is
+     not selectable, so a block copied out of the panel does not come out with `12\t` in front of it.
+     Each line is its own flex row, and the gutter is a *width* rather than a `min-width`: a minimum
+     lets the box grow with its own digits, so `300` would push the code right on the last row of a
+     three-hundred-line file and nowhere else. `ch` is one digit of the monospace face this panel
+     already uses and the page is `border-box`, so `4ch` is three digits and the space between them and
+     the code; a wider number widens the gutter for *every* row at once, from the class `showLines`
+     puts on the container. The row being a box is also what a wrapped line keeps its number beside its
+     first visual line with: a single `<pre>` with a gutter column beside it cannot do that, and neither
+     can arithmetic that assumes one line is one line-height tall. */
+  #preview-text .line { display: flex; }
+  #preview-text .ln {
+    flex: 0 0 auto; width: 4ch; padding-right: 1ch; text-align: right; color: var(--dim);
+    user-select: none; -webkit-user-select: none;
+  }
+  #preview-text.lines-4 .ln { width: 5ch; }
+  #preview-text.lines-5 .ln { width: 6ch; }
+  #preview-text.lines-6 .ln { width: 7ch; }
+  #preview-text .code { flex: 1 1 auto; min-width: 0; white-space: pre-wrap; word-wrap: break-word; }
   /* The picture and the control it sits in: a button with no chrome, because what a press does
      (`POST /open`) is not the point of looking at it and a frame around a screenshot would be. The
      image never grows past the column: `max-width`/`max-height` with `object-fit: contain` shows the
@@ -3325,8 +3345,7 @@ function showPicture(url, response) {
     holder.hidden = true;
     if (text) {
       text.hidden = false;
-      text.textContent =
-        "this browser cannot draw this " + type + " -- press open to look at it where it lives";
+      showPlain(text, "this browser cannot draw this " + type + " -- press open to look at it where it lives");
     }
     if (note) note.textContent = said;
   };
@@ -3354,13 +3373,12 @@ async function readPreview() {
   showPicture(null); // whatever picture was there is not this one; its URL is let go of here
   if (!canSend) {
     text.hidden = false;
-    text.textContent = "";
     note.textContent = "";
-    text.textContent = "this page has no flint behind it: a file is read through the run that served it";
+    showPlain(text, "this page has no flint behind it: a file is read through the run that served it");
     return;
   }
   text.hidden = false;
-  text.textContent = "reading…";
+  showPlain(text, "reading…");
   note.textContent = "";
   if (imageExt(preview.path) && (await readPicture())) return;
   await readText();
@@ -3396,7 +3414,7 @@ async function readText() {
   try {
     response = await fetch(fileRoute(preview.path), { headers: authHeader() });
   } catch (e) {
-    text.textContent = "cannot read it: " + describe(e);
+    showPlain(text, "cannot read it: " + describe(e));
     return;
   }
   const body = await response.text();
@@ -3424,7 +3442,7 @@ function paintPreviewRefusal(body, status) {
   if (button) button.hidden = true;
   if (text) {
     text.hidden = false;
-    text.textContent = String(body == null ? "" : body).trim();
+    showPlain(text, String(body == null ? "" : body).trim());
   }
   if (note) note.textContent = "HTTP " + status;
 }
@@ -3442,12 +3460,63 @@ function previewNote(response, body, line) {
   return said.join(" · ");
 }
 
+/// The file's own lines, each in its own box with its number in a gutter.
+///
+/// `\r\n` and a lone `\r` are read as one break, exactly as `markdownBlocks` reads them, because the
+/// two views of one file have to agree about how many lines it has -- the rendered reading and the
+/// source a `grep` hit opens are the same bytes. A trailing break *ends* the last line rather than
+/// opening an empty one: a file of three lines and a newline is three lines, which is what every
+/// editor says and what the number in a `grep` hit means. A file with no bytes at all has no lines,
+/// and the panel shows none of them.
+///
+/// The number is `aria-hidden` as well as unselectable: a screen reader should read the code, and the
+/// number is a place in the file rather than a word in it. The gutter's width is a class rather than a
+/// style written from here -- the geometry belongs in the stylesheet, and `ch` is the one unit that
+/// means "a digit" in the face this panel uses.
+function showLines(pre, body) {
+  while (pre.firstChild) pre.removeChild(pre.firstChild);
+  const lines = String(body == null ? "" : body).replace(/\r\n?/g, "\n").split("\n");
+  if (lines.length && lines[lines.length - 1] === "") lines.pop();
+  const digits = String(lines.length).length;
+  pre.className = digits > 3 ? "lines-" + Math.min(digits, 6) : "";
+  lines.forEach((line, at) => {
+    const row = el("div", "line");
+    const number = el("span", "ln", String(at + 1));
+    number.setAttribute("aria-hidden", "true");
+    row.appendChild(number);
+    row.appendChild(el("span", "code", line));
+    pre.appendChild(row);
+  });
+}
+
+/// A sentence where the file's lines would go: a refusal, a message, an empty panel.
+///
+/// The rows are removed as well as the text replaced, because the gutter belongs to a *file*: a
+/// sentence with `1 2 3` down its left is a sentence pretending to be three lines of one. The class
+/// goes with them, so a wide gutter left over from a long file cannot hollow out the next sentence.
+function showPlain(pre, message) {
+  while (pre.firstChild) pre.removeChild(pre.firstChild);
+  pre.className = "";
+  pre.textContent = String(message == null ? "" : message);
+}
+
 /// Put the line a `grep` hit was on at the top of the panel.
 ///
-/// No highlight and no second render pass: the line number came from the transcript, and all this
-/// owes the reader is not having to find it by eye.
+/// The row itself, rather than arithmetic: `(line - 1) * line-height` is right only for a file whose
+/// lines are all one visual line tall, and the moment a line above the target wrapped, the panel
+/// scrolled to the wrong place -- which is the one thing this owes the reader, who is otherwise
+/// comparing the number at the top of the panel against the one in the transcript. The arithmetic
+/// stays as the fallback for a panel with no rows to measure, which is the Node harness and a browser
+/// before the first paint.
 function scrollToLine(text, line) {
-  if (!line || typeof getComputedStyle !== "function") return;
+  if (!line) return;
+  const rows = text && text.children ? text.children : [];
+  const row = rows[line - 1];
+  if (row && typeof row.offsetTop === "number" && typeof text.offsetTop === "number") {
+    text.scrollTop = Math.max(0, row.offsetTop - text.offsetTop);
+    return;
+  }
+  if (typeof getComputedStyle !== "function") return;
   const height = parseFloat(getComputedStyle(text).lineHeight);
   const step = isNaN(height) ? 20 : height;
   text.scrollTop = Math.max(0, (line - 1) * step);
@@ -3767,7 +3836,7 @@ function paintPreviewView(body, response, view, path, line) {
     return;
   }
   if (text) {
-    text.textContent = body;
+    showLines(text, body);
     scrollToLine(text, line);
   }
   if (note) note.textContent = previewNote(response, body, line);
@@ -4697,6 +4766,11 @@ if (typeof module !== "undefined" && module.exports) {
     // nodes, so a check can read the structure it drew without a screenshot.
     isMarkdown, markdownBlocks, markdownList, tableCells, tableAlign, paintMarkdown,
     previewView, paintPreviewView, paintPreviewRefusal,
+    // The text half of the panel: the lines and their gutter, the sentence that stands in for a file
+    // that could not be read, and where a `grep` hit's line puts the scroll. Exported because a
+    // number's *text* and a row's *existence* are structure, which the Node harness can read off the
+    // nodes it drew -- a browser is needed for the geometry, not for the numbering.
+    showLines, showPlain, scrollToLine,
     jobsFrom, durationLabel, jobWhen, jobIsLive, jobIsStoppable, paintJobs, titleWords,
     // The position this tab was reading from: exported so the Node harness can check the three cases
     // -- a gap, a different conversation, and a position past the end -- against the real functions

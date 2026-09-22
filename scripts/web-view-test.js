@@ -1651,6 +1651,74 @@ check("the preview says which line, and how much of a cut file is here", () => {
   eq(viewer.bytesLabel(12 * 1024 * 1024), "12 MB", "megabytes");
 });
 
+check("a file is drawn line by line, with the file's own numbers in a gutter", () => {
+  const pre = viewer.__node("preview-text");
+  // The whole panel, as the browser paints it: what a line's number is, and what a line's text is.
+  const drawn = () =>
+    pre.children.map((row) => ({
+      number: row.children[0].textContent,
+      code: row.children[1].textContent,
+      hidden: row.children[0]["aria-hidden"],
+    }));
+  const showed = (body) => {
+    viewer.showLines(pre, body);
+    return { rows: drawn(), className: pre.className, firstChild: pre.children.length };
+  };
+
+  let view = showed("one\ntwo\nthree\n");
+  eq(view.rows.length, 3, "a trailing newline ends the last line rather than opening an empty one");
+  eq(view.rows.map((r) => r.number), ["1", "2", "3"], "the numbers are the file's own, from one");
+  eq(view.rows.map((r) => r.code), ["one", "two", "three"], "and the text is the line, without its break");
+  eq(view.rows.every((r) => r.hidden === "true"), true, "a number is hidden from a screen reader");
+  eq(view.className, "", "a narrow file needs no wider gutter than the base three characters");
+
+  // A file whose last line has no newline is the same three lines, and a blank line in the middle is
+  // a line: it has a number, which is the whole reason a `grep` hit's number can be trusted.
+  eq(showed("one\ntwo\nthree").rows.length, 3, "a file that does not end in a break");
+  eq(showed("one\n\nthree").rows.map((r) => r.code), ["one", "", "three"], "a blank line is a line");
+  eq(showed("one\r\ntwo\r\n").rows.length, 2, "CRLF is one break, like the Markdown reading reads it");
+  eq(showed("one\rtwo").rows.length, 2, "and so is a lone CR");
+  eq(showed("").rows.length, 0, "no bytes, no lines");
+  eq(showed(null).rows.length, 0, "and no body at all is not a line either");
+
+  // The gutter's width comes from how many digits the last line's number has, because a number that
+  // does not fit pushes the code right and breaks the column every other row shares.
+  eq(showed("x\n".repeat(9)).className, "", "nine lines fit the base width");
+  eq(showed("x\n".repeat(1000)).className, "lines-4", "a thousand lines ask for four digits");
+  eq(showed("x\n".repeat(100000)).className, "lines-6", "and a hundred thousand for six");
+  eq(showed("one\n").className, "", "and a short file again takes the base width back");
+
+  // A sentence where the file would be: no rows, so nothing looks like a numbered line of a file.
+  viewer.showPlain(pre, "nothing at C:\\gone.txt");
+  eq(pre.children.length, 0, "a refusal has no gutter");
+  eq(pre.textContent, "nothing at C:\\gone.txt", "and is the route's sentence, as it is");
+  eq(pre.className, "", "with the wide gutter of a long file let go of");
+});
+
+check("opening at a line scrolls to that line's own row, whatever is above it", () => {
+  const pre = viewer.__node("preview-text");
+  viewer.showLines(pre, "one\ntwo\nthree\nfour\n");
+  // The geometry a stub has to be given, because it has no layout: the container starts 30px down the
+  // page and the four rows start 0, 20, 90 and 200px inside it. The third row is 70px tall rather than
+  // one line's worth, which is a *wrapped* line -- and that is the case the old arithmetic got wrong:
+  // it scrolled by `(line - 1) * lineHeight` (60px for the fourth line here), which lands short of the
+  // target the moment anything above it takes more than one visual line.
+  pre.offsetTop = 30;
+  pre.children.forEach((row, at) => {
+    row.offsetTop = 30 + [0, 20, 90, 200][at];
+  });
+  pre.scrollTop = 999;
+  viewer.scrollToLine(pre, 4);
+  eq(pre.scrollTop, 200, "the fourth row's own top, not three line-heights down (that would be 60)");
+  viewer.scrollToLine(pre, 1);
+  eq(pre.scrollTop, 0, "the first line is the top of the file, never a negative scroll");
+  // A path with no line (a plain press) leaves the scroll where it is: `0` is "no line", which is not
+  // "line zero". The container is put back to a known position, because the point is that nothing moved.
+  pre.scrollTop = 55;
+  viewer.scrollToLine(pre, 0);
+  eq(pre.scrollTop, 55, "a press with no line does not move the panel");
+});
+
 console.log("the run's jobs");
 
 check("a job is read off the route, and a row that is not a job is dropped", () => {
@@ -2317,7 +2385,11 @@ check("the switch is offered only where there is a choice, and it says what it d
   eq(button.textContent, "rendered", "opened at a line, the button offers the rendering");
   eq(button.getAttribute("aria-pressed"), "false", "and nothing rendered is in force");
   eq(text.hidden, false, "the raw text is showing");
-  eq(text.textContent, "# Title\n", "and it is the file's own bytes");
+  // The bytes, read off the lines rather than off the container: what is between the code and the
+  // gutter is the file, and the container's own `textContent` is the numbers run together with it --
+  // which is exactly what the gutter must *not* be part of when a block is copied out of the panel.
+  eq(text.children.map((row) => row.children[1].textContent).join("\n") + "\n", "# Title\n", "and it is the file's own bytes");
+  eq(text.children.map((row) => row.children[0].textContent), ["1"], "with the file's own numbering");
   eq(rendered.hidden, true, "with the rendered view shut");
   eq(note.textContent, "line 412", "the note still says the line");
 

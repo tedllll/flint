@@ -410,7 +410,7 @@ fn the_page_stops_a_job_from_the_rows_it_is_already_showing() {
 fn the_preview_shows_the_routes_own_refusal_rather_than_an_empty_panel() {
     let body = from("function paintPreviewRefusal(body, status)", 14);
     assert!(
-        body.contains("text.textContent = String(body == null ? \"\" : body).trim()"),
+        body.contains("showPlain(text, String(body == null ? \"\" : body).trim())"),
         "the refusal is shown as it was written:\n{body}"
     );
     assert!(
@@ -1475,6 +1475,68 @@ fn a_markdown_file_is_read_not_just_shown() {
     assert!(
         refusal.contains("button.hidden = true") && refusal.contains("rendered.hidden = true"),
         "a refusal must take the reading and its switch away: {refusal}"
+    );
+}
+
+/// The panel numbers the lines of a text file, and the number is a gutter rather than part of the text.
+///
+/// The *structure* is checked in `scripts/web-view-test.js` (which lines a file has, what a number says,
+/// where a wrapped line's continuation goes) and the geometry in `scripts/browser-controls-test.js`
+/// (measured, because a number's width is a layout fact). What is held still here is the set of
+/// decisions a reader of this page can check in the bytes: the number is not selectable, it is not read
+/// out, a *sentence* is never numbered, and where the panel scrolls is a row's own position rather than
+/// arithmetic over a line-height.
+#[test]
+fn a_text_files_lines_are_numbered_beside_the_text_rather_than_in_it() {
+    // The gutter is unselectable and the width is a `width` rather than a `min-width`: a minimum lets
+    // the box grow with its own digits, so `300` would push the code right on the last row of a long
+    // file and nowhere else -- the one thing a shared column may not do.
+    let css = from("#preview-text .ln {", 4);
+    for (needed, why) in [
+        ("user-select: none", "a copied block must not come out with the number in front of it"),
+        ("width: 4ch", "the gutter is one width for every row, not one per number"),
+        ("text-align: right", "the digits line up on their last place, like every other gutter"),
+    ] {
+        assert!(css.contains(needed), "the gutter does not say `{needed}` ({why}): {css}");
+    }
+    assert!(
+        !css.contains("min-width"),
+        "a minimum width lets a longer number widen its own row: {css}"
+    );
+    // The lines themselves: one row per line, the number hidden from a screen reader (which should read
+    // the code), and the class that widens the gutter for a file whose numbers need the room.
+    let lines = from("function showLines(pre, body)", 20);
+    for (needed, why) in [
+        (r#"el("span", "ln", String(at + 1))"#, "the number is the line's own place in the file"),
+        (r#"number.setAttribute("aria-hidden", "true")"#, "the number is furniture, not text"),
+        (r#"el("span", "code", line)"#, "the line's text is its own node, which is what a copy takes"),
+        ("lines-", "a wider gutter is the container's decision, so every row shares it"),
+        (r#"lines[lines.length - 1] === """#, "a trailing break ends the last line"),
+    ] {
+        assert!(lines.contains(needed), "`showLines` does not say `{needed}` ({why}): {lines}");
+    }
+    // A refusal, a message, an empty panel: a sentence where the lines would be, and no gutter beside it
+    // -- a sentence with `1 2 3` down its left is a sentence pretending to be three lines of a file.
+    let plain = from("function showPlain(pre, message)", 6);
+    assert!(
+        plain.contains("while (pre.firstChild) pre.removeChild(pre.firstChild)")
+            && plain.contains(r#"pre.className = """#),
+        "a sentence must clear the lines and the width they needed: {plain}"
+    );
+    // The painter hands the bytes to `showLines` rather than assigning the container's text: the panel's
+    // own `textContent` is the numbers run together with the code, so a test that read it as the file
+    // would be reading something a person never sees.
+    let painted = from("function paintPreviewView(body, response, view, path, line)", 40);
+    assert!(
+        painted.contains("showLines(text, body)") && !painted.contains("text.textContent = body"),
+        "the raw view must be drawn as numbered lines: {painted}"
+    );
+    // Where a `grep` hit's line puts the scroll: the row, measured, rather than `(line - 1)` times a
+    // line-height -- which is only right while every line above the target is one visual line tall.
+    let scroll = from("function scrollToLine(text, line)", 12);
+    assert!(
+        scroll.contains("rows[line - 1]") && scroll.contains("row.offsetTop - text.offsetTop"),
+        "the scroll must land on the line's own row: {scroll}"
     );
 }
 
