@@ -118,10 +118,19 @@ def main():
         env={**os.environ, "FLINT_STUB_LOG": str(scratch / "requests.jsonl")},
     )
     stub.stdout.readline()  # "stub listening on ..."
+    # The two settings that differ by platform are the *values*, not the file. Written as one
+    # conditional expression they are not: `+` binds tighter than `if/else`, so the `else` branch was
+    # the entire config and a Linux run got a file holding `shell_args = ["-c"]` and nothing else --
+    # no provider, so nothing to default to. flint then exited 1 without writing a session file, and
+    # every check after this one in the file read as a product failure. Windows never saw it and this
+    # file was written on Windows (`f12fcaa`, 2026-09-15); the first CI run of this check on ubuntu
+    # found it, which is what it was added to the workflow for.
+    shell = "cmd" if os.name == "nt" else "sh"
+    shell_args = ["/C"] if os.name == "nt" else ["-c"]
     (scratch / "config.toml").write_text(
         'default_provider = "stub"\n'
-        "shell = " + json.dumps("cmd" if os.name == "nt" else "sh") + "\n"
-        'shell_args = ["/C"]\n' if os.name == "nt" else 'shell_args = ["-c"]\n',
+        f"shell = {json.dumps(shell)}\n"
+        f"shell_args = {json.dumps(shell_args)}\n",
         encoding="utf-8",
     )
     with open(scratch / "config.toml", "a", encoding="utf-8") as f:
