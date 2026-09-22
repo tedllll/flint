@@ -25,6 +25,16 @@ import threading
 import shutil
 from pathlib import Path
 
+# The fixtures here are Chinese, and a check has to be able to *say* what it saw: on Windows, Python
+# encodes a redirected stdout by the console code page, which is cp1252 on GitHub's runner, and printing
+# `FAIL ... -- 你好` then dies with `UnicodeEncodeError` -- a crash in the harness that reads like a
+# failure of the thing under test. It cost a CI round on the windows job to learn that, after the same
+# round had already been spent on ubuntu. `errors="replace"` is the second half: a console that cannot
+# show a character should show the rest of the line, and the verdict is what the check is for.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 HERE = Path(__file__).resolve().parent
 PYTHON_EXAMPLES = HERE.parent / "python"
 # The build in this checkout, two levels up. A *check* should be running this rather than whichever

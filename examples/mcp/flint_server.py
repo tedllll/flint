@@ -30,6 +30,18 @@ import sys
 import tempfile
 import threading
 
+# JSON-RPC over stdio is UTF-8 by specification, and a client's own words are not ours to transcode: a
+# prompt typed in Chinese reaches this file as UTF-8 and must reach flint as UTF-8, whatever the console
+# code page on the machine running it. Without this, `sys.stdout` is encoded by that code page -- cp1252
+# on a Windows runner, or the `gbk` a Chinese Windows install uses -- so a reply carrying a character the
+# page lacks raises `UnicodeEncodeError` *inside the protocol*, which the client sees as the server
+# dying. `reconfigure` is Python 3.7+; the guard is there because a copied example should not depend on
+# the reader's interpreter being current, and the default (`ensure_ascii=True` in `json.dumps` below)
+# keeps the wire ASCII-escaped either way.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
 PROTOCOL_VERSION = "2024-11-05"
 
 # What the tool tells the parent about itself. The wording matters more than it looks: an agent

@@ -19,6 +19,17 @@ import time
 import urllib.request
 from pathlib import Path
 
+# The fixtures here are Chinese, and a check has to be able to *say* what it saw: on Windows, Python
+# encodes a redirected stdout by the console code page, which is cp1252 on GitHub's runner, and printing
+# `FAIL ... -- <the answer it got back>` then dies with `UnicodeEncodeError` -- a crash in the harness
+# that reads like a failure of the thing under test. This file passed on the machine that wrote it
+# because that machine's code page is `gbk`, which has the characters, and failed on the runner, which
+# does not. `errors="replace"` is the second half: a console that cannot show a character should still
+# show the rest of the line, and the verdict is what the check is for.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 sys.path.insert(0, str(Path(__file__).parent))
 from flint_call import ask, FLINT  # noqa: E402
 
