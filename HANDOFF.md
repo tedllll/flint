@@ -15,8 +15,8 @@ reconstruct it:
 
 | §11 item | state |
 |---|---|
-| 1. the two headless Node harnesses in CI | **built** — one step in `.github/workflows/ci.yml`'s test job, on both runners |
-| 2. four stale sentences | **corrected** — all four, each now saying what the tree does |
+| 1. the two headless Node harnesses in CI | **built** — one step in `.github/workflows/ci.yml`'s test job, on both runners; the two `examples/` doors are one more step of the same job since 2026-09-18 |
+| 2. five stale sentences | **corrected** — all five, each now saying what the tree does (the fifth, §11 item 9's "two halves are left", was found by reading two passages against each other on 2026-09-18) |
 | 3. page claims vs what the harness holds | **bounded** — the browser harness prints what it drives; the two loose claims point at that list |
 | 4. retry safety (nothing identifies a request) | **answered in writing** in §10 — evidence, not a promise; no key, no heuristic |
 | 5. `flint --version` | **built**, with the `session`-`version` name collision stated where a reader meets it |
@@ -31,12 +31,19 @@ reconstruct it:
 
 The gate as the last session left it — re-measured after the page slices at the top of
 `## What was just done`, on a tree with the untracked verification record held aside (that file and no
-other is the one thing `cargo test` disagrees with; see the paragraph after this one): `cargo test`
-**664 passing, 1 ignored** across the 14 suites (lib 368, bin 7, `agent_loop` 34, `balance` 7,
-`cli_output` 113, `json_output` 41, `say` 6, `search_tool` 4, `task` 17, `term_capture` 20 + 1 ignored,
-`tty_hangup` 0 and the doc-tests 0 — both empty by construction — `web_view` 37, `who` 10);
+other is the one thing `cargo test` disagrees with; see the paragraph after this one) — and re-measured
+again on 2026-09-18, after the tool-payload round and this session's three commits: `cargo test`
+**678 passing, 1 ignored** across the 14 suites (lib 382 — 368 of it before that round, so the round
+added 14 — bin 7, `agent_loop` 34, `balance` 7, `cli_output` 113, `json_output` 41, `say` 6,
+`search_tool` 4, `task` 17, `term_capture` 20 + 1 ignored, `tty_hangup` **0 on Windows** and 3 on Unix
+— the suite is `#![cfg(unix)]`, and the library carries a few `#[cfg(unix)]` tests of its own, so the
+ubuntu job's total is larger and is *not* quoted here as if it were this number — `web_view` 37,
+`who` 10, and the doc-tests 0);
 `cargo clippy --all-targets -- -D warnings` silent; the two headless Node harnesses green
-(`term-layout-test.js`, `web-view-test.js`) **and run by CI**; `examples/python/test_call.py` green; the
+(`term-layout-test.js`, `web-view-test.js`) **and run by CI**; **both `examples/` doors green, as one
+more step of that same CI job** — `examples/python/test_call.py` and `examples/mcp/test_mcp.py`, each
+resolving the binary `cargo test` just built for itself and refusing a pass that came from an installed
+`flint` on `PATH`; the
 browser harness run by hand at **93/93 claims held**, printing the list of drives and not-drives it is
 bounded by. The release binary on `PATH` is the tree's (`flint --version` → `flint 0.1.0`, exit 0, and
 its SHA-256 is the one `target/release/flint.exe` was built with).
@@ -1945,7 +1952,9 @@ that keeps it right if somebody simplifies `_binary` later.
 
 **The gate, as of this session's head.** `cargo test` **664 passed / 0 failed / 1 ignored** (the ignored
 one is `tests/term_capture.rs::measured_cost_of_streaming_an_answer`, deliberately ignored; `web_view` is
-37 and the bin's own tests are 7 — the new one is the crash fix above); `cargo clippy --all-targets -- -D
+37 and the bin's own tests are 7 — the new one is the crash fix above — and the total read 664 at this
+commit rather than the 678 the top of this file quotes: the tool-payload round and the two example
+checks landed after it); `cargo clippy --all-targets -- -D
 warnings` silent; `node scripts/term-layout-test.js` all pass;
 `node scripts/web-view-test.js` all pass; `python examples/python/test_call.py`'s checks all pass; the
 browser harness run by hand at **93/93 claims held** (up from 61: the picture slice added five, the
