@@ -1982,6 +1982,20 @@ async fn interactive(
                 printer.term().line(format_args!("{} {e:#}", printer.style(RED, "error:")));
             }
         }
+
+        // The sidebar is told the list may have moved, because a turn can move it in the two ways a
+        // person watches for: the first thing said in a conversation is what *creates* its file (so a
+        // run holding a conversation with nothing in it has no row until a turn writes one), and for a
+        // conversation nobody has named the label the sidebar draws *is* the first question that turn
+        // writes. Neither is derivable from the frames the turn already pushes, and both were invisible
+        // until a real browser deleted the conversation it was in, asked its first question in the new
+        // one, and watched the sidebar stay empty while the transcript had the question and the answer
+        // (2026-09-23). It is deliberately unconditional rather than "only if the file was just
+        // created": that would be a second copy of the session's own rule about when a file appears,
+        // and the frame costs an empty line against a route the page re-reads.
+        if let Some(viewer) = viewer.as_mut() {
+            viewer.list_changed();
+        }
     }
     Ok(())
 }
@@ -2571,6 +2585,37 @@ fn continue_conversation(
     next.set_last_usage(old.last_usage());
     next.splice_loaded_history(cfg, &cwd, old.history().to_vec());
     Ok(next)
+}
+
+/// A run moved to a conversation of its own that nothing has been said in yet.
+///
+/// The three doors that *close* the conversation a run is in -- `/new`, and `/archive` or `/delete`
+/// aimed at the conversation being written -- need the same thing in the same order, and it is worth
+/// one function because the two copies would not fail symmetrically. A writer is created *lazily*
+/// (the name is claimed and nothing appears on disk until something is said, so a run that opens
+/// another conversation and says nothing leaves no empty file behind), the agent is built around it
+/// with the run's own guard and working directory carried over rather than re-derived, and the caller
+/// is handed the provider the new agent was built with because the REPL stores it beside the agent.
+///
+/// The read-only guard is the reason to be careful here rather than in each caller: `/new` forgetting
+/// it is a bug, and a destructive row forgetting it is the same bug with a worse outcome, because the
+/// row exists precisely so that a person can throw a conversation away.
+fn fresh_conversation(
+    cfg: &config::Config,
+    old: &agent::Agent,
+    target: &config::ProviderConfig,
+) -> Result<(agent::Agent, config::ProviderConfig)> {
+    let cwd = old.cwd().clone();
+    let provider = provider::Provider::new(target.clone())?;
+    let writer = Some(session::SessionWriter::create(
+        &config::sessions_dir(),
+        &cwd,
+        &target.name,
+        &target.model,
+        parent_session().as_deref(),
+    )?);
+    let agent = agent::Agent::new(cfg, provider, old.readonly(), cwd, writer);
+    Ok((agent, target.clone()))
 }
 
 /// Build an agent for `name` and hand it back to the REPL.
@@ -5023,13 +5068,21 @@ async fn handle_command(
         }
 
         "/archive" | "/delete" => {
-            // Both take an explicit session and both refuse the one that is open.
+            // Both take an explicit session, and both *work* on the one that is open.
             //
-            // Refusing is not a limitation, it is the only honest answer: this process is
-            // appending to that file, so deleting it would leave the writer pointing at a
-            // path that no longer exists (and the next event would recreate the file),
-            // while moving it would hide the conversation being written. `/new` first,
-            // then file the old one away by its number.
+            // They used to refuse it, and the reason was real: this process appends to that file, so
+            // deleting it leaves the writer pointing at a path that no longer exists (and the next
+            // event recreates it as a nameless fragment) while moving it hides the conversation being
+            // written. What that reason is not is a reason the person cannot have what they asked for:
+            // the workaround the refusal named -- "/new starts a fresh one; then this one can be filed
+            // away by its number" -- *is* the operation, so the command now does both, in that order.
+            // Asked for directly on 2026-09-23, from the page, where the sidebar draws these rows on
+            // the conversation being written like any other row: a row that is offered and then
+            // refused is worse than one that was never drawn.
+            //
+            // The fresh conversation comes first for the reason the refusal existed -- the run always
+            // has a file, and nothing is writing to the old path by the time it is moved or removed --
+            // and the destructive half is what it always was.
             if arg.is_empty() {
                 printer
                     .term()
@@ -5038,11 +5091,28 @@ async fn handle_command(
             }
             let path = resolve_session(arg)?;
             if agent.session_path().as_deref() == Some(path.as_path()) {
-                printer.term().line(format_args!(
-                    "{dim}that is the conversation you are in. /new starts a fresh one; \
-                     then this one can be filed away by its number.{reset}"
-                ));
-                return Ok(Flow::Continue);
+                let (next, provider) = fresh_conversation(cfg, agent, provider_cfg)?;
+                if cmd == "/archive" {
+                    let moved = session::archive(&path)?;
+                    printer.term().line(format_args!("archived {}", moved.display()));
+                } else {
+                    session::delete(&path)?;
+                    printer.term().line(format_args!("deleted {}", path.display()));
+                }
+                // The same sentence `/new` prints, because it is the same thing that happened to the
+                // run: a person who asked to delete the conversation they were in has to be able to
+                // see that they are now in another one, rather than in nothing.
+                printer.term().line(format_args!("started a new session"));
+                // Both halves are pushed, and both are needed: the list changed -- the row has to go
+                // -- and the run *moved*, which is what the `Flow::NewAgent` below tells the page by
+                // pointing it at the new session and pushing the `reset` that rebuilds the pane. The
+                // pane lands on a conversation nothing has been said in, so it has no file yet and
+                // `/sessions` has no rows: the sidebar says "no conversations yet" and the right side
+                // is the default page rather than an empty one. That is the state asked for by name.
+                if let Some(viewer) = viewer.as_mut() {
+                    viewer.list_changed();
+                }
+                return Ok(Flow::NewAgent(next, provider));
             }
             if cmd == "/archive" {
                 let moved = session::archive(&path)?;
@@ -5066,18 +5136,9 @@ async fn handle_command(
             if agent.no_session() {
                 return Ok(keeps_no_conversation(cmd, printer));
             }
-            let provider = provider::Provider::new(provider_cfg.clone())?;
-            let writer = Some(session::SessionWriter::create(
-                &config::sessions_dir(),
-                agent.cwd(),
-                &provider_cfg.name,
-                &provider_cfg.model,
-                parent_session().as_deref(),
-            )?);
-            let new_agent =
-                agent::Agent::new(cfg, provider, agent.readonly(), agent.cwd().clone(), writer);
+            let (new_agent, provider) = fresh_conversation(cfg, agent, provider_cfg)?;
             printer.term().line(format_args!("started a new session"));
-            return Ok(Flow::NewAgent(new_agent, provider_cfg.clone()));
+            return Ok(Flow::NewAgent(new_agent, provider));
         }
 
         other => {

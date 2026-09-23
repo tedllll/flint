@@ -1656,13 +1656,24 @@ async fn a_session_can_be_named_after_the_fact_and_the_last_name_wins() {
 
 /// The REPL's own session commands, driven through a real session.
 ///
-/// `/name` writes to the conversation that is open, and `/archive` and `/delete` refuse
-/// it -- a rule worth a test, because the failure it prevents is silent: deleting the
-/// file this process appends to would have it recreated by the next event, and the
-/// conversation would come back as a nameless fragment.
+/// `/name` writes to the conversation that is open, and `/delete` on that same conversation is the
+/// case this test is about.
+///
+/// It used to assert a *refusal*, and the refusal was the honest answer to a real problem: this
+/// process appends to that file, so deleting it under the writer leaves the writer pointing at a path
+/// that no longer exists, and the next event recreates it as a nameless fragment. What it was not is a
+/// reason the person cannot have what they asked for -- the workaround it named (`/new` starts a fresh
+/// one, then this one can be filed away by its number) *is* the operation, so the command does both.
+/// Asked for directly on 2026-09-23, from the page: the sidebar's `...` draws the destructive rows on
+/// the conversation being written like any other row, and a row that is offered and then refused is
+/// worse than one that was never drawn.
+///
+/// Both halves are asserted, because either alone passes for the wrong reason: the terminal says what
+/// happened, and the file that is left is the *new* conversation rather than a resurrected fragment of
+/// the old one, which is the exact failure the refusal existed to prevent.
 #[cfg(debug_assertions)]
 #[tokio::test]
-async fn the_repl_names_the_open_session_and_refuses_to_delete_it() {
+async fn deleting_the_open_session_starts_a_fresh_one_and_the_old_one_goes() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(
@@ -1677,7 +1688,89 @@ async fn the_repl_names_the_open_session_and_refuses_to_delete_it() {
         .mount(&server)
         .await;
 
-    let home = test_home("repl-name", &server.uri());
+    let home = test_home("repl-delete-open", &server.uri());
+    let mut child = binary()
+        .env("FLINT_HOME", &home)
+        .env("FLINT_TERM_CAPTURE", "1")
+        .env("FLINT_TERM_SIZE", "80x24")
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to run flint");
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().expect("no stdin handle");
+        // `1` is this run's own conversation: the listing numbers the newest first, and the run is
+        // writing the newest there is.
+        stdin
+            .write_all(b"/name a named conversation\n/delete 1\nhello\n/exit\n")
+            .expect("failed to write stdin");
+    }
+    let out = child.wait_with_output().expect("flint did not finish");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+
+    let files = jsonl_files(&home.join("sessions"));
+    let body = files
+        .first()
+        .map(|file| std::fs::read_to_string(file).unwrap_or_default())
+        .unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(
+        text.contains("a named conversation"),
+        "the listing does not show the name the run was given: {text:?}"
+    );
+    assert!(
+        text.contains("deleted "),
+        "deleting the conversation the run is in is still refused: {text:?}"
+    );
+    assert!(
+        text.contains("started a new session"),
+        "the run deleted the conversation it was in and did not say it had started another: {text:?}"
+    );
+    assert_eq!(
+        files.len(),
+        1,
+        "the run is writing {} conversations after deleting the one it was in: {:?}",
+        files.len(),
+        files
+    );
+    assert!(
+        body.contains("hello"),
+        "the run did not carry on in a fresh conversation: {body:?}"
+    );
+    assert!(
+        !body.contains("a named conversation"),
+        "the deleted conversation is the one the run is still writing, so it came back: {body:?}"
+    );
+}
+
+/// `/archive` on the conversation the run is in: the same rule, because it is the same problem.
+///
+/// Moving a file out from under the writer hides the conversation being written and has the next
+/// event recreate it at the old path -- `/delete`'s failure with a different name. So the run starts a
+/// fresh conversation first and files the old one away, and the archived file is the witness that it
+/// went into the archive rather than being removed.
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn archiving_the_open_session_files_it_away_and_starts_a_fresh_one() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(&[
+                    r#"data: {"choices":[{"delta":{"content":"ok"}}]}"#,
+                    r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+                    "data: [DONE]",
+                ])),
+        )
+        .mount(&server)
+        .await;
+
+    let home = test_home("repl-archive-open", &server.uri());
     let mut child = binary()
         .env("FLINT_HOME", &home)
         .env("FLINT_TERM_CAPTURE", "1")
@@ -1692,38 +1785,53 @@ async fn the_repl_names_the_open_session_and_refuses_to_delete_it() {
         use std::io::Write;
         let stdin = child.stdin.as_mut().expect("no stdin handle");
         stdin
-            .write_all(b"/name a named conversation\n/sessions\n/delete 1\n/exit\n")
+            .write_all(b"/name a named conversation\n/archive 1\nhello\n/exit\n")
             .expect("failed to write stdin");
     }
     let out = child.wait_with_output().expect("flint did not finish");
     let text = String::from_utf8_lossy(&out.stdout).to_string();
 
-    let session = jsonl_files(&home.join("sessions"))
-        .into_iter()
-        .next()
-        .expect("no session file was written");
-    let body = std::fs::read_to_string(&session).expect("read session");
-
-    assert!(
-        body.contains(r#""type":"title","name":"a named conversation""#),
-        "the name never reached the session file: {body:?}"
-    );
-    assert!(
-        text.contains("a named conversation"),
-        "the listing does not show the name: {text:?}"
-    );
-    assert!(
-        text.contains("that is the conversation you are in"),
-        "deleting the open session was not refused: {text:?}"
-    );
-    assert!(
-        session.exists(),
-        "the open session was deleted anyway: {}",
-        session.display()
-    );
-
+    // The archive sits beside the directory the conversation was held in -- a project's is
+    // `sessions/<dir>/archive/` -- so it is found rather than assumed to be at the root. The
+    // directory may not be there at all: nothing has been archived yet, which is exactly what this
+    // test asks about, and a helper that panicked on that would report the shape of the home rather
+    // than the behaviour of the command.
+    let mut archived: Vec<std::path::PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(home.join("sessions")).into_iter().flatten().flatten() {
+        let archive = if entry.file_name() == "archive" {
+            entry.path()
+        } else {
+            entry.path().join("archive")
+        };
+        if archive.is_dir() {
+            archived.extend(jsonl_files(&archive));
+        }
+    }
+    archived.sort();
+    let filed = archived
+        .first()
+        .map(|file| std::fs::read_to_string(file).unwrap_or_default())
+        .unwrap_or_default();
+    let left = jsonl_files(&home.join("sessions"));
     let _ = std::fs::remove_dir_all(&home);
+
+    assert!(
+        text.contains("archived "),
+        "archiving the conversation the run is in is still refused: {text:?}"
+    );
+    assert!(
+        filed.contains("a named conversation"),
+        "the conversation the run was in is not in the archive: {filed:?}"
+    );
+    assert_eq!(
+        left.len(),
+        1,
+        "the run left {} conversations behind, so the archived one is still being written: {:?}",
+        left.len(),
+        left
+    );
 }
+
 
 /// A warning raised while the REPL is running belongs in the transcript, not on stderr.
 ///
@@ -2620,6 +2728,190 @@ async fn renaming_a_conversation_tells_the_page_to_read_the_list_again() {
         written,
         vec!["a better name".to_string()],
         "the title was not written to the conversation that is open"
+    );
+}
+
+/// The page's half of deleting the conversation the run is *in*: the sidebar is told the list changed,
+/// the pane is told to start again, and there is nothing left to list.
+///
+/// Those are one operation seen by three readers, and the last is the one a person sees: with the old
+/// file gone and nothing said in the new conversation, `GET /sessions` has no rows -- which is what
+/// puts the sidebar on "no conversations yet" and the right pane back on its default page. That is the
+/// state asked for directly on 2026-09-23 ("the right side goes back to the default"), and it is the
+/// state DSH keeps for "no conversation chosen": a page, rather than an empty pane. Asserting the
+/// frames alone would pass over a route that went on listing the file it had just removed.
+#[tokio::test]
+async fn deleting_the_open_conversation_tells_the_page_to_start_again_and_lists_nothing() {
+    // No stub server: nothing here answers a model, and `/name` and `/delete` are file operations.
+    let home = test_home("delete-current-frame", "http://127.0.0.1:9/v1");
+
+    let log = home.join("transcript.txt");
+    let errors = home.join("stderr.txt");
+    let mut child = binary()
+        .arg("--web")
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::fs::File::create(&log).expect("transcript file"))
+        .stderr(std::fs::File::create(&errors).expect("stderr file"))
+        .spawn()
+        .expect("failed to run flint");
+
+    let (port, token) = port_and_token(&wait_for_url(&log));
+    let mut watching = http_stream(port, "/events", &token);
+    let opening = read_until(&mut watching, "\"model\":\"stub-model\"", 20);
+
+    // Named first, so there is a file to delete and a label for the listing to be missing afterwards.
+    // `/name` pushes a `sessions` frame of its own, and that one is read here rather than counted as
+    // the delete's: this test's claim is about the frames the *delete* produces.
+    let named = post_message(port, &token, "/name a better name");
+    let named_told = read_until(&mut watching, "event: sessions", 20);
+    let listed_before = http_get(port, "/sessions", &token);
+
+    let deleted = post_message(port, &token, "/delete 1");
+    // A `reset` and not only a `sessions`: the run moved to another conversation, and the pane is
+    // rebuilt from the file the run is now writing -- which, with nothing said in it, is the default
+    // page. Read to the `reset`, so what comes back carries both frames in the order they are pushed.
+    let told = read_until(&mut watching, "event: reset", 20);
+    let listed_after = http_get(port, "/sessions", &token);
+
+    drop(watching);
+    drop(child.stdin.take());
+    let exited = wait_for_exit(&mut child, 20);
+    let transcript = std::fs::read_to_string(&log).unwrap_or_default();
+    let left = jsonl_files(&home.join("sessions"));
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit");
+    assert!(
+        opening.contains("\"type\":\"state\""),
+        "the page was never told the state, so nothing here was measurable: {opening:?}"
+    );
+    assert!(
+        named.contains("202 Accepted") && named_told.contains("event: sessions"),
+        "the conversation was not named, so there was nothing to delete: {named:?} {named_told:?}"
+    );
+    assert!(
+        listed_before.contains("a better name"),
+        "the named conversation is not in the listing the sidebar draws: {listed_before:?}"
+    );
+    assert!(
+        deleted.contains("202 Accepted"),
+        "the delete was not accepted from the page: {deleted:?} {transcript:?}"
+    );
+    assert!(
+        transcript.contains("deleted ") && transcript.contains("started a new session"),
+        "the run did not delete the conversation it was in and start a fresh one: {transcript:?}"
+    );
+    assert!(
+        told.contains("event: sessions") && told.contains("event: reset"),
+        "the page was not told both halves: the list changed (so the deleted row goes) and the run \
+         moved (so the pane is rebuilt on the fresh conversation). Frames: {told:?} \
+         Terminal: {transcript:?}"
+    );
+    assert!(
+        listed_after.contains("\"sessions\":[]") && !listed_after.contains("a better name"),
+        "the sidebar still has a row for the conversation that was just deleted: {listed_after:?}"
+    );
+    assert!(
+        left.is_empty(),
+        "a conversation file is left where the run deleted its own: {left:?}"
+    );
+}
+
+/// A turn can change the list, so the page is told so -- twice over, and both are things a person
+/// watches for.
+///
+/// The first thing said in a conversation is what *creates* its file, so a run holding a conversation
+/// with nothing in it has no row in the sidebar until a turn writes one; and for a conversation nobody
+/// has named, the label the sidebar draws is the first question, which the same turn writes. Neither is
+/// derivable from the frames a turn already pushes. Found by a real browser on 2026-09-23: the harness
+/// deleted the conversation the run was in, asked its first question in the new one, and the sidebar
+/// stayed empty while the transcript had both the question and the answer.
+///
+/// The control is the frame that *is* asserted absent before the message: a `sessions` frame arriving
+/// for any other reason would make the claim below pass without the turn having said anything.
+#[tokio::test]
+async fn saying_something_tells_the_page_the_list_may_have_changed() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(&[
+                    r#"data: {"choices":[{"delta":{"content":"ok"}}]}"#,
+                    r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#,
+                    "data: [DONE]",
+                ])),
+        )
+        .mount(&server)
+        .await;
+
+    let home = test_home("turn-frame", &server.uri());
+    let log = home.join("transcript.txt");
+    let errors = home.join("stderr.txt");
+    let mut child = binary()
+        .arg("--web")
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::fs::File::create(&log).expect("transcript file"))
+        .stderr(std::fs::File::create(&errors).expect("stderr file"))
+        .spawn()
+        .expect("failed to run flint");
+
+    let (port, token) = port_and_token(&wait_for_url(&log));
+    let mut watching = http_stream(port, "/events", &token);
+    let opening = read_until(&mut watching, "\"type\":\"state\"", 20);
+    let listed_before = http_get(port, "/sessions", &token);
+
+    let asked = post_message(port, &token, "the first thing said");
+    let told = read_until(&mut watching, "event: sessions", 20);
+    let listed_after = http_get(port, "/sessions", &token);
+
+    drop(watching);
+    drop(child.stdin.take());
+    let exited = wait_for_exit(&mut child, 20);
+    let transcript = std::fs::read_to_string(&log).unwrap_or_default();
+    let written = jsonl_files(&home.join("sessions"));
+    let body = written
+        .first()
+        .map(|file| std::fs::read_to_string(file).unwrap_or_default())
+        .unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit");
+    assert!(
+        opening.contains("\"type\":\"state\""),
+        "the page was never told the state, so nothing here was measurable: {opening:?}"
+    );
+    assert!(
+        !opening.contains("event: sessions"),
+        "a `sessions` frame arrived before anything was said, so the claim below could pass without the \
+         turn having changed anything. Frames: {opening:?}"
+    );
+    assert!(
+        asked.contains("202 Accepted"),
+        "the message was not accepted from the page: {asked:?} {transcript:?}"
+    );
+    assert!(
+        told.contains("event: sessions"),
+        "the turn wrote the conversation's first event -- which is what puts a row in the sidebar -- and \
+         nothing told the page its list was stale. Frames: {told:?} Terminal: {transcript:?}"
+    );
+    assert_eq!(
+        written.len(),
+        1,
+        "the turn did not create exactly one conversation file: {written:?}"
+    );
+    assert!(
+        body.contains("the first thing said"),
+        "the file the sidebar would label the row from does not hold the question: {body:?}"
+    );
+    assert!(
+        listed_after.contains("the first thing said") && !listed_before.contains("the first thing said"),
+        "the route the page re-reads does not show the conversation the turn created: before \
+         {listed_before:?} after {listed_after:?}"
     );
 }
 

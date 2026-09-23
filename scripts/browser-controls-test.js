@@ -2824,6 +2824,133 @@ async function main() {
         JSON.stringify((await page.js(`document.getElementById("doc").textContent`)).slice(0, 300))
     );
 
+    // ---- the conversation you are *in* can be deleted, and the right side goes back to its page ---
+    //
+    // Everything above deletes a conversation that is not the run's own, which is the half the
+    // terminal always allowed. This is the other half, and it is the half it used to refuse: the row
+    // under the `...` of the conversation being *written*. The command closes that conversation first
+    // -- a fresh one is started, then the file is moved or removed -- so the sidebar loses the row and
+    // the pane has nothing to draw. That last state is the one asked for by name on 2026-09-23, with
+    // DSH as the reference: a run holding a conversation nobody has said anything in is still a page,
+    // not an empty pane. It is the last phase here on purpose, because it clears the transcript the
+    // claims above read.
+    //
+    // The list is scrolled to its bottom by the claim above (that is the state the upward flip is
+    // about), so the row is brought back into view by the press itself -- `click` does that -- rather
+    // than left to wherever the list happened to be.
+    //
+    // In a block of its own: `held` and `closed` are names the phases above already use for other
+    // things, and one `main` is one scope.
+    {
+    const held = await page.js(
+      `(() => { const li = document.querySelector("#sessions li.current");
+        if (!li) return null;
+        const label = li.querySelector("span.label");
+        return { id: li.title, label: label ? label.textContent : "" }; })()`
+    );
+    check(
+      "the run is holding a conversation, so deleting the one you are in has a subject",
+      !!held && !!held.id && !!held.label,
+      `current row: ${JSON.stringify(held)}`
+    );
+
+    const beforeOwn = before();
+    let ownRow = null;
+    if (held) {
+      await page.js(
+        `(() => { const li = document.querySelector("#sessions li.current");
+          if (!li) return null; const b = li.querySelector("button.more");
+          if (!b) return null; b.id = "harness-own"; return true; })()`
+      );
+      await page.click("#harness-own");
+      // Found by the run's own sentence for it, the way the fixture's row above is: the menu draws
+      // what a row *does*, so there is no command in the page to look for.
+      ownRow = await page.js(
+        `(() => { const li = document.querySelector("#sessions li.current");
+          const m = li && li.querySelector(".session-menu"); if (!m) return null;
+          const b = Array.from(m.querySelectorAll("button.row"))
+            .find((b) => String(b.textContent).trim() === "delete one");
+          if (!b) return null; b.id = "harness-own-delete"; return b.textContent; })()`
+      );
+      check(
+        "the conversation the run is writing offers the same rows in its own menu",
+        ownRow === "delete one",
+        `row: ${JSON.stringify(ownRow)}`
+      );
+      check(
+        "and opening that menu sent nothing",
+        flint.text().slice(beforeOwn).trim() === "",
+        `terminal gained: ${JSON.stringify(flint.text().slice(beforeOwn))}`
+      );
+      await page.click("#harness-own-delete");
+    }
+    let closed = "";
+    for (let i = 0; i < 40 && !(closed.includes("deleted ") && closed.includes("started a new session")); i += 1) {
+      await sleep(200);
+      closed = flint.text().slice(beforeOwn);
+    }
+    check(
+      "the second press deletes the conversation the run is in and starts a fresh one",
+      !!held && closed.includes("deleted ") && closed.includes("started a new session"),
+      `run printed: ${JSON.stringify(closed.slice(0, 300))}`
+    );
+
+    const swept = await page
+      .waitFor(
+        `!document.querySelector("#sessions li.current") &&
+         !Array.from(document.querySelectorAll("#sessions li"))
+            .some((li) => li.title === ${JSON.stringify(held && held.id)})`,
+        "the sidebar dropping the conversation the run was in",
+        30
+      )
+      .catch(() => null);
+    check(
+      "the sidebar stops showing it, and no row is marked as the run's own",
+      swept === true,
+      `rows: ${JSON.stringify(await page.js(
+        `Array.from(document.querySelectorAll("#sessions li")).map((li) => [li.title, li.className])`
+      ))}`
+    );
+
+    const resting = await page
+      .waitFor(
+        `document.querySelectorAll("#doc .turn").length === 0 &&
+         /Nothing loaded yet/.test(document.getElementById("doc").textContent)`,
+        "the pane going back to the page the viewer opens with",
+        30
+      )
+      .catch(() => null);
+    check(
+      "and the right side is back on the page the viewer opens with rather than an empty pane",
+      resting === true,
+      `transcript: ` +
+        JSON.stringify((await page.js(`document.getElementById("doc").textContent`)).slice(0, 200))
+    );
+
+    // And it is a page and not a picture of one: the run is in a conversation nothing has been said
+    // in, so the next thing said has to start one -- which is what "the default state" means for a
+    // run that keeps a file per conversation, and what makes the row's absence honest rather than a
+    // sidebar with a hole in it.
+    await page.js(`document.getElementById("message").focus(); true`);
+    await page.send("Input.insertText", { text: "after the delete" });
+    await page.click("#send");
+    const restarted = await page
+      .waitFor(
+        `document.getElementById("doc").textContent.includes("after the delete") &&
+         Array.from(document.querySelectorAll("#sessions li"))
+           .some((li) => li.textContent.includes("after the delete"))`,
+        "the page asking its first question in the conversation it started",
+        60
+      )
+      .catch(() => null);
+    check(
+      "and the page is one you can talk in: the next question starts a conversation of its own",
+      restarted === true,
+      `transcript: ` +
+        JSON.stringify((await page.js(`document.getElementById("doc").textContent`)).slice(0, 200))
+    );
+    }
+
   } finally {
     page.close();
     chrome.child.kill();

@@ -932,6 +932,55 @@ answer is the CSS default (below the row).
 | A menu on the last conversation opens where it can be read, and only the flip puts it there | the browser harness, in a shortened window with the list scrolled to its bottom | the claim carries its own control: it requires the menu to be inside the list's box *and* requires that removing the flip puts it outside, so it cannot pass over a menu that merely happened to fit. Red with the flip removed from the page: `up:false, flipped:false`, menu at `y=243`, list box ending at `y=243` |
 
 
+**A row acts on the conversation it was opened from, the run's own included — asked for 2026-09-23.**
+*"Add this: even the conversation you are in can be deleted, and the right side goes back to the default
+state. You can take DSH as the reference — when no conversation is chosen there is still a page."* The
+page already offered the rows on the current conversation and already sent that row's own `/delete <n>`;
+what refused was the terminal, with the sentence that named the workaround (`/new` starts a fresh one,
+then this one can be filed away by its number). That workaround *is* the operation, so `/archive` and
+`/delete` now do it: when the target is the conversation the run is writing, a fresh conversation is
+started first and the old file is then moved or removed. The refusal's reason survives as the **order**,
+and it is why the order is not cosmetic — the run must always have a file, and the old path must have
+nothing writing to it before it is touched. Nothing had to be flushed for that to be safe, which is a
+property of the format rather than a new guarantee: `SessionWriter::append` opens, writes, flushes and
+closes the file per event, so there is no buffer behind the writer that could recreate a deleted file.
+Both commands print `started a new session` after their own line, because that is what happened to the
+run and a person who asked to delete the conversation they were in has to be able to see they are now in
+another one rather than in nothing.
+
+The page half needed no new drawing, and that is the point worth recording: `Flow::NewAgent` is the arm
+that tells the page the run moved (`viewer.follow`), and it pushes `reset` beside the `sessions` frame
+the destructive commands already push. The pane is therefore rebuilt on a conversation nothing has been
+said in — which, since a session file appears with the first thing said in it, has **no file**: `GET
+/sessions` answers `"sessions":[]`, the sidebar says `no conversations yet`, and `#doc` is back to its
+`Nothing loaded yet.` paragraph. That is DSH's state for "no conversation chosen" — a page, not an empty
+pane — and it is the state the ask named. The composer still works from there, which is what makes the
+row's disappearance honest rather than a sidebar with a hole in it: the next thing said starts a
+conversation of its own.
+
+**A turn now tells the page the list may have moved, and the last claim above is what found it.** The
+pane going back to its default page is only half of "back to the default state"; the other half is what
+happens when the person says something there. A conversation's *file* is created by the first event
+written into it, so a run holding a conversation with nothing in it has no row in the sidebar — and for a
+conversation nobody has named, the label the sidebar draws **is** that first question. The browser
+harness asked its first question from the reset pane and the transcript had the question and the answer
+while the sidebar stayed empty: nothing had told the page its list was stale. The REPL now pushes the
+same `sessions` frame it pushes for `/name`, `/archive` and `/delete`, once per turn and
+unconditionally — deliberately unconditional, because "only when the file was just created" would be a
+second copy of the session's own rule about when a file appears, while the frame itself is an empty line
+against a route the page re-reads. `tests/cli_output.rs` holds it by the *absence* of that frame before
+the message, so a frame arriving for some other reason cannot make the claim pass.
+
+| Claim | How | Result |
+|---|---|---|
+| The conversation the run is writing is deleted by pressing the row in its own `⋯` menu | the browser harness, a real press | the terminal prints `deleted <path>` and `started a new session`, the sidebar loses the row and nothing is marked `current`. The row is found by the run's own sentence for it (`delete one`), because the menu no longer draws the command |
+| And the right side goes back to the page the viewer opens with | the browser harness | no `#doc .turn` and `Nothing loaded yet.` back in `#doc`; then the harness asks its first question from that pane and requires a conversation of its own to appear in the sidebar — a page you can talk in, not a picture of one |
+| Deleting it leaves the run in a *fresh* conversation rather than holding a resurrected file | `tests/cli_output.rs`, a real binary | `deleting_the_open_session_starts_a_fresh_one_and_the_old_one_goes`: red first, on the refusal itself. Exactly one session file is left, it holds the thing said after the delete, and it does **not** hold the name of the one that went — which is the failure the refusal existed to prevent |
+| The same rule for `/archive`, and the file really is in the archive | `tests/cli_output.rs` | `archiving_the_open_session_files_it_away_and_starts_a_fresh_one`: the archived file holds the name, and the sessions root holds one file — the new conversation — so the archived one is not still being written |
+| The page is told both halves, and the list really is empty | `tests/cli_output.rs`, a real `--web` process | `event: sessions` **and** `event: reset` on the feed after the delete, and `GET /sessions` answers `"sessions":[]` with no title in it. Asserting the frames alone would pass over a route that went on listing the file it had just removed |
+| A turn tells the page the list may have moved | `tests/cli_output.rs`, a real `--web` process | `saying_something_tells_the_page_the_list_may_have_changed`: red first, with `turn.started` on the feed and no `sessions` frame. It carries its own control — the same test asserts that **no** `sessions` frame arrived before the message — and it also asserts the file holds the question and `GET /sessions` shows it, which is the row the page is about to draw |
+
+
 **The open conversation's name is edited in the same menu — added 2026-09-17.** The name is the one
 thing the sidebar *shows* that nothing on the page could change: `/name <text>` has been in the frame's
 forms class for as long as there has been one, and the panel's row for it can only rename the
@@ -958,9 +1007,11 @@ nobody can answer.
 run's own, whose rename field is typed into and whose send button carries the name to the run, and a
 fixture row's, whose *second* press carries that row's number and removes that file — which the directory
 listing witnesses, and which the terminal would have agreed with even if the wrong number had been sent.
-What is still reasoned rather than seen is the three things this paragraph named: the menu's position
-(`absolute`, against a `relative` row), its dismissal (the button toggles it, a `reset` clears it, and
-a click elsewhere does **not** close it) and its behaviour while the sidebar scrolls. The dismissal is the
+Three things this paragraph named were reasoned rather than seen: the menu's position (`absolute`,
+against a `relative` row), its dismissal (the button toggles it, a `reset` clears it, and a click
+elsewhere does **not** close it) and its behaviour while the sidebar scrolls. Position and
+scrolling are measured as of 2026-09-23 (the two claims under "One class, two menus": the rows inside
+the box, and the upward flip with its own control), so the dismissal is the one left. The dismissal is the
 one worth watching in a real browser: the panel's choice list
 has an explicit `‹ commands` row to close it, and this menu has only its own button. The rename field
 adds two more halves that are still unmeasured, and for the same reason the harness presses the field's own

@@ -3685,9 +3685,13 @@ function peerPicker() {
 /// `send` and this row's number -- before it sends it. What the list holds comes from the frame (see
 /// `destroyingRows`), and the number is this row's, which is the numbering those commands take.
 ///
-/// The conversation you are in is offered them too. The terminal refuses it and says why ("/new
-/// starts a fresh one; then this one can be filed away by its number"), and that answer is better
-/// than a page that hides a row because it decided a rule the terminal owns.
+/// The conversation you are in is offered them too, and the terminal answers it by *closing* that
+/// conversation first: the run starts a fresh one and then files the old one away, which is the
+/// workaround its refusal used to name ("/new starts a fresh one; then this one can be filed away by
+/// its number") done in one press. So the row works on the row it was opened from, and the pane behind
+/// it goes back to the default page -- the fresh conversation has nothing said in it, so it has no
+/// file and no blocks. A page that hid the row instead would be deciding a rule the terminal owns, and
+/// one that offered it and had it refused would be worse than either.
 function sessionRow(doc, session) {
   const item = el("li", session.current ? "current" : "");
   item.appendChild(el("span", "n", String(session.n)));

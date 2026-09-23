@@ -47,10 +47,13 @@ that had to stop asserting the bug), and re-measured a **ninth** time the same d
 round at the top of that section (four page tests in `scripts/web-view-test.js`, all watched red first,
 and two rewritten browser-harness claims), and re-measured a **tenth** time the same day, after the round
 above it found the sidebar's menu collapsing to a 10px bar (one `web_view` test, eight filler
-conversations in the browser harness and three new browser claims, one of which carries its own control):
+conversations in the browser harness and three new browser claims, one of which carries its own control),
+and re-measured an **eleventh** time the same day, after the round above that — deleting the conversation
+the run is in (the refusal test rewritten into two `cli_output` tests, two more `--web` tests for the
+frames a delete and a turn push, and seven new browser claims):
 `cargo test`
-**697 passing, 1 ignored** across the 14 suites (lib **388**, bin **9**, `agent_loop` 34,
-`balance` 7, `cli_output` **119**, `json_output` 41, `say` 6,
+**700 passing, 1 ignored** across the 14 suites (lib **388**, bin **9**, `agent_loop` 34,
+`balance` 7, `cli_output` **122**, `json_output` 41, `say` 6,
 `search_tool` 4, `task` 17, `term_capture` 20 + 1 ignored, `tty_hangup` **0 on Windows** and 3 on Unix
 — the suite is `#![cfg(unix)]`, and the library carries a few `#[cfg(unix)]` tests of its own, so the
 ubuntu job's total is larger and is *not* quoted here as if it were this number — `web_view` **42**,
@@ -60,7 +63,7 @@ ubuntu job's total is larger and is *not* quoted here as if it were this number 
 more step of that same CI job** — `examples/python/test_call.py` and `examples/mcp/test_mcp.py`, each
 resolving the binary `cargo test` just built for itself and refusing a pass that came from an installed
 `flint` on `PATH`; the
-browser harness run by hand at **123/123 claims held**, printing the list of drives and not-drives it is
+browser harness run by hand at **130/130 claims held**, printing the list of drives and not-drives it is
 bounded by. The release binary on `PATH` is the tree's (`flint --version` → `flint 0.1.0`, exit 0, and
 its SHA-256 is the one `target/release/flint.exe` was built with).
 
@@ -1830,6 +1833,86 @@ picker, type `/config` into the composer, and see whether the answer lands in th
 the block is drawn — then open the `commands` panel and read it against `/help` in the terminal.
 
 ## What was just done
+
+### The conversation you are in can be deleted, and the right side goes back to its page — 2026-09-23
+
+**Asked for directly, after the menu round below was confirmed fixed: "add this — even the conversation
+you are in can be deleted, and the right side goes back to the default state. Take DSH as the reference:
+when no conversation is chosen there is still a page."** The page half already existed and always had:
+the `⋯` menu draws the frame's destructive rows on the current conversation like any other row, and the
+press sends that row's own `/delete <n>`. What refused was the **terminal**, with a sentence that named
+the workaround — `that is the conversation you are in. /new starts a fresh one; then this one can be
+filed away by its number.` That workaround *is* the operation, so the command now does it: when `/archive`
+or `/delete` is aimed at the conversation the run is writing, a fresh conversation is started first and
+the old file is then moved or removed. The refusal's reason survives as the **order**, and the order is
+not cosmetic — the run must always have a file, and the old path must have nothing writing to it before
+it is touched.
+
+**Nothing had to be flushed for that to be safe, and that is a property of the format rather than a new
+guarantee**: `SessionWriter::append` opens, writes, flushes and closes the file per event, so there is no
+buffer behind the writer that could recreate a deleted file on drop. Had the writer held an open
+`BufWriter`, the fix would have needed an explicit flush before the `mv`/`rm` — worth knowing before
+touching it. Both commands print `started a new session` after their own line (the sentence `/new` already
+prints), because a person who asked to delete the conversation they were in has to be able to see they
+are now in another one rather than in nothing.
+
+**The page needed no new drawing, and that is the part to keep.** `Flow::NewAgent` is the arm that tells
+the page the run moved (`viewer.follow`), and it pushes `reset` beside the `sessions` frame the
+destructive commands already push. So the pane is rebuilt on a conversation nothing has been said in —
+which, since a file appears with the first thing said in it, **has no file**: `GET /sessions` answers
+`"sessions":[]`, the sidebar says `no conversations yet`, and `#doc` is back to its `Nothing loaded yet.`
+paragraph. That is DSH's state for "no conversation chosen" — a page, not an empty pane — and the
+composer still works from there, which is what makes the row's disappearance honest rather than a sidebar
+with a hole in it.
+
+**A shared helper fell out of it.** `/new` and the destructive rows needed the same three things in the
+same order, so `fresh_conversation` in `src/main.rs` builds the writer (lazily — nothing appears on disk
+until something is said), builds the agent around it with the run's own `readonly` guard and working
+directory carried over, and hands back the provider the REPL stores beside the agent. Two copies of that
+would not have failed symmetrically: `/new` forgetting the guard is a bug, and a destructive row
+forgetting it is the same bug aimed at the door whose whole purpose is throwing a conversation away.
+
+**Five tests, all watched red first for the right reason.** The terminal half is
+`deleting_the_open_session_starts_a_fresh_one_and_the_old_one_goes` (red on the refusal itself: the
+terminal printed the `that is the conversation you are in` sentence), which asserts exactly one file is
+left, that it holds the thing said after the delete, and that it does **not** hold the name of the one
+that went — the resurrected-fragment failure the refusal existed to prevent. `archiving_the_open_session`
+is the same rule for `/archive`, with the archived file as the witness that it was filed rather than
+removed (its first red run was the helper panicking on a missing `archive/` directory, which is the shape
+of the home rather than the behaviour — fixed before the assertion was believed). The page half is
+`deleting_the_open_conversation_tells_the_page_to_start_again_and_lists_nothing`, a real `--web` process:
+`event: sessions` **and** `event: reset` on the feed, and `GET /sessions` answering `"sessions":[]` with
+no title in it. Asserting the frames alone would have passed over a route that went on listing the file
+it had just removed. The old test `the_repl_names_the_open_session_and_refuses_to_delete_it` asserted the
+refusal, so it had to stop asserting the bug — it is now the two terminal tests above, `/name` still
+covered by their `/sessions`-and-echo assertions.
+
+**And the browser harness drives the whole thing in its last phase** (seven new claims, 130 in total): a
+real press on the current row's `⋯`, the row found by the run's own sentence `delete one` (the menu draws
+what a row *does*, so there is no command in the page to look for), then `deleted <path>` and `started a
+new session` on the run's stdout, the sidebar losing the row with nothing left marked `current`, `#doc`
+back to `Nothing loaded yet.` with no turns, and finally the harness typing a question into that pane and
+requiring a conversation of its own to appear in the sidebar — a page you can talk in, not a picture of
+one. It is the last phase on purpose, because it clears the transcript the claims above read. The phase
+sits in a block of its own: `held` and `closed` are names the phases above already use, and one `main` is
+one scope.
+
+**That last claim failed on its first run, and it was right to — the sidebar never learned that the turn
+had created a file.** `tests/cli_output.rs`'s `saying_something_tells_the_page_the_list_may_have_changed`
+was written for it and watched red (the feed carried `turn.started` and no `sessions` frame): a
+conversation's file is created by the first event written into it, and for a conversation nobody has
+named the label the sidebar draws **is** that first question — so a turn can put a row in the list, and
+nothing was telling the page. The REPL now pushes the same `sessions` frame it pushes for `/name`,
+`/archive` and `/delete`, once per turn, unconditionally: "only when the file was just created" would be
+a second copy of the session's own rule about when a file appears, and the frame is an empty line against
+a route the page re-reads. The test's control is the *absence* of that frame before the message.
+
+**The gate after this round**: `cargo test` **700 passing, 1 ignored** across the 14 suites (lib 388, bin
+9, `agent_loop` 34, `balance` 7, `cli_output` **122** — one test stopped asserting the old refusal, three
+were added for the delete/archive halves and one for the turn's frame, `json_output` 41, `say` 6,
+`search_tool` 4, `task` 17, `term_capture` 20 + 1 ignored, `tty_hangup` 0 on Windows, `web_view` 42,
+`who` 10, doc-tests 0); clippy silent; `term-layout-test.js` and `web-view-test.js` green; both
+`examples/` doors green; the browser harness by hand at **130/130**.
 
 ### The menu was a bar: one class, two menus — 2026-09-23
 
