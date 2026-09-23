@@ -353,6 +353,48 @@ The level carries and the *field* does not — the same split as the section abo
 asks in is the new endpoint's, because a fact about somebody's server cannot travel with a person's
 choice.
 
+## A run-level decision is not a conversation
+
+Reported on 2026-09-23: *"a bunch of empty sessions — find out which flow created them."* Nine files in
+one real home had no `chat` line at all. Seven held `meta` and a `switch`, two held `meta` and a
+`thinking` level, and every one of them was a run that had been *told* something about how to ask and
+then said nothing: `flint --thinking high` opened and closed, `/thinking high` typed at an empty prompt,
+the page's thinking row, a `/model`, `/provider` or `/reload` before the first word. Each of those lines
+was appended to the session writer, and appending is what creates the file.
+
+The file is the conversation's, and the format's own rule — one line per event, `meta` first, created by
+the first event in it — was never about a run deciding a setting. A file with no messages is a
+conversation in `/sessions`, in the page's sidebar, in `--list-sessions`, and one that `--continue` will
+happily resume as the newest thing in the directory, answering with nothing. It is the same complaint as
+a child run's conversation surfacing in a person's list, arriving through a different door: something
+that is not a conversation got written where conversations live.
+
+**So the writer holds those lines instead of writing them.** `thinking`, `schema` and `switch` are held
+in the order they were decided and flushed under `meta` by the first write that really is the
+conversation starting. Nothing is lost by the delay — they are the state in force when the conversation
+begins, which is exactly the position they now occupy — and a conversation resumed tomorrow is held at
+what the person chose, which was the reason writing them early was tempting. The three are named at the
+one place that writes files rather than checked at each door, because there are eight doors (two flags,
+four commands, two page rows) and a rule enforced at eight places is a rule with eight chances to be
+forgotten.
+
+**The `switch` needed a second answer, and finding it is what kept the earlier fix honest.** A
+conversation that has not begun has nothing to switch *from*, so a held `switch` has no meaning as a
+line; but simply dropping it would have broken the promise the funnel's write exists for — "the file
+believes the model in force, so `--resume` does not send the old one" — because the pending `meta` line
+was built with the provider and model the run *started* under. The two facts are one: the writer
+retargets the `meta` it has not written yet, so the file that appears later names the model its
+conversation actually began on and holds no `switch` line, and a switch *inside* a conversation is still
+an appended line. The two tests that had to change were asserting the file a switch created on a run
+that had said nothing, which is the bug; both now ask a question first, and one of them reads the file
+before the switch rather than after, so its "appended to, not rewritten" assertion means what it says.
+
+The writer's laziness is the other half and was already right: `SessionWriter::create` claims a name and
+holds the `meta` line rather than touching the disk, so "opening flint and typing nothing leaves
+nothing" has always been true for the plain run. What was missing is that a *decision* is not a thing
+said. This is not the same rule as `--no-session`, which promises no file at all; a run that says
+something after deciding a level writes both, and the level is in the file.
+
 ## The calls of one message run together, and the report stays in order
 
 The model asks for several tool calls in one assistant message. flint used to run them one after

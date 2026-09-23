@@ -236,8 +236,21 @@ pub struct SessionWriter {
     /// `None` once the file exists: when resuming, because the file is already there and already has
     /// one, and after the first write, because *this* writer is the one that made it. Held rather than
     /// written at construction because a session file appears when the first thing is *said*, not when
-    /// flint is opened -- see `append`.
+    /// flint is opened -- see `append`. `meta.is_none()` is therefore also the answer to "is there a file
+    /// on disk", which `switched` and `hold` both need.
     meta: Option<SessionEvent>,
+    /// Lines about *how* this run asks, decided before the conversation had a file to put them in.
+    ///
+    /// The reasoning level and the answer shape are the run's rather than the conversation's, and they
+    /// are written down so a conversation resumed tomorrow is held at what the person chose -- but
+    /// writing one down used to be enough to *create* the file, so a run that was told `--thinking high`
+    /// and then said nothing left an empty conversation behind: a row in `/sessions`, in the page's
+    /// sidebar and in `--continue`, holding no messages at all. Reported from a real home on 2026-09-23
+    /// as "a bunch of empty sessions", and every one of them was this.
+    ///
+    /// Held in the order they were decided and flushed under `meta` at the first real write, which is
+    /// where they belong: they are the state in force when the conversation begins.
+    held: Vec<SessionEvent>,
 }
 
 /// A conversation being copied into a file of its own: the messages, the name they travel with, the file
@@ -307,6 +320,7 @@ impl SessionWriter {
         Ok(SessionWriter {
             path,
             meta: Some(meta),
+            held: Vec::new(),
         })
     }
 
@@ -438,6 +452,8 @@ impl SessionWriter {
             path: path.to_path_buf(),
             // Nothing: the file is already there, and its `meta` line is already in it.
             meta: None,
+            // Nor anything waiting to go under it: every write below lands in a file that exists.
+            held: Vec::new(),
         })
     }
 
@@ -464,6 +480,25 @@ impl SessionWriter {
         writeln!(file, "{line}").context("cannot write session event")?;
         file.flush().context("cannot flush session event")?;
         Ok(())
+    }
+
+    /// Record a line about *how* this run asks, without creating a conversation that has not started.
+    ///
+    /// The level and the shape are decided at the command line or by a slash command, and either can
+    /// happen before the person has said anything: `--thinking high` then Ctrl-C leaves nothing to
+    /// resume, and a file holding `meta` and a level is a conversation in every listing that has none.
+    /// So it is held until there is something to attach it to, and `claim` writes it under `meta` the
+    /// moment the conversation begins -- see the `held` field for what this cost when it was not so.
+    ///
+    /// A writer whose file already exists appends, which is every case where the run *has* something to
+    /// say about itself: a resumed conversation, or one that has already spoken.
+    fn hold(&mut self, event: SessionEvent) -> Result<()> {
+        if self.meta.is_some() {
+            self.held.push(event);
+            Ok(())
+        } else {
+            self.append(&event)
+        }
     }
 
     /// Open the file this writer appends to, taking the name if it is still free.
@@ -504,6 +539,15 @@ impl SessionWriter {
                         let meta =
                             serde_json::to_string(meta).context("cannot serialize session event")?;
                         writeln!(&file, "{meta}").context("cannot write session event")?;
+                    }
+                    // Whatever the run decided about how to ask, now that there is a conversation for it
+                    // to belong to: under `meta`, in the order it was decided, and before the line that
+                    // is creating the file. Taken rather than copied, so a writer that somehow claimed
+                    // twice could not write the same decision twice.
+                    for event in std::mem::take(&mut self.held) {
+                        let line = serde_json::to_string(&event)
+                            .context("cannot serialize session event")?;
+                        writeln!(&file, "{line}").context("cannot write session event")?;
                     }
                     // Claimed. `meta` is also the flag that says "not claimed yet", so it goes last.
                     self.meta = None;
@@ -566,7 +610,7 @@ impl SessionWriter {
     /// everything else, so the last line is the contract in force and the history of contracts is
     /// still readable.
     pub fn schema(&mut self, schema: Option<&serde_json::Value>) -> Result<()> {
-        self.append(&SessionEvent::Schema {
+        self.hold(SessionEvent::Schema {
             schema: schema.cloned(),
         })
     }
@@ -579,7 +623,7 @@ impl SessionWriter {
     /// rewriting what it started as. Always written when a run was *told* a level, `off` included,
     /// so "the last `thinking` line wins" can answer "and back to nothing".
     pub fn thinking(&mut self, level: &str) -> Result<()> {
-        self.append(&SessionEvent::Thinking {
+        self.hold(SessionEvent::Thinking {
             level: level.to_string(),
         })
     }
@@ -605,6 +649,21 @@ impl SessionWriter {
     /// one conversation into two files -- two rows in the page's sidebar, two numbers in `/sessions`,
     /// and half a conversation behind either of them.
     pub fn switched(&mut self, provider: &str, model: &str) -> Result<()> {
+        // A conversation that has not begun has nothing to switch *from*: the pending `meta` was built
+        // with the provider and model the run started under, so it is retargeted instead of appended to.
+        // That keeps the funnel's promise -- the file believes the model in force, so a resume of it
+        // does not send the old one -- without the `switch` line that used to create the file, and it is
+        // why the decision above ("a switch is always recorded") could not simply be skipped here.
+        if let Some(SessionEvent::Meta {
+            provider: from,
+            model: was,
+            ..
+        }) = &mut self.meta
+        {
+            *from = provider.to_string();
+            *was = model.to_string();
+            return Ok(());
+        }
         self.append(&SessionEvent::Switch {
             provider: provider.to_string(),
             model: model.to_string(),
@@ -2203,5 +2262,132 @@ mod tests {
         delete(&path).unwrap();
         assert!(!path.exists());
         assert_eq!(list(&dir.0).unwrap().len(), 0);
+    }
+
+    /// A run-level decision does not create a conversation, and is written the moment one begins.
+    ///
+    /// Reported from a real home on 2026-09-23: "a bunch of empty sessions". They were runs that had
+    /// been *told* something about how to ask -- `--thinking high`, `/thinking <level>`, `--schema`, or
+    /// a `/model`/`/provider`/`/reload` before anything was said -- each of which appended its line and
+    /// so created the file. A file with no messages is a row in `/sessions`, in the page's sidebar and
+    /// in `--continue`, and resuming one answers with nothing at all.
+    ///
+    /// The decision is still *kept*: it is the state in force when the conversation begins, so it lands
+    /// under `meta` at the first real write, in the order it was decided.
+    #[test]
+    fn a_level_decided_before_the_conversation_is_held_and_then_written_under_meta() {
+        let root = TempDir::new("held-thinking");
+        let project = TempDir::new("held-thinking-project");
+        let mut writer = SessionWriter::create(&root.0, &project.0, "p", "m", None).expect("create");
+        let path = writer.path().to_path_buf();
+
+        writer.thinking("high").expect("thinking");
+        assert!(
+            !path.exists(),
+            "a run that was told a level and then said nothing left a session file behind"
+        );
+
+        writer
+            .write_messages(&[Message::user("now say something")], None)
+            .expect("write_messages");
+        let text = std::fs::read_to_string(&path).expect("read");
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[0].contains(r#""type":"meta""#), "{text}");
+        assert!(
+            lines[1].contains(r#""type":"thinking""#) && lines[1].contains("high"),
+            "the level decided before the conversation is not in the file, so a resumed run would \
+             fall back to the config: {text}"
+        );
+        assert!(lines[2].contains(r#""type":"chat""#), "{text}");
+        assert_eq!(load(&path).unwrap().thinking.as_deref(), Some("high"));
+    }
+
+    /// The same for the answer shape, which is written by the same kind of door.
+    #[test]
+    fn a_shape_decided_before_the_conversation_is_held_too() {
+        let root = TempDir::new("held-schema");
+        let project = TempDir::new("held-schema-project");
+        let mut writer = SessionWriter::create(&root.0, &project.0, "p", "m", None).expect("create");
+        let path = writer.path().to_path_buf();
+        let shape: serde_json::Value = serde_json::json!({"type": "object"});
+
+        writer.schema(Some(&shape)).expect("schema");
+        assert!(
+            !path.exists(),
+            "a run that was told a shape and then said nothing left a session file behind"
+        );
+
+        writer
+            .write_messages(&[Message::user("now say something")], None)
+            .expect("write_messages");
+        assert_eq!(
+            load(&path).unwrap().output_schema.as_ref(),
+            Some(&shape),
+            "the shape decided before the conversation was not written under meta"
+        );
+    }
+
+    /// A switch before the conversation starts belongs in `meta`, not in a line of its own.
+    ///
+    /// This is the other half of the same report, and the reason the funnel's write cannot simply be
+    /// dropped when there is no file: the pending `meta` was built with the provider and model the run
+    /// *started* under, so retargeting it is what keeps the file honest about which model its
+    /// conversation began on. A `switch` line would say a conversation changed models when it had not
+    /// begun -- and it would be the line that created it.
+    #[test]
+    fn a_switch_before_the_conversation_retargets_meta_instead_of_creating_a_file() {
+        let root = TempDir::new("held-switch");
+        let project = TempDir::new("held-switch-project");
+        let mut writer = SessionWriter::create(&root.0, &project.0, "p1", "m1", None).expect("create");
+        let path = writer.path().to_path_buf();
+
+        writer.switched("p2", "m2").expect("switched");
+        assert!(
+            !path.exists(),
+            "switching model before anything was said left an empty conversation behind"
+        );
+
+        writer
+            .write_messages(&[Message::user("now say something")], None)
+            .expect("write_messages");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            !text.contains(r#""type":"switch""#),
+            "a conversation that had not started recorded a switch as though one had happened: {text}"
+        );
+        let loaded = load(&path).unwrap();
+        assert_eq!(
+            (loaded.provider.as_str(), loaded.model.as_str()),
+            ("p2", "m2"),
+            "the file says the conversation began on the model the run started under, not the one it \
+             was switched to before saying anything: {text}"
+        );
+    }
+
+    /// And a switch on a conversation that *has* started is still an appended line.
+    ///
+    /// The funnel's own comment defends this ("leaving it out of one branch is how a switch came to
+    /// write nothing at all, with the page told the provider had changed and no file to prove it"), and
+    /// it is the case a `--resume`d writer is in: the file exists, so there is nothing pending to
+    /// retarget.
+    #[test]
+    fn a_switch_after_the_conversation_has_started_is_still_a_line() {
+        let root = TempDir::new("switch-line");
+        let project = TempDir::new("switch-line-project");
+        let mut writer = SessionWriter::create(&root.0, &project.0, "p1", "m1", None).expect("create");
+        let path = writer.path().to_path_buf();
+        writer
+            .write_messages(&[Message::user("something")], None)
+            .expect("write_messages");
+
+        writer.switched("p2", "m2").expect("switched");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            text.contains(r#""type":"switch""#),
+            "a switch inside a conversation was not recorded anywhere: {text}"
+        );
+        let loaded = load(&path).unwrap();
+        assert_eq!((loaded.provider.as_str(), loaded.model.as_str()), ("p2", "m2"));
+        assert_eq!(loaded.messages.len(), 1);
     }
 }

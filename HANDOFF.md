@@ -41,9 +41,11 @@ hand), and re-measured a fifth time the same day, after the branch-cut round at 
 **2026-09-23**, after the directory-listing round at the top of that same section, and re-measured a
 seventh time the same day, after the two rebuild-carry rounds above it (the funnel, then the three other
 doors — one unit test in the binary and three `cli_output` tests, whose only observable is a request
-body): `cargo test`
-**691 passing, 1 ignored** across the 14 suites (lib **384**, bin **9**, `agent_loop` 34,
-`balance` 7, `cli_output` **118**, `json_output` 41, `say` 6,
+body), and re-measured an eighth time the same day, after the empty-session round at the top of that
+section (four unit tests in `src/session.rs`, one `cli_output` test over five doors, and two page tests
+that had to stop asserting the bug): `cargo test`
+**696 passing, 1 ignored** across the 14 suites (lib **388**, bin **9**, `agent_loop` 34,
+`balance` 7, `cli_output` **119**, `json_output` 41, `say` 6,
 `search_tool` 4, `task` 17, `term_capture` 20 + 1 ignored, `tty_hangup` **0 on Windows** and 3 on Unix
 — the suite is `#![cfg(unix)]`, and the library carries a few `#[cfg(unix)]` tests of its own, so the
 ubuntu job's total is larger and is *not* quoted here as if it were this number — `web_view` 41,
@@ -1824,6 +1826,71 @@ the block is drawn — then open the `commands` panel and read it against `/help
 
 ## What was just done
 
+### A decision is not a thing said — 2026-09-23
+
+**Reported directly: "a bunch of empty sessions — find out which flow created them."** Nine files in the
+real home had no `chat` line at all. Seven held `meta` and a `switch` (provider `stub`, working directory
+`%TEMP%` — probe runs of mine from the two rounds above, which is worth owning: they were created against
+the person's real `FLINT_HOME` rather than a scratch one, and they are the same defect, not a separate
+mistake). Two held `meta` and `{"type":"thinking","level":"high"}`, in the person's own directory, and
+those are the report: a run that was told how to ask and then said nothing.
+
+**The flows were found by probing the built binary rather than by reading it**, one door per run against
+a scratch home, and there are eight of them: `--thinking <level>` and `--schema`/`--no-schema` at
+startup, `/thinking <level>`, `/model`, `/provider`, `/reload`, `/config set`, and the page's rows that
+send the same commands. Every one of them appended a run-level line to the session writer, and appending
+is what creates the file — `SessionWriter::create` claims a name and holds the `meta` line, so "opening
+flint and typing nothing leaves nothing" was already true for the plain run and false for every door that
+decided something.
+
+**The fix is in the writer, not at the doors.** `thinking`, `schema` and `switch` are *held* by a new
+`SessionWriter::hold` and flushed under `meta` by the first write that really is the conversation
+starting, in the order they were decided — which is where they belong, because they are the state in
+force when it begins. A rule at eight doors is a rule with eight chances to be forgotten; this one is at
+the only place that writes files.
+
+**The `switch` needed a second answer, and that is the part worth reading.** A conversation that has not
+begun has nothing to switch *from*, so a held `switch` is meaningless as a line — but dropping it would
+have broken the promise the funnel's own comment defends ("the file believes the model in force, so
+`--resume` does not send the old one"), because the pending `meta` was built with the provider and model
+the run *started* under. So a switch before the first word **retargets the pending `meta`** instead: the
+file that appears names the model its conversation actually began on, and holds no `switch` line. Both
+halves are checked end to end, including `/model stub-other` typed before `hello`.
+
+**Two existing tests had to change, and they were asserting the bug.** `switching_provider_keeps_the_
+conversation_in_its_file` and `a_provider_can_be_added_from_the_page` each switched provider on a run
+that had said nothing and required one session file to exist — the exact empty conversation this round
+removes. Both now ask a question first (a stub server, `answer_once`), which is also what their names
+promise; the first additionally reads the file *before* the switch now, so its "appended to, not
+rewritten" assertion stopped comparing two snapshots of the same moment.
+
+**Held by four unit tests and one `cli_output` test, each watched red.** In `src/session.rs`:
+`a_level_decided_before_the_conversation_is_held_and_then_written_under_meta`,
+`a_shape_decided_before_the_conversation_is_held_too`,
+`a_switch_before_the_conversation_retargets_meta_instead_of_creating_a_file` (all three first run red with
+"left a session file behind"), and `a_switch_after_the_conversation_has_started_is_still_a_line` — green
+before the change and after it, which is what makes it a regression test for the funnel rather than a
+description of the fix. `a_run_level_decision_before_the_first_word_leaves_no_session` drives all five
+doors through the real binary, and its red run printed the person's own file back:
+`{"type":"meta",…}` + `{"type":"thinking","level":"high"}`.
+
+**The nine files in the real home were reported, not deleted** — two of them are the person's, and
+nothing outside this repository is removed without being asked. A run-level decision is unaffected in a
+conversation that *does* happen: `flint --thinking high`, then a question, gives `meta`, `thinking`,
+`chat`, and the level is what a resume tomorrow is held at.
+
+**The browser harness was asserting the same defect, which is why it had to change with the fix.** Its
+sidebar-menu phase reads the row the run is *writing* — and that row existed only because the switch
+phase above it pressed a setting, which used to create the file. Two claims now hold the new rule
+instead (a switch alone adds no conversation to the sidebar, and the run's own row arrives with the
+first thing it says), the phase names its own conversation to have one to put a menu on, and a third
+claim waits for the `current` row rather than assuming the sidebar had been redrawn — a `/name` puts a
+`sessions` frame on the feed, so a menu opened a round-trip early is replaced under the pointer. One
+more thing fell out of running it: the menu's `/name` field arrives **holding the conversation's own
+name** (a rename is an edit), so the claim that a typed name reaches the run now reads the field back
+and requires both halves rather than requiring the page to clear a field somebody may be editing.
+`node scripts/browser-controls-test.js` is **121/121** with all of that in.
+
 ### The other three doors carry it too — 2026-09-23
 
 **The round below fixed one funnel and left the other rebuilds alone, and three of them had the same
@@ -1862,6 +1929,10 @@ a stream it was reading — every *check* in the run up to that point had passed
 The same command was green on its own immediately afterwards and green again in the gate that follows,
 and nothing in this round touches the MCP surface (`flint -p --json`, the schema path, the exit codes).
 It is noted here because a red that nothing explains is worth a line, not because anything was fixed.
+**Seen a second time on 2026-09-23**, in the gate of the empty-session round below: the same traceback on
+that script's stderr while the script printed `all checks passed` and exited 0, and green on its own
+immediately after with no traceback at all. Two sightings, one shape, still nothing in either round's
+diff near the MCP path — recorded as a flake to keep watching rather than as a fault with a cause.
 
 ### A rebuild keeps what the run decided — 2026-09-23
 

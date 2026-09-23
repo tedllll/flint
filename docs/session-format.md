@@ -33,6 +33,19 @@ file is also what claims the name (`create_new`): a name that turns out to be ta
 writer to the next millisecond rather than appending to somebody else's conversation, and the
 `id` it writes moves with it, because the id in the file has to be the id *of* the file.
 
+**Three events are about how the run asks rather than about the conversation, and they are held
+until the conversation begins.** `thinking`, `schema` and `switch` can all be decided before
+anything is said — `--thinking high` at the command line, `/thinking <level>` at an empty prompt,
+a `/model` or a `/reload` on a run nobody has spoken to — and writing one used to be enough to
+*create* the file, which left a conversation in every listing with no messages in it at all
+(reported from a real home on 2026-09-23, where a handful had collected). They are held in the
+order they were decided and written under `meta` by the first event that really is the
+conversation starting, which is where they belong: they are the state in force when it begins. A
+`switch` is the one of the three that has nowhere to go in that position — a conversation that
+has not begun has nothing to switch *from* — so it retargets the `meta` line the writer has not
+written yet, and the file that appears later names the model its conversation actually began on.
+A `switch` on a conversation that has already started is still a line of its own, as below.
+
 **A run can be told to write none of this.** `--no-session` means exactly that: no file is created, so
 there is no `meta`, no id, and nothing for a listing to find — and no way to continue from it later,
 which is the point. What such a run still writes is the state it needs to work: spilled tool output and
@@ -131,6 +144,14 @@ now: `/model`, `/provider` and `/reload` append a `switch` when they move a conv
 to another model, and the last `switch` in the file is the one in force (`--resume` reads
 it). Editing the first line to change a session's model would be a lie about where it
 began; appending a `switch` is how you say it moved.
+
+The one case that is not a `switch` is a switch *before* the conversation starts, where
+there is nothing to say it moved from: the writer has not written `meta` yet — it writes it
+with the first real event (see the top of this file) — so a `/model` on a run nobody has
+spoken to retargets that pending line instead. The file that appears when the person finally
+says something therefore begins at the model they were on, with no `switch` in it, which is
+what `--resume` reads and what stops the conversation being sent to the model it was moved
+away from. A `switch` line is written from the moment there is a conversation to switch.
 
 `parent` appears on a conversation **another run started** — a `task`/`tasks` child, or the
 same thing reached from Python or MCP — and holds the parent's session id:

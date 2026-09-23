@@ -765,6 +765,9 @@ async function main() {
       `names: ${JSON.stringify(names)}`
     );
     const started = before();
+    // Read before the press, for the claim under it: what the sidebar holds is conversations, and a
+    // switch is a decision about how to ask rather than something said.
+    const rowsBeforeSwitch = await page.js(`document.querySelectorAll("#sessions li").length`);
     // The switch that is moved is chosen by *name*, not by position: a row added to the run screen
     // above it must not silently change which command this claim presses.
     const was = await page.js(VALUE_OF("run", "verbose"));
@@ -812,6 +815,19 @@ async function main() {
         flint.text().length > started,
       `page: ${JSON.stringify(was)} -> ${JSON.stringify(moved)}, run printed: ` +
         JSON.stringify(flint.text().slice(started).slice(0, 200))
+    );
+    // ...and what it does *not* do, which is put a conversation in the sidebar. It did: measured on
+    // 2026-09-23 in a real home, every door that records how a run asks -- `--thinking`, `--schema`,
+    // `/thinking`, `/model`, `/provider`, `/reload`, `/config set`, and these rows -- created an empty
+    // session file, so a person who moved one setting and closed the window had a conversation with no
+    // messages in it. A run-level decision is written into the conversation's file once there is one;
+    // it does not make one. The row the run is *writing* arrives with the first thing it says, which is
+    // what the sidebar's own menu below needs and now sets up explicitly.
+    const rowsAfterSwitch = await page.js(`document.querySelectorAll("#sessions li").length`);
+    check(
+      "and a switch alone does not add a conversation to the sidebar",
+      rowsAfterSwitch === rowsBeforeSwitch,
+      `sidebar rows: ${rowsBeforeSwitch} -> ${rowsAfterSwitch}`
     );
 
     // ---- the run's own actions ---------------------------------------------
@@ -1027,6 +1043,41 @@ async function main() {
     // than seen", so what is checked here is the two-press shape on the row itself: the press that
     // opens the menu sends nothing, the row in it says the whole line before it sends it, and the
     // line that goes out belongs to *that* conversation.
+    //
+    // The run's own conversation is named first, and that is the setup this phase needs rather than
+    // politeness. The two rows in the sidebar belong to other conversations: until this run says
+    // something it has no conversation of its own to have a menu on (a settings switch used to create
+    // one, which is the defect the claim above now holds). Naming it is the cheapest thing it can say
+    // -- it writes the file and asks the model nothing, so the scripted answers below stay on the
+    // requests they were written for.
+    const beforeRunName = before();
+    await page.js(`document.getElementById("message").focus(); true`);
+    await page.send("Input.insertText", { text: "/name the conversation being written" });
+    await page.click("#send");
+    let namedRun = "";
+    for (let i = 0; i < 25 && !namedRun.includes("named:"); i += 1) {
+      await sleep(200);
+      namedRun = flint.text().slice(beforeRunName);
+    }
+    check(
+      "the run's own conversation gets a row of its own once it has said something",
+      namedRun.includes("named:"),
+      `run printed: ${JSON.stringify(namedRun.slice(0, 200))}`
+    );
+    // And the row is waited for rather than assumed. A `/name` puts a `sessions` frame on the feed --
+    // that is the page's own documented behaviour -- so the sidebar is redrawn one round-trip later,
+    // and a menu opened before that redraw is replaced under the pointer. Waiting for the `current`
+    // row is waiting for that redraw, because the row is the thing the redraw is what carries.
+    const ownRow = await page
+      .waitFor(`!!document.querySelector("#sessions li.current")`, "the run's own row", 25)
+      .catch(() => null);
+    check(
+      "and that row is the one marked current, which is what the menu below belongs to",
+      ownRow === true,
+      `rows: ${JSON.stringify(await page.js(
+        `Array.from(document.querySelectorAll("#sessions li")).map((li) => [li.title, li.className])`
+      ))}`
+    );
     const rowState = () => page.js(
       `(() => {
         const rows = Array.from(document.querySelectorAll("#sessions li"));
@@ -1083,6 +1134,7 @@ async function main() {
       f.querySelector("button.send").id = "harness-name-send"; return true; })()`;
     if (await page.js(nameInput)) {
       const beforeName = before();
+      const wasNamed = await page.js(`document.getElementById("harness-name").value`);
       await page.js(`document.getElementById("harness-name").focus(); true`);
       await page.send("Input.insertText", { text: "named from the sidebar" });
       await page.click("#harness-name-send");
@@ -1091,10 +1143,17 @@ async function main() {
         await sleep(200);
         named = flint.text().slice(beforeName);
       }
+      // The field arrives holding the conversation's own name -- it is the row `current` that offers
+      // it, and a rename is an edit -- so what is typed lands *after* that name and the line the run
+      // prints carries both. Asserting the whole string would be asserting that the page clears a
+      // field a person may well be editing; what the claim is about is that what was typed reaches
+      // the run at all, which is why the name is read back off the field rather than assumed.
       check(
         "a name typed into that field reaches the run",
-        named.includes("named: named from the sidebar"),
-        `terminal gained: ${JSON.stringify(named.slice(0, 200))}`
+        named.includes("named from the sidebar") &&
+          (wasNamed === "" || named.includes(`named: ${wasNamed}`)),
+        `field held ${JSON.stringify(wasNamed)}, terminal gained: ` +
+          JSON.stringify(named.slice(0, 200))
       );
     }
 

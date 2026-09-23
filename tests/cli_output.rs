@@ -3393,6 +3393,109 @@ async fn an_imported_conversation_brings_its_own_level_and_shape() {
     );
 }
 
+/// A run-level decision before the first word leaves no session behind, door by door.
+///
+/// Reported directly on 2026-09-23 -- "a bunch of empty sessions" -- and the files in that real home
+/// were `meta` plus exactly one line: a `thinking` from a run told `--thinking high` (or a person
+/// typing `/thinking high` and then closing the window), or a `switch` from a `/model` or a `/reload`
+/// before anything was said. Each one is a conversation in `/sessions`, in the page's sidebar and in
+/// `--continue` -- with no messages in it, which is also what `--continue` resumes when it is the
+/// newest.
+///
+/// `SessionWriter`'s own tests hold the mechanism (the level is held, the switch retargets the pending
+/// `meta`); this one holds the doors, because a mechanism nothing comes through is worth nothing. The
+/// last phase is the other half of the same claim: what a run *does* decide is still kept, and is in the
+/// file under `meta` when the conversation finally begins.
+#[test]
+fn a_run_level_decision_before_the_first_word_leaves_no_session() {
+    let home = test_home("no-empty-session", "http://127.0.0.1:1/v1");
+    std::fs::write(
+        home.join("config.toml"),
+        "default_provider = \"stub\"\n\n\
+         [[providers]]\n\
+         name = \"stub\"\n\
+         base_url = \"http://127.0.0.1:1/v1\"\n\
+         model = \"stub-model\"\n\
+         models = [\"stub-other\"]\n\
+         api_key = \"not-a-real-key\"\n",
+    )
+    .expect("the test config");
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("working directory");
+    let conversations = || -> Vec<String> {
+        let mut found: Vec<String> = Vec::new();
+        let sessions = home.join("sessions");
+        let mut dirs = vec![sessions.clone()];
+        while let Some(dir) = dirs.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|e| e == "jsonl") {
+                    found.push(
+                        std::fs::read_to_string(&path)
+                            .unwrap_or_else(|_| "<unreadable>".to_string()),
+                    );
+                }
+            }
+        }
+        found
+    };
+
+    let doors: [(&str, &[&str], &[&str]); 5] = [
+        ("--thinking high", &["--thinking", "high"], &[]),
+        ("--no-schema", &["--no-schema"], &[]),
+        ("/thinking high", &[], &["/thinking high"]),
+        ("/reload", &[], &["/reload"]),
+        ("/model stub-other", &[], &["/model stub-other"]),
+    ];
+    for (name, args, lines) in doors {
+        repl_of_with(&home, &work, args, lines);
+        assert!(
+            conversations().is_empty(),
+            "{name} on a run that had said nothing left a session file behind, and it is a \
+             conversation every listing will show: {:?}",
+            conversations()
+        );
+    }
+
+    // ...and the same run, once it says something, keeps what it decided: the file exists, begins with
+    // the model it is actually on, and carries no `switch` line -- nothing switched, the conversation
+    // simply started there.
+    let out = repl_of_with(
+        &home,
+        &work,
+        &["--thinking", "high"],
+        &["/model stub-other", "hello"],
+    );
+    let found = conversations();
+    assert_eq!(
+        found.len(),
+        1,
+        "a conversation that was spoken in did not leave exactly one session: {found:?} / {out:?}"
+    );
+    let text = &found[0];
+    assert!(
+        text.contains(r#""model":"stub-other""#),
+        "the conversation began under the model it was switched to and the file does not say so: {text}"
+    );
+    assert!(
+        !text.contains(r#""type":"switch""#),
+        "a conversation that had not started recorded a switch as though one had happened: {text}"
+    );
+    assert!(
+        text.contains(r#""type":"thinking""#) && text.contains(r#""level":"high""#),
+        "the level this run was told is not in the conversation it went on to have: {text}"
+    );
+    assert!(
+        text.contains(r#""role":"user","content":"hello""#),
+        "the conversation does not hold what was said in it: {text}"
+    );
+}
+
 /// A conversation somebody handed you becomes one of yours, and their file is left alone.
 ///
 /// `/import` is `--fork`'s act for a file this run did not start from: the conversation is *copied*
@@ -7318,22 +7421,34 @@ async fn the_page_is_told_the_state_its_controls_would_show() {
 /// numbers: the file is append-only, so what changed is a line in it. `/new` and `/resume` still move
 /// to another file, because that is what they are *for*; `/model`, `/provider` and `/reload` replace
 /// the agent around a conversation that stays put.
+///
+/// The question comes first, and it has to: a run that has said nothing is not a conversation, so a
+/// switch in one leaves no file at all -- the empty sessions
+/// `a_run_level_decision_before_the_first_word_leaves_no_session` is about. Reading the file before the
+/// switch is also what makes the "appended to, not rewritten" assertion mean what it says; it used to be
+/// read after it, from both sides of the same moment.
 #[tokio::test]
 async fn switching_provider_keeps_the_conversation_in_its_file() {
-    let home = test_home("switch-file", "http://127.0.0.1:9/v1");
+    let server = MockServer::start().await;
+    answer_once(&server).await;
+    let home = test_home("switch-file", &server.uri());
     std::fs::write(
         home.join("config.toml"),
-        "default_provider = \"stub\"\n\n\
-         [[providers]]\n\
-         name = \"stub\"\n\
-         base_url = \"http://127.0.0.1:9/v1\"\n\
-         model = \"stub-model\"\n\
-         api_key = \"not-a-real-key\"\n\n\
-         [[providers]]\n\
-         name = \"other\"\n\
-         base_url = \"http://127.0.0.1:9/v1\"\n\
-         model = \"other-model\"\n\
-         api_key = \"not-a-real-key\"\n",
+        format!(
+            "default_provider = \"stub\"\n\n\
+             [[providers]]\n\
+             name = \"stub\"\n\
+             base_url = \"{}\"\n\
+             model = \"stub-model\"\n\
+             api_key = \"not-a-real-key\"\n\n\
+             [[providers]]\n\
+             name = \"other\"\n\
+             base_url = \"{}\"\n\
+             model = \"other-model\"\n\
+             api_key = \"not-a-real-key\"\n",
+            server.uri(),
+            server.uri()
+        ),
     )
     .expect("a config with two providers");
     let sessions = home.join("sessions");
@@ -7359,19 +7474,33 @@ async fn switching_provider_keeps_the_conversation_in_its_file() {
         "opening the page wrote a session before anything was said"
     );
 
-    // The provider switch, exactly as the header's picker sends it. This *is* something happening, so
-    // it is where the conversation's file begins: `meta` first, then the switch.
+    // One question, answered by the stub: this is what makes the file worth keeping, and the switch
+    // below is what has to keep it *there* rather than in a second one.
+    let asked = post_message(port, &token, "hello");
+    assert!(asked.starts_with("HTTP/1.1 202"), "the question was refused: {asked:?}");
+    read_until(&mut watching, "STUB ANSWER", 20);
+
+    let before = jsonl_files(&sessions);
+    assert_eq!(
+        before.len(),
+        1,
+        "one question wrote {} conversations: {before:?}",
+        before.len()
+    );
+    let was = std::fs::read_to_string(&before[0]).expect("the session file");
+    assert!(
+        was.contains("\"content\":\"hello\""),
+        "the question was not written into the conversation it was asked in: {was:?}"
+    );
+
+    // The provider switch, exactly as the header's picker sends it.
     let switched = post_message(port, &token, "/provider other");
     assert!(switched.starts_with("HTTP/1.1 202"), "the switch was refused: {switched:?}");
     let told = read_until(&mut watching, "\"provider\":\"other\"", 20);
 
-    let before = jsonl_files(&sessions);
-    assert_eq!(before.len(), 1, "the switch wrote {} sessions: {before:?}", before.len());
-    let was = std::fs::read_to_string(&before[0]).expect("the session file");
-
-    let after = jsonl_files(&sessions);
     // Read before the scratch home is removed below: the point of the two assertions on this text is
     // that it is the *same* file, appended to rather than rewritten.
+    let after = jsonl_files(&sessions);
     let text = after
         .first()
         .map(|path| std::fs::read_to_string(path).unwrap_or_default())
@@ -8223,10 +8352,14 @@ async fn a_switch_is_offered_the_values_it_may_take() {
 /// The line posted below is the one the page composes from its three inputs, in the frame's order,
 /// with the optional answer left off; the second post is the same command typed by hand, to show the
 /// two forms are one command. The last assertion is the one that ties this to the fix before it: a
-/// provider added mid-conversation is a `switch` in the file the conversation is already in.
+/// provider added mid-conversation is a `switch` in the file the conversation is already in -- and the
+/// conversation is asked a question first, because a run that has said nothing has no file for the
+/// switch to be appended to.
 #[tokio::test]
 async fn a_provider_can_be_added_from_the_page() {
-    let home = test_home("provider-add", "http://127.0.0.1:9/v1");
+    let server = MockServer::start().await;
+    answer_once(&server).await;
+    let home = test_home("provider-add", &server.uri());
     let log = home.join("transcript.txt");
     let mut child = binary()
         .arg("--web")
@@ -8257,10 +8390,19 @@ async fn a_provider_can_be_added_from_the_page() {
 
     let sessions = home.join("sessions");
     // Nothing has been said yet -- opening the page is not saying anything -- so there is no session
-    // to find. The first thing that happens writes the file, and that is asserted below.
+    // to find. The question below writes the file, and the provider added after it goes into that same
+    // file rather than starting one of its own.
     assert!(
         jsonl_files(&sessions).is_empty(),
         "opening the page wrote a session before anything was said"
+    );
+    let asked = post_message(port, &token, "hello");
+    assert!(asked.starts_with("HTTP/1.1 202"), "the question was refused: {asked:?}");
+    read_until(&mut watching, "STUB ANSWER", 20);
+    assert_eq!(
+        jsonl_files(&sessions).len(),
+        1,
+        "one question did not leave exactly one conversation"
     );
 
     // The line the page composes: the row's own `send`, then the answers, with the empty optional one

@@ -973,6 +973,13 @@ key is used — and the `task` tool strips the three capture variables from a ch
 
 One JSON object per line, `type`-tagged, append-only, `FORMAT_VERSION = 2`. Eleven types:
 
+A file is created by the first event that is really *in* it, not when flint starts, so opening a run
+and typing nothing leaves nothing. Three of these events are about how the run asks rather than about
+the conversation — `thinking`, `schema` and `switch` — and are held by the writer until the
+conversation begins, then written under `meta` in the order they were decided; a `/model` or
+`--thinking high` on a run nobody has spoken to therefore leaves no conversation behind (reported and
+fixed 2026-09-23: they used to, and a real home had collected nine of them).
+
 | `type` | Written when | Fields | What a reader does with it |
 |---|---|---|---|
 | `meta` | the first line of a new file | `v`, `id`, `created`, `cwd`, `provider`, `model`, `parent` | the file's identity; a second one wins |
@@ -982,9 +989,9 @@ One JSON object per line, `type`-tagged, append-only, `FORMAT_VERSION = 2`. Elev
 | `peer` | a mailbox message arrived | `from`, `text`, `at`, `heard` | shown, recorded, and **kept out of history** on load |
 | `usage` | the endpoint reported counts | `usage.{prompt_tokens, completion_tokens, total_tokens?, cache_hit_tokens?}` | `/usage` on resume |
 | `title` | `--name`, `/name` | `name` | the conversation's name; last wins |
-| `switch` | a provider or model switch | `provider`, `model` | so `--resume` believes the file; last wins |
-| `schema` | `--schema` / `--no-schema` | `schema` (`null` clears) | holds a resumed conversation to the same shape |
-| `thinking` | `--thinking`, `/thinking <level>` | `level` | the level in force |
+| `switch` | a provider or model switch | `provider`, `model` | so `--resume` believes the file; last wins. A switch before the conversation has begun is not a line — it retargets the `meta` line the writer has not written yet, so the file that appears names the model it began on and no empty conversation is created |
+| `schema` | `--schema` / `--no-schema` | `schema` (`null` clears) | holds a resumed conversation to the same shape; held until the conversation begins, like `thinking` |
+| `thinking` | `--thinking`, `/thinking <level>` | `level` | the level in force. Held until the conversation begins and written under `meta` by its first event, so `--thinking high` on a run that says nothing leaves no file |
 | `compact` | `/compact` | `summary`, `from` (byte offset of the first `chat` line still sent) | the fold; last wins, and the folded lines stay in the file |
 
 An **unknown** type is skipped in silence — a *well-formed* object naming a type this build has
