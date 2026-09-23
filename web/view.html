@@ -494,7 +494,9 @@
     color: var(--dim); background: none; border: 0; padding: 0 2px; cursor: pointer; opacity: 0;
   }
   #sessions li:hover .more, #sessions li .more:focus { opacity: 1; color: var(--user); }
-  /* The second level: one row per action the frame offers, each one the line it will send. */
+  /* The second level: one row per action the frame offers, each one what it does rather than the line
+     it sends. The words are the frame's own sentence for the row, and they may run to a line or two:
+     a menu of syntax with the meaning clipped off the end was the defect reported on 2026-09-23. */
   #sessions li .menu {
     position: absolute; right: 8px; top: 100%; z-index: 5; min-width: 150px;
     background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px;
@@ -505,8 +507,8 @@
     font: inherit; text-align: left; width: 100%; background: none; border: 0; padding: 0;
     color: inherit; cursor: pointer;
   }
-  #sessions li .menu button.row:hover code, #sessions li .menu button.row:hover span { color: var(--bad); }
-  #sessions li .menu .row { color: var(--dim); font-size: 12.5px; }
+  #sessions li .menu button.row:hover span { color: var(--bad); }
+  #sessions li .menu .row { color: var(--dim); font-size: 12.5px; line-height: 1.35; }
   /* The rename field inside the menu: the same shape as the panel's forms -- a row that takes an
      answer is still a row -- at the size of the list it hangs off rather than the size of the panel.
      It is drawn here rather than in the panel because the conversation it names is the one this row
@@ -519,7 +521,7 @@
   #sessions li .menu form.field input.value:focus { outline: none; border-bottom-color: var(--user); }
   #sessions li .menu form.field button.send {
     font: inherit; font-size: 12.5px; color: var(--dim); background: none; border: 0; padding: 0;
-    cursor: pointer; white-space: nowrap;
+    cursor: pointer; white-space: normal; text-align: left; flex: 0 1 auto;
   }
   #sessions li .menu form.field button.send:hover { color: var(--user); }
   #sessions .none, #sessions .waiting { color: var(--dim); cursor: default; padding: 7px 14px; }
@@ -2750,6 +2752,15 @@ function showState(doc) {
   // document it draws, and a state that arrived for another one has to draw there. A frame arrives
   // once per turn rather than once per delta, so there is nothing to coalesce.
   paint(doc);
+  // And the sidebar, for the same reason one level down and with one more consequence: a row's `...`
+  // menu is the frame's rows drawn on that row, and the sidebar itself is drawn from `GET /sessions`,
+  // which answers on its own. So a page that has just loaded has rows and menus before this frame
+  // lands -- and a menu opened in that moment was left saying it had nothing to offer, even after the
+  // frame arrived, because nothing repainted the list. Reported directly, 2026-09-23, as *the three
+  // dots has no commands to choose*. Repainted whole rather than patched: the menu is a child of the
+  // row, `doc.menu` names the row it belongs to, and a second press on `...` closes it -- so the
+  // rebuild lands on the same row and the open menu stays open, filled in.
+  paintSessions(doc);
 }
 
 /// Which screen is open. The page's own state, like the preview's path: nothing outside reads it.
@@ -3665,14 +3676,21 @@ function sessionMenu(doc, session) {
   for (const command of actions) {
     const row = el("button", "row danger");
     row.type = "button";
-    row.title = command.help || "";
     row.addEventListener("click", (event) => {
       if (event && event.stopPropagation) event.stopPropagation();
       // The second press, and the line has been on the screen since the menu opened.
       doc.menu = null;
       sendText(command.send + " " + session.n);
     });
-    row.appendChild(el("code", "", command.send + " " + session.n));
+    // What the row *does*, in the frame's own sentence for it -- not the line it sends.
+    //
+    // Reported directly, 2026-09-23: the conversation's three dots had no commands to choose, and the
+    // fix asked for was to stop writing the command out. Both halves are one decision. `/delete 3` is
+    // the line, and the reader is choosing an act: the sentence is what the terminal's own `/help`
+    // prints for it, so the page still invents nothing -- and a command the run gains, loses or
+    // rewords moves this menu with no edit here. It was also what was *breaking*: the command was a
+    // `code` that may not wrap, so in a 250px sidebar it took the width and crowded the sentence out,
+    // which left a menu of syntax with the meaning clipped off the end.
     row.appendChild(el("span", "", command.help || ""));
     menu.appendChild(row);
   }
@@ -3692,7 +3710,16 @@ function sessionMenu(doc, session) {
   if (rename) menu.appendChild(nameRow(doc, session, rename));
   // An empty menu is indistinguishable from one that failed to draw, so it says which it is -- and
   // a rename field counts as something to do, which is why this asks the menu rather than the frame.
-  if (!menu.children.length) menu.appendChild(el("div", "row", "nothing to do from here"));
+  //
+  // The two answers are different facts and the sidebar is drawn before it can know which one it is:
+  // the rows come from `GET /sessions`, which answers on its own, while what a row *may* do comes in
+  // the `state` frame. A page that has just loaded can hold a row and its `...` for a moment before
+  // that frame lands, and "nothing to do from here" would then be a claim the page cannot make.
+  if (!menu.children.length) {
+    menu.appendChild(el("div", "row", doc.state
+      ? "nothing to do from here"
+      : "this run has not sent its commands yet"));
+  }
   return menu;
 }
 
@@ -3730,7 +3757,11 @@ function nameRow(doc, session, command) {
     return input;
   });
   if (inputs.length > 0) inputs[0].value = session.label === "(empty)" ? "" : session.label;
-  const submit = el("button", "send", command.send);
+  // The act rather than the command, for the same reason the rows above it are: the field beside it
+  // holds the name, and `/name` is the spelling of the line rather than the thing being done. The
+  // frame's own sentence for the row is what the terminal's `/help` prints. `send` is still what the
+  // form sends -- `formLine` composes from it -- so nothing is inferred from the label.
+  const submit = el("button", "send", command.help || command.send);
   submit.type = "submit";
   // The row behind this field *is* the conversation, and clicking into the field is not a press on
   // it: without this the press that puts the cursor in the field would bubble up and open the

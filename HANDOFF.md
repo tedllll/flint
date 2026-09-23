@@ -43,7 +43,9 @@ seventh time the same day, after the two rebuild-carry rounds above it (the funn
 doors — one unit test in the binary and three `cli_output` tests, whose only observable is a request
 body), and re-measured an eighth time the same day, after the empty-session round at the top of that
 section (four unit tests in `src/session.rs`, one `cli_output` test over five doors, and two page tests
-that had to stop asserting the bug): `cargo test`
+that had to stop asserting the bug), and re-measured a **ninth** time the same day, after the sidebar-menu
+round at the top of that section (four page tests in `scripts/web-view-test.js`, all watched red first,
+and two rewritten browser-harness claims): `cargo test`
 **696 passing, 1 ignored** across the 14 suites (lib **388**, bin **9**, `agent_loop` 34,
 `balance` 7, `cli_output` **119**, `json_output` 41, `say` 6,
 `search_tool` 4, `task` 17, `term_capture` 20 + 1 ignored, `tty_hangup` **0 on Windows** and 3 on Unix
@@ -1825,6 +1827,50 @@ picker, type `/config` into the composer, and see whether the answer lands in th
 the block is drawn — then open the `commands` panel and read it against `/help` in the terminal.
 
 ## What was just done
+
+### A menu of syntax, and a frame that never repainted it — 2026-09-23
+
+**Reported directly, minutes after the round below: "the conversation's three dots has no commands to
+choose any more — and when you fix it, do not write the command out, write what it does; be friendly."**
+Both halves turned out to be one decision. Each row of that menu drew the line it would send
+(`/delete 3`) in a `code` that may not wrap, *beside* the frame's sentence for the act in a dim `span`.
+In a 250px sidebar the command took the width and the sentence was crowded off the end, so the menu read
+as a list of syntax with the one word a person needs clipped away. The rows are now the frame's own
+sentence for each act — `delete one`, `file one away, out of the list` — and there is no `code` in this
+menu at all. The page still invents nothing: those words are the frame's `help` for the row, the same
+sentence the terminal's `/help` prints, so a command the run gains, loses or rewords moves the menu with
+no edit in `web/view.html`. The rename row was the same question and got the same answer — its submit
+read `/name` and now reads `name this conversation`, that row's help — and the panel and the `/` menu
+were left alone on purpose, because there the command *is* the thing being chosen.
+
+**The second half was a real defect, and it is why the menu could be empty at all.** The sidebar's rows
+come from `GET /sessions`, which answers on its own; what a row's `⋯` may offer comes in the `state`
+frame. A page that has just loaded therefore has rows and `⋯` buttons *before* that frame lands — and
+nothing repainted the list when it did, so a menu opened in that window stayed empty for as long as the
+page was up, saying `nothing to do from here` about a run that had said plenty. Two changes: `showState`
+now paints the sidebar, with the same argument it already used for the transcript's branch buttons (one
+thing the frame draws, so the frame repaints it — the menu is a child of the row and `doc.menu` names
+the row, so the rebuild lands on the same row and an open menu stays open, filled in), and an empty menu
+now says *which* of the two it is: `this run has not sent its commands yet` when there is no frame at
+all, `nothing to do from here` when there is one and it offers nothing for that row.
+
+**Four claims in `scripts/web-view-test.js` hold it, and each was watched red first** — the rows are the
+frame's sentences, no slash and no `code` element anywhere in the menu, the rename submit is the act,
+the placeholder distinguishes the two cases, and `showState` repaints the list (the last one by the only
+thing the stub DOM can hold: the painter ran on this frame). Two claims in `scripts/browser-controls-test.js`
+were rewritten for the same reason — the menu's rows are read as text now rather than as `code`, and so is
+the row that deletes a fixture conversation, which is found by the run's own sentence for it. That
+harness was the round's first red: it drives `target/debug/flint.exe`, and `web/view.html` is embedded
+with `include_str!`, so a page change is not in the binary until `cargo build` — the harness failed three
+claims against the previous page, which is the *trap* `AGENTS.md` already names, met from the other side
+(the tests that run the binary need it rebuilt, not just `cargo test --lib`).
+
+**The gate after this round**: `cargo test` **696 passing, 1 ignored** across the 14 suites (lib 388, bin
+9, `agent_loop` 34, `balance` 7, `cli_output` 119, `json_output` 41, `say` 6, `search_tool` 4, `task` 17,
+`term_capture` 20 + 1 ignored, `tty_hangup` 0 on Windows, `web_view` 41, `who` 10, doc-tests 0); clippy
+silent; `term-layout-test.js` and `web-view-test.js` green; both `examples/` doors green; the browser
+harness by hand at **121/121** — the same count, because the claim that used to read "with its own
+number" was rewritten rather than added to.
 
 ### A decision is not a thing said — 2026-09-23
 

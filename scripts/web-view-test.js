@@ -1190,6 +1190,114 @@ check("a message is the shape the route reads", () => {
   eq(JSON.parse(viewer.messageBody('line one\nline two')).text, "line one\nline two", "a block");
 });
 
+console.log("\na conversation's own actions, in its row's menu");
+
+// The frame's destructive rows, as the process sends them: the same two the sidebar's menu is drawn
+// from, each with the list its argument comes from.
+const SESSION_ACTIONS = [
+  { label: "/archive <n|id>", send: "/archive", help: "file one away, out of the list",
+    class: "danger", from: "sessions" },
+  { label: "/delete <n|id>", send: "/delete", help: "delete one", class: "danger", from: "sessions" },
+  { label: "/name [text]", send: "/name", help: "name this conversation", class: "form",
+    group: "conversation", fields: [{ field: "text", name: "name", optional: false }] },
+];
+const withActions = (page, d, commands) =>
+  page.applyState(d, JSON.stringify({
+    type: "state", provider: "stub", model: "m", providers: [], commands,
+  }));
+// The menu a row drew, and the words on its action rows: the row's own children are the number, the
+// label, the `...` button and -- when `doc.menu` names this row -- the menu itself.
+const menuOf = (row) => row.children.find((child) => child.className === "menu");
+const actionWords = (row) => {
+  const menu = menuOf(row);
+  if (!menu) return null;
+  return menu.children
+    .filter((child) => String(child.className).includes("danger"))
+    .map((button) => String(button.children[0].textContent));
+};
+
+// Reported directly, 2026-09-23: *the conversation's three dots has no commands to choose any more --
+// and when you fix it, do not write the command out, write what it does.* Both halves are the same
+// decision: a row that reads `/delete 3` is a row of syntax, and the one word a person needs is the
+// frame's own sentence for the act. It is also the half that was breaking: the command was drawn in a
+// `code` that may not wrap, so in a 250px sidebar it took the width and crowded the sentence out.
+check("a conversation's menu offers what its actions do, in the frame's own words", () => {
+  const page = loadViewer();
+  const d = page.newDoc();
+  withActions(page, d, SESSION_ACTIONS);
+  d.menu = { n: 3, id: "abc" };
+  const row = page.sessionRow(d, { n: 3, id: "abc", label: "a conversation", current: true });
+  eq(actionWords(row), ["file one away, out of the list", "delete one"],
+     "each row is the frame's sentence for what it does");
+  // The same on a conversation this run is not the one writing: the actions belong to the row, so
+  // whether it is the open one changes only the rename field below them.
+  d.menu = { n: 4, id: "def" };
+  const drawn = page.sessionRow(d, { n: 4, id: "def", label: "another", current: false });
+  eq(actionWords(drawn), ["file one away, out of the list", "delete one"],
+     "and the same on a conversation this run is not the one writing");
+});
+
+check("and none of them is the command's spelling", () => {
+  const page = loadViewer();
+  const d = page.newDoc();
+  withActions(page, d, SESSION_ACTIONS);
+  d.menu = { n: 3, id: "abc" };
+  const row = page.sessionRow(d, { n: 3, id: "abc", label: "a conversation", current: true });
+  const words = actionWords(row).join(" | ");
+  eq(/[/]/.test(words), false, `no slash anywhere in the menu's actions: ${JSON.stringify(words)}`);
+  // The rename field is the third row of the same menu and it is the same question: the button that
+  // sends the name says what it does rather than `/name`, which leaves the field free to hold the
+  // name it starts with.
+  const form = menuOf(row).children.find((child) => child.className === "field");
+  eq(String(form.children[form.children.length - 1].textContent), "name this conversation",
+     "the rename row's submit is the act, not the command");
+});
+
+check("a menu drawn before the state arrived says so, and is filled in by it", () => {
+  // The sidebar is drawn from `GET /sessions`, which answers on its own: a page that has just loaded
+  // can have rows and `...` buttons while the frame that says what those buttons may do has not
+  // arrived yet. That is the state the report came from, and the menu has to say which of the two it
+  // is -- an empty menu and a menu that failed to draw look the same -- and then fill itself in when
+  // the frame lands, without a second press.
+  const page = loadViewer();
+  const d = page.newDoc();
+  const row = () => page.sessionRow(d, { n: 3, id: "abc", label: "a conversation", current: false });
+  // Nothing has drawn the sidebar at all yet: the page's own boot is what reads `/sessions`, and no
+  // check here runs it.
+  const list = page.__node("sessions");
+  eq(list.children.length, 0, "nothing has drawn the sidebar yet");
+  d.menu = { n: 3, id: "abc" };
+  eq(actionWords(row()), [], "no actions to draw before the frame says what they are");
+  eq(String(menuOf(row()).children[0].textContent), "this run has not sent its commands yet",
+     "and the menu says it is waiting rather than claiming there is nothing to do");
+  // Which is a fact about the frame, not about the moment: once one has arrived the same row draws
+  // the actions, and the sentence is the other one.
+  withActions(page, d, SESSION_ACTIONS);
+  eq(actionWords(row()), ["file one away, out of the list", "delete one"],
+     "the frame arriving is what the menu was waiting for");
+  // And the frame repaints the sidebar, which is the half that made this a bug rather than a wait: a
+  // menu already open on screen was left empty for as long as the page stayed up, because nothing
+  // redrew the list the menu hangs off. What the stub can hold is that the painter *ran* on this
+  // frame -- an empty list has one row to draw, and nothing else here draws the sidebar at all -- so
+  // that is what is asserted; the reported case, a real menu filling in, is the browser harness's.
+  eq(list.children.length, 1, "the frame repaints the list after the state arrives");
+  eq(String(list.children[0].textContent), "no conversations yet",
+     "with the list the page holds");
+});
+
+check("a frame with no session rows says there is nothing to do here", () => {
+  // The other half of the same sentence: the frame *has* arrived and offers nothing this row may be
+  // sent, which is a different fact from a frame that has not arrived.
+  const page = loadViewer();
+  const d = page.newDoc();
+  withActions(page, d, [{ label: "/reload", send: "/reload", help: "re-read the config file",
+    class: "button", group: "run" }]);
+  d.menu = { n: 3, id: "abc" };
+  const row = page.sessionRow(d, { n: 3, id: "abc", label: "a conversation", current: false });
+  eq(String(menuOf(row).children[0].textContent), "nothing to do from here",
+     "the frame's answer, not a wait");
+});
+
 console.log("\nwhat a mid-turn reset must not destroy");
 
 check("the answer being streamed is kept when the file is behind", () => {

@@ -1105,13 +1105,21 @@ async function main() {
         const m = li && li.querySelector(".menu"); if (!m) return null;
         const n = (li.querySelector("span.n") || {}).textContent || "";
         return { number: n,
-                 rows: Array.from(m.querySelectorAll("button.row")).map((b) => (b.querySelector("code") || {}).textContent),
+                 rows: Array.from(m.querySelectorAll("button.row")).map((b) => b.textContent),
+                 codes: m.querySelectorAll("code").length,
                  form: Array.from(m.querySelectorAll("form.field button.send")).map((b) => b.textContent) }; })()`
     );
+    // What the rows *say* is the frame's own sentence for each action -- "delete one", "file one away,
+    // out of the list" -- and never the line the press sends. Reported directly, 2026-09-23: *the
+    // conversation's three dots has no commands to choose, and do not write the command out, write
+    // what it does.* The claim is made over the drawing rather than over a list of sentences: the
+    // run's words are the run's, and a harness that spelled them here would be a second copy that
+    // could agree with itself while the page showed a command.
     check(
-      "the menu opens with that conversation's actions and its own number",
+      "the menu opens with that conversation's actions, written as what they do",
       !!menu && Array.isArray(menu.rows) && menu.rows.length > 0 &&
-        menu.rows.every((line) => String(line).endsWith(" " + menu.number)),
+        menu.codes === 0 &&
+        menu.rows.every((line) => String(line).trim().length > 0 && !String(line).includes("/")),
       `menu: ${JSON.stringify(menu)}`
     );
     check(
@@ -1124,7 +1132,8 @@ async function main() {
     // happened to be open.
     check(
       "the conversation being written offers a name field in the same menu",
-      !!menu && Array.isArray(menu.form) && menu.form.includes("/name"),
+      !!menu && Array.isArray(menu.form) && menu.form.length > 0 &&
+        menu.form.every((word) => String(word).length > 0 && !String(word).includes("/")),
       `menu forms: ${JSON.stringify(menu && menu.form)}`
     );
     const nameInput = `(() => { const li = document.querySelector("#sessions li.current") ||
@@ -1171,18 +1180,22 @@ async function main() {
     );
     if (aimed) {
       await page.click("#harness-victim");
+      // The row that deletes, found by the run's own sentence for it rather than by the line it
+      // sends: the menu no longer draws the command at all (reported directly, 2026-09-23), so the
+      // words on the row are the frame's help for `/delete`, and the file disappearing below is what
+      // says the press carried *this* conversation's number.
       const victimRow = await page.js(
         `(() => { const li = Array.from(document.querySelectorAll("#sessions li"))
             .find((r) => r.title === ${JSON.stringify(victim)});
           const m = li && li.querySelector(".menu"); if (!m) return null;
           const b = Array.from(m.querySelectorAll("button.row"))
-            .find((b) => String((b.querySelector("code") || {}).textContent).startsWith("/delete"));
+            .find((b) => String(b.textContent).trim() === "delete one");
           if (!b) return null; b.id = "harness-delete-row";
-          return (b.querySelector("code") || {}).textContent; })()`
+          return b.textContent; })()`
       );
       check(
-        "a fixture conversation's menu names the line it would send",
-        typeof victimRow === "string" && victimRow.startsWith("/delete "),
+        "a fixture conversation's menu offers the same actions, in its own words",
+        victimRow === "delete one",
         `row: ${JSON.stringify(victimRow)}`
       );
       check(

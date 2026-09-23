@@ -868,17 +868,40 @@ password-manager behaviour, which is the browser's and not this page's.
 The last thing added to the page, and the only part of §8 asked for after using it: archiving or
 removing a conversation meant opening the command panel, finding the destructive row and reading the
 number off the sidebar by eye. The sidebar row is the conversation, so the row carries a `⋯` button
-that opens a short menu — the panel's shape one level down — and the rows in that menu print the whole
-line they will send before they send it.
+that opens a short menu — the panel's shape one level down — and the rows in that menu say what they
+do, in the frame's own sentence for the act, while the line they will send stays behind the press.
 
 | Claim | How | Result |
 |---|---|---|
 | The row has its own control, dim until the row is pointed at | Node, over the stub DOM | one `button` per row, reading `⋯`, titled "actions for this conversation"; no menu node while `doc.menu` is unset |
-| The menu is the frame's rows, not a list in the page | `tests/web_view.rs` over the page's bytes, and Node | the items are `/archive 3` and `/delete 3` from a frame offering four danger rows — the `from: "providers"` one and the `selector` one are not there. Mutation-checked: asking for `"providers"` instead fails both |
-| The second press sends the frame's line | Node, and by construction | `command.send + " " + session.n` — the line is on screen from the moment the menu opens |
+| The menu is the frame's rows, not a list in the page | `tests/web_view.rs` over the page's bytes, and Node | the items are the frame's own sentences for `/archive` and `/delete` from a frame offering four danger rows — the `from: "providers"` one and the `selector` one are not there. Mutation-checked: asking for `"providers"` instead fails both |
+| The second press sends the frame's line | Node, and by construction | `command.send + " " + session.n` — the number is the row's, and the file that goes away is what says so |
 | The menu belongs to one conversation | Node | a menu whose `id` is another row's is not drawn on this one |
-| An empty menu says so | Node | a frame with no `from: "sessions"` rows draws `nothing to do from here` rather than an empty box |
+| An empty menu says which it is | Node | a frame with no `from: "sessions"` rows draws `nothing to do from here` — and a page whose frame has **not arrived** draws `this run has not sent its commands yet`, because the sidebar is read from `GET /sessions` and can be on screen before the frame that says what its buttons may do |
 | It cannot outlive its numbers | `web/view.html`, read | a `reset` clears `doc.menu`, and `readSessions` closes a menu whose conversation is gone — the same argument `doc.confirm` is built on, because the `n` in a menu is a position |
+
+**The rows say what they do, not what they would send — reported directly, 2026-09-23.** *"The
+conversation's three dots has no commands to choose any more; and when you fix it, do not write the
+command out, write what it does."* The second half is why the first half happened, and the mechanism is
+worth keeping: each row drew the line it would send in a `code` that may not wrap, beside the frame's
+sentence for the act in a dim `span`. In a 250px sidebar the command took the width and the sentence
+was crowded off the end, so the menu read as `/archive 3` and `/delete 3` — a list of syntax, with the
+one word a person needs clipped away. The fix is one decision: the row is the sentence, and there is no
+`code` in this menu at all. The page still invents nothing — the words are the frame's `help` for the
+row, the same sentence the terminal's `/help` prints — so a command the run gains, loses or rewords
+moves the menu with no edit in `web/view.html`. The rename row's submit was the same question and got
+the same answer: it read `/name` and now reads `name this conversation`, which is that row's help. The
+panel and the `/` menu are deliberately untouched: there the command *is* the thing being chosen.
+
+**And the frame repaints the sidebar, which is the half that made it a bug rather than a moment.** The
+rows of the sidebar come from `GET /sessions`, which answers on its own; what a row's `⋯` may offer
+comes in the `state` frame. A page that has just loaded therefore has rows and menus before that frame
+lands — and nothing repainted the list when it did, so a menu opened in that window stayed empty for as
+long as the page was up. `showState` now paints the sidebar with the same argument it already used for
+the transcript's branch buttons (one thing the frame draws, so the frame repaints it); the menu is a
+child of the row and `doc.menu` names the row, so the rebuild lands on the same row and an open menu
+stays open, filled in.
+
 
 **The open conversation's name is edited in the same menu — added 2026-09-17.** The name is the one
 thing the sidebar *shows* that nothing on the page could change: `/name <text>` has been in the frame's
@@ -993,8 +1016,8 @@ traffic, which is what turned the first failure from "the controls never appeare
 | The credential field is masked, and the secret does not come back | typing `sk-not-a-real-key-0000` into the `/provider key` field, then its submit | the input is `type=password`, the run printed `key saved`, the field was emptied, the secret is nowhere in the page's markup — and `config.toml` *does* contain it, which is what stops the other three passing on a command that never ran |
 | A destructive row opens its candidates instead of sending | a real click on `/delete <n|id>` | candidates drawn, the run's stdout gained nothing, and backing out left the sessions directory byte-identical |
 | The composer sends a line the run answers | `/usage` typed into the box, then a real click on `send` | the run printed, and the answer was in the transcript |
-| A conversation's row opens its own menu, and the press that opens it sends nothing | a real click on the row's `⋯`, then the terminal | the menu's rows are the frame's destructive commands with *this row's* number appended, the open conversation's menu carries the `/name` field and no other row's does, and the run's stdout gained nothing until a row was pressed |
-| A name typed into that field reaches the run | `Input.insertText` into the menu's own field, then its submit | the run printed `named: …named from the sidebar`. The field arrives holding the conversation's own name — it is the row `current` that offers it, and a rename is an edit — so what is typed lands after that name and the claim reads the field back and requires both, rather than requiring the page to clear a field somebody may be editing |
+| A conversation's row opens its own menu, and the press that opens it sends nothing | a real click on the row's `⋯`, then the terminal | the rows are the frame's sentences for the acts it offers on a conversation — no `code` element and no slash anywhere in the menu — the open conversation's menu carries the rename field and no other row's does, and the run's stdout gained nothing until a row was pressed |
+| A name typed into that field reaches the run | `Input.insertText` into the menu's own field, then its submit | the run printed `named: …named from the sidebar`. The field arrives holding the conversation's own name — it is the row `current` that offers it, and a rename is an edit — so what is typed lands after that name and the claim reads the field back and requires both, rather than requiring the page to clear a field somebody may be editing. Its submit is the act, not `/name`, for the reason the rows above it are |
 | The second press in a row's menu carries that row's number | a real click on the `/delete` row of a conversation the harness created | that session file was gone from `sessions/`, read off the directory rather than the page — the terminal would agree with a menu that had sent the wrong number and been refused |
 | The sidebar's hand takes a real drag, and the arrow keys and a double-click belong to the same control | a pointer press, four moves with `buttons: 1`, a release; then `ArrowRight` on the focused hand; then two press/release pairs with `clickCount` 1 and 2 | `--side` grew by the drag, grew by 16 with the arrow, and the double-click removed the property rather than leaving a number — with `body.dragging` asserted *during* the drag, which is the page saying it accepted it. Mutation-checked: neutering the page's `pointermove` handler fails this row and the one below it (32/34) while the arrow-key and double-click claims still pass, so the two halves are independent |
 | The reading hand is the same control on the other boundary | the same gestures on `#read-grip`, dragging left | `--read` shrank by the drag, and its double-click reset its own width — and, as the check asserts, nobody else's |
