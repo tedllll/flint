@@ -621,7 +621,7 @@ async function main() {
       // directory that is not there. The first is one name and two tokens to any reader of the text,
       // which is exactly why the page asks the run where it ends.
       `${path.join(where.cwd, "sub dir")} for the directory with a space in its name, ` +
-      `${path.join(where.cwd, "nothere")}\\ for a directory that is gone, ` +
+      `${path.join(where.cwd, "nothere")}${path.sep} for a directory that is gone, ` +
       "and javascript:alert(1) for the scheme that is not the web"
   );
   script[script.length - 1] = addresses;
@@ -2351,7 +2351,7 @@ async function main() {
 
     // The press, on a directory that is gone: `/open` is asked, its refusal is what the page says, and
     // nothing is listed -- the listing is not where a directory press goes any more.
-    const gone = path.join(where.cwd, "nothere") + "\\";
+    const gone = path.join(where.cwd, "nothere") + path.sep;
     const pressedGone = await pressIn("#doc button.path", gone, "harness-gone-dir");
     const goneSaid = pressedGone
       ? await page

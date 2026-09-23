@@ -3712,6 +3712,12 @@ mod tests {
     /// `used` counts **UTF-16 code units**, which is what a JavaScript string index is; the page cuts
     /// the line at the path it found with `slice(0, used)`. A directory named in Chinese is what that
     /// counting is for, and it is why this is asserted with one.
+    ///
+    /// Every line here is built with `Path::join` and `display()`, never with a separator typed into a
+    /// `format!`: the first version of this test wrote `\\` between the scratch directory and the name
+    /// and passed on Windows, where that is the separator, and failed on the Linux job with `/tmp/…\My
+    /// Projects` -- a text that names nothing, which is exactly what the route answered. A test about a
+    /// path is a test about *this* platform's path, so the platform writes it.
     #[test]
     fn the_run_says_where_a_path_in_a_line_ends() {
         let dir = scratch("resolve");
@@ -3720,36 +3726,38 @@ mod tests {
         written(&dir, "My Projects/inside.txt", "two\n");
         written(&dir, "notes file.txt", "three\n");
         let state = working_in(&dir);
-        let base = dir.display().to_string();
         let units = |s: &str| -> usize { s.chars().map(char::len_utf16).sum() };
+        let spaced_name = dir.join("My Projects").display().to_string();
+        let file_name = dir.join("notes file.txt").display().to_string();
+        let cjk_name = dir.join("\u{8d44}\u{6599} \u{5939}").display().to_string();
 
         // The whole name, which is what a token reader cannot see: two words, one directory. The words
         // after it belong to the sentence, and the answer says so by counting only what it used.
-        let spaced = format!("{base}\\My Projects is where it goes");
+        let spaced = format!("{spaced_name} is where it goes");
         let found = ask(&ours(&format!("/resolve?text={}", encoded(&spaced))), &state);
         assert_eq!(found.status, 200, "{}", found.body);
         assert_eq!(found.content_type, "application/json; charset=utf-8");
         let json: serde_json::Value = serde_json::from_str(&found.body).expect("JSON");
-        assert_eq!(json["path"], dir.join("My Projects").display().to_string(), "{}", found.body);
-        assert_eq!(json["used"], units(&format!("{base}\\My Projects")), "{}", found.body);
+        assert_eq!(json["path"], spaced_name, "{}", found.body);
+        assert_eq!(json["used"], units(&spaced_name), "{}", found.body);
 
         // A file with a space, followed by a comma: the punctuation is the sentence's, not the name's.
         // The text handed over begins at the path -- the page sends the line *from there*, because a
         // token reader is the thing that cannot see where the name starts either.
-        let sentence = format!("{base}\\notes file.txt, and then carry on");
+        let sentence = format!("{file_name}, and then carry on");
         let file = ask(&ours(&format!("/resolve?text={}", encoded(&sentence))), &state);
         assert_eq!(file.status, 200, "{}", file.body);
         let json: serde_json::Value = serde_json::from_str(&file.body).expect("JSON");
-        assert_eq!(json["path"], dir.join("notes file.txt").display().to_string(), "{}", file.body);
-        assert_eq!(json["used"], units(&format!("{base}\\notes file.txt")), "{}", file.body);
+        assert_eq!(json["path"], file_name, "{}", file.body);
+        assert_eq!(json["used"], units(&file_name), "{}", file.body);
 
         // Non-ASCII names are counted in UTF-16 units, because the reader is a JavaScript string.
-        let cjk = format!("{base}\\\u{8d44}\u{6599} \u{5939} and then");
+        let cjk = format!("{cjk_name} and then");
         let counted = ask(&ours(&format!("/resolve?text={}", encoded(&cjk))), &state);
         assert_eq!(counted.status, 200, "{}", counted.body);
         let json: serde_json::Value = serde_json::from_str(&counted.body).expect("JSON");
-        assert_eq!(json["path"], dir.join("\u{8d44}\u{6599} \u{5939}").display().to_string(), "{}", counted.body);
-        assert_eq!(json["used"], units(&format!("{base}\\\u{8d44}\u{6599} \u{5939}")), "{}", counted.body);
+        assert_eq!(json["path"], cjk_name, "{}", counted.body);
+        assert_eq!(json["used"], units(&cjk_name), "{}", counted.body);
 
         // Nothing in it names anything: a refusal, not an empty answer -- and not a 500.
         let nothing = ask(&ours(&format!("/resolve?text={}", encoded("and then some words"))), &state);
