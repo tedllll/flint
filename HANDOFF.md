@@ -1902,6 +1902,16 @@ one of the marks quoted in it.
 `AGENTS.md`'s `src/web.rs` row names both routes, and §27's press half is marked as what it was: true while
 a directory had no way to be opened from a press.
 
+**And the Linux job caught the round's own test, which is the trap AGENTS.md keeps naming.** The resolver's
+route test built its lines by typing `\\` between the scratch directory and the name: the separator on
+Windows, where it passed, and one more character of the name on Linux, where the job came back with the
+answer the route gives to a text that names nothing — `nothing in /tmp/flint-web-resolve-2839\My Projects
+is where it goes names a path this run can reach`. A second commit is `Path::join`/`display()` and
+`path.sep` in the browser harness's two fixtures; the first push was otherwise green on both platforms
+(ubuntu failed, windows passed — its failure and nothing else). Anything under `#[cfg]`, anything calling
+`libc` and any test that **builds a path or counts characters** is the shape to check on the other two
+platforms before pushing, and this round is the third time that has cost a red job here.
+
 ### A directory read as a listing, and a name with a space in it — 2026-09-23
 
 *(The press half of this entry is superseded by the one above: a directory is opened where it lives now,
