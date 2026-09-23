@@ -823,8 +823,18 @@ path is the path of the process that wrote it, so `src/web.rs` means the run's `
 nothing else; §12 of `docs/web-mode.md` has the rule for what in a line counts as a path and the
 measured record from a real browser.
 
+**A directory opens as a listing rather than as a refusal.** Pressing one used to fill the panel with
+"is a directory, not a file", which is true and gives you nowhere to go. Now the panel draws what is in
+it: `..` to go up, then one row per entry — the directories in full ink, the files dim — and pressing a
+row reads it, so a file opens beside the turn and a directory goes in. The paths come from the run
+(`GET /dir`), not from the page reading the transcript as text, which is what makes a name with a space
+in it work at all: `My Projects/` is one name to a listing and two words to a line, so a directory whose
+name has a space in it was never even a button before. A `list` result's own rows are buttons too, for
+the same reason. §27 of `docs/web-mode.md`.
+
 **And the panel can hand a path to your machine.** Some of what a transcript names is not text this
-page can show: a directory, a PDF, a log past the preview cap, an image. The panel's head has one more
+page can show: a PDF, a log past the preview cap, an image, and a directory — which the panel also
+*reads* now, so `open` is for going there in another program. The panel's head has one more
 control for that — `open` — and it hands the path to whatever *your* computer uses for it: `explorer`,
 `open`, or `xdg-open`, so a directory opens in the file manager and a file in the program its type is
 registered to. It is a second, deliberate press rather than the path itself, because the text in a

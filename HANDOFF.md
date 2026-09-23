@@ -37,9 +37,11 @@ third time on **2026-09-22**, after the two page rounds at the top of `## What w
 preview's line numbers, then the settings screens and the `toggles` field's removal), and re-measured a
 fourth time the same day after the round above it (DSH's settings shape, the sidebar seat, the panel's
 hand), and re-measured a fifth time the same day, after the branch-cut round at the top of that section
-(`cargo test` run in full, and the browser harness by hand): `cargo test`
-**684 passing, 1 ignored** across the 14 suites (lib 382 — 368 of it before the tool-payload round, so
-that round added 14 — bin 8, `agent_loop` 34, `balance` 7, `cli_output` 115, `json_output` 41, `say` 6,
+(`cargo test` run in full, and the browser harness by hand), and re-measured a sixth time on
+**2026-09-23**, after the directory-listing round at the top of that same section: `cargo test`
+**686 passing, 1 ignored** across the 14 suites (lib **383** — 382 of it before this round, so this round
+added one `/dir` route test and one header assertion inside a test already there — bin 8, `agent_loop` 34,
+`balance` 7, `cli_output` 115, `json_output` 41, `say` 6,
 `search_tool` 4, `task` 17, `term_capture` 20 + 1 ignored, `tty_hangup` **0 on Windows** and 3 on Unix
 — the suite is `#![cfg(unix)]`, and the library carries a few `#[cfg(unix)]` tests of its own, so the
 ubuntu job's total is larger and is *not* quoted here as if it were this number — `web_view` 40,
@@ -49,25 +51,23 @@ ubuntu job's total is larger and is *not* quoted here as if it were this number 
 more step of that same CI job** — `examples/python/test_call.py` and `examples/mcp/test_mcp.py`, each
 resolving the binary `cargo test` just built for itself and refusing a pass that came from an installed
 `flint` on `PATH`; the
-browser harness run by hand at **113/113 claims held**, printing the list of drives and not-drives it is
+browser harness run by hand at **121/121 claims held**, printing the list of drives and not-drives it is
 bounded by. The release binary on `PATH` is the tree's (`flint --version` → `flint 0.1.0`, exit 0, and
 its SHA-256 is the one `target/release/flint.exe` was built with).
 
-**`docs/features-verification.md` is untracked, is not part of any commit, and makes the suite red on
-its own.** It is an external verification pass over `docs/features.md`, left in the tree rather than
-committed, and `the_source_tree_contains_no_mojibake` refuses it: the guard lists `U+8DEF` among its
-CP936 artifacts — the character a middle dot becomes when a UTF-8 file is read as CP936 — and that
-character is the second half of the Chinese word for a filesystem *path*, which is a word no Chinese
-document about this program can avoid. A long Chinese verification record therefore trips a check that is
-right about Rust sources and the page. Proven rather than assumed: with
-that one file moved aside the guard passes and the whole suite is the 650 above; with it present, 112 of
-`cli_output`'s 113 pass and the guard names only lines of that file. So a Chinese verification record
-cannot live in this tree as it stands. Two ways out, and the choice is a person's: keep the file outside
-the checkout (its evidence already lives under `%TEMP%\fv\`), or teach the guard that `U+8DEF` is
-legitimate prose *inside a file declared to hold CJK* while staying a marker everywhere else — a change
-to a safety guard, which is why it was not made to make a red suite go green. Everything the record
-found has been worked through and committed (`## What was just done`), so the file is now the evidence
-trail rather than an open to-do list.
+**`docs/features-verification.md` is untracked and is not part of any commit, and it no longer makes the
+suite red.** It is an external verification pass over `docs/features.md`, left in the tree rather than
+committed, and it used to trip `the_source_tree_contains_no_mojibake`: the guard lists `U+8DEF` among its
+CP936 artifacts — the character a middle dot becomes when a UTF-8 file is read as CP936 — which is the
+second half of the Chinese word for a filesystem *path*, a word no Chinese document about this program can
+avoid, so a long Chinese verification record could not live in this tree. Re-measured on 2026-09-23, in
+the round that deleted an unrelated scratch file (`scratch-paths.js`, a byte-order mark at line 1) which
+*was* tripping the guard: the guard now passes with this file present and `cli_output` is 115/115, the
+whole suite being the 686 above. The two ways out this paragraph used to weigh — keep the record outside
+the checkout, or teach the guard that `U+8DEF` is legitimate prose inside a file declared to hold CJK —
+are therefore both moot for this file, and the guard is unchanged. Everything the record found has been
+worked through and committed (`## What was just done`), so it is the evidence trail rather than an open
+to-do list.
 
 **That paragraph was first written with the character spelled out, and CI caught it** — the guard doing
 its job on a file (`HANDOFF.md`) that has been declared as holding Chinese since long before this
@@ -1821,6 +1821,75 @@ picker, type `/config` into the composer, and see whether the answer lands in th
 the block is drawn — then open the `commands` panel and read it against `/help` in the terminal.
 
 ## What was just done
+
+### A directory read as a listing, and a name with a space in it — 2026-09-23
+
+**Reported directly, in the middle of using the build: *现在目录还是跳转不了，然后带空格的目录依然无法正常识别*
+— pressing a directory still does not go anywhere, and a directory with a space in its name is still not
+recognised at all.** Two symptoms, one missing idea: a directory had exactly one treatment in the page,
+and `GET /file` refuses one by its own rule, so a directory path filled the panel with "is a directory,
+not a file" — and a *name with a space* could not even reach that far, because the scanner reads tokens
+and `My Projects` is two of them. §18 of `docs/web-mode.md` had stated that residue as unfixable, and for
+a reader of *text* it is: nothing in `Application Data  (0 bytes)` says where the name ends. What §18 had
+not considered is that the page need not read that line as text — the run knows the directory, and can be
+asked. §27 of `docs/web-mode.md` is the record; `docs/decisions.md` carries the decision.
+
+**A route that answers with a listing, rather than a smarter scanner.** `GET /dir?path=…` returns
+`{"path","parent","entries":[{"name","line","path","dir","size"}],"total","shown"}`. Each entry carries
+the **full path joined by the process** — the page never puts a separator next to a name, which is the
+same rule that keeps it from composing shell commands, and it is what makes a name with a space in it one
+name — and each carries the `line` the `list` tool itself would print (`name/`, or `name  (N bytes)`).
+That last part is one function called by two doors: `tools::directory_items` is now what `ListTool::call`
+lists, sorted by the printed line, so a model reading a tool result and a person reading the panel are
+told the same thing in the same order and cannot drift. A directory is a *listing* route rather than a
+mode of `/file`: the two answers have different content types and one of them is not bytes at all.
+
+**The refusal keeps its sentence and gains a header.** A path whose name ends in a separator is asked of
+`/dir` first — the one thing a name can say about being a directory — and everything else goes to
+`/file`, whose directory refusal now carries `X-Flint-Dir: 1`. The page acts on the header; the sentence
+stays for the person. Matching the words "is a directory" was refused as this page parsing prose it wrote
+itself, which is worse than parsing a stranger's because it looks safe. Being wrong costs one request.
+
+**The panel reads it as rows.** `paintDir` draws `..` first when the route said there is a parent (a
+direction, dim, tooltipped `up to <dir>`), then one `button.path` per entry — directories in full ink,
+files dim — each with the full path in its tooltip, and the raw/rendered switch put away because there is
+no Markdown reading of a directory. A press asks for that row's path: a directory goes in, a file opens
+beside the turn. A listing longer than one answer counts what it holds (`the first 2000 of 4321
+entries`), the same rule `/file` follows when it cuts a long file. `paintPreviewHead` strips a trailing
+separator before splitting, so `/a/b/` reads as `b` inside `/a/` rather than as a path with an empty name.
+
+**And the run's own `list` output is read as names, which is where the space is actually fixed.** The
+scanner's splitter gained a second alternative that matches exactly a line of that output — anchored to
+the whole line and tried only where relative names are read — so `My Projects/` is one button reading
+`My Projects` with the run's `/` left as the text around it, and `Application Data  (0 bytes)` one
+reading `Application Data`. It is the same kind of rule as the one that reads `src/web.rs:412` as a path
+and a line: a known format of this program's own output, read where it appears. Prose is untouched, so
+§18's residue stands where it always did — a bare spaced path a model did not quote stays split.
+
+**What is held where.** `src/web.rs` gained one route test (`/dir` against a real scratch directory
+holding `My Projects/inside.txt` and `notes.txt`: the entries, their order, the joined paths, the
+`parent`, and the same directory listed through `ListTool::call` so "one directory, two doors" is
+asserted rather than intended — red first as `404 no such route`), and the existing
+missing/file/binary test gained the `X-Flint-Dir` assertion (red first: the header was absent).
+`scripts/web-view-test.js` gained two claims (the route, the header, `..`, the capped note, the drawn
+rows and the head after a press; and the listing lines as one path each, with the row rule disabled to
+watch the spaced rows vanish). `scripts/browser-controls-test.js` gained seven, against a real browser,
+a real run and a real `sub dir` with a space in its name: the transcript's directory argument is **read**
+rather than refused, `..` is the first row, the way up lists the parent and a row of that listing is a
+way back down, pressing `sub dir/` goes in, the head shows the whole path, a file reached through the
+listing reads as its own bytes, and the same name is pressable in the run's own `list` output with the
+block unfolded. That harness is now **121/121** (was 113), and the whole claim block was watched red
+first by removing the header from the route — with it gone, all seven fail and the panel says exactly
+what the person reported: `… is a directory, not a file`.
+
+**The gate**: `cargo test` **686 passing, 1 ignored** (684 + one `web.rs` route test + the header
+assertion in an existing one), `cargo clippy --all-targets -- -D warnings` silent, `term-layout-test.js`,
+`web-view-test.js` and both `examples/` doors green, and the browser harness by hand at **121/121**.
+`docs/features.md`'s route table gained `GET /dir` and the header on `/file`'s refusal (and its count is
+corrected from nine routes to the thirteen that exist), §12.3 gained the listing's rows and the
+transcript's listing-line rule, `README.md` gained the paragraph a person reads, `AGENTS.md`'s
+`src/web.rs` and `scripts/` rows follow, and §18's "a directory is the one thing `GET /file` refuses"
+sentence is now marked as what it was: true while a directory had no reading at all.
 
 ### A branch cut from an answer, in the page — 2026-09-22
 

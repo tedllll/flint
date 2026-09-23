@@ -231,7 +231,7 @@ would disagree with.
 
 ## 6. The HTTP surface, small on purpose
 
-Nine routes. No cookies, no HTTP/2, no TLS, no keep-alive, no streaming request bodies.
+Thirteen routes. No cookies, no HTTP/2, no TLS, no keep-alive, no streaming request bodies.
 
 | Route | Returns |
 |---|---|
@@ -240,16 +240,20 @@ Nine routes. No cookies, no HTTP/2, no TLS, no keep-alive, no streaming request 
 | `GET /events` | SSE: replays from the cursor (`Last-Event-ID`, or `?last=` with `?session=`), then live events |
 | `POST /message` | one message from the browser, into the steering channel |
 | `POST /report` | one command *read* from the browser: same channel, and its answer is captured with the terminal quiet (§11) |
+| `POST /log` | the page's own account of itself, appended where it can be read afterwards (§25) |
 | `GET /sessions` | the conversations `/resume` can reach, numbered the way `/resume` numbers them |
-| `GET /file` | a file the transcript named, for the preview drawer (§12). `?path=` takes what the transcript says, including a trailing `:line` or `:line:column`; a relative path is resolved against the run's own working directory. `text/plain` with `X-Flint-Line` when a line was named, and `X-Flint-Cut`/`X-Flint-Size` when the file was longer than the preview cap |
-| `POST /open` | the *other* half of that answer: `{"path": "…"}` handed to the program this machine uses for it, for what the panel cannot show — a directory, a file past the cap, anything that is not text (§16). `{"opened": …, "with": …}`, or the refusal that says why not. The second route here that starts something, and the only one that starts a **process**: refused outright when the run is `readonly` |
+| `GET /file` | a file the transcript named, for the preview drawer (§12). `?path=` takes what the transcript says, including a trailing `:line` or `:line:column`; a relative path is resolved against the run's own working directory. `text/plain` with `X-Flint-Line` when a line was named, and `X-Flint-Cut`/`X-Flint-Size` when the file was longer than the preview cap. A *directory* is refused by this route's own rule, and the refusal carries `X-Flint-Dir: 1` — the sentence is for the person and the header is for the page, which then reads it as the listing it is (§27) |
+| `GET /dir` | what is in a directory, for the same panel: `{"path", "parent", "entries":[{"name","line","path","dir","size"}], "total", "shown"}`, the entries in the order the `list` tool prints them and each `path` joined by this process (§27). A file is refused — "is a file, not a directory" — because drawing one as an empty listing would be the panel lying about where the reader is |
+| `GET /image` | the other half of the same press: a picture's own bytes, with the type they really are rather than the one its name suggests (§21) |
+| `POST /open` | the *other* half of that answer: `{"path": "…"}` handed to the program this machine uses for it, for what the panel cannot show — a file past the cap, anything that is not text, and a directory, which the panel also *reads* now: `open` is for going there in another program (§16, §27). `{"opened": …, "with": …}`, or the refusal that says why not. The second route here that starts something, and the only one that starts a **process**: refused outright when the run is `readonly` |
 | `GET /jobs` | the `task` children and background commands this run started, as `{"jobs":[…]}` in the run's own order (running first, newest first) — for the header's jobs panel (§13). Each row carries `pid`, `kind`, what was asked, a status word, the exit code in words beside it, absolute epoch seconds for its start and end, and `path`: a child's conversation or a command's log |
+| `GET /peers` | who else is working in this directory, read off the presence records — the same list `/say --to` addresses (§8) |
 | *`event: sessions`* | not a route but its counterpart: the list has changed, re-read it |
 | *`event: jobs`* | the same for `GET /jobs`: a job started or ended, re-read it |
 | *`event: state`* | the run's own configuration: provider, model, what each provider offers, every setting with the words that change it and the screen it belongs on (`settings`, one list for the switches and the values alike), and the command rows with §8's class and the screen each is filed on (`group`) — a row also carries `values` when the page may send that command with an argument the frame names (a *read* on a `panel` row, a line the page types for you on a `selector`), `fields` when the page may collect its answers (one entry per word the line wants, each with the input's kind, the argument's name, and whether the command works without it), and `from` when it destroys something and the argument is one of a list (§11). There is no `toggles` field: `settings` says what the switches are, what they take and which one is on, and a second copy of that is one fact in two places (§22) |
 | `type: command` | what a command answered, on the same stream as the turn's events: `input` and `text` — which is also what a header button's answer arrives on. Carries `panel: true` when the page asked to read it rather than typing it, and `input` is the command's own `send` rather than the line in the one case the line carries a credential (§11) |
 
-**All nine are implemented.** `/session` and `/events` read the session path and the event feed
+**All thirteen are implemented.** `/session` and `/events` read the session path and the event feed
 through a shared handle, which is what lets `/new` and `/resume` move an open window to the
 conversation the terminal moved to. `/sessions` is the sidebar's source and goes through
 `session::list` — the same function `resolve_session` uses — so the numbers in the page *are*
@@ -1731,8 +1735,12 @@ The rule now asks the shape only of a **slash-rooted** path: two segments deep, 
 end. `/etc/hosts` passes, `/notes.md` passes on its extension, `/stop` and `/tmp` do not. `~`-rooted and
 drive-rooted paths are exempt, and the exemption is the point: the extra evidence exists to tell a
 one-segment `/word` apart from a command word, and no command word begins with `~` or a drive letter — so
-`~/notes` and `C:\notes` are paths on their own evidence. Dropping `/tmp` costs nothing, because a
-directory is the one thing `GET /file` refuses by its own rule.
+`~/notes` and `C:\notes` are paths on their own evidence. Dropping `/tmp` costs nothing **today**,
+because a directory is the one thing `GET /file` refuses by its own rule — and that reason was only
+true while a directory had no reading at all: since §27, a directory *is* readable, and a one-segment
+`/word` is still dropped for the reason it always was (this program's own commands are written that
+way). What §27 adds is the other direction: a name that *ends* in a separator is evidence of its own,
+and the run's own listing rows are read as names rather than as tokens.
 
 **2. A path with a space in it was cut in the middle.** `read C:\Program Files\flint\config.toml` is a
 path and a word, and which is which cannot be recovered from the line — so the scanner cut at the space
@@ -2501,3 +2509,109 @@ the cut keeps what is in front of the question, so the honest place for it is th
 the same reason `--fork` takes a question *number* and not a message. Nor a branch button on the newest
 answer, which would mean "ask this again in the same conversation" and is a different act. Nor a way to
 un-fold, which the file allows by hand and the page has no reason to offer.
+
+## 27. A directory, read: the panel's second reading — **built**
+
+Reported directly, 2026-09-23, while reading a run that had listed a directory:
+
+> 现在目录还是跳转不了，然后带空格的目录依然无法正常识别
+> — *pressing a directory still does not go anywhere, and a directory with a space in its name is still
+> not recognised at all.*
+
+Two symptoms, and they turned out to be one missing idea. A directory had exactly one treatment in this
+page: `GET /file` refuses it by its own rule ("is a directory, not a file"), so a path that named one
+filled the panel with a true sentence and nowhere to go — and a *name with a space* could not even reach
+that far, because the scanner reads tokens and `My Projects` is two of them. §18 stated that residue as
+unfixable, and for a reader of *text* it is: nothing in `Application Data  (0 bytes)` says where the name
+ends. What §18 did not consider is that the page does not have to read that line as text at all — the
+run knows the directory, and can be asked.
+
+**The answer is a route, not a smarter scanner.** `GET /dir?path=…` answers with what is in a directory
+as **data**: `{"path", "parent", "entries":[{"name","line","path","dir","size"}], "total", "shown"}`.
+Three decisions in that shape are the whole of it:
+
+- **Each entry carries the full path, joined by the process.** The page never joins a name onto a
+  directory: separators are the business of the machine the run is on, and `My Projects` is one name
+  there and two tokens here. This is the same rule the page follows about commands — it composes
+  nothing it can be told.
+- **Each entry carries its own `line`** — `name/` for a directory, `name  (N bytes)` for a file — built
+  by `tools::DirItem::line`, which is the function the `list` tool prints from. One answer, two doors: a
+  person reading the panel and a model reading a tool result are told the same thing in the same order,
+  and neither can drift from the other without the shared function changing.
+- **The path is a *listing* route rather than a mode of `/file`.** `/file` serves bytes; a directory has
+  none, and the two answers do not even have the same content type. A third route is cheaper than a
+  route with two shapes.
+
+The `list` tool was rewritten onto the same function (`tools::directory_items`), which is a small
+refactor with one visible consequence: the entries are sorted by the **printed line** in both doors, so
+`My Projects/` sorts beside `My Notes.txt` rather than in a block of its own. It was `lines.sort()` on
+the printed lines before, so nothing moved — the sort is now stated where both callers read it.
+
+**The refusal keeps its sentence and gains a header.** A path whose *name* ends in a separator is asked
+of `/dir` first, because that is the one thing a name can say about being a directory. Everything else —
+`C:\Users\zhangzhuo`, which is how a `list` call names the directory it wants, and which is the case
+that was reported — goes to `/file`, whose refusal now carries `X-Flint-Dir: 1`. The page reads that
+header and asks `/dir`; the sentence in the body is unchanged, because it is for the person. Matching
+the words "is a directory" was rejected: that is this page parsing prose it wrote itself, which is worse
+than parsing a stranger's, because it looks safe.
+
+**The panel's second reading.** A listing draws one `button.path` per entry into the same body a file's
+lines go in — a directory is a *reading of a path*, not a different panel — with `..` first when the
+route says there is a parent, the directories in full ink and the files dim, and the raw/rendered switch
+put away (there is no Markdown reading of a directory, exactly as there is none of a refusal). Pressing a
+row asks for that row's path: a directory goes in, a file opens beside the turn. The panel's head keeps
+its own rule — it shows the path that was pressed, not the one the route resolved — and now strips a
+trailing separator before splitting it, so `/a/b/` reads as `b` inside `/a/` rather than as a whole path
+with an empty name after it. A listing with more entries than one answer carries is **counted** rather
+than quietly shortened: the note says `the first 2000 of 4321 entries`, the same rule `/file` follows
+when it cuts a long file.
+
+**The run's own listing is readable as names, which is where the space is fixed.** The `list` tool
+prints one entry per line as `NAME/` or `NAME  (N bytes)`, and that line is evidence no token stream
+has: the mark says where the name ends, so everything before it — spaces and all — is one name. The
+page's splitter gained a second alternative that matches exactly such a line (`addressParts`, tried
+before the bare-token rule and anchored to the line), and the row becomes one button whose text is the
+name: `Application Data  (0 bytes)` is now a button reading `Application Data`, and `My Projects/` a
+button reading `My Projects` with the run's `/` left as the text that follows it. This is the same kind
+of rule as the one that reads `src/web.rs:412` as a path and a line: a *known format of this program's
+own output*, read where relative names are read at all.
+
+**What was measured, and where.**
+
+| Claim | Where it was measured | What came back |
+|---|---|---|
+| `/dir` lists what is in a directory, in the `list` tool's own order | `src/web.rs::a_directory_is_read_as_a_listing_of_what_is_in_it` | `["My Projects", "notes.txt"]`, the directory's `path` joined by the process, `parent` for the way up, and the tool's own text asserted beside it (`My Projects/`, `notes.txt  (4 bytes)`) — the same directory, two doors. Watched red first: `404 no such route` |
+| `/file`'s directory refusal names the kind in a header | `src/web.rs::a_missing_file_a_directory_and_a_binary_each_say_what_they_are` | `X-Flint-Dir: 1` beside `sub is a directory, not a file`. Watched red first: the header was absent, and the test's message says why the page needs it |
+| A file is not a directory, and nothing is not either | the same test | `notes.txt` → 400 `not a directory`; `nowhere` → 404; `?path=` empty → 400 |
+| Which route a path is asked of, and what a listing becomes | `scripts/web-view-test.js`, two claims | the route's encoding; a trailing separator decides the first request; the header decides the correction; `..` first, then the entries, each carrying the run's own path and label; a capped listing counting what is there; the drawn rows' classes, labels and tooltips; the head after a press |
+| The run's own listing rows are names, spaces and all | `scripts/web-view-test.js` | `My Projects/`, `notes.txt  (12 bytes)` and `Application Data  (0 bytes)` are each one path; the pieces rejoined are the line that came in, so nothing is eaten; prose is not a listing. Watched red first: with the row rule disabled, the same claim reports `["notes.txt"]` — the spaced rows vanish and the note survives only because it has an extension |
+| The whole interaction, in a browser, on a real directory | `scripts/browser-controls-test.js`, seven new claims | a directory named in the transcript is **read** rather than refused; `..` is the first row; the way up lists the parent and a row of that listing is a way back down; pressing `sub dir` — a real directory with a space in its name — lists what is inside it; the head shows the whole path; a file reached through the listing reads as its own bytes; and the same name is pressable in the run's own listing in the transcript, with the block unfolded |
+
+**The residues, stated rather than hidden.**
+
+- **A row from the run's own listing resolves against the run's working directory**, because that is the
+  name a model listing `.` means. A listing of somewhere *else* therefore names entries relative to the
+  wrong directory, and the panel says `nothing at AppData` rather than opening the wrong file: pressing
+  the *directory* first is how to read that one, and the panel's own listing carries full paths for
+  exactly this reason.
+- **A bare path with a space outside a listing stays split.** §18's residue is unchanged for prose and
+  for a `glob` line; a quoted path works, and flint quotes what it prints.
+- **A path in a tool call's arguments is shown as the JSON that carried it**, so on Windows its
+  separators read doubled (`C:\\Users\\…`) in the button and in the panel's head. Measured: the run
+  resolves it anyway — repeated backslashes are one separator to Windows — and the panel showing what it
+  was asked for, rather than a normalised spelling of it, is the rule the head already followed. The
+  terminal is not in this position: it prints its own summary of a call, not the wire form.
+
+**The gate, after this round.** `cargo test` **686 passed / 1 ignored** (the pty test, Unix only) across
+its 14 suites — 684 before the round, plus one `web.rs` route test and the header assertion in an
+existing one; `cargo clippy --all-targets -- -D warnings` silent; `node scripts/term-layout-test.js` and
+`node scripts/web-view-test.js` (two claims added, all green) — both run by CI; both Python doors green;
+and `scripts/browser-controls-test.js` **121/121** in headless Chrome on Windows (was 113, with seven
+claims for this round), by hand, because it needs a real browser.
+
+**What is deliberately not here.** A panel-side path box or "go to…" field: the transcript and the
+listing are the two doors, and a third place to type a path is a third place to be wrong. A way to
+*create*, rename or delete anything from the listing: this panel reads, `POST /open` hands a path to the
+machine, and writing a directory has no route because it is not a reading. Nor a page-side resolution of
+a row against the directory that was listed — see the first residue above; it needs a `base` on the
+route and a base threaded through the renderer, and the honest failure is cheap.

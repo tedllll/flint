@@ -166,6 +166,40 @@ writes another, and the machine where the provider is in doubt is exactly where 
 handing to somebody. No messages means no page, refused the way `/import` refuses an empty file: one
 that looks like a conversation and holds nothing cannot be told from one that failed to load.
 
+## A directory is read as data, not as text
+
+**A directory is a reading, so `GET /dir` answers with a listing rather than with prose.** `GET /file`
+refused a directory by its own rule — "is a directory, not a file" — which is true and useless to a
+person who pressed the path to go there, and to a page that then had to decide what to draw. The three
+ways out were weighed. Drawing the refusal with an `open` button was already possible and is not a
+reading: it hands the question to another program on the same machine. Parsing the run's own `list`
+output in the page was refused for this repository's oldest rule about the page: it would be a second
+place where "what a listing looks like" is decided, and it cannot be done at all for the case that was
+reported — `My Projects/` is one name to a person and two tokens to any reader of text. So the process
+answers, in a shape the page draws controls from, and the entries' full paths are **joined here**: the
+page never puts a separator next to a name, which is the same reason it composes no shell command.
+
+**The listing and the `list` tool are one function, so they cannot disagree.** `tools::directory_items`
+is called by both, the order is the order the tool prints (sorted by the printed line), and the page
+shows each entry's `line` as the tool would have printed it. A model reading a tool result and a person
+reading the panel are therefore told the same thing; the alternative — a route that re-implemented the
+listing for the page — is exactly the drift that the tool and the panel would be blamed for.
+
+**The refusal keeps its sentence and gains a header.** A path whose name ends in a separator is asked
+of `/dir` first, because that is the one thing a name can say about being a directory. Everything else
+goes to `/file`, whose directory refusal now carries `X-Flint-Dir: 1`: the page acts on the header, and
+the sentence stays for the person. Matching the words "is a directory" was refused — that is this page
+reading prose it wrote itself, which is worse than reading a stranger's because it looks safe. A page
+that guesses wrong costs one request, and nothing else.
+
+**A line of the run's own listing is a name, which is where a space stops being ambiguous.** `list`
+prints one entry per line as `NAME/` or `NAME  (N bytes)`, and such a line says where the name ends —
+so the page's splitter reads it as one name, in the position where relative names are read at all. This
+is the same kind of rule as the one that reads `src/web.rs:412` as a path and a line: a known format of
+this program's own output, read where it appears. It does not touch prose, so §18's stated residue — a
+bare path with a space, written by a model that did not quote it — is unchanged; what is new is that a
+*listing* is no longer prose to this page.
+
 ## A cursor is a position in a file
 
 The browser's reconnect cursor was a **frame count minted by the process** (`Live::next`), and that was

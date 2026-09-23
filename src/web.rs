@@ -1125,6 +1125,13 @@ pub fn respond(request: &Request, body: &str, state: &State) -> Answer {
         // program. The one route that reads a path from the wire: see `serve_file`, and §12 of
         // `docs/web-mode.md` for what it will and will not serve.
         ("GET", "/file") => serve_file(request, state),
+        // A directory, which is the one thing `/file` refuses by its own rule and the one a person
+        // pressing a path in a transcript most often wants: the argument of a `list`, the directory a
+        // `glob` walked, a path the model wrote. It answers as *data* rather than as text -- the panel
+        // draws each entry as a control, and an entry whose name has a space in it is a name rather
+        // than two tokens -- and it is the same listing the `list` tool prints, from the same
+        // function: see `serve_dir` and §27 of `docs/web-mode.md`.
+        ("GET", "/dir") => serve_dir(request, state),
         // The other half of the same question: a path the panel cannot draw as text. A picture is
         // not a file too big or too strange to preview, it is a file this page can show *only* if
         // it is handed the bytes with the type they really are -- see `serve_image`, and §21 of
@@ -1609,7 +1616,12 @@ fn refusal(asked: &str, path: &std::path::Path) -> Response {
             400,
             "Bad Request",
             format!("{asked} is a directory, not a file\n"),
-        ),
+        )
+        // ...and the *kind* of thing it is in a header as well, because the page acts on it: a
+        // directory is read through `GET /dir`, and a page that had to read this sentence to find
+        // that out would be parsing prose -- prose this process wrote, which is worse than parsing a
+        // stranger's, because it looks safe.
+        .with_header("X-Flint-Dir", "1".to_string()),
         Ok(metadata) if metadata.len() > FILE_REFUSE_ABOVE => Response::text(
             400,
             "Bad Request",
@@ -1624,6 +1636,87 @@ fn refusal(asked: &str, path: &std::path::Path) -> Response {
             format!("{asked} is not text this page can show (it is not valid UTF-8)\n"),
         ),
         Err(e) => Response::text(404, "Not Found", format!("nothing at {asked}: {e}\n")),
+    }
+}
+
+/// The most entries one listing will describe, and the reason a listing can be bounded at all.
+///
+/// A directory can hold a hundred thousand names, and every entry here is drawn as a control: the cap
+/// is what keeps one press from building a page nobody can use. What is there is still *counted*, so a
+/// reader is told the directory holds more than what they can see rather than being shown a quietly
+/// shortened list -- the same rule `GET /file` follows when it cuts a long file.
+const DIR_ENTRIES_MAX: usize = 2000;
+
+/// `GET /dir?path=…`: what is in a directory, as the data the panel draws.
+///
+/// The answer to a press that used to be a refusal. A directory path in a transcript is a button --
+/// the argument of a `list`, the directory a `glob` walked, something a model wrote -- and pressing one
+/// used to fill the panel with "is a directory, not a file", which is true and useless.
+///
+/// It answers as JSON because the page builds a *control* per entry (one press to go in, one press to
+/// read a file) and because an entry's name is one name: `My Projects` is a single entry here and two
+/// tokens to anything reading the transcript as text, which is the whole reason a directory with a
+/// space in its name could never be pressed before. Each entry carries the **full path**, joined by
+/// this process -- separators are the process's business, and a page joining a name onto a directory
+/// would be a second opinion about paths on a machine it cannot see.
+///
+/// The listing itself comes from `tools::directory_items`, the same function the `list` tool prints
+/// from, so a model and a person looking at one directory are told the same thing in the same order.
+fn serve_dir(request: &Request, state: &State) -> Response {
+    let Some(raw) = request.query("path") else {
+        return Response::text(
+            400,
+            "Bad Request",
+            "which directory? this route takes ?path=<directory>\n",
+        );
+    };
+    let Some(asked) = percent_decode(raw) else {
+        return Response::text(400, "Bad Request", "that path is not percent-encoded properly\n");
+    };
+    if asked.trim().is_empty() {
+        return Response::text(400, "Bad Request", "which directory? ?path= was empty\n");
+    }
+    let literal = resolve(&asked, &state.cwd);
+    match std::fs::metadata(&literal) {
+        Err(e) => Response::text(404, "Not Found", format!("nothing at {asked}: {e}\n")),
+        Ok(metadata) if !metadata.is_dir() => Response::text(
+            400,
+            "Bad Request",
+            format!("{asked} is a file, not a directory\n"),
+        ),
+        Ok(_) => match crate::tools::directory_items(&literal) {
+            Err(e) => Response::text(400, "Bad Request", format!("cannot list {asked}: {e}\n")),
+            Ok(items) => {
+                let total = items.len();
+                let entries: Vec<serde_json::Value> = items
+                    .iter()
+                    .take(DIR_ENTRIES_MAX)
+                    .map(|item| {
+                        serde_json::json!({
+                            // The name, the line the `list` tool would print for it, the path this
+                            // process joined, and the two facts the panel styles a row with.
+                            "name": item.name,
+                            "line": item.line(),
+                            "path": literal.join(&item.name).to_string_lossy(),
+                            "dir": item.dir,
+                            "size": item.size,
+                        })
+                    })
+                    .collect();
+                Response::json(
+                    200,
+                    "OK",
+                    serde_json::json!({
+                        "path": literal.to_string_lossy(),
+                        "parent": literal.parent().map(|p| p.to_string_lossy().to_string()),
+                        "entries": entries,
+                        "total": total,
+                        "shown": entries.len(),
+                    })
+                    .to_string(),
+                )
+            }
+        },
     }
 }
 
@@ -3396,6 +3489,15 @@ mod tests {
         let directory = ask(&ours(&format!("/file?path={}", encoded("sub"))), &working_in(&dir));
         assert_eq!(directory.status, 400, "{}", directory.body);
         assert!(directory.body.contains("directory"), "{}", directory.body);
+        // ...and the refusal says *which kind* of thing it was in a header as well, because the page
+        // acts on it: a directory is read through `GET /dir`, and a page that had to read the sentence
+        // to know that would be a page parsing prose it wrote itself.
+        assert_eq!(
+            header(&directory, "X-Flint-Dir"),
+            Some("1"),
+            "the page cannot tell a directory from a binary without this: {}",
+            directory.body
+        );
 
         std::fs::write(dir.join("blob.bin"), [0x00, 0xFF, 0xFE, 0x41]).expect("scratch binary");
         let binary = ask(&ours(&format!("/file?path={}", encoded("blob.bin"))), &working_in(&dir));
@@ -3404,6 +3506,81 @@ mod tests {
 
         // Asked with no path at all: a question answered, not a missing route.
         let unsaid = ask(&ours("/file"), &working_in(&dir));
+        assert_eq!(unsaid.status, 400, "{}", unsaid.body);
+        assert!(unsaid.body.contains("path"), "{}", unsaid.body);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A directory is a reading of its own, and the route that serves it is `GET /dir`.
+    ///
+    /// Reported directly, 2026-09-23: *pressing a directory does not go anywhere, and a directory with
+    /// a space in its name is not recognised at all.* A directory path in a transcript is a button --
+    /// the argument of a `list`, the path a `glob` walked, something the model wrote -- and pressing
+    /// one used to fill the panel with "is a directory, not a file". The name was the reason a
+    /// directory with a space was never a button in the first place: the scanner reads a *token*, and
+    /// `My Projects` is two, so the only way to press such a directory is to have the run list it and
+    /// hand the entries over as data rather than as text to be re-scanned.
+    ///
+    /// What is asserted here is the contract the page's listing depends on: the entries carry the
+    /// **full path the process built** (the page never joins a name onto a directory -- separators are
+    /// the process's business, and a name with a space or a backslash is a name), the parent so the
+    /// panel can go up, and the same order the `list` tool prints -- asserted against that tool rather
+    /// than against a fixture, because the whole guarantee is that a person and a model reading this
+    /// directory are told the same thing.
+    #[tokio::test]
+    async fn a_directory_is_read_as_a_listing_of_what_is_in_it() {
+        use crate::tools::Tool as _;
+        let dir = scratch("dir-route");
+        std::fs::create_dir_all(dir.join("My Projects")).expect("scratch directory");
+        written(&dir, "notes.txt", "one\n");
+        written(&dir, "My Projects/inside.txt", "two\n");
+
+        let response = ask(&ours(&format!("/dir?path={}", encoded(&dir.display().to_string()))), &state());
+        assert_eq!(response.status, 200, "{}", response.body);
+        assert_eq!(response.content_type, "application/json; charset=utf-8");
+
+        let json: serde_json::Value = serde_json::from_str(&response.body).expect("JSON");
+        assert_eq!(json["path"], dir.display().to_string());
+        let parent = json["parent"].as_str().expect("a parent to go up to");
+        assert_eq!(std::path::Path::new(parent), dir.parent().expect("a scratch parent"));
+
+        let names: Vec<&str> = json["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .map(|e| e["name"].as_str().expect("a name"))
+            .collect();
+        assert_eq!(names, ["My Projects", "notes.txt"], "{}", response.body);
+
+        let inside = &json["entries"][0];
+        assert_eq!(inside["dir"], true);
+        assert_eq!(
+            inside["path"],
+            dir.join("My Projects").display().to_string(),
+            "the path is joined by the process, so a name with a space is one name"
+        );
+        let file = &json["entries"][1];
+        assert_eq!(file["dir"], false);
+        assert_eq!(file["size"], 4);
+
+        // The same listing the tool prints, in the same order: one directory, two doors.
+        let printed = crate::tools::ListTool
+            .call(&serde_json::json!({ "path": dir.display().to_string() }))
+            .await
+            .expect("list");
+        let lines: Vec<&str> = printed.lines().collect();
+        assert_eq!(lines.len(), 2, "{printed:?}");
+        assert!(lines[0].starts_with("My Projects/"), "{printed:?}");
+        assert!(lines[1].starts_with("notes.txt  (4 bytes)"), "{printed:?}");
+
+        // A file is not a directory, and neither is nothing at all.
+        let file = ask(&ours(&format!("/dir?path={}", encoded("notes.txt"))), &working_in(&dir));
+        assert_eq!(file.status, 400, "{}", file.body);
+        assert!(file.body.contains("not a directory"), "{}", file.body);
+        let missing = ask(&ours(&format!("/dir?path={}", encoded("nowhere"))), &working_in(&dir));
+        assert_eq!(missing.status, 404, "{}", missing.body);
+        let unsaid = ask(&ours("/dir"), &working_in(&dir));
         assert_eq!(unsaid.status, 400, "{}", unsaid.body);
         assert!(unsaid.body.contains("path"), "{}", unsaid.body);
 

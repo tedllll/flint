@@ -1592,6 +1592,129 @@ check("the preview says which line, and how much of a cut file is here", () => {
   eq(viewer.bytesLabel(12 * 1024 * 1024), "12 MB", "megabytes");
 });
 
+// The directory half of the same press. Reported 2026-09-23: *pressing a directory does not go
+// anywhere, and a directory with a space in its name is not recognised at all.* The second half of
+// that is not a scanner bug to be fixed in the scanner -- a name with a space is two tokens to
+// anything reading text -- so the listing is a route, each entry arrives as one path the run built,
+// and the panel draws a control per entry. What is checked here is the decision (which route a path
+// is asked of, and the header that corrects it), the mapping from the route's JSON to rows, and what
+// the panel draws.
+check("a directory is read through its own route, and a listing draws one row per entry", () => {
+  // A page of its own: `paintDir` and the press below both write the panel's own state, and a stub
+  // node cannot be emptied by assigning `textContent = ""` (it is a plain field there) -- so a check
+  // sharing a page with an earlier press would read that press's leftovers.
+  const page = loadViewer();
+  // The route, encoded the way `/file` and `/image` are.
+  eq(page.dirRoute("C:\\work\\My Projects"), "/dir?path=C%3A%5Cwork%5CMy%20Projects",
+     "a directory with a space is one encoded path");
+  eq(page.dirRoute("src/"), "/dir?path=src%2F", "a trailing separator travels as itself");
+
+  // Which route is asked first. A trailing separator is the one thing a *name* says about being a
+  // directory; it is how the run's own `list` prints one, and being wrong costs one request because
+  // `/file` says so in a header (`dirHeader`).
+  ["src/", "C:\\work\\", "/tmp/", "~/notes/", "  src/  "].forEach((p) => {
+    eq(page.dirPath(p), true, p + " ends in a separator, so it is asked for as a directory");
+  });
+  ["src", "notes.txt", "C:\\work\\a b.txt", "", null, "src//x"].forEach((p) => {
+    eq(page.dirPath(p), false, JSON.stringify(p) + " says nothing about being a directory");
+  });
+  const headers = (map) => ({ get: (name) => (name in map ? map[name] : null) });
+  eq(page.dirHeader({ headers: headers({ "X-Flint-Dir": "1" }) }), true, "the header says a directory");
+  eq(page.dirHeader({ headers: headers({}) }), false, "and only that header does");
+  eq(page.dirHeader(null), false, "with no answer there is nothing to read");
+
+  // The route's JSON to rows. The paths are the ones the run built, in the order the run listed them,
+  // with the way up first when there is one -- and the note counts what the route counted rather than
+  // what was drawn, because a directory can hold more than one answer carries.
+  const listing = page.dirRows({
+    path: "C:\\work",
+    parent: "C:\\",
+    total: 3,
+    shown: 3,
+    entries: [
+      { name: "My Projects", line: "My Projects/", path: "C:\\work\\My Projects", dir: true, size: 0 },
+      { name: "notes.txt", line: "notes.txt  (12 bytes)", path: "C:\\work\\notes.txt", dir: false, size: 12 },
+      { name: "sub", line: "sub/", path: "C:\\work\\sub", dir: true, size: 0 },
+    ],
+  });
+  eq(listing.rows.map((r) => r.label), ["..", "My Projects/", "notes.txt  (12 bytes)", "sub/"],
+     "the way up and then the entries, each labelled the way the run prints it");
+  eq(listing.rows.map((r) => r.path),
+     ["C:\\", "C:\\work\\My Projects", "C:\\work\\notes.txt", "C:\\work\\sub"],
+     "and each row carries the path the run built, not one this page joined");
+  eq(listing.rows[0].title, "up to C:\\", "the way up says where it goes");
+  eq(listing.note, "3 entries", "the count is the route's own");
+  eq(page.dirRows({ entries: [{ name: "only", line: "only/", path: "a/only", dir: true }] }).note,
+     "1 entry", "and one entry is not `1 entries`");
+  eq(page.dirRows({ total: 5000, shown: 2000, entries: [] }).note, "the first 2000 of 5000 entries",
+     "a capped listing says what it is rather than pretending to be the whole directory");
+  eq(page.dirRows({}).rows.length, 0, "an answer with nothing in it draws nothing");
+  eq(page.dirRows(null).rows.length, 0, "including no answer at all");
+
+  // ...and what the panel draws: a button per row, a directory marked as one, and the label the run
+  // gave rather than this page's reassembly of `name` and `/`.
+  page.paintDir({
+    path: "C:\\work",
+    parent: "C:\\",
+    total: 3,
+    shown: 3,
+    entries: [
+      { name: "My Projects", line: "My Projects/", path: "C:\\work\\My Projects", dir: true, size: 0 },
+      { name: "notes.txt", line: "notes.txt  (12 bytes)", path: "C:\\work\\notes.txt", dir: false, size: 12 },
+    ],
+  });
+  const drawn = page.__node("preview-text").children;
+  eq(drawn.map((r) => r.className), ["path dir up", "path dir", "path file"],
+     "the way up, the directory and the file, each drawn as what it is");
+  eq(drawn.map((r) => r.children.map((n) => n.textContent).join("")),
+     ["..", "My Projects/", "notes.txt  (12 bytes)"],
+     "labelled the way the run prints them, space and all");
+  eq(drawn.map((r) => r.title), ["up to C:\\", "C:\\work\\My Projects", "C:\\work\\notes.txt"],
+     "and each one names the whole path a press will read");
+  eq(page.__node("preview-note").textContent, "3 entries", "the note is the listing's own");
+  eq(page.__node("preview-render").hidden, true, "a listing has no rendered reading");
+  eq(page.__node("preview-md").hidden, true, "and no Markdown one either");
+
+  // The press. What it must do is ask about the path the *run* built -- which is the whole reason a
+  // directory with a space in its name works here -- and the panel's head is drawn before the read,
+  // so it is visible without a fetch behind it.
+  page.fire(drawn[1], "click");
+  eq(page.__node("preview").hidden, false, "the panel is on screen");
+  eq(page.__node("preview-path").children.map((n) => n.textContent).join(""),
+     "C:\\work\\My Projects", "and its head shows the whole path, space included");
+});
+
+check("a listing in a tool result is read by its own rows, which is where a space survives", () => {
+  // The `list` tool's output, which is the shape a person presses paths in. `My Projects/` is two
+  // tokens to the splitter and one name to the run, and the line's own mark is the evidence: this is
+  // the one place in the page where a bare name with a space can be known to end where it ends.
+  const listed = "My Projects/\nnotes.txt  (12 bytes)\nApplication Data  (0 bytes)\n";
+  const parts = viewer.addressParts(listed, false);
+  eq(parts.filter((p) => p.path !== undefined).map((p) => p.path),
+     ["My Projects", "notes.txt", "Application Data"],
+     "each row is one path, spaces and all");
+  eq(parts.filter((p) => p.path !== undefined).map((p) => p.written),
+     ["My Projects", "notes.txt", "Application Data"],
+     "and the button says the name, which is the row's own first half");
+  eq(
+    parts.map((p) => (p.path !== undefined ? p.written : p.text)).join(""),
+    listed,
+    "nothing is eaten: the directory's `/`, the sizes and the breaks are all still there"
+  );
+  // A row is only read where relative names are read at all: prose is a sentence, and `My Projects/`
+  // in one is two words that happen to end in a slash.
+  eq(viewer.addressParts("in My Projects/ we keep it", true).filter((p) => p.path !== undefined).length,
+     0, "a sentence is not a listing");
+  // And outside a listing the residue stands: a bare path with a space is still cut at the space, so
+  // the first fragment is a link to `C:\My` -- a path that does not exist rather than the one that was
+  // meant. Nothing outside the run's own listing can tell that name from two words.
+  eq(viewer.addressParts("wrote C:\\My Projects\\notes.txt", false).filter((p) => p.path !== undefined)
+       .map((p) => p.path), ["C:\\My", "Projects\\notes.txt"],
+     "a bare spaced path in prose is still split -- quoted, it is one");
+  eq(viewer.addressParts('"C:\\My Projects\\notes.txt"', false).filter((p) => p.path !== undefined)
+       .map((p) => p.path), ["C:\\My Projects\\notes.txt"], "which is what the quotes are for");
+});
+
 check("a file is drawn line by line, with the file's own numbers in a gutter", () => {
   const pre = viewer.__node("preview-text");
   // The whole panel, as the browser paints it: what a line's number is, and what a line's text is.

@@ -725,6 +725,25 @@
   #preview-text.lines-5 .ln { width: 6ch; }
   #preview-text.lines-6 .ln { width: 7ch; }
   #preview-text .code { flex: 1 1 auto; min-width: 0; white-space: pre-wrap; word-wrap: break-word; }
+  /* A directory, read: one pressable row per entry, in the same body a file's lines go in. The rows
+     are buttons rather than links because pressing one asks this run for another path -- nothing here
+     is an address a browser could follow -- and they are laid out as a *column* rather than as the
+     wrapped run of words a path in the transcript is, because a listing is read as a list: a reader
+     scanning for a name wants one name per line, and the panel is the one place that can give it to
+     them. The face is the one the code reading uses, so the names line up. */
+  #preview-text .path {
+    display: flex; align-items: baseline; width: 100%; min-height: 19px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 13px; text-align: left; color: var(--ink); background: none; border: 0;
+    padding: 1px 2px; cursor: pointer;
+  }
+  #preview-text .path:hover, #preview-text .path:focus { background: rgba(127, 127, 127, 0.16); }
+  /* What a listing is for is deciding what to open, and the two kinds of row are two different
+     decisions: a directory is somewhere to go and a file is something to read. So the directories are
+     in full ink and the files give way -- including the way up, which is a direction rather than an
+     entry, and whose dim colour says so without a second column to explain it. */
+  #preview-text .path.file, #preview-text .path.up { color: var(--dim); }
+  #preview-text .path + .path { margin-top: 1px; }
   /* The picture and the control it sits in: a button with no chrome, because what a press does
      (`POST /open`) is not the point of looking at it and a frame around a screenshot would be. The
      image never grows past the column: `max-width`/`max-height` with `object-fit: contain` shows the
@@ -1419,12 +1438,26 @@ function clip(s, n) {
 function addressParts(text, absoluteOnly) {
   const parts = [];
   let last = 0;
-  const candidates = String(text).matchAll(/"[^"\n]*"|'[^'\n]*'|`[^`\n]*`|[^\s"'`()\[\]{}<>,;]+/g);
+  // The second alternative is a line of the run's *own* listing, and it is here because a name with a
+  // space in it cannot be recovered from a token stream: `My Projects/` arrives as `My` and
+  // `Projects/`, and the second half is a link to nothing. The `list` tool prints one entry per line
+  // as `NAME/` or `NAME  (N bytes)`, so the line itself is the evidence that everything up to the mark
+  // is one name -- and the mark is left *outside* the match, so the transcript keeps it (`last` moves
+  // past the name only). Reported 2026-09-23 as "a directory with a space in it is not recognised".
+  // It is only read where relative names are read at all (`!absoluteOnly`): a row is a name beside the
+  // directory that was listed, not in prose. The `^` is what keeps it honest inside a paragraph that
+  // happens to end in a slash: the row has to *be* the line, and a sentence that ends in `/` is a
+  // sentence.
+  const row = "(?<row>^[^\\n]+?)(?=/[ \\t]*$|\\s\\s+\\(\\d+ bytes\\)[ \\t]*$)";
+  const candidates = String(text).matchAll(
+    new RegExp('"[^"\\n]*"|\'[^\'\\n]*\'|`[^`\\n]*`|' + (absoluteOnly ? "" : row + "|") + '[^\\s"\'`()\\[\\]{}<>,;]+', "gm")
+  );
   for (const match of candidates) {
     const raw = match[0];
     const quote = raw.length > 1 && /^["'`]/.test(raw) ? raw[0] : "";
     const token = quote ? raw.slice(1, -1) : raw;
-    const found = asUrl(token) || asPath(token, absoluteOnly);
+    const named = match.groups && match.groups.row !== undefined;
+    const found = asUrl(token) || (named ? asRowPath(token) : asPath(token, absoluteOnly));
     if (!found) continue;
     // The opening quote stays text, and the closing one is left for the next piece: a link drawn
     // *inside* the quotes it was written with, rather than a link that ate them.
@@ -1436,6 +1469,26 @@ function addressParts(text, absoluteOnly) {
   }
   if (last < text.length) parts.push({ text: text.slice(last) });
   return parts;
+}
+
+/// One line of the run's own listing, as the path it names.
+///
+/// `list` prints `NAME/` for a directory and `NAME  (N bytes)` for a file, and this is the one place a
+/// name with a space in it can be known to be a single name: the line's own mark says where it ends.
+/// The path is left as the name the run printed -- relative, and resolved against the run's working
+/// directory by the route, because that is the directory a model listing `.` means. A listing of
+/// somewhere *else* therefore names entries relative to the wrong directory, and the panel says
+/// "nothing at …" rather than opening the wrong file: pressing the directory first is the way to read
+/// that one, and the panel's own listing carries full paths for exactly this reason.
+///
+/// The floor on the length is `asPath`'s: a one-character name is a word that happens to end in a
+/// slash, and a button to `a/` is worth less than the noise it makes.
+function asRowPath(name) {
+  // Trimmed, because the match starts at the line's first character and an indented listing is a
+  // listing. A name that is *really* padded is a file nobody can see the edges of anyway.
+  const path = String(name).trim();
+  if (path.length < 3) return null;
+  return { path: path, line: 0, written: path };
 }
 
 /// One candidate token as a web address, or `null`.
@@ -3623,9 +3676,14 @@ function paintPreviewHead() {
   }
   if (!preview) return;
   node.title = preview.line ? preview.path + ":" + preview.line : preview.path;
-  const cut = Math.max(preview.path.lastIndexOf("/"), preview.path.lastIndexOf("\\"));
-  if (cut > 0) node.appendChild(el("span", "dirs", preview.path.slice(0, cut + 1)));
-  node.appendChild(el("span", "name", cut > 0 ? preview.path.slice(cut + 1) : preview.path));
+  // A path that ends in a separator -- a directory, which is a reading this panel now has -- would
+  // otherwise have nothing left for the `name` half, and the split would put the whole path in `dirs`
+  // and an empty name after it. The separator is put back on the directory half, so `/a/b/` reads as
+  // the directory `b` inside `/a/`.
+  const shown = /[\\/]$/.test(preview.path) ? preview.path.slice(0, -1) : preview.path;
+  const cut = Math.max(shown.lastIndexOf("/"), shown.lastIndexOf("\\"));
+  if (cut > 0) node.appendChild(el("span", "dirs", shown.slice(0, cut + 1)));
+  node.appendChild(el("span", "name", cut > 0 ? shown.slice(cut + 1) : shown));
 }
 
 /// Whether a state frame says the run's write guard is on.
@@ -3705,6 +3763,88 @@ function fileRoute(path) {
 /// the route decides which of those a file is by looking at its first bytes rather than at its name.
 function imageRoute(path) {
   return "/image?path=" + encodeURIComponent(path);
+}
+
+/// The route a directory is read through, encoded: `GET /dir` (§27 of `docs/web-mode.md`).
+///
+/// A third route for a third kind of answer. `/file` refuses a directory by its own rule -- it serves
+/// *files*, and a directory has no bytes to serve -- so a press on a directory used to fill the panel
+/// with that refusal, which is true and useless. The listing is JSON because the panel draws a
+/// *control* per entry, and because an entry's name is one name: `My Projects` arrives as a single
+/// path from the run, where anything reading the transcript as text sees two tokens.
+function dirRoute(path) {
+  return "/dir?path=" + encodeURIComponent(path);
+}
+
+/// Whether a path's own name says it is a directory: a trailing separator.
+///
+/// The one thing a *name* can say about this, and the page cannot ask the filesystem. It is how the
+/// run's own `list` prints a directory (`name/`) and how a person writes one when they mean a
+/// directory rather than a file, which is why it is the evidence used -- and it is only a guess about
+/// which route to ask *first*: `/file` answers a directory it was asked about with `X-Flint-Dir`, and
+/// the panel then reads it as the listing it is (`dirHeader`). Being wrong costs one request.
+function dirPath(path) {
+  return /[\\/]$/.test(String(path == null ? "" : path).trim());
+}
+
+/// Whether a route's answer says "this is a directory, not a file" in its header.
+///
+/// The refusal sentence is for the person; this is for the page, which acts on it. The alternative --
+/// matching the words "is a directory" -- would be this page parsing prose it wrote itself, which is
+/// worse than parsing a stranger's, because it looks safe.
+function dirHeader(response) {
+  return !!response && !!response.headers && response.headers.get("X-Flint-Dir") === "1";
+}
+
+/// A listing drawn as rows, from the route's JSON: the pure half of the directory panel.
+///
+/// The route hands over full paths and each entry's own line (`tools::DirItem::line`, the same text
+/// the `list` tool prints), so nothing here joins a name onto a directory or guesses at a separator:
+/// the process knows the machine it is on and the page does not. A row is `{path, label, dir, title}`;
+/// the first one is the way up, when the route says there is somewhere to go up to -- and its label
+/// is `..` with a tooltip naming the directory it lands in, because a way up is a direction rather
+/// than an entry and the place it goes is the only thing worth checking about it.
+///
+/// The note counts what the *route* counted rather than what was drawn, because those two differ
+/// exactly when the directory holds more than one answer can carry -- and a reader told "12 entries"
+/// while looking at 2,000 rows has been lied to about the directory rather than about the page.
+function dirRows(json) {
+  const said = json && typeof json === "object" ? json : {};
+  const entries = Array.isArray(said.entries) ? said.entries : [];
+  const rows = [];
+  if (typeof said.parent === "string" && said.parent) {
+    rows.push({
+      path: said.parent,
+      label: "..",
+      dir: true,
+      up: true,
+      title: "up to " + said.parent,
+    });
+  }
+  entries.forEach((entry) => {
+    if (!entry || typeof entry.path !== "string") return;
+    // The route's own line -- `name/` or `name  (N bytes)` -- is the label, because it is the one
+    // spelling of an entry this program has: it is what the `list` tool prints, so a person and a
+    // model reading one directory are told the same thing, and a name with a space in it is one name
+    // in both places rather than a page-side reassembly of two tokens.
+    const label = typeof entry.line === "string" && entry.line ? entry.line : String(entry.name || entry.path);
+    rows.push({
+      path: entry.path,
+      label: label,
+      dir: !!entry.dir,
+      // The tooltip is the path, as it is on a path in the transcript: the row shows the entry's own
+      // name, and what a press will read is the whole path the run built for it.
+      title: entry.path,
+    });
+  });
+  const total = Number(said.total);
+  const shown = Number(said.shown);
+  const counted = Number.isFinite(total) && total > 0 ? total : rows.length - (said.parent ? 1 : 0);
+  let note = counted === 1 ? "1 entry" : counted + " entries";
+  if (Number.isFinite(total) && Number.isFinite(shown) && shown < total) {
+    note = "the first " + shown + " of " + total + " entries";
+  }
+  return { rows: rows, note: note };
 }
 
 /// The extensions this page will **ask** `/image` about, because a name is all it has to go on.
@@ -3808,6 +3948,14 @@ async function readPreview() {
   text.hidden = false;
   showPlain(text, "reading…");
   note.textContent = "";
+  // A name that ends in a separator is a directory, and that is the one path this page can route
+  // without asking: everything else is asked for as a *file*, and the refusal that comes back says
+  // whether it was really a directory (`dirHeader`). Tried before the picture, because a directory
+  // called `shots.png` is a directory.
+  if (dirPath(preview.path)) {
+    await readDir();
+    return;
+  }
   if (imageExt(preview.path) && (await readPicture())) return;
   await readText();
 }
@@ -3847,12 +3995,88 @@ async function readText() {
   }
   const body = await response.text();
   if (!response.ok) {
+    // The refusal that is not an answer: `/file` was asked about a directory, and the panel reads
+    // those through its own route. The header is what says so -- see `dirHeader`.
+    if (dirHeader(response)) {
+      await readDir();
+      return;
+    }
     paintPreviewRefusal(body, response.status);
     return;
   }
   // Which of the two views draws it, and the note that says so. The body is the same bytes either way,
   // and the view comes off the panel's own state rather than being decided again here.
   paintPreviewView(body, response, preview.view, preview.path, preview.line);
+}
+
+/// The directory half of a press: ask `GET /dir` for what is in the path and draw it as rows.
+///
+/// A refusal here is a sentence like any other -- the directory is gone, or the run cannot read it --
+/// and it is shown in the route's own words rather than turned into a status code, exactly as a
+/// `/file` refusal is. The JSON is allowed to be unreadable: this page drew buttons from a document it
+/// could not parse, which is a thing that should be said out loud rather than left as an empty panel.
+async function readDir() {
+  const text = document.getElementById("preview-text");
+  if (!text || !preview) return;
+  let response;
+  try {
+    response = await fetch(dirRoute(preview.path), { headers: authHeader() });
+  } catch (e) {
+    showPlain(text, "cannot read it: " + describe(e));
+    return;
+  }
+  const body = await response.text();
+  if (!response.ok) {
+    paintPreviewRefusal(body, response.status);
+    return;
+  }
+  let json = null;
+  try {
+    json = JSON.parse(body);
+  } catch (e) {
+    json = null;
+  }
+  if (!json || typeof json !== "object") {
+    paintPreviewRefusal(
+      "the run answered " + preview.path + " with something this page cannot read as a listing\n",
+      200
+    );
+    return;
+  }
+  paintDir(json);
+}
+
+/// A listing, drawn as one pressable row per entry.
+///
+/// The rows go where the file's lines go (`#preview-text`), because that is the panel's body and a
+/// directory is a *reading* of a path rather than a different panel -- and the raw/rendered switch
+/// goes away with it, for the same reason it goes away on a refusal: there is no Markdown reading of a
+/// directory. A row is a `button.path`, the control the transcript uses for a path, so pressing one is
+/// the gesture a reader already knows: a directory goes in, a file opens beside it.
+function paintDir(json) {
+  const text = document.getElementById("preview-text");
+  const note = document.getElementById("preview-note");
+  const rendered = document.getElementById("preview-md");
+  const button = document.getElementById("preview-render");
+  if (rendered) rendered.hidden = true;
+  if (button) button.hidden = true;
+  if (!text) return;
+  const listing = dirRows(json);
+  // `showPlain` first, so the gutter of an earlier file goes with the lines it numbered: a listing is
+  // not numbered, and rows under a line-number gutter are a file pretending to be a directory.
+  showPlain(text, "");
+  listing.rows.forEach((row) => {
+    const item = el("button", row.up ? "path dir up" : row.dir ? "path dir" : "path file");
+    item.type = "button";
+    item.title = row.title;
+    item.appendChild(el("span", "name", row.label));
+    // The path the row carries is the one the run built, so pressing it asks about exactly the entry
+    // that was listed -- a name with a space, a name that is nothing but a space, a name that looks
+    // like a number: none of them are this page's to reassemble.
+    item.addEventListener("click", () => openPreview(row.path, 0));
+    text.appendChild(item);
+  });
+  if (note) note.textContent = listing.note;
 }
 
 /// A refusal, in the route's own words.
@@ -5179,7 +5403,13 @@ if (typeof module !== "undefined" && module.exports) {
     // stub DOM -- which is how the Node harness checks what a screen holds without a browser.
     drawSettings, settingRow, drawRows, drawCommandRow, paintSettings, screenOf, MENU_GROUPS,
     sessionRow, formLine,
-    addressParts, asUrl, asPath, bytesLabel, previewNote, linkNodes, renderBlock, fileRoute,
+    addressParts, asUrl, asPath, asRowPath, bytesLabel, previewNote, linkNodes, renderBlock, fileRoute,
+    // The directory half of the same question: which route a listing is read through, which names say
+    // "a directory" before anything is asked, the header that says it afterwards, and the pure mapping
+    // from the route's JSON to the rows the panel draws. All four are decisions the Node harness can
+    // hold without a browser and without a directory on disk -- including the rule that a row's path is
+    // the one the *run* built rather than one this page joined.
+    dirRoute, dirPath, dirHeader, dirRows, paintDir,
     // The branch control's half of the transcript: which answers a value cuts from, and the one
     // comparison that ties a value's label to a turn the page drew. Both are pure -- a document and a
     // frame in, marks out -- so the Node harness can check where the buttons land over a folded

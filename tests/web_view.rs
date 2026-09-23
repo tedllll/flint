@@ -422,11 +422,17 @@ fn the_preview_shows_the_routes_own_refusal_rather_than_an_empty_panel() {
         status.contains("paintPreviewRefusal(body, response.status)"),
         "a refused read must hand its sentence and its code to that function:\n{status}"
     );
-    let chooser = from("async function readPreview()", 20);
     assert!(
-        chooser.contains("if (imageExt(preview.path) && (await readPicture())) return;")
+        status.contains("if (dirHeader(response)) {"),
+        "and a text route's refusal that names a directory is read as the listing it is:\n{status}"
+    );
+    let chooser = from("async function readPreview()", 32);
+    assert!(
+        chooser.contains("if (dirPath(preview.path)) {")
+            && chooser.contains("if (imageExt(preview.path) && (await readPicture())) return;")
             && chooser.contains("await readText();"),
-        "a picture is asked for first and a refusal falls through to the text route:\n{chooser}"
+        "the directory's name is decided first (a directory called `shots.png` is a directory), then \
+         a picture, and a refusal falls through to the text route:\n{chooser}"
     );
 }
 

@@ -4000,6 +4000,72 @@ impl Tool for PatchTool {
 
 pub struct ListTool;
 
+/// One entry of a directory, as every door that lists one describes it.
+///
+/// The `list` tool and the page's own listing (`GET /dir` in `src/web.rs`) are two doors onto one
+/// answer, and an answer that differed between them would be exactly the drift this repository spends
+/// comments preventing: a person reading the panel and a model reading a tool result would be told
+/// different things about the same directory. So the shape, the size and the *order* live here; each
+/// door decides only how to render it — the tool as the text a model reads, the route as the JSON the
+/// page draws buttons from.
+pub struct DirItem {
+    pub name: String,
+    /// Whether it is a directory. Follows a link, like everything else that asks this question here:
+    /// a junction on Windows (`Application Data`) and a symlinked directory on Unix are directories
+    /// to a person, and calling them files because of how they are stored is a distinction nobody
+    /// asked for.
+    pub dir: bool,
+    /// The size for a file, and whatever the metadata says for a directory (which is a number on
+    /// Windows and 4 KB on Unix). Printed for files only, because a directory's own size is a fact
+    /// about the filesystem rather than about the directory.
+    pub size: u64,
+}
+
+impl DirItem {
+    /// The one line that names it, which is also the sort key.
+    ///
+    /// A directory carries a trailing `/` rather than a size: that is how every shell prints one, it
+    /// is what tells a reader (and the page's scanner, which reads these lines as text) that this name
+    /// is a place rather than a file, and it is why a directory's *name* can hold a space without
+    /// becoming ambiguous in the one place flint can do something about it.
+    pub fn line(&self) -> String {
+        if self.dir {
+            format!("{}/", self.name)
+        } else {
+            format!("{}  ({} bytes)", self.name, self.size)
+        }
+    }
+}
+
+/// A directory's entries, sorted the way both doors print them.
+///
+/// Sorted by the *printed line* rather than by name, which is what `list` has always done: it puts
+/// `My Projects/` beside `My Notes.txt` instead of in a block of its own, and it means the order is a
+/// property of what a reader sees rather than of a comparison somebody would have to keep in step with
+/// the formatting. The cost is that the sort is not the one a shell's `dir` gives, which is the reason
+/// this is stated where both callers can read it.
+///
+/// Synchronous, and called from an async tool body: a directory listing is one syscall per entry and
+/// this process already reads files synchronously on both sides of the same runtime (`serve_file`,
+/// `serve_open`, `jobs_snapshot`). One definition shared by both doors is worth more than an async
+/// loop that only this tool would have.
+pub fn directory_items(path: &Path) -> std::io::Result<Vec<DirItem>> {
+    let mut items = Vec::new();
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        // A name that vanished between the read and the stat is a file that was there a moment ago:
+        // it is still an entry, and calling it zero bytes is the honest answer about it.
+        let meta = entry.metadata().ok();
+        items.push(DirItem {
+            name: entry.file_name().to_string_lossy().to_string(),
+            dir: meta.as_ref().map(|m| m.is_dir()).unwrap_or(false),
+            size: meta.as_ref().map(|m| m.len()).unwrap_or(0),
+        });
+    }
+    items.sort_by_key(|a| a.line());
+    Ok(items)
+}
+
 #[async_trait::async_trait]
 impl Tool for ListTool {
     fn name(&self) -> &str {
@@ -4023,26 +4089,12 @@ impl Tool for ListTool {
         // The list tool is always allowed, even in readonly mode.
         let raw = optional_str(args, "path")?.unwrap_or(".");
         let path = PathBuf::from(raw);
-        let mut entries = tokio::fs::read_dir(&path)
-            .await
+        let items = directory_items(&path)
             .with_context(|| format!("cannot list {}", path.display()))?;
-
-        let mut lines = Vec::new();
-        while let Some(entry) = entries.next_entry().await? {
-            let meta = entry.metadata().await.ok();
-            let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
-            let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-            let name = entry.file_name().to_string_lossy().to_string();
-            if is_dir {
-                lines.push(format!("{name}/"));
-            } else {
-                lines.push(format!("{name}  ({size} bytes)"));
-            }
-        }
-        lines.sort();
-        if lines.is_empty() {
+        if items.is_empty() {
             return Ok(format!("{} is empty", path.display()));
         }
+        let lines: Vec<String> = items.iter().map(|item| item.line()).collect();
         Ok(util::truncate(&lines.join("\n"), 20_000))
     }
 }
