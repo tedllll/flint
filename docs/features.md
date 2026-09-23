@@ -328,16 +328,16 @@ press; `terminal` is not offered on the page at all.
 | `/provider key <key>` | set the API key for the active provider | `saved …` | form | the key is **not** echoed; the row is redacted on the page. A blank key is refused |
 | `/provider rm <name>` | delete one | one line naming what went | danger (second press) | refuses the last provider: `refusing to delete the last provider — there would be nothing left to talk to` |
 | `/model` | show the model in force | four lines: which provider and endpoint the list belongs to, one line per model with the active one starred, the `/model <name>` usage, and where to add more | panel | — |
-| `/model <name>` | switch to one | the switch | selector | the conversation is kept, and a `switch` event records the move |
+| `/model <name>` | switch to one | the switch | selector | the conversation is kept, and a `switch` event records the move. The reasoning level and the answer shape are carried over: a rebuild is not a new run (see `/reload`) |
 | `/config` | show shell, steps, proxy | a listing of the settings that matter, plus the config path | panel | — |
 | `/config edit` | change shell, steps, proxy | interactive questions | form | — |
 | `/config set <key> <value>` | change one setting **and use it now** | `key = value` | form | an unknown key is refused by name, listing the keys it takes; `max_steps = 0` is refused; the running tools are rebuilt |
-| `/thinking [off\|low\|medium\|high]` | how much reasoning to ask for | the level, and whether the endpoint has a field for it | toggle | a level with no `thinking_field` on the provider says nothing is sent |
+| `/thinking [off\|low\|medium\|high]` | how much reasoning to ask for | the level, and whether the endpoint has a field for it | toggle | a level with no `thinking_field` on the provider says nothing is sent. The level is the run's rather than the agent object's: `/model`, `/provider` and `/reload` replace the agent around the conversation and keep it — `thinking = "medium"` in the config survives picking another model |
 | `/readonly [on\|off]` | toggle the write guard | the new state | toggle | bare toggles; the guard is all-or-nothing (§7.6) |
 | `/verbose [off\|on\|full]` | how much of the agent's activity to narrate | the new level | toggle | — |
 | `/detail [on\|off]` | print tool output, or one line per result | the new level | toggle | — |
 | `/hear-peers [on\|off]` | send what a peer says here to the model | the new state, and the warning that a peer's words can steer a tool loop | toggle | anything other than `on`/`off` is refused |
-| `/reload` | re-read the config file (after editing it yourself) | what changed | button | re-reads `AGENTS.md` and the skill catalog too; the agent is rebuilt around the new config, and the conversation is kept in the same file |
+| `/reload` | re-read the config file (after editing it yourself) | what changed | button | re-reads `AGENTS.md` and the skill catalog too; the agent is rebuilt around the new config, and the conversation is kept in the same file. A rebuild carries what the *run* decided and the config cannot re-derive: the reasoning level, the answer shape (`--schema`), the read-only guard, and the peer relay |
 
 ### 5.2 Context and accounting
 

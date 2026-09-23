@@ -2507,6 +2507,26 @@ fn continue_conversation(
     }
     let mut next = agent::Agent::new(cfg, provider, old.readonly(), cwd.clone(), writer);
     next.set_no_session(no_session);
+    // Two things the *run* decided, and the reason this function has to hand them over by name:
+    // `Agent::new` builds both of them fresh, and neither is in the provider table it builds from. The
+    // replacement is not a new run -- it is the same run asking a different endpoint, or re-reading a
+    // file -- so both are read off the old agent rather than re-derived from the config.
+    //
+    // Measured, after a report that a settings screen opened on `off` for a run whose preset was
+    // `medium`: `/model <other>` came through here and the level went back to `off`, in the request as
+    // well as on the page -- a silently dropped preset is the same class of fault as the dropped
+    // history this function exists for, one door along. `/thinking`'s and `hold_to_schema`'s own
+    // comments already said a rebuild carries these across; these are the two lines that make it true.
+    //
+    // The level and not the field: the field belongs to the endpoint, and a switch to a provider that
+    // carries reasoning in a different key has to ask its own way.
+    next.hold_to_thinking(old.thinking());
+    next.hold_to_schema(old.schema().cloned());
+    // Whatever else a rebuild owes the old agent lives in the REPL's rebuild arm rather than here, so
+    // that it covers the doors that move to another conversation (`/new`, `/resume`) as well -- the
+    // peer relay is the one that does. Two homes for one carry is how one of them comes to be missing
+    // a door.
+    //
     // A switch keeps the conversation, so it keeps how big its last prompt was: `/usage` after
     // `/model` used to answer "no usage reported yet" about a turn that had just reported one.
     next.set_last_usage(old.last_usage());
@@ -7821,6 +7841,56 @@ mod tests {
                 "{send} is excused by this test and is not a row any more"
             );
         }
+    }
+
+    /// A rebuild keeps the two decisions that are the run's rather than the conversation's.
+    ///
+    /// `/model`, `/provider` and `/reload` all replace the agent through `continue_conversation`, and
+    /// both of the things held here are invisible until the next request -- which is what makes losing
+    /// them quiet. Reported on 2026-09-23 as a settings screen opening on `off` for a run whose preset
+    /// was `medium`: the level had already gone back to `off` in the *run*, so the screen was telling
+    /// the truth about a run that had stopped being the one the person configured. The answer shape is
+    /// the same fault with a worse ending -- a caller promised JSON gets prose, after a model switch.
+    ///
+    /// This is the funnel's own test rather than a run's, because what has to be true is about the agent
+    /// that comes back: a whole run proves it through a frame or a request body, and both of those are
+    /// already covered where they live (`the_page_is_told_the_state_its_controls_would_show` in
+    /// `tests/cli_output.rs` holds the level through a real switch and a real `/reload`).
+    #[test]
+    fn a_rebuild_carries_the_level_and_the_shape() {
+        let mut cfg = config::Config::default();
+        let target = config::ProviderConfig {
+            name: "stub".to_string(),
+            base_url: "http://127.0.0.1:9/v1".to_string(),
+            api_key: "not-a-real-key".to_string(),
+            model: "stub-model".to_string(),
+            models: Vec::new(),
+            api_key_env: None,
+            start: None,
+            stop: None,
+            start_timeout_secs: 0,
+            proxy: None,
+            thinking_field: "reasoning_effort".to_string(),
+        };
+        cfg.providers.push(target.clone());
+        cfg.default_provider = target.name.clone();
+        let provider = || provider::Provider::new(target.clone()).expect("a provider for the test");
+        let mut old = agent::Agent::new(&cfg, provider(), false, std::env::temp_dir(), None);
+        old.hold_to_thinking("high");
+        let shape = crate::schema::Schema::parse("{\"type\":\"object\"}").expect("a shape");
+        old.hold_to_schema(Some(shape));
+
+        let next = continue_conversation(&cfg, provider(), &target, &old).expect("a rebuilt agent");
+
+        assert_eq!(
+            next.thinking(),
+            "high",
+            "a rebuild dropped the reasoning level, so the run asks for less than the person did"
+        );
+        assert!(
+            next.schema().is_some(),
+            "a rebuild dropped the answer shape, so a caller promised JSON is sent prose"
+        );
     }
 
     /// `/config set` changes the settings the wizard changes, and refuses everything else by name.

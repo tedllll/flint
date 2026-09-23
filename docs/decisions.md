@@ -307,6 +307,38 @@ another provider asks in that provider's field with the level the person chose. 
 not have are **not** hidden: flint cannot know which rungs an endpoint supports without asking it, and a
 menu that quietly drops one is a menu that lies. Four words, offered as they are.
 
+## A rebuild of the agent is not a new run
+
+Three commands replace the agent around a conversation that stays where it is: `/model` and `/provider`
+(a different endpoint), and `/reload` (a config file somebody just edited). One function builds the
+replacement, and what it is allowed to forget is the whole question — because the replacement is not a
+new run, it is the same run asking somebody else, and every fact the person decided about *this run*
+has to be handed over by name. `Agent::new` builds each of them fresh from the config, and none of them
+is a config key: the read-only guard, the working directory, whether this run keeps a conversation, the
+size of the last prompt, the reasoning level, and the answer shape.
+
+**The rule is that the list is closed by the funnel, not by the command.** Every one of those is read
+off the old agent in the one place every rebuild passes through, so a command cannot forget one — it
+never had to remember. What the rule cost when it was not followed is worth keeping, because the failure
+is silent in the worst way. Measured on 2026-09-23, from a report that a settings screen opened on `off`
+for a run whose preset was `medium`: `/model` came through the funnel, and the reasoning level was not
+on the list, so picking another model dropped the person's preset in the *run* — not on the screen. The
+settings screen was telling the truth about a run that had stopped being the one they configured, and
+the requests that followed stopped asking for reasoning. The answer shape was lost the same way, and its
+ending is worse: a caller promised JSON gets prose, after a model switch, with nothing saying so.
+
+Two placements fell out of fixing it, and both are decisions rather than tidiness. The **reasoning level
+and the answer shape** are carried in the funnel function, because only the three commands that keep the
+conversation come through it — `/new` and `/resume` really do move, and the shape belongs to the
+conversation, so the new one's own file decides (`/new` correctly drops it). The **peer-relay decision**
+is carried one level up, in the REPL's rebuild arm, because `--hear-peers` is about the process and
+`/new` does not end it: two homes for one carry is how one of them comes to be missing a door.
+
+The level carries and the *field* does not — the same split as the section above, one layer down.
+`thinking = "medium"` surviving a `/provider` switch means the run still asks for medium; the key it
+asks in is the new endpoint's, because a fact about somebody's server cannot travel with a person's
+choice.
+
 ## The calls of one message run together, and the report stays in order
 
 The model asks for several tool calls in one assistant message. flint used to run them one after

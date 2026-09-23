@@ -251,7 +251,7 @@ Inside the REPL:
 | `/verbose [on\|off\|full]` | how much of the agent's activity to narrate |
 | `/detail [on\|off]` | print tool output (default off: one line per result) |
 | `/readonly [on\|off]` | toggle the write guard |
-| `/thinking [off\|low\|medium\|high]` | how much reasoning to ask the provider for, and which field it goes in (default `off`: ask for none) |
+| `/thinking [off\|low\|medium\|high]` | how much reasoning to ask the provider for, and which field it goes in (default `off`: ask for none). The level belongs to the run: `/model`, `/provider` and `/reload` keep it, so picking another model does not quietly turn your preset off |
 | `/hear-peers [on\|off]` | relay messages from `flint say` to the model (default off) |
 | `/say [--to <pid>] <text>` | leave a message for whoever else is working in this directory; on the page the address is a picker over the live runs, and leaving it empty reaches everyone here |
 | `/queue <text>` | say this after the turn that is running, without interrupting it |

@@ -6887,15 +6887,21 @@ async fn the_page_is_told_the_state_its_controls_would_show() {
     // so nothing here talks to a provider. Two models, because a picker with one option would
     // pass this test while being useless.
     let home = test_home("state-frame", "http://127.0.0.1:9/v1");
+    // The reasoning level is set in the file rather than left at its default, because that is the
+    // case the page got wrong: a run whose *preset* is `medium` opened its settings screen on `off`.
+    // The field the level goes in is set too, or the run would be at `medium` while its requests
+    // carried nothing -- a different complaint, and one `/thinking` says out loud.
     std::fs::write(
         home.join("config.toml"),
         "default_provider = \"stub\"\n\n\
+         thinking = \"medium\"\n\n\
          [[providers]]\n\
          name = \"stub\"\n\
          base_url = \"http://127.0.0.1:9/v1\"\n\
          model = \"stub-model\"\n\
          models = [\"stub-other\"]\n\
-         api_key = \"not-a-real-key\"\n",
+         api_key = \"not-a-real-key\"\n\
+         thinking_field = \"reasoning_effort\"\n",
     )
     .expect("the test config");
 
@@ -6942,6 +6948,21 @@ async fn the_page_is_told_the_state_its_controls_would_show() {
     let reasoned = post_message(port, &token, "/thinking high");
     let reasoning = read_until(&mut watching, "\"value\":\"high\"", 20);
 
+    // `--hear-peers` is a decision about *this run*, not about this conversation, so the rebuild has to
+    // keep it -- and the frame is where a person reads it back.
+    let heard = post_message(port, &token, "/hear-peers on");
+    let hearing = read_until(&mut watching, "\"key\":\"hear-peers\"", 20);
+
+    // `/reload` is the third door onto the same rebuild, and the one a person uses after editing the
+    // config by hand: it re-reads the file and replaces the agent. What it must not do is quietly turn
+    // the reasoning back off under a run that asked for it -- the level in force here is the `high`
+    // that `/thinking` set. Read from a *new* subscriber, because that is both how a page that opens
+    // its settings screen late gets the state and the only read that is certain: `Live::state` drops a
+    // frame identical to the last one, so a reload that changed nothing says nothing, by design.
+    let reloaded = post_message(port, &token, "/reload");
+    let mut reopened = http_stream(port, "/events", &token);
+    let after_reload = read_until(&mut reopened, "\"key\":\"hear-peers\"", 20);
+
     // And a page that opens *now* -- a second subscriber with no backlog at all, so what it is
     // sent can only be the snapshot.
     let mut later_page = http_stream(port, "/events", &token);
@@ -6955,6 +6976,12 @@ async fn the_page_is_told_the_state_its_controls_would_show() {
     let _ = std::fs::remove_dir_all(&home);
 
     assert!(exited, "flint did not exit");
+    // A failure message about a setting quotes the settings and not the whole frame: the frame carries
+    // every command's description and is several kilobytes, and the row a person needs to read is one
+    // object at the end of it.
+    let only_settings = |frame: &str| -> String {
+        frame.rsplit("\"settings\":").next().unwrap_or(frame).to_string()
+    };
     assert!(
         opening.contains("\"type\":\"state\""),
         "the page was never told the state, so it has no options to draw. Frames: {opening:?} \
@@ -6976,6 +7003,16 @@ async fn the_page_is_told_the_state_its_controls_would_show() {
     assert!(
         changed.contains("\"model\":\"stub-other\""),
         "the page was not told the state changed after its own command: {changed:?}"
+    );
+    // The level the *file* asked for has to survive the switch. `/model` rebuilds the agent, and a
+    // person who set themselves a preset and then picked another model must not find their reasoning
+    // quietly turned off -- which, on the page, is a settings screen reading `off` while the run was
+    // at `medium` a moment before. Every frame carries the settings, so this is asked of the frame
+    // the switch itself produced.
+    assert!(
+        changed.contains("\"key\":\"thinking\"") && changed.contains("\"value\":\"medium\""),
+        "the reasoning level was lost by a model switch, so the page draws a run that is not the one \
+         running: {said}", said = only_settings(&changed)
     );
     assert!(
         opening.contains("\"key\":\"verbose\"")
@@ -6999,9 +7036,10 @@ async fn the_page_is_told_the_state_its_controls_would_show() {
     assert!(
         opening.contains("\"key\":\"thinking\"")
             && opening.contains("\"choices\":[\"off\",\"low\",\"medium\",\"high\"]")
-            && opening.contains("\"value\":\"off\""),
-        "the state does not offer the reasoning ladder, so the page has nothing to pick from and \
-         the default is not visible: {opening:?}"
+            && opening.contains("\"value\":\"medium\""),
+        "the state does not offer the reasoning ladder, or it opens on a level that is not the one \
+         in force: a page whose settings screen says `off` while the run is asking for `medium` is \
+         reporting a run that does not exist. {said}", said = only_settings(&opening)
     );
     assert!(
         reasoned.starts_with("HTTP/1.1 202"),
@@ -7010,6 +7048,24 @@ async fn the_page_is_told_the_state_its_controls_would_show() {
     assert!(
         reasoning.contains("\"key\":\"thinking\"") && reasoning.contains("\"value\":\"high\""),
         "the run was not shown the reasoning level it had just set: {reasoning:?}"
+    );
+    assert!(
+        heard.starts_with("HTTP/1.1 202") && reloaded.starts_with("HTTP/1.1 202"),
+        "a line this test needs to have happened was refused: {heard:?} {reloaded:?}"
+    );
+    assert!(
+        hearing.contains("\"key\":\"hear-peers\"") && hearing.contains("\"value\":\"on\""),
+        "the run was not shown the peer relay it had just turned on: {hearing:?}"
+    );
+    assert!(
+        after_reload.contains("\"key\":\"hear-peers\"") && after_reload.contains("\"value\":\"on\""),
+        "`/reload` turned the peer relay back off, so the person who asked to hear peers has silently \
+         stopped hearing them and the page's own row agrees with the mistake: {said}", said = only_settings(&after_reload)
+    );
+    assert!(
+        after_reload.contains("\"key\":\"thinking\"") && after_reload.contains("\"value\":\"high\""),
+        "`/reload` dropped the reasoning level -- the same fault as the model switch, by the third \
+         door onto that rebuild: {said}", said = only_settings(&after_reload)
     );
     assert!(
         transcript.contains("thinking high"),

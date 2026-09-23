@@ -1822,6 +1822,41 @@ the block is drawn — then open the `commands` panel and read it against `/help
 
 ## What was just done
 
+### A rebuild keeps what the run decided — 2026-09-23
+
+**Reported directly: opening the page's settings showed values that were not the ones in force — the
+thinking level read `off` while the preset was not off.** The settings frame was not lying. `/model
+<name>`, `/provider <name>` and `/reload` all replace the agent around the conversation it is already
+in, and that replacement was built from the config's provider table, which has no `thinking` key: the
+level lives on the run. So picking another model silently dropped a person's preset — `medium` became
+`off` in the *run*, not on the screen, and every request after the switch stopped asking for reasoning.
+The same funnel dropped the answer shape (`--schema`), whose ending is worse: a caller promised JSON
+gets prose, after a model switch, with nothing saying so.
+
+**The rule now has a home rather than a list.** `continue_conversation` — the one function every
+rebuild that *keeps* the conversation goes through — reads the reasoning level and the answer shape off
+the old agent and puts them on the new one, beside the read-only guard, the working directory,
+`--no-session` and the last prompt size it already carried. The peer relay is deliberately not there:
+the REPL's rebuild arm carries it, because `/new` and `/resume` do not come through that function and
+`--hear-peers` is about the process rather than the conversation. Two homes for one carry is how one of
+them comes to be missing a door, and the comment says so where somebody would be tempted to add it.
+
+**Held by two tests, each watched red first.** `tests/cli_output.rs`'s
+`the_page_is_told_the_state_its_controls_would_show` grew a `thinking = "medium"` preset and a
+`thinking_field`, and now asserts the boot frame opens on `medium`, that a `/model` switch keeps it, and
+that a page opening *after* a `/reload` is still told `high` (set with `/thinking` first) and still told
+the peer relay is `on` — that last read through a **new** subscriber on purpose, since `Live::state`
+drops a frame identical to the last one, which is the honest design and makes a reload that changed
+nothing say nothing. `src/main.rs` gained a unit test over the funnel itself,
+`a_rebuild_carries_the_level_and_the_shape`, whose two assertions were watched failing separately (each
+carry removed on its own) — because a test that has never been red has not been shown to test anything,
+and the shape half has no frame to be visible in.
+
+**Two things about the fix worth keeping.** The *level* carries and the *field* does not: `thinking =
+"medium"` surviving a `/provider` switch means the run still asks for medium, in the new endpoint's own
+key — a fact about somebody's server cannot travel with a person's choice. And `/new` correctly still
+drops the shape: the conversation moves, and the shape belongs to the conversation.
+
 ### A directory is opened, not previewed — and the run says where a path ends — 2026-09-23
 
 **Reported directly, one sentence with two halves: *`C:\Users\zhangzhuo\My Documents` 这个依然识别不了，
