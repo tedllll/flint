@@ -45,19 +45,22 @@ body), and re-measured an eighth time the same day, after the empty-session roun
 section (four unit tests in `src/session.rs`, one `cli_output` test over five doors, and two page tests
 that had to stop asserting the bug), and re-measured a **ninth** time the same day, after the sidebar-menu
 round at the top of that section (four page tests in `scripts/web-view-test.js`, all watched red first,
-and two rewritten browser-harness claims): `cargo test`
-**696 passing, 1 ignored** across the 14 suites (lib **388**, bin **9**, `agent_loop` 34,
+and two rewritten browser-harness claims), and re-measured a **tenth** time the same day, after the round
+above it found the sidebar's menu collapsing to a 10px bar (one `web_view` test, eight filler
+conversations in the browser harness and three new browser claims, one of which carries its own control):
+`cargo test`
+**697 passing, 1 ignored** across the 14 suites (lib **388**, bin **9**, `agent_loop` 34,
 `balance` 7, `cli_output` **119**, `json_output` 41, `say` 6,
 `search_tool` 4, `task` 17, `term_capture` 20 + 1 ignored, `tty_hangup` **0 on Windows** and 3 on Unix
 — the suite is `#![cfg(unix)]`, and the library carries a few `#[cfg(unix)]` tests of its own, so the
-ubuntu job's total is larger and is *not* quoted here as if it were this number — `web_view` 41,
+ubuntu job's total is larger and is *not* quoted here as if it were this number — `web_view` **42**,
 `who` 10, and the doc-tests 0);
 `cargo clippy --all-targets -- -D warnings` silent; the two headless Node harnesses green
 (`term-layout-test.js`, `web-view-test.js`) **and run by CI**; **both `examples/` doors green, as one
 more step of that same CI job** — `examples/python/test_call.py` and `examples/mcp/test_mcp.py`, each
 resolving the binary `cargo test` just built for itself and refusing a pass that came from an installed
 `flint` on `PATH`; the
-browser harness run by hand at **121/121 claims held**, printing the list of drives and not-drives it is
+browser harness run by hand at **123/123 claims held**, printing the list of drives and not-drives it is
 bounded by. The release binary on `PATH` is the tree's (`flint --version` → `flint 0.1.0`, exit 0, and
 its SHA-256 is the one `target/release/flint.exe` was built with).
 
@@ -1827,6 +1830,64 @@ picker, type `/config` into the composer, and see whether the answer lands in th
 the block is drawn — then open the `commands` panel and read it against `/help` in the terminal.
 
 ## What was just done
+
+### The menu was a bar: one class, two menus — 2026-09-23
+
+**Reported again within the hour: "after I click it open there are no options in it at all, it is an
+empty bar with nothing in it."** That is a more precise report than it looks, and it was right: an *empty
+bar*, not an empty box. The sidebar's menu was drawn as `<div class="menu">` — the same class as the `/`
+menu above the composer — and that rule is `position: absolute` with `left: 18px`, `right: 18px` **and**
+`bottom: calc(100% - 4px)`, a `max-height` and `overflow-y: auto`. Both rules applied to one box:
+`top: 100%` from the sidebar's rule, `bottom` from the composer's, and an absolutely positioned box with
+both ends pinned and no height of its own is stretched between them — against a 31px row,
+`31 − 31 − 27 = 0`. Clamped at zero, plus 1px of border and 4px of padding twice: **10px**, which is what
+a real browser measured, with the two action rows at `y=976` and `y=1011` inside a box ending at
+`y=981`. A bar, with the options in the scrollable overflow of a box that has no height.
+
+**Every claim about this menu had been reading `textContent`, and text does not need to be visible.**
+The browser harness's menu claims, the naming claim, the delete claim — all of them passed over a menu
+nobody could see, and had passed since the menu was built. That is the lesson worth keeping from this
+round: for a control, "the page drew it" and "the page said it" are different facts, and only a browser
+can hold the first one. `scripts/web-view-test.js` cannot: its DOM has no layout at all, which is
+deliberate.
+
+**The fix is a name, and it is the smallest possible one.** The sidebar's menu wears its own class
+(`session-menu`) with a complete rule of its own, so a rule written for the composer's menu cannot reach
+it again; `tests/web_view.rs` holds it (the drawer's class, the CSS under that name, and no rule under
+`#sessions li .menu`). The old `#sessions li .menu` rules were renamed and given the three things they
+had been borrowing from the composer's menu, which is exactly the dependency that broke: the row layout,
+the size, and a `max-width` so a narrow sidebar cannot push the box out of the column.
+
+**And the sidebar scrolls, which the same report covered the second half of.** A menu that hangs below a
+row near the bottom of the list is drawn past the box the list paints in: measured with the flip removed,
+the menu at `y=243` with the list's box ending at `y=243` — entirely below it, so "no options in it"
+again, from a different cause. `placeMenu`, called at the end of `paintSessions` where the rows are
+finally in the document, opens it upward when there is room above and not below. It is guarded
+(`typeof node.getBoundingClientRect !== "function"`), because the Node harness draws into a DOM with no
+layout, where the honest answer is the CSS default.
+
+**Three new claims, each watched red first**: the byte test (red on the class name), the browser claim
+that the action rows are inside the menu's own rectangle (red before the rename — the shape the user
+described), and the browser claim about the bottom row, which carries **its own control**: it requires
+the menu to be inside the list's box *and* requires that removing the flip puts it outside, so it cannot
+pass over a menu that merely happened to fit. Watched red with the flip disabled:
+`up:false, flipped:false`, menu at `y=243`, list box ending at `y=243`. That claim also needed the
+harness to have a sidebar that scrolls, so `scratch()` now writes eight filler conversations, old enough
+(`epoch:1`) that nothing asking which conversation is newest can see them.
+
+**One mistake of my own, worth recording because the repository already warns about it**: the first
+attempt at the red run disabled the flip by rewriting `web/view.html` with PowerShell's `-replace` and
+`Set-Content -Encoding utf8`. That mangles a UTF-8 file with CJK in it — the page threw
+`Uncaught SyntaxError: Invalid or unexpected token` and the harness timed out on the settings door. The
+file was restored from a copy taken first, byte for byte, and the temporary disable was done with the
+`edit` tool instead. `AGENTS.md`'s Windows notes are about exactly this; use the editing tool, not a
+shell round-trip, on any file in this tree.
+
+**The gate after this round**: `cargo test` **697 passing, 1 ignored** across the 14 suites (lib 388, bin
+9, `agent_loop` 34, `balance` 7, `cli_output` 119, `json_output` 41, `say` 6, `search_tool` 4, `task` 17,
+`term_capture` 20 + 1 ignored, `tty_hangup` 0 on Windows, `web_view` **42**, `who` 10, doc-tests 0);
+clippy silent; `term-layout-test.js` and `web-view-test.js` green; both `examples/` doors green; the
+browser harness by hand at **123/123**.
 
 ### A menu of syntax, and a frame that never repainted it — 2026-09-23
 

@@ -1207,7 +1207,7 @@ const withActions = (page, d, commands) =>
   }));
 // The menu a row drew, and the words on its action rows: the row's own children are the number, the
 // label, the `...` button and -- when `doc.menu` names this row -- the menu itself.
-const menuOf = (row) => row.children.find((child) => child.className === "menu");
+const menuOf = (row) => row.children.find((child) => child.className === "session-menu");
 const actionWords = (row) => {
   const menu = menuOf(row);
   if (!menu) return null;

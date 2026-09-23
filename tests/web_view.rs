@@ -1226,6 +1226,42 @@ fn the_sidebar_renames_a_conversation_through_the_same_form_composition() {
     );
 }
 
+/// The sidebar's menu is not the composer's menu, and the class is what says so.
+///
+/// Reported directly, 2026-09-23, straight after the round that changed what its rows *say*: the
+/// conversation's three dots still opened "an empty bar with nothing in it". It was one class worn by
+/// two menus. `.menu` styles the `/` menu above the composer -- `position: absolute` with `left`,
+/// `right` *and* `bottom: calc(100% - 4px)`, a `max-height` and `overflow-y: auto` -- and the
+/// sidebar's menu wore the same name, so both rules applied to one box: `top: 100%` from the
+/// sidebar's rule and `bottom` from the composer's pinned both ends of it against the row, and a box
+/// with both ends pinned and no height collapses. Measured in a real browser: 10px tall, which is
+/// its own border and padding twice, with its rows inside the scrollable overflow of a box that has
+/// no height -- a bar, with nothing readable in it.
+///
+/// What holds it here is the name. A browser is what shows the collapse (the browser harness measures
+/// the rows against the box they are drawn in), and this is the half a text scan can hold: the
+/// sidebar's menu draws its own class, its rules are written under that class, and nothing styles it
+/// under the composer's.
+#[test]
+fn the_sidebar_menu_is_not_the_composers_menu() {
+    let drawer = from("function sessionMenu(doc, session)", 40);
+    assert!(
+        drawer.contains("el(\"div\", \"session-menu\")"),
+        "the sidebar's menu wears the class the composer's `/` menu is styled by, so a rule written \
+         for that menu lands on this one as well: {drawer}"
+    );
+    assert!(
+        view().contains("#sessions li .session-menu"),
+        "the sidebar's menu has no rule of its own to be styled by"
+    );
+    forbidden(
+        "#sessions li .menu",
+        "the sidebar's menu is styled under the composer's class name, which is how two rules came \
+         to apply to one box",
+    );
+}
+
+///
 /// A destructive row takes two presses, and the second one prints the line it will send.
 ///
 /// §8's last class, and the one where a single press could destroy work that no undo anywhere in

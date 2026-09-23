@@ -902,6 +902,35 @@ the transcript's branch buttons (one thing the frame draws, so the frame repaint
 child of the row and `doc.menu` names the row, so the rebuild lands on the same row and an open menu
 stays open, filled in.
 
+**One class, two menus — reported again the next day, 2026-09-23, and this was the real one.** *"Still
+the same problem: after I click it open there are no options in it at all, it is an empty bar with
+nothing in it."* Precisely an empty bar, and the arithmetic says why. The sidebar's menu was drawn as
+`<div class="menu">`, the same class as the `/` menu above the composer — and that rule is
+`position: absolute` with `left: 18px`, `right: 18px` **and** `bottom: calc(100% - 4px)`, a
+`max-height` and `overflow-y: auto`, written for a menu anchored to the composer. Both rules applied to
+one box: `top: 100%` from the sidebar's rule, `bottom` from the composer's, and an absolutely positioned
+box with both ends pinned and no height of its own is *stretched* between them — against a 31px row,
+`31 − 31 − 27 = 0`. Clamped at zero, plus 1px of border and 4px of padding twice, that is **10px tall**,
+which is what a browser measured: a bar one border wide, its rows inside the scrollable overflow of a box
+with no height. Every claim about this menu was reading `textContent` and passing the whole time — the
+words were in the DOM, and nothing had ever asked whether they could be seen.
+
+Two changes, and the name is the load-bearing one. The sidebar's menu has **its own class**
+(`session-menu`) and a complete rule of its own, so a rule written for the composer's menu cannot reach
+it again; the byte test in `tests/web_view.rs` holds that, because a browser is what shows a collapse and
+a text scan is what can hold a name. And because the sidebar *scrolls*, a menu hanging below a row near
+the bottom of the list is drawn past the box the list paints in — measured with the flip removed: the
+menu at `y=243` with the list's box ending at `y=243`, entirely below it. `placeMenu`, called at the end
+of `paintSessions` where the rows are finally in the document, turns that menu upward when there is room
+above and not below; it is guarded, because the tests draw into a DOM with no layout, where the honest
+answer is the CSS default (below the row).
+
+| Claim | How | Result |
+|---|---|---|
+| The sidebar's menu is not the composer's menu | `tests/web_view.rs` over the page's bytes | the drawer creates `session-menu`, the CSS has rules under that name, and no CSS rule styles the sidebar's menu under `#sessions li .menu` |
+| The menu is a box its rows fit in | the browser harness | every action row's rectangle is inside the menu's own rectangle; red before this round, when the box was 10px and its rows were at `y=976` and `y=1011` inside a box ending at `y=981` |
+| A menu on the last conversation opens where it can be read, and only the flip puts it there | the browser harness, in a shortened window with the list scrolled to its bottom | the claim carries its own control: it requires the menu to be inside the list's box *and* requires that removing the flip puts it outside, so it cannot pass over a menu that merely happened to fit. Red with the flip removed from the page: `up:false, flipped:false`, menu at `y=243`, list box ending at `y=243` |
+
 
 **The open conversation's name is edited in the same menu — added 2026-09-17.** The name is the one
 thing the sidebar *shows* that nothing on the page could change: `/name <text>` has been in the frame's

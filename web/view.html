@@ -496,34 +496,53 @@
   #sessions li:hover .more, #sessions li .more:focus { opacity: 1; color: var(--user); }
   /* The second level: one row per action the frame offers, each one what it does rather than the line
      it sends. The words are the frame's own sentence for the row, and they may run to a line or two:
-     a menu of syntax with the meaning clipped off the end was the defect reported on 2026-09-23. */
-  #sessions li .menu {
-    position: absolute; right: 8px; top: 100%; z-index: 5; min-width: 150px;
+     a menu of syntax with the meaning clipped off the end was the defect reported on 2026-09-23.
+
+     Its own class, and its own complete rule, because it is not the composer's `/` menu: that one is
+     `position: absolute` with `left`, `right` *and* `bottom` pinned, a `max-height` and
+     `overflow-y: auto`, and this menu wearing the same class name meant both rules applied to one box.
+     `top: 100%` here plus `bottom` there pins both ends of it against the row, and a box with both
+     ends pinned and no height collapses to its own border and padding -- 10px, reported directly as
+     "an empty bar with nothing in it", with the rows inside the scrollable overflow of a box that has
+     no height. Every claim about this menu was reading `textContent` and could not see it. */
+  #sessions li .session-menu {
+    position: absolute; right: 8px; top: 100%; z-index: 5;
+    min-width: 150px; max-width: 100%;
     background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px;
     box-shadow: 0 6px 18px rgba(0, 0, 0, .35);
+    font-size: 12.5px;
   }
-  #sessions li .menu button.row {
+  /* A menu on a row with no room under it opens upward instead. `placeMenu` decides, from the box the
+     row and the list are actually in: the sidebar scrolls, so a menu hanging below a row near its
+     bottom is drawn outside the box the list paints in -- a menu nobody sees unless they think to
+     scroll a sidebar for it. */
+  #sessions li .session-menu.up { top: auto; bottom: 100%; }
+  #sessions li .session-menu button.row {
     display: flex; justify-content: space-between; gap: 10px;
     font: inherit; text-align: left; width: 100%; background: none; border: 0; padding: 0;
-    color: inherit; cursor: pointer;
+    color: inherit; cursor: pointer; border-radius: 4px;
   }
-  #sessions li .menu button.row:hover span { color: var(--bad); }
-  #sessions li .menu .row { color: var(--dim); font-size: 12.5px; line-height: 1.35; }
+  #sessions li .session-menu button.row:hover { background: rgba(255, 255, 255, .05); }
+  #sessions li .session-menu button.row:hover span { color: var(--bad); }
+  #sessions li .session-menu .row {
+    display: flex; gap: 8px; align-items: baseline;
+    color: var(--dim); font-size: 12.5px; line-height: 1.35;
+  }
   /* The rename field inside the menu: the same shape as the panel's forms -- a row that takes an
      answer is still a row -- at the size of the list it hangs off rather than the size of the panel.
      It is drawn here rather than in the panel because the conversation it names is the one this row
      is, and the field starts on that name. */
-  #sessions li .menu form.field { display: flex; gap: 6px; align-items: baseline; margin-top: 4px; }
-  #sessions li .menu form.field input.value {
+  #sessions li .session-menu form.field { display: flex; gap: 6px; align-items: baseline; margin-top: 4px; }
+  #sessions li .session-menu form.field input.value {
     font: inherit; font-size: 12.5px; flex: 1 1 auto; min-width: 0; color: var(--fg);
     background: none; border: 0; border-bottom: 1px solid var(--dim); padding: 0 0 1px;
   }
-  #sessions li .menu form.field input.value:focus { outline: none; border-bottom-color: var(--user); }
-  #sessions li .menu form.field button.send {
+  #sessions li .session-menu form.field input.value:focus { outline: none; border-bottom-color: var(--user); }
+  #sessions li .session-menu form.field button.send {
     font: inherit; font-size: 12.5px; color: var(--dim); background: none; border: 0; padding: 0;
     cursor: pointer; white-space: normal; text-align: left; flex: 0 1 auto;
   }
-  #sessions li .menu form.field button.send:hover { color: var(--user); }
+  #sessions li .session-menu form.field button.send:hover { color: var(--user); }
   #sessions .none, #sessions .waiting { color: var(--dim); cursor: default; padding: 7px 14px; }
   /* `position: relative` and `--pad-x` are for the reading-width hand below: the hand is placed
      against the pane's own edge, and the padding is a variable because three things need the same
@@ -3514,6 +3533,34 @@ function paintSessions() {
     return;
   }
   for (const session of sessions) list.appendChild(sessionRow(doc, session));
+  placeMenu();
+}
+
+/// Turn a menu that would open past the bottom of the sidebar to face upward instead.
+///
+/// The sidebar scrolls and the menu is positioned against its row, so a menu hanging below a row near
+/// the bottom of the list is drawn outside the box the list paints in: the browser makes it part of
+/// the list's scrollable overflow, which is a menu nobody sees unless they think to scroll a sidebar
+/// for it. Reported as the same complaint as the empty bar ("no options in it"), so it is answered
+/// here rather than left for the next report.
+///
+/// Measured after the row is in the document, because that is the only moment the answer exists -- and
+/// guarded, because the tests draw into a DOM with no layout at all, where the honest answer is the
+/// CSS default: the menu hangs below the row. This is the one place the page reads a box it has drawn.
+function placeMenu() {
+  const list = document.getElementById("sessions");
+  if (!list || typeof list.getBoundingClientRect !== "function") return;
+  const menu = list.querySelector("li .session-menu");
+  if (!menu || typeof menu.getBoundingClientRect !== "function") return;
+  const room = list.getBoundingClientRect();
+  const row = menu.parentElement.getBoundingClientRect();
+  const height = menu.getBoundingClientRect().height;
+  // Below if it fits, above if it only fits there, and below when it fits in neither -- a menu run off
+  // the top of the list is no better than one run off the bottom, and the CSS default is the one the
+  // page can explain.
+  if (row.bottom + height > room.bottom && row.top - height >= room.top) {
+    menu.classList.add("up");
+  }
 }
 
 /// The frame's rows that destroy something and take their argument from the list `from` names.
@@ -3671,7 +3718,7 @@ function sessionRow(doc, session) {
 /// can be read back without a browser -- the same reason every other drawer here returns its nodes
 /// through the DOM it was given.
 function sessionMenu(doc, session) {
-  const menu = el("div", "menu");
+  const menu = el("div", "session-menu");
   const actions = destroyingRows(doc, "sessions");
   for (const command of actions) {
     const row = el("button", "row danger");

@@ -118,6 +118,21 @@ function scratch(baseUrl) {
       `${meta}\n${JSON.stringify({ type: "chat", message: { role: "user", content: prompt } })}\n`
     );
   }
+  // Eight more conversations, because one claim needs a sidebar whose list *scrolls*: a menu that
+  // hangs below its row is only drawn outside the list's box when the row it belongs to is at the
+  // bottom of a list with more rows than fit, which is the case the sidebar is in after a week of
+  // work. They are old (`epoch:1`, like the two above) so nothing that asks which conversation is
+  // newest can see them.
+  for (let i = 0; i < 8; i += 1) {
+    const id = `900-${i}`;
+    const meta = JSON.stringify({
+      type: "meta", v: 2, id, created: "epoch:1", cwd, provider: "stub", model: "stub-model",
+    });
+    fs.writeFileSync(
+      path.join(home, "sessions", `${id}.jsonl`),
+      `${meta}\n${JSON.stringify({ type: "chat", message: { role: "user", content: `filler ${i}` } })}\n`
+    );
+  }
   return { home, cwd, log: path.join(home, "stdout.txt") };
 }
 
@@ -1102,12 +1117,16 @@ async function main() {
     const menu = await page.js(
       `(() => { const li = document.querySelector("#sessions li.current") ||
           document.querySelector("#sessions li");
-        const m = li && li.querySelector(".menu"); if (!m) return null;
+        const m = li && li.querySelector(".session-menu"); if (!m) return null;
         const n = (li.querySelector("span.n") || {}).textContent || "";
+        const box = (node) => { const r = node.getBoundingClientRect();
+          return { top: Math.round(r.top), bottom: Math.round(r.bottom), height: Math.round(r.height) }; };
         return { number: n,
                  rows: Array.from(m.querySelectorAll("button.row")).map((b) => b.textContent),
                  codes: m.querySelectorAll("code").length,
-                 form: Array.from(m.querySelectorAll("form.field button.send")).map((b) => b.textContent) }; })()`
+                 form: Array.from(m.querySelectorAll("form.field button.send")).map((b) => b.textContent),
+                 box: box(m),
+                 rowBoxes: Array.from(m.querySelectorAll("button.row")).map(box) }; })()`
     );
     // What the rows *say* is the frame's own sentence for each action -- "delete one", "file one away,
     // out of the list" -- and never the line the press sends. Reported directly, 2026-09-23: *the
@@ -1127,6 +1146,20 @@ async function main() {
       flint.text().slice(beforeMenu).trim() === "",
       `terminal gained: ${JSON.stringify(flint.text().slice(beforeMenu))}`
     );
+    // That the rows *exist* is not that they can be seen, and the difference is the whole of this
+    // claim. Reported directly, 2026-09-23 -- twice, the second time after the rows were already right
+    // -- the three dots opened "an empty bar with nothing in it": the menu wore the class the
+    // composer's `/` menu is styled by, whose rule pins `left`, `right` *and* `bottom`, so together
+    // with the sidebar's `top: 100%` the box had both ends pinned against the row and collapsed to
+    // its own border and padding -- 10px, with its rows in the scrollable overflow of a box with no
+    // height. Every claim above this one was reading `textContent` and passing. So: the box the rows
+    // are drawn in has to hold them.
+    check(
+      "the menu is a box its rows fit in",
+      !!menu && menu.rows.length > 0 && menu.rowBoxes.length === menu.rows.length &&
+        menu.rowBoxes.every((row) => row.bottom <= menu.box.bottom + 1 && row.top >= menu.box.top - 1),
+      `menu: ${JSON.stringify(menu && { box: menu.box, rows: menu.rowBoxes })}`
+    );
     // The rename belongs to the row the run is writing and to no other, which is why it is looked
     // for *here* rather than assumed: a menu that offered it on every row would rename whatever
     // happened to be open.
@@ -1138,7 +1171,7 @@ async function main() {
     );
     const nameInput = `(() => { const li = document.querySelector("#sessions li.current") ||
         document.querySelector("#sessions li");
-      const f = li.querySelector(".menu form.field");
+      const f = li.querySelector(".session-menu form.field");
       if (!f) return null; f.querySelector("input").id = "harness-name";
       f.querySelector("button.send").id = "harness-name-send"; return true; })()`;
     if (await page.js(nameInput)) {
@@ -1166,6 +1199,66 @@ async function main() {
       );
     }
 
+    // A menu on the last row of a full sidebar is still a menu. The list scrolls, and a menu that
+    // hangs *below* its row can be drawn past the bottom of the box the browser lets the list paint
+    // in -- reachable only by scrolling a sidebar nobody thought to scroll. The window is shortened
+    // here rather than the list grown, and the list is scrolled to its bottom, which is where it sits
+    // when somebody is looking at what they were just doing. Measured with the flip removed from the
+    // page: the menu is drawn at y=243 with the list's own box ending at y=243 -- entirely below it,
+    // which is the second half of the report this round began with.
+    await page.send("Emulation.setDeviceMetricsOverride", {
+      width: 1400, height: 300, deviceScaleFactor: 1, mobile: false,
+    });
+    await sleep(400);
+    const bottomRow = await page.js(
+      `(() => { const list = document.getElementById("sessions"); if (!list) return null;
+        const items = () => Array.from(list.querySelectorAll("li"));
+        // Scrolled to the bottom, which is where a long list sits when somebody is looking at their
+        // most recent conversations -- and the only state in which the last row is against the box.
+        list.scrollTop = list.scrollHeight;
+        const last = items()[items().length - 1]; if (!last) return null;
+        const title = last.title;
+        const more = last.querySelector("button.more"); if (!more) return null;
+        // The press repaints the list, so the row it was on is a new node afterwards: the row is found
+        // again by title rather than held across the click, which is what "the list is a function of
+        // the state" means for anything driving it.
+        more.click();
+        const li = items().find((r) => r.title === title);
+        const m = li && li.querySelector(".session-menu"); if (!m) return null;
+        const box = (node) => { const r = node.getBoundingClientRect();
+          return { top: Math.round(r.top), bottom: Math.round(r.bottom) }; };
+        const room = box(list);
+        const readable = () => {
+          const r = box(m);
+          return r.top >= room.top - 1 && r.bottom <= room.bottom + 1;
+        };
+        const flipped = readable();
+        const up = m.classList.contains("up");
+        // The control: the same menu with the flip taken off it, which is where it would have been
+        // drawn. A claim that only checked the page as it stands could pass over a menu that happened
+        // to fit; this one cannot, because it also requires that *not* flipping it does not.
+        m.classList.remove("up");
+        m.getBoundingClientRect();
+        const unflipped = readable();
+        return { title: title, rows: items().length, up: up, flipped: flipped,
+                 unflipped: unflipped, menu: box(m), list: room }; })()`
+    );
+    check(
+      "a menu on the last conversation opens where it can be read, and only the flip puts it there",
+      !!bottomRow && bottomRow.up === true && bottomRow.flipped === true &&
+        bottomRow.unflipped === false,
+      `bottom row: ${JSON.stringify(bottomRow)}`
+    );
+    // Closed again by the same press that opened it, so the phase below starts with no menu open: its
+    // own press is a toggle, and a menu already open on the row it means to open would close.
+    await page.js(
+      `(() => { const items = Array.from(document.querySelectorAll("#sessions li"));
+        const li = items[items.length - 1]; if (!li) return null;
+        const more = li.querySelector("button.more"); if (more) more.click(); return true; })()`
+    );
+    await page.send("Emulation.clearDeviceMetricsOverride");
+    await sleep(400);
+
     // The second press is the one that sends, and it sends *this row's* number: the fixture session
     // is removed by the menu on its own row, and the file is the witness (the terminal would agree
     // with a menu that had sent the wrong conversation's number and been refused).
@@ -1187,7 +1280,7 @@ async function main() {
       const victimRow = await page.js(
         `(() => { const li = Array.from(document.querySelectorAll("#sessions li"))
             .find((r) => r.title === ${JSON.stringify(victim)});
-          const m = li && li.querySelector(".menu"); if (!m) return null;
+          const m = li && li.querySelector(".session-menu"); if (!m) return null;
           const b = Array.from(m.querySelectorAll("button.row"))
             .find((b) => String(b.textContent).trim() === "delete one");
           if (!b) return null; b.id = "harness-delete-row";
