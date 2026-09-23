@@ -191,6 +191,12 @@ function loadViewer() {
         (this.handlers[type] = this.handlers[type] || []).push(handler);
       },
     },
+    // Where the page reads its token from, which is the header every request it makes carries. It is
+    // `file:` on purpose: the token is here so that a request can be *made* -- a check has to be able
+    // to see which route a press asks -- while `servedByFlint` still says this page was dropped rather
+    // than served, which is the level the whole harness is written at. Without a `location` at all,
+    // every fetch path threw inside its own `try` and reported a failure about nothing.
+    location: { protocol: "file:", search: "?token=stub-token" },
     sessionStorage: (() => {
       const store = new Map();
       return {
@@ -1705,14 +1711,92 @@ check("a listing in a tool result is read by its own rows, which is where a spac
   // in one is two words that happen to end in a slash.
   eq(viewer.addressParts("in My Projects/ we keep it", true).filter((p) => p.path !== undefined).length,
      0, "a sentence is not a listing");
-  // And outside a listing the residue stands: a bare path with a space is still cut at the space, so
-  // the first fragment is a link to `C:\My` -- a path that does not exist rather than the one that was
-  // meant. Nothing outside the run's own listing can tell that name from two words.
+  // And outside a listing, a bare path with a space is asked about rather than guessed at: the run is
+  // the only reader here with a filesystem, and its answer is what makes the name one name (see the
+  // next check). With no run behind the page the token keeps its own reading, which is the honest
+  // residue -- `C:\My` is a link to something that does not exist rather than to nothing.
   eq(viewer.addressParts("wrote C:\\My Projects\\notes.txt", false).filter((p) => p.path !== undefined)
        .map((p) => p.path), ["C:\\My", "Projects\\notes.txt"],
-     "a bare spaced path in prose is still split -- quoted, it is one");
+     "with nothing to ask, a bare spaced path is still split -- quoted, it is one");
   eq(viewer.addressParts('"C:\\My Projects\\notes.txt"', false).filter((p) => p.path !== undefined)
        .map((p) => p.path), ["C:\\My Projects\\notes.txt"], "which is what the quotes are for");
+});
+
+check("a path the reader could not have seen whole is resolved by the run", () => {
+  // Reported directly, 2026-09-23: `C:\Users\zhangzhuo\My Documents` still could not be recognised --
+  // a real directory, and two tokens to the splitter. The page asks the run and draws the button over
+  // exactly the characters the answer names, so the words after the name stay words.
+  const line = "see C:\\Users\\me\\My Documents is where it lives";
+  const at = line.indexOf("C:\\");
+  const end = at + "C:\\Users\\me\\My".length;
+  const asked = viewer.askablePath(line, at, end);
+  eq(asked, line.slice(at), "a drive-rooted token with words after it is worth asking about");
+  eq(viewer.askablePath("in C:\\work\\x", 3, 12), null, "a token at the end of the line is not");
+  eq(viewer.askablePath("in src/My Dir", 3, 9), null, "and a relative one is not: in prose it is words");
+
+  // The run's answer, as `GET /resolve` gives it: how many characters of that text the path took.
+  const used = asked.indexOf(" is ");
+  viewer.pathEnds.set(asked, { path: "C:\\Users\\me\\My Documents", used });
+  const parts = viewer.addressParts(line, true);
+  eq(parts.filter((p) => p.path !== undefined).map((p) => p.written),
+     ["C:\\Users\\me\\My Documents"], "one button, over the whole name");
+  eq(parts.filter((p) => p.path !== undefined).map((p) => p.path),
+     ["C:\\Users\\me\\My Documents"], "and a press asks for the name the run found");
+  eq(parts.map((p) => (p.path !== undefined ? p.written : p.text)).join(""), line,
+     "with every word of the sentence still on the page");
+  eq(parts.filter((p) => p.line !== undefined && p.line > 0).length, 0, "no line was invented");
+
+  // A `:N` inside the name the run found is the line, exactly as it is for every other path here.
+  viewer.pathEnds.set(asked, { path: "C:\\Users\\me\\My Documents", used: used });
+  const numbered = "at " + "C:\\Users\\me\\My Documents\\notes.txt:12 and then";
+  const nAt = numbered.indexOf("C:\\");
+  const nAsked = viewer.askablePath(numbered, nAt, nAt + "C:\\Users\\me\\My".length);
+  viewer.pathEnds.set(nAsked, { path: "C:\\Users\\me\\My Documents\\notes.txt", used: nAsked.indexOf(" and") });
+  const numberedParts = viewer.addressParts(numbered, true);
+  eq(numberedParts.filter((p) => p.path !== undefined).map((p) => p.written),
+     ["C:\\Users\\me\\My Documents\\notes.txt:12"], "the button says the name and the line");
+  eq(numberedParts.filter((p) => p.path !== undefined).map((p) => p.line),
+     [12], "and the press goes to the line inside the name");
+
+  // A refusal is an answer too -- nothing there -- and it leaves the token exactly as it was: this page
+  // does not turn a "no" into a longer name.
+  viewer.pathEnds.set(asked, null);
+  eq(viewer.addressParts(line, true).filter((p) => p.path !== undefined).map((p) => p.written),
+     ["C:\\Users\\me\\My"], "a refusal changes nothing");
+  // So is an answer this page cannot read: the button it would have drawn is the one it already draws.
+  viewer.pathEnds.set(asked, { path: "C:\\whatever", used: 0 });
+  eq(viewer.addressParts(line, true).filter((p) => p.path !== undefined).map((p) => p.written),
+     ["C:\\Users\\me\\My"], "and so does one that used nothing");
+
+  viewer.pathEnds.delete(asked);
+  viewer.pathEnds.delete(nAsked);
+});
+
+check("a directory is opened where it lives, which is what pressing one means", () => {
+  // Reported directly, 2026-09-23: *a press should open the directory with the machine's own way of
+  // opening one, rather than previewing the files in it.* The route asked is the whole of it -- the
+  // harness records what the page sent -- and `/open` is the one that starts a program.
+  const before = viewer.sent.length;
+  viewer.openPreview("C:\\work\\My Projects\\", 0);
+  const sent = viewer.sent.slice(before);
+  eq(sent.length, 1, "one press, one request");
+  eq(sent[0].route, "/open", "and it is the route that opens a path where it lives");
+  eq(JSON.parse(sent[0].body), { path: "C:\\work\\My Projects\\" },
+     "carrying the path as it was written, space and separator and all");
+  eq(sent.filter((s) => s.route.indexOf("/dir") === 0).length, 0,
+     "nothing is listed: the panel is not the place a directory press goes");
+  // A path that does not say it is a directory is not opened by a press: it goes to the panel, which
+  // is how the run gets to say it is one (`X-Flint-Dir`) before anything is handed to the desktop.
+  // The head is drawn before the read, so it is visible with no run behind the page.
+  const second = viewer.sent.length;
+  // The stub's `textContent = ""` does not clear children, so the head from an earlier check is
+  // cleared by hand here: this is about what *this* press drew.
+  viewer.__node("preview-path").children.length = 0;
+  viewer.openPreview("C:\\work\\notes.txt", 0);
+  eq(viewer.sent.length, second, "a press on a file starts nothing");
+  eq(viewer.__node("preview").hidden, false, "it goes to the panel, which is the thing that opens");
+  eq(viewer.__node("preview-path").children.map((n) => n.textContent).join(""),
+     "C:\\work\\notes.txt", "with the path it was pressed for on its head");
 });
 
 check("a file is drawn line by line, with the file's own numbers in a gutter", () => {
@@ -2110,6 +2194,29 @@ check("the menu filters by prefix, then by subsequence, then by the help text", 
   eq(page.menuScore({ send: "/delete", help: "remove one of them" }, "rmv"), 0, "help is not fuzzy");
   ok(page.menuScore({ send: "/delete", help: "remove one of them" }, "remove") > 0,
      "but a substring of the help does match");
+});
+
+// The tie-break, which the bare `/` is made of entirely: every row scores the same, so what decides is
+// the order the menu *draws* in -- by class, this page's own reading order -- and not the frame's. The
+// fixture above is already grouped by class, which is why this needs a frame of its own: the process's
+// table is not, and with the frame's order as the tie-break the marked row is not the top row on screen.
+check("a tie is broken by the order the menu draws in, not by the frame's", () => {
+  const page = loadViewer();
+  const d = page.newDoc();
+  page.applyState(d, JSON.stringify({
+    type: "state", provider: "stub", model: "m", providers: [{ name: "stub", models: ["m"] }],
+    commands: [
+      { label: "/config", send: "/config", help: "show shell, steps, proxy", class: "panel", group: "limits" },
+      { label: "/config set <key> <value>", send: "/config set", help: "change one setting",
+        class: "form", group: "limits" },
+      { label: "/reload", send: "/reload", help: "re-read the config file", class: "button", group: "run" },
+    ],
+  }));
+  const names = (query) => page.menuRows(d, query).map((c) => c.send);
+  eq(names(""), ["/config", "/reload", "/config set"], "a bare slash reads in the drawn order");
+  // And the score still wins outright over it: `/config set` is drawn last and comes back first, which
+  // is the palette's promise and the reason the class is only the tie-break.
+  eq(names("config set")[0], "/config set", "a query that names a row beats the drawing order");
 });
 
 check("the menu draws the frame's rows, marked, and says when nothing matches", () => {

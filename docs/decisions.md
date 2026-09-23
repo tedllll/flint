@@ -166,18 +166,28 @@ writes another, and the machine where the provider is in doubt is exactly where 
 handing to somebody. No messages means no page, refused the way `/import` refuses an empty file: one
 that looks like a conversation and holds nothing cannot be told from one that failed to load.
 
-## A directory is read as data, not as text
+## A directory is opened where it lives, and read only where opening is refused
 
-**A directory is a reading, so `GET /dir` answers with a listing rather than with prose.** `GET /file`
-refused a directory by its own rule — "is a directory, not a file" — which is true and useless to a
+**A press on a directory is a request to go there, not to read it.** This section first said a directory
+is a reading, and the listing route below is what came of it. A person using it said otherwise, in one
+sentence: *pressing it should open the directory with the machine's own way of opening one, rather than
+previewing the files in it*. That is the right reading of the gesture — every desktop surface opens a
+directory on a press, and a panel of file names is what a person asks for when they want to read, not
+what they mean when they press — so the press now goes to `POST /open`, and a run that may not start a
+program (the guard refuses it with `409`) answers with the listing instead. The two are not two features:
+the listing is what is left of a reading when the machine will not open anything, which is why the route,
+its test and the panel's drawing of it all survived the change.
+
+**A directory is still read as data, so `GET /dir` answers with a listing rather than with prose.** `GET
+/file` refused a directory by its own rule — "is a directory, not a file" — which is true and useless to a
 person who pressed the path to go there, and to a page that then had to decide what to draw. The three
-ways out were weighed. Drawing the refusal with an `open` button was already possible and is not a
-reading: it hands the question to another program on the same machine. Parsing the run's own `list`
-output in the page was refused for this repository's oldest rule about the page: it would be a second
-place where "what a listing looks like" is decided, and it cannot be done at all for the case that was
-reported — `My Projects/` is one name to a person and two tokens to any reader of text. So the process
-answers, in a shape the page draws controls from, and the entries' full paths are **joined here**: the
-page never puts a separator next to a name, which is the same reason it composes no shell command.
+ways out were weighed. Drawing the refusal with an `open` button is what the press does now. Parsing the
+run's own `list` output in the page was refused for this repository's oldest rule about the page: it
+would be a second place where "what a listing looks like" is decided, and it cannot be done at all for the
+case that was reported — `My Projects/` is one name to a person and two tokens to any reader of text. So
+the process answers, in a shape the page draws controls from, and the entries' full paths are **joined
+here**: the page never puts a separator next to a name, which is the same reason it composes no shell
+command.
 
 **The listing and the `list` tool are one function, so they cannot disagree.** `tools::directory_items`
 is called by both, the order is the order the tool prints (sorted by the printed line), and the page
@@ -185,20 +195,41 @@ shows each entry's `line` as the tool would have printed it. A model reading a t
 reading the panel are therefore told the same thing; the alternative — a route that re-implemented the
 listing for the page — is exactly the drift that the tool and the panel would be blamed for.
 
-**The refusal keeps its sentence and gains a header.** A path whose name ends in a separator is asked
-of `/dir` first, because that is the one thing a name can say about being a directory. Everything else
-goes to `/file`, whose directory refusal now carries `X-Flint-Dir: 1`: the page acts on the header, and
-the sentence stays for the person. Matching the words "is a directory" was refused — that is this page
-reading prose it wrote itself, which is worse than reading a stranger's because it looks safe. A page
-that guesses wrong costs one request, and nothing else.
+**The refusal keeps its sentence and gains a header.** A path whose name ends in a separator is decided
+by the *page* without asking anything, because that is the one thing a name can say about being a
+directory. Everything else goes to `/file`, whose directory refusal carries `X-Flint-Dir: 1`: the page
+acts on the header, and the sentence stays for the person. Matching the words "is a directory" was
+refused — that is this page reading prose it wrote itself, which is worse than reading a stranger's
+because it looks safe. A page that guesses wrong costs one request, and nothing else.
 
 **A line of the run's own listing is a name, which is where a space stops being ambiguous.** `list`
 prints one entry per line as `NAME/` or `NAME  (N bytes)`, and such a line says where the name ends —
 so the page's splitter reads it as one name, in the position where relative names are read at all. This
 is the same kind of rule as the one that reads `src/web.rs:412` as a path and a line: a known format of
-this program's own output, read where it appears. It does not touch prose, so §18's stated residue — a
-bare path with a space, written by a model that did not quote it — is unchanged; what is new is that a
-*listing* is no longer prose to this page.
+this program's own output, read where it appears. The residue it does not touch — a bare path with a
+space in prose, written by a model that did not quote it — is the decision below.
+
+## The page asks the run where a path ends
+
+**A path with a space in it is a question about the filesystem, and the page does not have one.** §18 of
+`docs/web-mode.md` stated the residue honestly and called it unfixable: no reader of `C:\work\My Notes`
+can tell a name from a path followed by a word, and the scanner cut at the space and drew a button to
+`C:\work\My`, a name that exists nowhere. Every page-side answer to it is a heuristic — "a capital letter
+starts a name", "look for a known extension" — and each one is a guess dressed as a rule. The run has the
+one thing that settles it, so the page asks: `GET /resolve?text=…` with the line from the candidate's
+first character, answered with the longest prefix that exists and the **length** of it.
+
+Three parts of that are decisions rather than plumbing. The answer is a length in **UTF-16 code units**,
+because the caller's only use for it is a JavaScript `slice` — an offset in any other unit would be a
+number the page cannot use without counting again. The question is asked about the shapes prose does not
+make — an absolute path, a UNC share, a `~`, a rooted name — and only when a word follows it, because a
+relative name in a sentence is two words far more often than it is a directory, and a request per
+plausible-looking line is a request per line. And the answer is **cached per text and asked once**: the
+page repaints on every token of a streaming answer, so without that cache a single sentence would be a
+dozen requests to a run that is busy writing it. A refusal is cached too (`null`: asked, and nothing
+there), and the token keeps its own reading until an answer arrives — the honest failure, stated rather
+than hidden, is the same one §18 described, and it is what a page with no run behind it (an export, a
+dropped session file) always shows.
 
 ## A cursor is a position in a file
 

@@ -261,6 +261,60 @@ fn an_address_leaves_the_page_and_a_path_does_not() {
     forbidden("href = part.text", "an address is a property, never markup");
 }
 
+/// A path cut in two by a space is resolved **by the run**, and the button is drawn over what it named.
+///
+/// Reported directly, 2026-09-23: *`C:\Users\zhangzhuo\My Documents` still cannot be recognised.* A
+/// real directory, and two tokens to anything that reads a sentence as text -- no rule about the text
+/// can tell it from a path followed by a word, which is exactly why the page asks the one reader that
+/// has a filesystem (`GET /resolve`) instead of guessing. What is held here is that question and its
+/// bounds: one request per text and never a second, only for a token that looks absolute and has
+/// words after it, nothing at all without a run behind the page, and a redraw of only the blocks whose
+/// own text was asked about -- a block replaced for a reason that is not its own is a fold the reader
+/// had opened, closed.
+#[test]
+fn a_path_cut_by_a_space_is_resolved_by_the_run_rather_than_guessed_at() {
+    let asks = from("function askablePath(text, at, end)", 6);
+    assert!(
+        asks.contains("pathStarts(token)") && asks.contains("/\\s\\S/.test("),
+        "only an absolute-looking token with a word after it is worth asking about:\n{asks}"
+    );
+    let starts = from("function pathStarts(token)", 5);
+    assert!(
+        starts.contains("[A-Za-z]:[\\\\/]") && starts.contains("^~[\\\\/]"),
+        "a drive letter, a UNC share and the home directory are the shapes prose does not make:\n{starts}"
+    );
+    let asked = from("function askWhereThePathEnds(asked)", 12);
+    assert!(
+        asked.contains("pathEndsAsked.has(asked)")
+            && asked.contains("!canSend")
+            && asked.contains("fetch(\"/resolve?text=\" + encodeURIComponent(asked)"),
+        "one request per text, encoded, and none at all without a run behind the page:\n{asked}"
+    );
+    assert!(
+        view().contains("pathEnds.set(asked, said)") && view().contains("pathEnds.set(asked, null)"),
+        "a refusal is cached as an answer, or the same line would be asked about on every paint"
+    );
+    let resolved = from("function resolvedPath(asked, absoluteOnly)", 8);
+    assert!(
+        resolved.contains("!pathEnds.has(asked)") && resolved.contains("askWhereThePathEnds(asked)")
+            && resolved.contains("asked.slice(0, answer.used)"),
+        "the answer is a length, and the button is the characters it used:\n{resolved}"
+    );
+    let splitter = from("function addressParts(text, absoluteOnly)", 60);
+    assert!(
+        splitter.contains("askablePath(text, match.index, end)")
+            && splitter.contains("wider.written.length > token.length"),
+        "a name the run found longer than the token is what replaces it, and nothing shorter:\n{splitter}"
+    );
+    let repaint = from("function repaintResolvedPaths()", 16);
+    assert!(
+        repaint.contains("pathEndsCallers.get(asked)")
+            && repaint.contains("painted[at].rev = null")
+            && repaint.contains("paint(doc)"),
+        "only the blocks that asked are drawn again, and once:\n{repaint}"
+    );
+}
+
 /// The jobs panel reads the run's list, and a row is a press that stays in this page.
 ///
 /// Two policies, in one place because they are the same policy seen twice. The list is a *route*
@@ -406,29 +460,41 @@ fn the_page_stops_a_job_from_the_rows_it_is_already_showing() {
 /// file that is not a picture by *falling through* to this, so the sentence a reader sees is always
 /// the text route's own. That fall-through is asserted here too, since it is the reason the split
 /// exists at all.
+///
+/// A directory is the one refusal that is not a sentence: the press goes where a directory press goes,
+/// which is out of this page entirely (`openDirectory`), and the listing is what is left for a run
+/// that may not start a program. Reported directly, 2026-09-23, and this is where the routing is held.
 #[test]
 fn the_preview_shows_the_routes_own_refusal_rather_than_an_empty_panel() {
-    let body = from("function paintPreviewRefusal(body, status)", 14);
+    let body = from("function paintPreviewLine(message)", 14);
     assert!(
-        body.contains("showPlain(text, String(body == null ? \"\" : body).trim())"),
-        "the refusal is shown as it was written:\n{body}"
+        body.contains("showPlain(text, String(message == null ? \"\" : message))"),
+        "a sentence is shown as it was written:\n{body}"
     );
     assert!(
-        body.contains("\"HTTP \" + status"),
-        "and the status beside it, for the reader who wants the code:\n{body}"
+        body.contains("rendered.hidden = true") && body.contains("button.hidden = true"),
+        "and it is not a file: the reading and its switch go with it:\n{body}"
     );
-    let status = from("async function readText()", 30);
+    let painted = from("function paintPreviewRefusal(body, status)", 6);
+    assert!(
+        painted.contains("paintPreviewLine(")
+            && painted.contains("\"HTTP \" + status"),
+        "a refusal is that sentence plus the status beside it, for the reader who wants the code:\n{painted}"
+    );
+    let status = from("async function readText()", 32);
     assert!(
         status.contains("paintPreviewRefusal(body, response.status)"),
         "a refused read must hand its sentence and its code to that function:\n{status}"
     );
     assert!(
-        status.contains("if (dirHeader(response)) {"),
-        "and a text route's refusal that names a directory is read as the listing it is:\n{status}"
+        status.contains("if (dirHeader(response)) {")
+            && status.contains("await openDirectory(preview.path);"),
+        "and a text route's refusal that names a directory turns the press into a directory press:\n{status}"
     );
-    let chooser = from("async function readPreview()", 32);
+    let chooser = from("async function readPreview()", 34);
     assert!(
         chooser.contains("if (dirPath(preview.path)) {")
+            && chooser.contains("await openDirectory(preview.path);")
             && chooser.contains("if (imageExt(preview.path) && (await readPicture())) return;")
             && chooser.contains("await readText();"),
         "the directory's name is decided first (a directory called `shots.png` is a directory), then \
@@ -1466,10 +1532,23 @@ fn the_slash_menu_is_a_launcher_drawn_from_the_frame() {
 
     // Drawn from the frame, like the panel: the same `state.commands`, the same row fields, and the
     // page's own group names as the only thing it knows by heart.
-    let rows = from("function menuRows(doc, query)", 16);
+    let rows = from("function menuRows(doc, query)", 32);
     assert!(
         rows.contains("state.commands"),
         "the menu must be drawn from the frame rather than from a list of its own: {rows}"
+    );
+    // A tie is broken by the order the menu *draws* in, not by the frame's. The bare `/` ties every row
+    // at 1, and the frame's order is a table's while the drawing's is by class -- so with the frame's
+    // order as the tie-break the marked row is not the top row on screen, which a real browser found.
+    // The score stays first, which is the palette's promise: a query that names a row wins outright
+    // even when that row is drawn in a later group.
+    assert!(
+        rows.contains("rank(a.command) - rank(b.command)") && rows.contains("b.score - a.score"),
+        "the menu's ties must follow the drawn order, after the score: {rows}"
+    );
+    assert!(
+        rows.contains("MENU_GROUPS"),
+        "and the drawn order is the page's own group table: {rows}"
     );
     let built = from("function menuButton(doc, row, at)", 14);
     for (needed, why) in [
@@ -1649,11 +1728,13 @@ fn a_markdown_file_is_read_not_just_shown() {
         "the switch must flip the view and read again: {flip}"
     );
     // A refusal is not a file: the route's sentence is the answer, and the switch goes with the reading
-    // that did not happen.
-    let refusal = from("function paintPreviewRefusal(body, status)", 16);
+    // that did not happen. Both halves are one decision now -- `paintPreviewRefusal` is the status, and
+    // the sentence painter is shared with the one other thing that is not a file (a directory that was
+    // opened where it lives).
+    let refusal = from("function paintPreviewLine(message)", 14);
     assert!(
         refusal.contains("button.hidden = true") && refusal.contains("rendered.hidden = true"),
-        "a refusal must take the reading and its switch away: {refusal}"
+        "a sentence must take the reading and its switch away: {refusal}"
     );
 }
 
@@ -1877,15 +1958,21 @@ fn the_page_offers_the_live_runs_a_message_can_address() {
 /// A path can be opened in the program this machine uses for it, and only deliberately.
 ///
 /// The one control on this page that starts a program, which is why it is not the path itself. A
-/// path in the transcript stays what it has always been -- a button that reads the file into this
-/// page's own panel -- and opening it *outside* the page is a second, named press whose title says
-/// what will happen. Two reasons for the split, and neither is taste:
+/// path in the transcript is a button that reads the file into this page's own panel, and opening it
+/// *outside* the page is a second, named press whose title says what will happen. Two reasons for the
+/// split, and neither is taste:
 ///
 /// - The transcript's text is model-written. A plain click on it must never be the thing that
 ///   launches a process, or reading an answer becomes a way to run what the answer names.
 /// - A person who wants to *look* at a file is already served by the panel. `open` is for the
-///   cases the panel cannot serve -- a directory, a file too large to preview, a PDF -- which is
-///   exactly what `GET /file`'s own refusals say to do.
+///   cases the panel cannot serve -- a file too large to preview, a PDF -- which is exactly what
+///   `GET /file`'s own refusals say to do.
+///
+/// A **directory** is the exception, and it is the one a reader reported (2026-09-23): pressing one
+/// opens it where it lives rather than filling the panel with a listing, because that is what pressing
+/// a directory means everywhere else on a desktop. It is not a hole in the rule above -- a directory
+/// is not a file a model can hand over and have run, and the route decides the same way for both
+/// presses -- and the listing is still here for the run that may not start a program at all.
 ///
 /// What is held here is the wiring: one route, one body, never a navigation. The route's own
 /// decisions are held in `src/web.rs`, and the press is driven for real by
@@ -1916,10 +2003,11 @@ fn a_path_opens_outside_the_page_only_through_the_route() {
         "the body must be JSON carrying the path: {body:?}"
     );
 
-    // One press, one route: the panel's button is the only caller, and the transcript's path button
-    // still reads into the panel. The needle starts inside the quotes on purpose -- the page's own
-    // call is `getElementById("preview-open")`, and a needle carrying the function's name is a
-    // needle that breaks on the one letter it spells differently from this test's expectation.
+    // One press, one route: the panel's button and a directory press both go through `askOpen`, and a
+    // press on a path that is not a directory still reads into the panel. The needle starts inside the
+    // quotes on purpose -- the page's own call is `getElementById("preview-open")`, and a needle
+    // carrying the function's name is a needle that breaks on the one letter it spells differently
+    // from this test's expectation.
     let listeners = from("(\"preview-open\").addEventListener", 2);
     assert!(
         listeners.contains("openOutside()"),
@@ -1928,6 +2016,30 @@ fn a_path_opens_outside_the_page_only_through_the_route() {
     assert!(
         html.contains("openPreview(part.path, part.line)"),
         "a click on a path must still be this page's own preview"
+    );
+
+    // The directory press: decided by the *name* before anything is asked -- a path that ends in a
+    // separator is a directory, and there is nothing a route could add -- and then the same request as
+    // the named control.
+    let press = from("async function openPreview(path, line)", 6);
+    assert!(
+        press.contains("if (dirPath(path)) {") && press.contains("await openDirectory(path);"),
+        "a directory press must open it rather than fill the panel:\n{press}"
+    );
+    let dir = from("async function openDirectory(path)", 44);
+    assert!(
+        dir.contains("await askOpen(path)") && dir.contains("setHint("),
+        "the route's own words are the feedback, on the same hint line as the named control:\n{dir}"
+    );
+    assert!(
+        dir.contains("said.status === 409") && dir.contains("await readDir();"),
+        "and only a refusal about *permission* falls back to a listing -- a readonly run cannot start a \
+         program, and a directory it cannot open is still one it can read:\n{dir}"
+    );
+    let ask = from("async function askOpen(path)", 6);
+    assert!(
+        ask.contains("fetch(\"/open\", { method: \"POST\", headers: authHeader(), body: openBody(path) })"),
+        "one place composes the request the route takes:\n{ask}"
     );
 
     // And it never leaves the page to do it. A navigation would be a page that replaced itself with

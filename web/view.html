@@ -1393,11 +1393,161 @@ function clip(s, n) {
   return s.length > n ? s.slice(0, n) + "…" : s;
 }
 
+/// Where the run said a path in a line *ends*, keyed by the text that was asked about.
+///
+/// The one question this page cannot answer and the run can. `C:\Users\me\My Documents` is a single
+/// name to a person and two tokens to any scanner, and no rule about the *text* tells it apart from a
+/// path followed by a word: the difference is a `stat`, and this page has no filesystem. So a
+/// candidate that looks absolute and has more words after it is sent to `GET /resolve`, which looks.
+/// Reported directly, 2026-09-23: *that path still cannot be recognised.*
+///
+/// `has` is "the run answered" (the value is then the answer or `null` for "nothing there"), and
+/// [`pathEndsAsked`] is "already in flight". Without both, a line would be asked about again on every
+/// paint -- and a paint happens on every token of a streaming answer.
+let pathEnds = new Map();
+
+/// The texts already sent to `GET /resolve`, answered or not.
+let pathEndsAsked = new Set();
+
+/// The texts the run has answered about since the last redraw.
+let pathEndsSettled = new Set();
+
+/// The block being drawn, so an answer can say which block asked for it.
+///
+/// `paint` is the one caller of `renderBlock`, and this is set around that call and cleared after it.
+/// It exists for one thing: when an answer lands, exactly the blocks whose own text was asked about
+/// are redrawn, because a block replaced for a reason that is not its own is a selection lost and a
+/// fold closed.
+let drawing = -1;
+
+/// The index of the block each asked text was seen in.
+let pathEndsCallers = new Map();
+
+/// Whether a token could be the *first word* of a path that carries on past the space after it.
+///
+/// Only the shapes prose does not produce: a drive (`C:\`), a UNC share (`\\`), the home directory
+/// (`~/`) or something rooted (`/`). A relative name is left out on purpose -- `src/bin and` is a
+/// sentence far more often than it is a directory, which is the same reason the wide rule is not used
+/// on prose at all -- and so is a token with nothing after it, since there is nothing to carry on to.
+function pathStarts(token) {
+  return (
+    /^[A-Za-z]:[\\/]/.test(token) || /^\\\\/.test(token) || /^~[\\/]/.test(token) || /^\//.test(token)
+  );
+}
+
+/// The text the run should be asked about for the candidate that starts at `at` and ends at `end`,
+/// or `null` when this candidate is not one to ask about at all.
+///
+/// One function rather than three conditions inside the loop, because this is the decision the Node
+/// harness holds. Both halves are needed for "this might carry on": the token has to *look* absolute
+/// ([`pathStarts`]), and there has to be a word after it -- a path at the end of a line is already
+/// whole, and asking the run to confirm it would be a request per path in the conversation.
+function askablePath(text, at, end) {
+  const token = String(text).slice(at, end);
+  if (!pathStarts(token)) return null;
+  if (!/\s\S/.test(String(text).slice(end, end + 64))) return null;
+  return askableText(text, at);
+}
+
+/// What the run is asked about: the rest of the line from the candidate, bounded.
+///
+/// Cut on a whole character: a lone surrogate at the end would make `encodeURIComponent` throw, and a
+/// throw while the transcript is being drawn would take the whole reading with it.
+function askableText(text, at) {
+  let rest = String(text).slice(at, at + 400);
+  if (/[\uD800-\uDBFF]$/.test(rest)) rest = rest.slice(0, -1);
+  return rest;
+}
+
+/// The path a candidate really was, according to the run, or `null` when there is nothing to say yet.
+///
+/// What the run found is a *length*: the page draws the button over exactly those characters, so the
+/// words after the name stay the words they are. It goes back through `asPath`, which is where a
+/// trailing `:N` becomes a line -- the button reads `notes file.txt:12` and the press asks for the
+/// file at line 12, exactly as every other path on this page does.
+function resolvedPath(asked, absoluteOnly) {
+  if (!pathEnds.has(asked)) {
+    askWhereThePathEnds(asked);
+    return null;
+  }
+  const answer = pathEnds.get(asked);
+  if (!answer || !(answer.used > 0)) return null;
+  const span = asked.slice(0, answer.used);
+  const found = asPath(span, absoluteOnly);
+  if (!found) return null;
+  // What the reader met, as everywhere else: the characters the path was written with, not the
+  // absolute spelling the run resolved them to.
+  found.written = span;
+  return found;
+}
+
+/// Ask the run, once per text, and redraw when the answer lands.
+///
+/// Nothing is asked without a run behind the page: a dropped file has no process to answer, and the
+/// answer would be the same "no" for every line.
+function askWhereThePathEnds(asked) {
+  if (pathEndsAsked.has(asked) || !canSend) return;
+  pathEndsAsked.add(asked);
+  if (drawing >= 0) {
+    if (!pathEndsCallers.has(asked)) pathEndsCallers.set(asked, new Set());
+    pathEndsCallers.get(asked).add(drawing);
+  }
+  fetch("/resolve?text=" + encodeURIComponent(asked), { headers: authHeader() })
+    .then(async (response) => {
+      // A refusal is an answer -- nothing in that text names a path -- and so is a body this page
+      // cannot read: the button it would have drawn is the one it already draws.
+      let said = null;
+      if (response.ok) {
+        try {
+          const json = JSON.parse(await response.text());
+          if (json && typeof json === "object") said = json;
+        } catch (e) {
+          said = null;
+        }
+      }
+      pathEnds.set(asked, said);
+      pathEndsSettled.add(asked);
+    })
+    .catch(() => {
+      pathEnds.set(asked, null);
+      pathEndsSettled.add(asked);
+    })
+    // One redraw for the batch: the answers to one paint's questions arrive together, and a redraw
+    // per answer would be a redraw per line of a conversation.
+    .then(repaintResolvedPaths);
+}
+
+/// Redraw the blocks whose paths the run has just answered about.
+///
+/// The revision `paint` remembers per block is what normally keeps a node, and clearing it is how
+/// this says "this one is not drawn right any more". Only the blocks that asked: the answer is about
+/// their own text, and replacing a node for a reason that is not its own closes whatever the reader
+/// had unfolded in it.
+function repaintResolvedPaths() {
+  if (!pathEndsSettled.size) return;
+  const settled = pathEndsSettled;
+  pathEndsSettled = new Set();
+  let any = false;
+  settled.forEach((asked) => {
+    const callers = pathEndsCallers.get(asked);
+    if (!callers) return;
+    callers.forEach((at) => {
+      if (painted[at]) {
+        painted[at].rev = null;
+        any = true;
+      }
+    });
+  });
+  if (any) paint(doc);
+}
+
 /// The pieces of a string that are an address -- a web address or a path -- and the text between.
 ///
-/// A pure splitter, so the rules this page has about addresses can be tested under Node without a
-/// DOM. It is deliberately dumb, and the whole of it is written down here rather than left to a
-/// regex nobody reads again:
+/// A splitter, so the rules this page has about addresses can be tested under Node without a DOM. It
+/// reads one thing outside its arguments -- [`pathEnds`], the run's answers about where a path that
+/// carries on past a space ends -- and asks for the answers it does not have ([`askWhereThePathEnds`]),
+/// which is why it is not called pure. It is deliberately dumb, and the whole of it is written down
+/// here rather than left to a regex nobody reads again:
 ///
 ///   * a candidate is a run of characters with no whitespace, quote, bracket, brace, angle
 ///     bracket, comma, semicolon or backtick in it -- so JSON arguments and English sentences
@@ -1432,9 +1582,13 @@ function clip(s, n) {
 /// fragment became a link to a file that does not exist and the rest was plain text, which is how
 /// one path reads as two things. A quote is also what flint itself puts around such a path when it
 /// prints one (`display::quote_if_spaced`), because the same ambiguity faces a person reading the
-/// terminal. A *bare* path with a space stays cut, and that residue is stated rather than hidden: no
-/// reader can tell `C:\Program Files\x` from a path and a word, and the first fragment is still a
-/// link to something that exists rather than to nothing.
+/// terminal.
+///
+/// A *bare* path with a space is the case no rule here can settle, so the run is asked instead
+/// ([`resolvedPath`]): for a token that looks absolute and has words after it, the answer says how
+/// many characters of the line the path really took, and the button is drawn over exactly those. The
+/// token keeps its own reading until the answer arrives -- and keeps it for good when there is no run
+/// to ask, which is the honest residue rather than a guess at where the name ended.
 function addressParts(text, absoluteOnly) {
   const parts = [];
   let last = 0;
@@ -1457,7 +1611,21 @@ function addressParts(text, absoluteOnly) {
     const quote = raw.length > 1 && /^["'`]/.test(raw) ? raw[0] : "";
     const token = quote ? raw.slice(1, -1) : raw;
     const named = match.groups && match.groups.row !== undefined;
-    const found = asUrl(token) || (named ? asRowPath(token) : asPath(token, absoluteOnly));
+    let found = asUrl(token) || (named ? asRowPath(token) : asPath(token, absoluteOnly));
+    let end = match.index + raw.length - (quote ? 1 : 0);
+    // A path cut in two by a space, which is the one thing this splitter cannot decide: `My Documents`
+    // is two words to it and one name on the disk. The run is asked, and its answer is the *length* it
+    // found -- so the button covers the name and the words after it stay words. Asked of a bare token
+    // that looks absolute and has something after it, whether or not the token was a path on its own:
+    // `C:\Users\me\My` names nothing, while the name it starts is a directory.
+    const asks = quote || named ? null : askablePath(text, match.index, end);
+    if (asks) {
+      const wider = resolvedPath(asks, absoluteOnly);
+      if (wider && wider.written.length > token.length) {
+        found = wider;
+        end = match.index + wider.written.length;
+      }
+    }
     if (!found) continue;
     // The opening quote stays text, and the closing one is left for the next piece: a link drawn
     // *inside* the quotes it was written with, rather than a link that ate them.
@@ -1465,7 +1633,7 @@ function addressParts(text, absoluteOnly) {
       parts.push({ text: text.slice(last, match.index + quote.length) });
     }
     parts.push(found);
-    last = match.index + raw.length - (quote ? 1 : 0);
+    last = end;
   }
   if (last < text.length) parts.push({ text: text.slice(last) });
   return parts;
@@ -2273,7 +2441,19 @@ function menuRows(doc, query) {
     const score = menuScore(command, query);
     if (score > 0) scored.push({ command, score, at });
   });
-  scored.sort((a, b) => (b.score - a.score) || (a.at - b.at));
+  // Score first, then the order the menu *draws* in, then the frame's. The score is the palette's
+  // promise -- the best match is the marked row -- and it is what a typed query is asking about.
+  // The other two matter when it cannot decide, and the bare `/` is the case that found this: every
+  // row ties at 1, so the tie-break used to be the *frame's* order while `showMenu` draws by class,
+  // and the mark landed on a row that was not the top one on screen. A reader sees the top row
+  // unmarked and `Enter` taking something else. Ties now follow the drawing, so the mark and the
+  // screen agree wherever the score is silent, and a query that names one row still wins outright
+  // even when that row is drawn in a later group.
+  const rank = (command) => {
+    const at = MENU_GROUPS.findIndex(([className]) => className === command.class);
+    return at < 0 ? MENU_GROUPS.length : at;
+  };
+  scored.sort((a, b) => (b.score - a.score) || (rank(a.command) - rank(b.command)) || (a.at - b.at));
   return scored.slice(0, MENU_ROWS_MAX).map((entry) => entry.command);
 }
 
@@ -3217,9 +3397,19 @@ function paint(doc) {
     ) {
       continue;
     }
+    // Which block is being drawn, for the one thing a render cannot say for itself: the run's answer
+    // about a path inside this block's text arrives later, and the block it belongs to is the one that
+    // has to be drawn again when it does.
+    drawing = i;
     const node = renderBlock(block, branch);
-    if (existing && existing.node.parentNode === root) root.replaceChild(node, existing.node);
-    else root.appendChild(node);
+    drawing = -1;
+    if (existing && existing.node.parentNode === root) {
+      // A node replaced for a reason that is not the block's own text -- an answer about a path in it
+      // -- keeps what the reader had unfolded. The revision comparison above is what normally
+      // preserves that, and this is the one path that goes around it.
+      if (node.open !== undefined && existing.node.open !== undefined) node.open = existing.node.open;
+      root.replaceChild(node, existing.node);
+    } else root.appendChild(node);
     painted[i] = { rev: block.rev, fork: branch ? branch.line : null, node };
   }
 
@@ -3614,14 +3804,31 @@ let preview = null;
 
 /// Open a path, or move the panel to another one. `line` of zero means the transcript named no
 /// line, which is the usual case.
+///
+/// A **directory** does not come here at all: pressing one opens it where it lives, which is what
+/// every other surface on a desktop does with a directory. Reported directly, 2026-09-23: *a press
+/// should open the directory with the machine's own way of opening one, rather than previewing the
+/// files in it* -- and the listing the panel can draw is still there for the run that may not start a
+/// program at all (see [`openDirectory`]).
 async function openPreview(path, line) {
+  if (dirPath(path)) {
+    await openDirectory(path);
+    return;
+  }
   preview = { path: path, line: line || 0, view: previewView(path, line) };
+  showPanel();
+  await readPreview();
+}
+
+/// Put the panel on screen for whatever `preview` holds, and take the hand with it.
+///
+/// The hand goes in the same two places as the panel, because a hand with nothing behind it would
+/// resize a column nobody can see, and its 5px would be a strip of the page that does nothing. Its
+/// reported width is read here rather than at boot, because at boot the panel is closed and an
+/// unopened column measures zero -- a reader would be told the panel it just opened is 0px wide.
+function showPanel() {
   const panel = document.getElementById("preview");
   if (panel) panel.hidden = false;
-  // The hand goes with the panel, and in the same two places: a hand with nothing behind it would
-  // resize a column nobody can see, and its 5px would be a strip of the page that does nothing. Its
-  // reported width is read here rather than at boot, because at boot the panel is closed and an
-  // unopened column measures zero -- a reader would be told the panel it just opened is 0px wide.
   const hand = document.getElementById("preview-grip");
   if (hand) {
     hand.hidden = false;
@@ -3630,7 +3837,6 @@ async function openPreview(path, line) {
     }
   }
   paintPreviewHead();
-  await readPreview();
 }
 
 /// Close it. The transcript, the scroll position and the reader's place are untouched: this panel
@@ -3712,38 +3918,85 @@ function openBody(path) {
   return JSON.stringify({ path: path });
 }
 
-/// Hand the panel's path to the program this machine uses for it.
+/// Ask `POST /open` to hand a path to this machine, and answer with what it said.
 ///
-/// The second press, and deliberately not the first: a path in the transcript is a button that
-/// reads the file into this panel, and this is the separate, named control beside it. The text the
-/// transcript carries is model-written, so a plain click on it must never be the thing that starts
-/// a process -- and the cases this is for are exactly the ones the panel cannot serve: a directory,
-/// a file past the preview cap, anything that is not text.
-///
-/// The route's answer is the whole of the feedback. It says what it opened with, or why it would
-/// not, in its own words, and the hint shows those rather than a status code.
-async function openOutside() {
-  if (!preview) return;
-  const body = openBody(preview.path);
+/// One place composes the request and reads the answer, because two presses now lead here: the named
+/// control in the panel's head, and a press on a directory. The route's words are the whole of the
+/// feedback, so they are what comes back -- with the status, because one refusal means something
+/// different from the others (see [`openDirectory`]) and it is the route, not this page, that decides
+/// which.
+async function askOpen(path) {
   let response;
   try {
-    response = await fetch("/open", { method: "POST", headers: authHeader(), body: body });
+    response = await fetch("/open", { method: "POST", headers: authHeader(), body: openBody(path) });
   } catch (e) {
-    setHint("cannot open it: " + describe(e), true);
-    return;
+    return { ok: false, status: 0, text: "cannot open it: " + describe(e), opened: "", with: "" };
   }
   const text = (await response.text()).trim();
-  if (!response.ok) {
-    setHint("not opened: " + text, true);
-    return;
-  }
   let said = {};
   try {
     said = JSON.parse(text);
   } catch (e) {
-    said = {};
+    said = {}; // a body this page cannot read is still an answer: what it opened is then the path
   }
-  setHint("opened " + (said.opened || preview.path) + " with " + (said.with || "the system"), false);
+  if (!response.ok) return { ok: false, status: response.status, text: text, opened: "", with: "" };
+  return {
+    ok: true,
+    status: response.status,
+    text: text,
+    opened: said && said.opened ? String(said.opened) : path,
+    with: said && said.with ? String(said.with) : "",
+  };
+}
+
+/// A directory, opened where it lives.
+///
+/// The press a directory gets is the one a desktop gives it: hand it to the program this machine uses
+/// for directories. That is the whole of the success path -- no panel, no listing -- because a person
+/// who pressed a directory asked to go there.
+///
+/// What is left is the refusal, and the listing has one use it keeps: a **readonly** run may not start
+/// a program at all (409, and the reason is the permission), and a directory it cannot open is still a
+/// directory it can read. That is the only case the panel lists anything, and the sentence comes first
+/// so a reader is told why. Any other refusal -- the directory is gone, the run cannot read it -- is a
+/// sentence like any other, and there is nothing to list.
+async function openDirectory(path) {
+  const said = await askOpen(path);
+  const panel = document.getElementById("preview");
+  const wasOpen = !!panel && !panel.hidden;
+  if (said.ok) {
+    const line = "opened " + said.opened + " with " + (said.with || "the system");
+    setHint(line, false);
+    // A panel already on screen was mid-press on this very path: it says what happened rather than
+    // sitting on "reading…" for a directory that went to the desktop instead.
+    if (wasOpen) {
+      preview = { path: path, line: 0, view: previewView(path, 0) };
+      paintPreviewHead();
+      paintPreviewLine(line);
+    }
+    return;
+  }
+  setHint("not opened: " + said.text, true);
+  preview = { path: path, line: 0, view: previewView(path, 0) };
+  showPanel();
+  if (said.status === 409) {
+    await readDir();
+    return;
+  }
+  paintPreviewRefusal(said.text, said.status);
+}
+
+/// Hand the panel's path to the program this machine uses for it.
+///
+/// The second press, and deliberately not the first: a path in the transcript is a button that reads
+/// the file into this panel, and this is the separate, named control beside it. The text the
+/// transcript carries is model-written, so a plain click on it must never be the thing that starts a
+/// process -- except for a directory, where *not* starting one is the surprise (see [`openDirectory`]).
+async function openOutside() {
+  if (!preview) return;
+  const said = await askOpen(preview.path);
+  if (said.ok) setHint("opened " + said.opened + " with " + (said.with || "the system"), false);
+  else setHint("not opened: " + said.text, true);
 }
 
 /// The route one path is read through, encoded.
@@ -3782,7 +4035,8 @@ function dirRoute(path) {
 /// run's own `list` prints a directory (`name/`) and how a person writes one when they mean a
 /// directory rather than a file, which is why it is the evidence used -- and it is only a guess about
 /// which route to ask *first*: `/file` answers a directory it was asked about with `X-Flint-Dir`, and
-/// the panel then reads it as the listing it is (`dirHeader`). Being wrong costs one request.
+/// the press then goes where a directory press goes (see [`openDirectory`]). Being wrong costs one
+/// request.
 function dirPath(path) {
   return /[\\/]$/.test(String(path == null ? "" : path).trim());
 }
@@ -3951,9 +4205,10 @@ async function readPreview() {
   // A name that ends in a separator is a directory, and that is the one path this page can route
   // without asking: everything else is asked for as a *file*, and the refusal that comes back says
   // whether it was really a directory (`dirHeader`). Tried before the picture, because a directory
-  // called `shots.png` is a directory.
+  // called `shots.png` is a directory -- and a directory is opened rather than read (see
+  // `openDirectory`), which is why this is the one press that leaves the panel.
   if (dirPath(preview.path)) {
-    await readDir();
+    await openDirectory(preview.path);
     return;
   }
   if (imageExt(preview.path) && (await readPicture())) return;
@@ -3995,10 +4250,11 @@ async function readText() {
   }
   const body = await response.text();
   if (!response.ok) {
-    // The refusal that is not an answer: `/file` was asked about a directory, and the panel reads
-    // those through its own route. The header is what says so -- see `dirHeader`.
+    // The refusal that is not an answer: `/file` was asked about a directory, and a directory is
+    // *opened* rather than read here. The header is what says so -- see `dirHeader` -- and the press
+    // carries on as the press it turns out to have been.
     if (dirHeader(response)) {
-      await readDir();
+      await openDirectory(preview.path);
       return;
     }
     paintPreviewRefusal(body, response.status);
@@ -4011,10 +4267,12 @@ async function readText() {
 
 /// The directory half of a press: ask `GET /dir` for what is in the path and draw it as rows.
 ///
-/// A refusal here is a sentence like any other -- the directory is gone, or the run cannot read it --
-/// and it is shown in the route's own words rather than turned into a status code, exactly as a
-/// `/file` refusal is. The JSON is allowed to be unreadable: this page drew buttons from a document it
-/// could not parse, which is a thing that should be said out loud rather than left as an empty panel.
+/// The fallback, not the press: a directory is normally *opened* where it lives (`openDirectory`), and
+/// this is what a run that may not start a program can still do with one. A refusal here is a sentence
+/// like any other -- the directory is gone, or the run cannot read it -- and it is shown in the route's
+/// own words rather than turned into a status code, exactly as a `/file` refusal is. The JSON is allowed
+/// to be unreadable: this page drew buttons from a document it could not parse, which is a thing that
+/// should be said out loud rather than left as an empty panel.
 async function readDir() {
   const text = document.getElementById("preview-text");
   if (!text || !preview) return;
@@ -4048,11 +4306,12 @@ async function readDir() {
 
 /// A listing, drawn as one pressable row per entry.
 ///
-/// The rows go where the file's lines go (`#preview-text`), because that is the panel's body and a
-/// directory is a *reading* of a path rather than a different panel -- and the raw/rendered switch
-/// goes away with it, for the same reason it goes away on a refusal: there is no Markdown reading of a
-/// directory. A row is a `button.path`, the control the transcript uses for a path, so pressing one is
-/// the gesture a reader already knows: a directory goes in, a file opens beside it.
+/// The rows go where the file's lines go (`#preview-text`), because that is the panel's body -- and the
+/// raw/rendered switch goes away with it, for the same reason it goes away on a refusal: there is no
+/// Markdown reading of a directory. A row is a `button.path`, the control the transcript uses for a
+/// path, so pressing one is the gesture a reader already knows: a directory is opened where it lives
+/// (that is what `openDirectory` does with it, and what a listing of a readonly run is *for*), and a
+/// file is read beside it.
 function paintDir(json) {
   const text = document.getElementById("preview-text");
   const note = document.getElementById("preview-note");
@@ -4079,13 +4338,12 @@ function paintDir(json) {
   if (note) note.textContent = listing.note;
 }
 
-/// A refusal, in the route's own words.
+/// One sentence in the panel, with the two reading controls taken away.
 ///
-/// The route says *why* -- nothing there, a directory, not text -- and that sentence is the whole
-/// answer, so it is shown as it is rather than turned into a status code. A refusal is not a Markdown
-/// file either, so the raw/rendered switch goes away with the reading it belonged to: offering to render
-/// something that was not read would be offering a view of nothing.
-function paintPreviewRefusal(body, status) {
+/// A sentence is not a file: there is no Markdown reading of "opened it with explorer" and none of a
+/// refusal, so offering to render one would be offering a view of nothing. The raw/rendered switch
+/// goes away with it for the same reason a listing takes it away.
+function paintPreviewLine(message) {
   const text = document.getElementById("preview-text");
   const note = document.getElementById("preview-note");
   const rendered = document.getElementById("preview-md");
@@ -4094,8 +4352,19 @@ function paintPreviewRefusal(body, status) {
   if (button) button.hidden = true;
   if (text) {
     text.hidden = false;
-    showPlain(text, String(body == null ? "" : body).trim());
+    showPlain(text, String(message == null ? "" : message));
   }
+  if (note) note.textContent = "";
+}
+
+/// A refusal, in the route's own words.
+///
+/// The route says *why* -- nothing there, a directory, not text -- and that sentence is the whole
+/// answer, so it is shown as it is rather than turned into a status code. The status is the one thing
+/// the sentence does not carry, and it is the note beside it rather than a word inside it.
+function paintPreviewRefusal(body, status) {
+  paintPreviewLine(String(body == null ? "" : body).trim());
+  const note = document.getElementById("preview-note");
   if (note) note.textContent = "HTTP " + status;
 }
 
@@ -5404,6 +5673,12 @@ if (typeof module !== "undefined" && module.exports) {
     drawSettings, settingRow, drawRows, drawCommandRow, paintSettings, screenOf, MENU_GROUPS,
     sessionRow, formLine,
     addressParts, asUrl, asPath, asRowPath, bytesLabel, previewNote, linkNodes, renderBlock, fileRoute,
+    // Where a path that carries on past a space ends: the run's answer, the cache of those answers,
+    // and the two halves the page decides on its own -- which tokens are worth asking about, and what
+    // text each question sends. Exported because all of it is a decision over strings, which is
+    // exactly what the Node harness can hold without a filesystem: it seeds an answer and reads the
+    // pieces the splitter drew.
+    pathEnds, pathStarts, askableText, askablePath, resolvedPath,
     // The directory half of the same question: which route a listing is read through, which names say
     // "a directory" before anything is asked, the header that says it afterwards, and the pure mapping
     // from the route's JSON to the rows the panel draws. All four are decisions the Node harness can
@@ -5427,6 +5702,11 @@ if (typeof module !== "undefined" && module.exports) {
     // browser, which is the only way the readonly case is checked without turning a live run's guard
     // on in the middle of a turn.
     openBody, readonlyOn,
+    // Opening a directory is exported for the same reason the readonly check is: the press it answers
+    // is now `POST /open` rather than a reading, and a check has to be able to make that press and
+    // read the route it asked -- which the Node harness can do with its recorded requests and no
+    // window on anybody's screen.
+    openDirectory,
     // Opening a path is exported for one reason: the overlays now overlap, and "which one does Escape
     // close" is only a question once two of them can be open at once. The panel's own drawing is
     // checked in a browser; here it is a way to have one open.

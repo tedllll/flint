@@ -1132,6 +1132,7 @@ pub fn respond(request: &Request, body: &str, state: &State) -> Answer {
         // than two tokens -- and it is the same listing the `list` tool prints, from the same
         // function: see `serve_dir` and §27 of `docs/web-mode.md`.
         ("GET", "/dir") => serve_dir(request, state),
+        ("GET", "/resolve") => serve_resolve(request, state),
         // The other half of the same question: a path the panel cannot draw as text. A picture is
         // not a file too big or too strange to preview, it is a file this page can show *only* if
         // it is handed the bytes with the type they really are -- see `serve_image`, and §21 of
@@ -1719,6 +1720,117 @@ fn serve_dir(request: &Request, state: &State) -> Response {
         },
     }
 }
+
+/// `GET /resolve?text=…`: where, in a line of text, does the path end?
+///
+/// The one question a *reader* of the transcript cannot answer and this process can. A bare path with
+/// a space in it is two tokens to any scanner -- `C:\Users\me\My Documents` is one name and two words,
+/// and no rule about the text can tell it from a path followed by a word -- so the page asks the run,
+/// which is the only thing here that has a filesystem. Reported directly, 2026-09-23, on that exact
+/// path: *a directory with a space in it is not recognised at all.*
+///
+/// The answer is the **longest prefix that exists**, and how many characters of the text it used. The
+/// page cuts the line there and draws the button, so what a person reads as the link is exactly what
+/// the run found -- and the words that were tried and rejected stay plain text.
+///
+/// A reading, like `/file`: it stats paths and serves nothing. It answers with `used` because the
+/// answer's use is a `slice` in a browser, and with `path` so a caller -- and a test -- can see what
+/// was actually found rather than only how long it was.
+///
+/// **The text begins at the path.** That is the whole contract, and it is the page's half of the
+/// question: `C:\work\x` in a sentence is found by the scanner as a candidate, and what it sends is
+/// the line *from that candidate's first character* on. A caller that handed over a whole sentence
+/// would be asking this route to find where the path *starts*, which is the part the scanner does.
+fn serve_resolve(request: &Request, state: &State) -> Response {
+    let Some(raw) = request.query("text") else {
+        return Response::text(400, "Bad Request", "which text? this route takes ?text=<some text>\n");
+    };
+    let Some(text) = percent_decode(raw) else {
+        return Response::text(400, "Bad Request", "that text is not percent-encoded properly\n");
+    };
+    if text.trim().is_empty() {
+        return Response::text(400, "Bad Request", "which text? ?text= was empty\n");
+    }
+    match path_in_text(&text, &state.cwd) {
+        Some((path, used)) => Response::json(
+            200,
+            "OK",
+            serde_json::json!({ "path": path, "used": used }).to_string(),
+        ),
+        None => Response::text(
+            404,
+            "Not Found",
+            format!(
+                "nothing in {} names a path this run can reach\n",
+                crate::util::truncate(&text, 120)
+            ),
+        ),
+    }
+}
+
+/// The longest prefix of `text` that names something on this machine, and how much of it that was.
+///
+/// Word by word, longest first, with trailing punctuation trimmed at each step, so `read
+/// <path>\My Notes.txt, and then` names the file rather than the comma -- and a sentence that begins
+/// after a path is not swallowed by it, which is the half a page cannot get right on its own: it can
+/// only guess where a name ends, and this can look.
+///
+/// Two fallbacks, both of them the rules `/file` already keeps: a trailing `:N`/`:N:C` is tried as a
+/// line number after the literal path has had its chance (a Windows drive letter or a name that
+/// really has a colon in it is never mistaken for one), and every candidate goes through
+/// [`resolve`], so a relative name is the run's own and `~/x` is the home directory.
+///
+/// `used` counts **UTF-16 code units**, because the reader is a JavaScript string: `slice(0, used)`
+/// is how the page cuts the line. That is asserted with a name in Chinese rather than assumed.
+fn path_in_text(text: &str, cwd: &std::path::Path) -> Option<(String, usize)> {
+    let units = |s: &str| -> usize { s.chars().map(char::len_utf16).sum() };
+    // Every place a word could end, longest first: the whole text, then just before each space.
+    let mut ends: Vec<usize> = Vec::new();
+    for (i, c) in text.char_indices() {
+        if c.is_whitespace() {
+            ends.push(i);
+        }
+    }
+    ends.push(text.len());
+    ends.reverse();
+
+    for end in ends {
+        let candidate = text[..end].trim_end_matches(TRAILING_PUNCTUATION);
+        if candidate.is_empty() {
+            continue;
+        }
+        let literal = resolve(candidate, cwd);
+        if std::fs::metadata(&literal).is_ok() {
+            return Some((literal.to_string_lossy().to_string(), units(candidate)));
+        }
+        if let Some((path, _line)) = split_line(&literal) {
+            if std::fs::metadata(&path).is_ok() {
+                // The line number stays *inside* what was used: the button on the page reads
+                // `notes file.txt:12`, because that is what the line says, and the press is what
+                // turns it into the path and the line.
+                return Some((path.to_string_lossy().to_string(), units(candidate)));
+            }
+        }
+    }
+    None
+}
+
+/// What is punctuation rather than part of a name when a candidate is tried.
+///
+/// The sentence's, not the name's: `read <path>, and then` has a comma after the file, and a name
+/// that really ends in one is a name this resolver will not find -- which is the honest trade, since
+/// the alternative is to hand `/file` a path that does not exist.
+///
+/// The four full-width marks (U+3002 the ideographic full stop, U+FF0C the full-width comma, U+3001 the
+/// enumeration comma, U+FF1A the full-width colon) are escapes rather than characters, and that is the
+/// mojibake guard's rule rather than a preference: a Rust source in this tree holds no CJK, so damage in
+/// one stays visible. They are here because a model writing Chinese between a path and the rest of its
+/// sentence uses them, and a resolver that only knew the ASCII punctuation would glue one onto the name
+/// it had found.
+const TRAILING_PUNCTUATION: &[char] = &[
+    '.', ',', ';', ':', '!', '?', ')', ']', '}', '"', '\'', '>', '\u{3002}', '\u{ff0c}', '\u{3001}',
+    '\u{ff1a}',
+];
 
 /// The biggest picture this page will draw.
 ///
@@ -3583,6 +3695,70 @@ mod tests {
         let unsaid = ask(&ours("/dir"), &working_in(&dir));
         assert_eq!(unsaid.status, 400, "{}", unsaid.body);
         assert!(unsaid.body.contains("path"), "{}", unsaid.body);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A bare path with a space in it is resolved **by the run**, because the run is the only reader
+    /// that can `stat`.
+    ///
+    /// Reported directly, 2026-09-23: *`C:\Users\zhangzhuo\My Documents` still cannot be recognised* --
+    /// a real directory on this machine, and two tokens to anything that reads a line as text. No rule
+    /// about the *text* can tell `C:\work\My Notes` from a path followed by a word; the process can,
+    /// by asking the filesystem, and this route is that question. Longest prefix first, word by word,
+    /// with trailing punctuation trimmed at each step -- so `read <path>, and then` names the file and
+    /// not the comma, and a sentence that happens to follow a path is not part of it.
+    ///
+    /// `used` counts **UTF-16 code units**, which is what a JavaScript string index is; the page cuts
+    /// the line at the path it found with `slice(0, used)`. A directory named in Chinese is what that
+    /// counting is for, and it is why this is asserted with one.
+    #[test]
+    fn the_run_says_where_a_path_in_a_line_ends() {
+        let dir = scratch("resolve");
+        std::fs::create_dir_all(dir.join("My Projects")).expect("scratch directory");
+        std::fs::create_dir_all(dir.join("\u{8d44}\u{6599} \u{5939}")).expect("scratch CJK directory");
+        written(&dir, "My Projects/inside.txt", "two\n");
+        written(&dir, "notes file.txt", "three\n");
+        let state = working_in(&dir);
+        let base = dir.display().to_string();
+        let units = |s: &str| -> usize { s.chars().map(char::len_utf16).sum() };
+
+        // The whole name, which is what a token reader cannot see: two words, one directory. The words
+        // after it belong to the sentence, and the answer says so by counting only what it used.
+        let spaced = format!("{base}\\My Projects is where it goes");
+        let found = ask(&ours(&format!("/resolve?text={}", encoded(&spaced))), &state);
+        assert_eq!(found.status, 200, "{}", found.body);
+        assert_eq!(found.content_type, "application/json; charset=utf-8");
+        let json: serde_json::Value = serde_json::from_str(&found.body).expect("JSON");
+        assert_eq!(json["path"], dir.join("My Projects").display().to_string(), "{}", found.body);
+        assert_eq!(json["used"], units(&format!("{base}\\My Projects")), "{}", found.body);
+
+        // A file with a space, followed by a comma: the punctuation is the sentence's, not the name's.
+        // The text handed over begins at the path -- the page sends the line *from there*, because a
+        // token reader is the thing that cannot see where the name starts either.
+        let sentence = format!("{base}\\notes file.txt, and then carry on");
+        let file = ask(&ours(&format!("/resolve?text={}", encoded(&sentence))), &state);
+        assert_eq!(file.status, 200, "{}", file.body);
+        let json: serde_json::Value = serde_json::from_str(&file.body).expect("JSON");
+        assert_eq!(json["path"], dir.join("notes file.txt").display().to_string(), "{}", file.body);
+        assert_eq!(json["used"], units(&format!("{base}\\notes file.txt")), "{}", file.body);
+
+        // Non-ASCII names are counted in UTF-16 units, because the reader is a JavaScript string.
+        let cjk = format!("{base}\\\u{8d44}\u{6599} \u{5939} and then");
+        let counted = ask(&ours(&format!("/resolve?text={}", encoded(&cjk))), &state);
+        assert_eq!(counted.status, 200, "{}", counted.body);
+        let json: serde_json::Value = serde_json::from_str(&counted.body).expect("JSON");
+        assert_eq!(json["path"], dir.join("\u{8d44}\u{6599} \u{5939}").display().to_string(), "{}", counted.body);
+        assert_eq!(json["used"], units(&format!("{base}\\\u{8d44}\u{6599} \u{5939}")), "{}", counted.body);
+
+        // Nothing in it names anything: a refusal, not an empty answer -- and not a 500.
+        let nothing = ask(&ours(&format!("/resolve?text={}", encoded("and then some words"))), &state);
+        assert_eq!(nothing.status, 404, "{}", nothing.body);
+        assert!(nothing.body.contains("names a path"), "{}", nothing.body);
+
+        let unsaid = ask(&ours("/resolve"), &state);
+        assert_eq!(unsaid.status, 400, "{}", unsaid.body);
+        assert!(unsaid.body.contains("text"), "{}", unsaid.body);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

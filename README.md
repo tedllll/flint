@@ -823,26 +823,40 @@ path is the path of the process that wrote it, so `src/web.rs` means the run's `
 nothing else; §12 of `docs/web-mode.md` has the rule for what in a line counts as a path and the
 measured record from a real browser.
 
-**A directory opens as a listing rather than as a refusal.** Pressing one used to fill the panel with
-"is a directory, not a file", which is true and gives you nowhere to go. Now the panel draws what is in
-it: `..` to go up, then one row per entry — the directories in full ink, the files dim — and pressing a
-row reads it, so a file opens beside the turn and a directory goes in. The paths come from the run
-(`GET /dir`), not from the page reading the transcript as text, which is what makes a name with a space
-in it work at all: `My Projects/` is one name to a listing and two words to a line, so a directory whose
-name has a space in it was never even a button before. A `list` result's own rows are buttons too, for
-the same reason. §27 of `docs/web-mode.md`.
+**A directory is opened, not previewed.** Pressing a directory used to fill the panel with "is a
+directory, not a file", which is true and gives you nowhere to go; it then drew the directory's contents,
+which was the wrong answer to the gesture — pressing a folder on any desktop means *go there*. So a press
+on one now opens it with your machine's own file manager, the same `POST /open` the panel's `open`
+control uses, and no panel is drawn at all. A run that may not start a program (`readonly`) is the one
+case that still reads: the route refuses with `409`, the hint says so, and the panel draws the listing —
+`..` to go up, then one row per entry, the directories in full ink and the files dim, every row pressable.
+Those paths come from the run (`GET /dir`), never from the page reading the transcript as text, which is
+what makes a name with a space in it work at all: `My Projects/` is one name to a listing and two words to
+a line. A `list` result's own rows are buttons too, for the same reason. §27 and §28 of `docs/web-mode.md`.
+
+**And a bare path with a space in it is settled by the run rather than guessed at.** `C:\Users\you\My
+Documents` is one name to you and two tokens to any reader of text, and no rule about the *text* can tell
+it from a path followed by a word — the page used to cut it and draw a button to a name that exists
+nowhere. The run has a filesystem and the page does not, so the page asks: `GET /resolve` answers with the
+longest prefix of the line that exists and how long it was, and the button is drawn over exactly that.
+The words after the name stay the words they are, a `:12` inside the name still opens at the line, and the
+question is only asked about a shape prose does not make — an absolute path, a `~`, a rooted one — and
+only when a word follows it. Asked once per line, cached, and nothing is asked at all when the page has no
+run behind it (an exported page, a file dropped into the browser): there the token keeps its own reading,
+which is the honest failure rather than a silent guess. §28 of `docs/web-mode.md`.
 
 **And the panel can hand a path to your machine.** Some of what a transcript names is not text this
-page can show: a PDF, a log past the preview cap, an image, and a directory — which the panel also
-*reads* now, so `open` is for going there in another program. The panel's head has one more
-control for that — `open` — and it hands the path to whatever *your* computer uses for it: `explorer`,
-`open`, or `xdg-open`, so a directory opens in the file manager and a file in the program its type is
-registered to. It is a second, deliberate press rather than the path itself, because the text in a
-transcript is model-written and a plain click on it must not be what starts a process. It is refused
-outright in a `readonly` run — that guard means the model may not start a program, and a button that
-started one on a person's click would be the same program running anyway — and the page does not offer
-it there, reading that from the run's own state rather than deciding for itself. `POST /open`, with the
-command lines asserted per platform and never actually launched by a test: §16 of `docs/web-mode.md`.
+page can show: a PDF, a log past the preview cap, an image, and a directory — which a press opens
+directly now, so this control is for the same thing from *inside* the panel. The panel's head has one
+more control for that — `open` — and it hands the path to whatever *your* computer uses for it:
+`explorer`, `open`, or `xdg-open`, so a directory opens in the file manager and a file in the program its
+type is registered to. From a transcript it is a second, deliberate press rather than the path itself,
+because the text there is model-written; a press on a directory is that press, since a directory cannot
+be previewed at all. It is refused outright in a `readonly` run — that guard means the model may not
+start a program, and a button that started one on a person's click would be the same program running
+anyway — and the page does not offer it there, reading that from the run's own state rather than
+deciding for itself. `POST /open`, with the command lines asserted per platform and never actually
+launched by a test: §16 of `docs/web-mode.md`.
 
 **A web address in the transcript is a link.** An `http` or `https` address in the run's own words —
 the answer that cites a page, a fetch result, a URL in a tool's output — opens in a new tab, with the

@@ -1822,7 +1822,91 @@ the block is drawn — then open the `commands` panel and read it against `/help
 
 ## What was just done
 
+### A directory is opened, not previewed — and the run says where a path ends — 2026-09-23
+
+**Reported directly, one sentence with two halves: *`C:\Users\zhangzhuo\My Documents` 这个依然识别不了，
+另外行为不对，点击以后应该是直接用电脑本身的方式打开这个目录，而不是预览他的文件目录* — that path still
+cannot be recognised, and the behaviour is wrong: pressing it should open the directory the way the machine
+opens one, rather than previewing the files in it.** The entry below this one made a directory *readable*,
+which fixed the refusal and was the wrong answer to the gesture. §28 of `docs/web-mode.md` is the record;
+`docs/decisions.md` carries both decisions.
+
+**Pressing a directory now opens it where it lives.** `openPreview` — the one door every press on a path
+goes through, the transcript's buttons and the listing's rows alike — starts with `if (dirPath(path))` and
+calls `POST /open`, the same route the panel's own `open` control uses, with the same body and refusals. A
+path whose *name* ends in a separator is decided there without asking anything; anything else goes to
+`/file` first as before, and `X-Flint-Dir: 1` on that refusal is what turns the press into an open. A
+successful open draws **no panel at all** — the hint says `opened <path> with explorer` and the desktop has
+the window — and a refused one says why in the route's own words on the same hint line. The one refusal
+that is not a failure is `409 readonly`: the panel shows the sentence and *then* `GET /dir`'s listing,
+which is why the listing route, its test and its drawing all survived the change. The press is the reader's
+either way; what changed is that the page no longer decides a directory is a document.
+
+**The run resolves a path the page cannot see the end of.** `GET /resolve?text=…` takes the line *from the
+first character of the candidate* and answers `{"path","used"}`: the longest prefix that exists, and its
+length in **UTF-16 code units**, because the caller's only use for it is a JavaScript `slice`. The page
+asks at *paint* time rather than at press time — the button's own label has to read the whole name — caches
+every answer per text (`undefined` not asked, `null` asked and nothing there), asks each text once, and
+redraws only the blocks whose text asked (`pathEndsCallers`), for the reason `paint`'s per-block revision
+exists at all: a node replaced for a reason that is not its own closes an unfolded `details` and drops a
+selection. It is asked only about a shape prose does not make — a drive letter, a UNC share, `~`, a rooted
+name — and only when a word follows, because `src/My Dir` in a sentence is two words far more often than a
+directory, and a request per plausible-looking line is a request per line. With no run behind the page (an
+export, a dropped session) nothing is asked and the first fragment stays the button: §18's honest failure,
+stated rather than hidden.
+
+**Two more faults came out of measuring it, and only one of them was in the page.** The browser harness
+came back red twice on the two claims about the bare `/` in the menu, and the first fault was real: the
+menu's rows were sorted by score and then by the **frame's** order while `showMenu` *draws* by class, so
+with a bare `/` — where every row ties — the marked row was not the top row on screen. It is fixed by
+ranking the drawn order as the tie-break after the score (a query that names a row still wins outright),
+held by a Node claim over a deliberately interleaved frame and by an assertion in `tests/web_view.rs`,
+both watched red against the old comparator. The second fault was the harness's own:
+`Input.dispatchMouseEvent` leaves the pointer where the last press put it, and a row under the pointer is
+marked on `mouseenter` — the claim before the menu presses a path button in the transcript's last turn, one
+press away from where the menu appears, so the menu opened under the pointer and hover marked a row
+nobody's keyboard had chosen. Two rounds of looking at the page went by before the mouse was suspected;
+`typedMenu` now parks the pointer in the corner before typing, and the claim prints `first` as well as
+`marked`. **The browser failure was the pointer; the tie-break is a real defect found on the way and is
+held by the two unit-level claims, not by the browser.** Both are written down in §23 of
+`docs/web-mode.md`, which is where the next reader of a red menu claim should start.
+
+**What is held where.** `src/web.rs` gained `the_run_says_where_a_path_in_a_line_ends` (watched red as `404
+no such route`): a spaced directory found from the line that begins at it, the comma after a file trimmed,
+a directory named in CJK counted in UTF-16 units, a line that names nothing answered `404` in a sentence,
+and no `?text=` answered `400`. `tests/web_view.rs` gained
+`a_path_cut_by_a_space_is_resolved_by_the_run_rather_than_guessed_at` (the ask is bounded, one request per
+text, the answer replaces the token only when it is longer, the redraw touches only the blocks that asked),
+extended `a_path_opens_outside_the_page_only_through_the_route` with the directory half (one press, one
+request, and it is `/open` with the path as written — **no** `/dir`, and only a `409` falls back to a
+listing), and extended the menu test with the tie-break. `scripts/web-view-test.js` gained two claims (the
+press and the resolution) and corrected one. `scripts/browser-controls-test.js` replaced its seven
+directory-in-the-panel claims with four for the new rule, made against a **directory that is gone**
+(`nothere\`) so the routing is proved with no window on anybody's screen, plus the seven claims for the
+bare spaced path and the menu corrections: **118/118** (red first at 115/118, then 116, then 117 — the
+claims that were failing named themselves each time).
+
+**The mojibake guard caught this round's own test, and that is worth recording.** The resolver's trailing
+punctuation holds four full-width marks, and the CJK directory the UTF-16 count is measured against was
+written as a literal; both are non-ASCII in `src/web.rs`, and `the_source_tree_contains_no_mojibake` refuses
+CJK in a file nobody declared to hold it — printing the very characters. `src/web.rs` is a file where
+damage would be invisible, so the fix is the guard's own prescription rather than an entry in `CJK_FILES`:
+the marks and the name are `\u{…}` escapes. The guard then caught the *comment* explaining that, which had
+one of the marks quoted in it.
+
+**The gate**: `cargo test` **687 passing, 1 ignored** (the pty test, Unix only) across its 14 suites,
+`cargo clippy --all-targets -- -D warnings` silent, `term-layout-test.js`, `web-view-test.js` and both
+`examples/` doors green, the browser harness by hand at **118/118**. `docs/features.md`'s route table gained
+`GET /resolve`, and its rows for `/file`, `/dir` and `POST /open` say what a press on a directory does now;
+§12.3 gained the resolution and the press, `README.md` gained the two paragraphs a person reads,
+`AGENTS.md`'s `src/web.rs` row names both routes, and §27's press half is marked as what it was: true while
+a directory had no way to be opened from a press.
+
 ### A directory read as a listing, and a name with a space in it — 2026-09-23
+
+*(The press half of this entry is superseded by the one above: a directory is opened where it lives now,
+and the listing it describes is what a `readonly` run is answered with. The reading, the route and the
+`list`-output rule below all stand.)*
 
 **Reported directly, in the middle of using the build: *现在目录还是跳转不了，然后带空格的目录依然无法正常识别*
 — pressing a directory still does not go anywhere, and a directory with a space in its name is still not

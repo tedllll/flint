@@ -545,10 +545,11 @@ async function main() {
     toolCall("read", { path: "gone.txt" }),
     toolCall("grep", { pattern: "two", path: "." }),
     // The directory, listed. Its argument is patched below to the run's own absolute working
-    // directory, for the same reason the prose's paths are: the panel's door is a path in a tool
-    // block, and the claim is about pressing a real directory rather than a made-up one. The `list`
-    // output is where a *name with a space* appears -- `sub dir/`, a directory this harness makes --
-    // which is the half of the report that a scanner could never fix on its own.
+    // directory, for the same reason the prose's paths are: the listing's door is a path in a tool
+    // block, and the claim is about the run's own listing of a real directory rather than a made-up
+    // one. The `list` output is where a *name with a space* appears as the run prints it -- `sub dir/`,
+    // a directory this harness makes -- which is the one spelling of that name a reader of the text can
+    // already see whole.
     toolCall("list", { path: "." }),
     toolCall("bash", { command: slow, background: true }),
     toolCall("bash", { command: endless, background: true }),
@@ -578,8 +579,9 @@ async function main() {
   // A directory whose name has a space in it, and a file inside it. Reported by the person using this
   // build: *a directory with a space in its name is still not recognised*. Nothing about that name is
   // special to a filesystem -- it is two tokens to anything reading the transcript as text, and one
-  // name to the run -- so the fixture has to be real: the claim is that the listing hands the panel a
-  // path, and that pressing it reads the directory it names.
+  // name to the run -- so the fixture has to be real: the claims below are that a *bare* path with that
+  // space in it becomes one button reading the whole name, and that the run's own listing carries the
+  // name it built.
   fs.mkdirSync(path.join(where.cwd, "sub dir"), { recursive: true });
   fs.writeFileSync(path.join(where.cwd, "sub dir", "inside.txt"), "deep\n");
   // A Markdown file for the rendered view, written here for the same reason the PNG is: its bytes are the
@@ -614,6 +616,12 @@ async function main() {
       `${path.join(where.cwd, "cell.png")} for the picture, ` +
       `${path.join(where.cwd, "not-a-picture.png")} for the one that only looks like one, ` +
       `${path.join(where.cwd, "notes.md")} for the notes, ` +
+      // Two paths for the directory claims below, both of them *bare* -- no quotes anywhere in this
+      // prose -- because that is the shape the report was about: a name with a space in it, and a
+      // directory that is not there. The first is one name and two tokens to any reader of the text,
+      // which is exactly why the page asks the run where it ends.
+      `${path.join(where.cwd, "sub dir")} for the directory with a space in its name, ` +
+      `${path.join(where.cwd, "nothere")}\\ for a directory that is gone, ` +
       "and javascript:alert(1) for the scheme that is not the web"
   );
   script[script.length - 1] = addresses;
@@ -2269,30 +2277,28 @@ async function main() {
     );
     await page.js(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); true`);
 
-    // ---- a directory, read in the panel ------------------------------------
-    // Reported by the person using this build, 2026-09-23: *pressing a directory does not go
-    // anywhere, and a directory with a space in its name is not recognised at all.* Both halves are
-    // here and neither can be faked: the directory is the run's own working directory as its `list`
-    // call named it, the directory with a space in it is one this harness made inside that one (`sub
-    // dir`, an entry of the run's *own* listing), and the panel has to have been handed those paths by
-    // the process rather than have re-read the text.
+    // ---- a directory, opened where it lives --------------------------------
+    // Reported by the person using this build, 2026-09-23, both halves in one sentence: *`C:\Users\
+    // zhangzhuo\My Documents` still cannot be recognised*, and *a press should open the directory with
+    // the machine's own way of opening one, rather than previewing the files in it.*
     //
-    // A real browser and a real listener are the point. The stub in `scripts/web-view-test.js` holds
-    // the scanner's rule and the panel's drawing; what it cannot hold is that the route answers, that
-    // the entry list is what is on this disk, or that a name with a space survives the whole way from
-    // the filesystem to a button.
+    // The *name* is held here end to end, because nothing smaller can hold it: the model's own prose
+    // names a real directory whose name has a space in it, the page asks the run where that path ends
+    // (`GET /resolve`), and the button that appears reads the whole name. A page that guessed -- which
+    // is the page a person was looking at -- drew `...\sub`, a path that is not there.
     //
-    // Every claim here is *behavioural* -- press a row, read what the panel then holds -- rather than a
-    // comparison against a path this file computed. That is deliberate: a path in a tool call's
+    // The *press* is held against a directory that is gone, for the reason the panel's own open control
+    // already is, above: a real one would put a file manager on the screen of whoever ran this. What is
+    // checked is where the press goes and what it does *not* do -- `POST /open`, the route's own
+    // sentence on the hint line, and no listing drawn, which a page that read the directory into the
+    // panel could not have produced. That the run would open a real directory is `open_plan` in
+    // `src/web.rs`, and which route a press sends is recorded in `scripts/web-view-test.js`; no test on
+    // this machine launches anything.
+    //
+    // Every claim here is *behavioural* -- press a button, read what the page then holds -- rather than
+    // a comparison against a path this file computed. That is deliberate: a path in a tool call's
     // arguments is shown as the JSON that carried it, so on Windows its separators read doubled, and a
-    // harness deriving the expected spelling would be testing its own arithmetic. The run resolves what
-    // the panel asked for, which is the claim.
-    const cwdAsShown = JSON.stringify(where.cwd).slice(1, -1);
-    const panelRows = () =>
-      page.js(`Array.from(document.querySelectorAll("#preview-text .path")).map((row) => ({
-        label: row.textContent, kind: row.className, path: row.title }))`);
-    const panelSays = (text) =>
-      page.js(`document.getElementById("preview-text").textContent.includes(${JSON.stringify(text)})`);
+    // harness deriving the expected spelling would be testing its own arithmetic.
     const pressIn = async (scope, text, id) => {
       const tagged = await page.js(
         `(() => { const row = Array.from(document.querySelectorAll(${JSON.stringify(scope)}))
@@ -2303,112 +2309,75 @@ async function main() {
       return tagged === true;
     };
 
-    // The transcript half first: the `list` call's own argument, which is an absolute path and was
-    // already a button -- what changed is that pressing it now reads the directory instead of
-    // answering "is a directory, not a file".
-    const cwdPressed = await pressIn("#doc button.path", cwdAsShown, "harness-cwd");
-    const listedTheDir = cwdPressed ? await page.waitFor(
-      `document.querySelectorAll("#preview-text .path").length > 2`,
-      "the run's own directory listed in the panel",
-      30
-    ).then(() => true, () => null) : null;
-    const dirListing = listedTheDir ? await panelRows() : [];
-    check(
-      "a directory the transcript named is read in the panel rather than refused",
-      listedTheDir === true &&
-        dirListing.some((row) => row.label === "sub dir/" && row.kind.includes("dir")),
-      `pressed: ${cwdPressed}, rows: ${JSON.stringify(dirListing.slice(0, 8))}`
+    // The prose's bare path, with its space: the button must read the whole name the *run* found, and
+    // the words after it must still be the sentence they were.
+    const spacedName = path.join(where.cwd, "sub dir");
+    const spacedDrawn = await page
+      .waitFor(
+        `Array.from(document.querySelectorAll("#doc button.path"))
+           .some((b) => b.textContent === ${JSON.stringify(spacedName)}) ? true : null`,
+        "the spaced path, resolved by the run and drawn as one button",
+        30
+      )
+      .catch(() => null);
+    const drawn = await page.js(
+      `Array.from(document.querySelectorAll("#doc button.path")).map((b) => b.textContent)`
     );
     check(
-      "and the way up is the first row of it, marked as a direction rather than an entry",
-      dirListing.length > 2 && dirListing[0].label === ".." && dirListing[0].kind.includes("up"),
-      `rows: ${JSON.stringify(dirListing.slice(0, 4))}`
+      "a bare path with a space in it is one button, reading the whole name the run found",
+      spacedDrawn === true && !drawn.includes(path.join(where.cwd, "sub")),
+      `drawn: ${JSON.stringify(drawn.filter((label) => /sub|nothere/.test(label)))}, resolved: ${spacedDrawn}`
     );
-
-    // The way up, and back down again: the listing above the run's working directory is its parent,
-    // and the row for the directory it came from is an entry of *that* listing. Both presses are
-    // behavioural -- what the panel holds afterwards -- because the paths here are the run's own.
-    const pressedUp = await pressIn("#preview-text .path", "..", "harness-up");
-    const upThere = pressedUp ? await panelSays("work/") : null;
+    const sentence = await page.js(`document.getElementById("doc").textContent`);
     check(
-      "the way up in a listing goes to the directory above it",
-      upThere === true,
-      `pressed: ${pressedUp}, panel: ${JSON.stringify(
-        (await page.js(`document.getElementById("preview-text").textContent`)).slice(0, 120)
-      )}`
-    );
-    const cameBack = upThere ? await pressIn("#preview-text .path", "work/", "harness-work") : false;
-    check(
-      "and a directory row in *that* listing is a way back down",
-      cameBack === true && (await panelSays("sub dir/")) === true,
-      `pressed: ${cameBack}, panel: ${JSON.stringify(
-        (await page.js(`document.getElementById("preview-text").textContent`)).slice(0, 120)
-      )}`
+      "and the words after the name are still the sentence they were",
+      typeof sentence === "string" && sentence.includes("for the directory with a space in its name"),
+      `transcript: ${JSON.stringify(String(sentence).slice(-200))}`
     );
 
-    // The other half of the report: a name with a space. This press is the panel's own listing -- a
-    // path the run built -- and the row it goes into is the one that proves the name arrived whole: a
-    // page that had split `sub dir` would have asked for a directory called `sub`.
-    const wentIn = await pressIn("#preview-text .path", "sub dir/", "harness-subdir");
-    const insideListed = wentIn
-      ? await page.waitFor(
-          `document.getElementById("preview-text").textContent.includes("inside.txt")`,
-          "the directory with a space in its name, listed",
-          30
-        ).then(() => true, () => null)
+    // The run's own listing, where the *process* is what says where the name ends: it prints one entry
+    // per line (`sub dir/`), so a name with a space in it is already one name there -- the other half of
+    // the same report, and the half no scanner can get wrong. The press is not made -- it would open a
+    // real directory -- so this is about the row, not about what it does.
+    const listedName = await page.js(
+      `Array.from(document.querySelectorAll("#doc details.tool button.path"))
+         .filter((b) => b.textContent === "sub dir").length`
+    );
+    check(
+      "the run's own listing draws that name as one row, the way the process printed it",
+      listedName >= 1,
+      `rows in tool blocks reading "sub dir": ${listedName}`
+    );
+
+    // The press, on a directory that is gone: `/open` is asked, its refusal is what the page says, and
+    // nothing is listed -- the listing is not where a directory press goes any more.
+    const gone = path.join(where.cwd, "nothere") + "\\";
+    const pressedGone = await pressIn("#doc button.path", gone, "harness-gone-dir");
+    const goneSaid = pressedGone
+      ? await page
+          .waitFor(
+            `/not opened:/.test(document.getElementById("hint").textContent || "")
+               ? document.getElementById("hint").textContent
+               : null`,
+            "the open route's refusal in the hint",
+            30
+          )
+          .catch(() => null)
       : null;
+    const listingRows = await page.js(`document.querySelectorAll("#preview-text .path").length`);
     check(
-      "pressing a directory whose name has a space in it goes into it",
-      insideListed === true,
-      `pressed: ${wentIn}, panel now: ${JSON.stringify(
-        (await page.js(`document.getElementById("preview-text").textContent`)).slice(0, 160)
-      )}`
+      "a press on a directory asks the run to open it, in the route's own words",
+      pressedGone === true &&
+        typeof goneSaid === "string" &&
+        goneSaid.includes("not opened:") &&
+        goneSaid.includes("nothing at") &&
+        goneSaid.includes("nothere"),
+      `pressed: ${pressedGone}, hint: ${JSON.stringify(goneSaid)}`
     );
-    // ...and the head shows the whole name, which is the half a person checks: a page that had split
-    // it would show `dir` under `.../sub ` and look almost right.
-    const headText = (await page.js(`document.getElementById("preview-path").textContent`)) || "";
     check(
-      "and the head shows the whole path, space and all",
-      headText.endsWith("work\\sub dir") || headText.endsWith("work/sub dir"),
-      `head: ${JSON.stringify(headText)}`
-    );
-    // The file *inside* the directory with a space: pressing it reads its bytes, which is the proof
-    // that the paths the run handed over are paths the run can resolve again -- a listing that drew
-    // right and answered "nothing at …" would pass every check above this one.
-    const openedFile = await pressIn("#preview-text .path", "inside.txt  (5 bytes)", "harness-inside-file");
-    const readInside = openedFile
-      ? await page.waitFor(`${bodyOf}.includes("deep") ? true : null`, "the file inside it", 30)
-          .then(() => true, () => null)
-      : null;
-    check(
-      "a file reached through a listing is read, so the row's path is the run's own",
-      readInside === true,
-      `pressed: ${openedFile}, body: ${JSON.stringify((await page.js(bodyOf)).slice(0, 80))}`
-    );
-    // The transcript's copy of the same name: the `list` output is text, `sub dir/` is two tokens in
-    // it, and the page reads the row as one name. The button says `sub dir` -- the trailing `/` is the
-    // run's mark and stays in the text around the button -- and pressing it asks the run for the
-    // directory the listing named, which the run resolves against its own working directory.
-    //
-    // The block is opened first: a tool result lives inside the `details` a reader unfolds, and a
-    // button inside a folded one has no box to press. Opening it is the gesture a person makes, and it
-    // is also what proves the row is in the *output* rather than in the arguments.
-    const unfolded = await page.js(
-      `(() => { const block = Array.from(document.querySelectorAll("#doc details.tool"))
-            .find((d) => /\\blist\\b/.test(d.querySelector("summary").textContent)
-                      && d.querySelector("summary").textContent.includes(${JSON.stringify(cwdAsShown)}));
-          if (!block) return false; block.open = true; return true; })()`
-    );
-    const fromText = unfolded
-      ? await pressIn("#doc details.tool button.path", "sub dir", "harness-subdir-text")
-      : false;
-    const textOpen = fromText ? await panelSays("inside.txt") : null;
-    check(
-      "a directory with a space in it is pressable in the run's own listing too",
-      textOpen === true,
-      `unfolded: ${unfolded}, pressed: ${fromText}, panel: ${JSON.stringify(
-        (await page.js(`document.getElementById("preview-text").textContent`)).slice(0, 120)
-      )}`
+      "and the panel lists nothing: a directory press is not a reading",
+      listingRows === 0,
+      `listing rows in the panel: ${listingRows}`
     );
     // ---- the `/` menu in the composer --------------------------------------
     // The one surface that needs a real browser *and* a real run: a menu drawn from the frame the
@@ -2427,6 +2396,13 @@ async function main() {
                  settings: !document.getElementById("settings").hidden }; })()`);
 
     const typedMenu = async (text) => {
+      // The pointer is parked in the corner first, and that is not tidiness: a row under the pointer is
+      // marked on `mouseenter`, so a menu that opens *where the last press left the mouse* can be marked
+      // on a row nobody's keyboard chose. The claims below are about the keyboard, and the transcript's
+      // last row is one press away from where the menu appears. Measured: without this, the bare `/`
+      // came back marked on the fifth row while the first row on screen was unmarked, and the press
+      // before it was a path button in the last turn.
+      await page.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 2, y: 2 });
       await page.js(`document.getElementById("message").focus(); true`);
       await page.send("Input.insertText", { text });
       await sleep(150);
@@ -2450,7 +2426,7 @@ async function main() {
     check(
       "the keyboard starts on the first row",
       bare.marked.length === 1 && bare.marked[0] === bare.first,
-      `marked: ${JSON.stringify(bare.marked)}`
+      `marked: ${JSON.stringify(bare.marked)} first: ${JSON.stringify(bare.first)} of ${bare.count}`
     );
 
     // Typing after the slash filters, and a space closes it: the line is being written, and a menu
