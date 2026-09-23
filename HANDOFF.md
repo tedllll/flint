@@ -38,13 +38,15 @@ preview's line numbers, then the settings screens and the `toggles` field's remo
 fourth time the same day after the round above it (DSH's settings shape, the sidebar seat, the panel's
 hand), and re-measured a fifth time the same day, after the branch-cut round at the top of that section
 (`cargo test` run in full, and the browser harness by hand), and re-measured a sixth time on
-**2026-09-23**, after the directory-listing round at the top of that same section: `cargo test`
-**686 passing, 1 ignored** across the 14 suites (lib **383** — 382 of it before this round, so this round
-added one `/dir` route test and one header assertion inside a test already there — bin 8, `agent_loop` 34,
-`balance` 7, `cli_output` 115, `json_output` 41, `say` 6,
+**2026-09-23**, after the directory-listing round at the top of that same section, and re-measured a
+seventh time the same day, after the two rebuild-carry rounds above it (the funnel, then the three other
+doors — one unit test in the binary and three `cli_output` tests, whose only observable is a request
+body): `cargo test`
+**691 passing, 1 ignored** across the 14 suites (lib **384**, bin **9**, `agent_loop` 34,
+`balance` 7, `cli_output` **118**, `json_output` 41, `say` 6,
 `search_tool` 4, `task` 17, `term_capture` 20 + 1 ignored, `tty_hangup` **0 on Windows** and 3 on Unix
 — the suite is `#![cfg(unix)]`, and the library carries a few `#[cfg(unix)]` tests of its own, so the
-ubuntu job's total is larger and is *not* quoted here as if it were this number — `web_view` 40,
+ubuntu job's total is larger and is *not* quoted here as if it were this number — `web_view` 41,
 `who` 10, and the doc-tests 0);
 `cargo clippy --all-targets -- -D warnings` silent; the two headless Node harnesses green
 (`term-layout-test.js`, `web-view-test.js`) **and run by CI**; **both `examples/` doors green, as one
@@ -1821,6 +1823,45 @@ picker, type `/config` into the composer, and see whether the answer lands in th
 the block is drawn — then open the `commands` panel and read it against `/help` in the terminal.
 
 ## What was just done
+
+### The other three doors carry it too — 2026-09-23
+
+**The round below fixed one funnel and left the other rebuilds alone, and three of them had the same
+fault.** A `/resume` into a conversation whose file recorded `high` and a schema kept the level and the
+shape of the conversation it was *leaving*; `/import` did the same with the file it copied in; and
+`/fork`, whose branch file has neither line in it yet, dropped both. Each is the same measurement as the
+report below — a settings screen that disagrees with the run, or a caller promised JSON sent prose —
+through a door the funnel does not cover.
+
+**The rule is one rule with two sources, and it now has two functions rather than four pairs of lines.**
+`carry_the_runs_decisions` hands a rebuilt agent what the *run* is at: the funnel, and `/fork`, which is
+this conversation cut short. `hold_to_what_the_file_says` applies what the startup path already applies
+through `resolve_thinking` and `resolve_output_schema`: the conversation moved to has the last word,
+because the level and the shape travel with the file. `/new` still drops the shape and takes the config's
+level, which is what a conversation that has decided nothing means.
+
+**Held by three tests in `tests/cli_output.rs`, each watched red on its own.**
+`a_resumed_conversation_brings_its_own_level_and_shape`,
+`an_imported_conversation_brings_its_own_level_and_shape`, and
+`a_forked_branch_is_held_at_what_the_run_is_at` all read the **request body** — `response_format` for the
+shape, and the level in the endpoint's own `thinking_field` — from one stub home whose provider declares
+`reasoning_effort`, because with no field set flint sends no reasoning at all and a test that means to
+observe a level has to give the endpoint one. Each was red with its own call removed and green with the
+others' removed, which is what makes them three tests rather than one.
+
+**One mistake in writing them is worth keeping, because the repository's own rule caught it.** The fork
+test first cut at `question 1` of a conversation holding one question. `/fork` refuses that — "nothing to
+keep: cutting at question 1 would leave an empty conversation" — and a refused fork leaves the run where
+it was, so the test passed while testing nothing: the whole suite was green with the fork's carry
+removed. The `forked:` assertion added in front of the two facts is what found it, and it is the reason
+that assertion reads as it does.
+
+**One unexplained red, recorded rather than smoothed over.** The first full gate of this round ran
+`examples/mcp/test_mcp.py` and got `json.decoder.JSONDecodeError: Expecting value: line 1 column 1` from
+a stream it was reading — every *check* in the run up to that point had passed against a real `flint`.
+The same command was green on its own immediately afterwards and green again in the gate that follows,
+and nothing in this round touches the MCP surface (`flint -p --json`, the schema path, the exit codes).
+It is noted here because a red that nothing explains is worth a line, not because anything was fixed.
 
 ### A rebuild keeps what the run decided — 2026-09-23
 

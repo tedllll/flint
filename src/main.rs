@@ -2444,6 +2444,59 @@ fn save_provider(
     Ok(())
 }
 
+/// Hand a rebuilt agent what the *run* decided: the reasoning level and the answer shape.
+///
+/// Both are invisible until the next request goes out, which is what makes losing them quiet.
+/// Measured 2026-09-23, after a report that the page's settings screen opened on values that were not
+/// the ones in force: `/model <other>` replaced the agent and the level went from `medium` back to
+/// `off` -- in the request as well as on the screen. The shape ends worse, and by the same door: a
+/// caller promised JSON is sent prose, after a model switch, with nothing saying so.
+///
+/// The *level* and not the *field*: the field is the endpoint's (`thinking_field`), and a switch to a
+/// provider that carries reasoning in a different key has to ask its own way.
+///
+/// The two callers are the two rebuilds that keep a conversation: the funnel every `/model`,
+/// `/provider` and `/reload` passes through, and `/fork`, which starts a branch of the conversation
+/// this run is already at. The config can produce neither -- the level is the run's and the shape is
+/// the conversation's -- which is why they are handed over by name.
+fn carry_the_runs_decisions(next: &mut agent::Agent, old: &agent::Agent) {
+    next.hold_to_thinking(old.thinking());
+    next.hold_to_schema(old.schema().cloned());
+}
+
+/// Hand a rebuilt agent what the *file* says, for the two doors that switch to another conversation:
+/// `/resume` carries on inside it and `/import` copies it in.
+///
+/// The rule is the startup path's (`resolve_thinking`, `resolve_output_schema`): a conversation's own
+/// last `thinking` and `schema` lines have the last word over the config, because the level and the
+/// shape travel with the conversation. Without this the run kept the pair belonging to the
+/// conversation it was *leaving*, so a person who had chosen `high` in the one they were going back to
+/// watched it ask for the other one's -- held by
+/// `a_resumed_conversation_brings_its_own_level_and_shape` in `tests/cli_output.rs`.
+///
+/// A file that recorded neither means the config's level and no shape at all, which is what
+/// `Agent::new` has just built. Written out here anyway: this is the one place the rule lives, and a
+/// rule with half of itself in a constructor's defaults is a rule that drifts.
+fn hold_to_what_the_file_says(
+    next: &mut agent::Agent,
+    loaded: &session::LoadedSession,
+    cfg: &config::Config,
+) -> Result<()> {
+    let level = loaded.thinking.clone().unwrap_or_else(|| cfg.thinking.clone());
+    next.hold_to_thinking(&level);
+    let shape = match &loaded.output_schema {
+        Some(raw) => Some(schema::Schema::parse(&raw.to_string()).with_context(|| {
+            // `resolve_output_schema`'s sentence, for its reason: the schema in the file was accepted
+            // when it was written, so this is the file edited by hand or written by a newer flint
+            // whose subset is larger.
+            "the schema recorded in this session is not one this build can check"
+        })?),
+        None => None,
+    };
+    next.hold_to_schema(shape);
+    Ok(())
+}
+
 /// Hand a conversation to a new agent, in the file it is already in.
 ///
 /// `/model`, `/provider` and `/reload` all replace the agent -- a different model, a different
@@ -2507,21 +2560,7 @@ fn continue_conversation(
     }
     let mut next = agent::Agent::new(cfg, provider, old.readonly(), cwd.clone(), writer);
     next.set_no_session(no_session);
-    // Two things the *run* decided, and the reason this function has to hand them over by name:
-    // `Agent::new` builds both of them fresh, and neither is in the provider table it builds from. The
-    // replacement is not a new run -- it is the same run asking a different endpoint, or re-reading a
-    // file -- so both are read off the old agent rather than re-derived from the config.
-    //
-    // Measured, after a report that a settings screen opened on `off` for a run whose preset was
-    // `medium`: `/model <other>` came through here and the level went back to `off`, in the request as
-    // well as on the page -- a silently dropped preset is the same class of fault as the dropped
-    // history this function exists for, one door along. `/thinking`'s and `hold_to_schema`'s own
-    // comments already said a rebuild carries these across; these are the two lines that make it true.
-    //
-    // The level and not the field: the field belongs to the endpoint, and a switch to a provider that
-    // carries reasoning in a different key has to ask its own way.
-    next.hold_to_thinking(old.thinking());
-    next.hold_to_schema(old.schema().cloned());
+    carry_the_runs_decisions(&mut next, old);
     // Whatever else a rebuild owes the old agent lives in the REPL's rebuild arm rather than here, so
     // that it covers the doors that move to another conversation (`/new`, `/resume`) as well -- the
     // peer relay is the one that does. Two homes for one carry is how one of them comes to be missing
@@ -4601,6 +4640,11 @@ async fn handle_command(
             // is the terminal catching up with its own startup path.
             print_transcript(&loaded.messages, printer);
             new_agent.set_last_usage(loaded.last_usage);
+            // The conversation's own level and shape come with it -- see `hold_to_what_the_file_says`
+            // for the rule and for what this door used to do instead. Without it the run kept the
+            // pair belonging to the conversation it was leaving, which is the settings screen
+            // disagreeing with the run that was reported on 2026-09-23, through this door.
+            hold_to_what_the_file_says(&mut new_agent, &loaded, cfg)?;
             new_agent.splice_loaded_history(cfg, &cwd, loaded.messages);
             return Ok(Flow::NewAgent(new_agent, provider_cfg.clone()));
         }
@@ -4741,6 +4785,10 @@ async fn handle_command(
             // cannot be told apart from an empty one, and this one is *new* to the person reading it.
             print_transcript(&loaded.messages, printer);
             new_agent.set_last_usage(loaded.last_usage);
+            // The imported conversation's own level and shape come with it, exactly as `/resume`'s do:
+            // the two doors differ in who owns the file afterwards, not in what the file says about
+            // the run. See `hold_to_what_the_file_says`.
+            hold_to_what_the_file_says(&mut new_agent, &loaded, cfg)?;
             new_agent.splice_loaded_history(cfg, &cwd, loaded.messages);
             return Ok(Flow::NewAgent(new_agent, provider_cfg.clone()));
         }
@@ -4894,6 +4942,12 @@ async fn handle_command(
             // Drawn, like `/resume` and `/import`: what is on screen has to be the conversation the run
             // is now in, and the tail that was dropped from it is the part a person needs to see go.
             print_transcript(&copy, printer);
+            // A branch is *this* conversation cut short, so it is held at what this run is at -- the
+            // same two things the funnel hands over, for the same reason: the branch's own file has no
+            // `thinking` line and no `schema` line yet, and `/fork` exists to ask one question again,
+            // not to stop asking for the reasoning or the shape the person asked for. See
+            // `carry_the_runs_decisions`.
+            carry_the_runs_decisions(&mut new_agent, agent);
             new_agent.splice_loaded_history(cfg, &cwd, copy);
             return Ok(Flow::NewAgent(new_agent, provider_cfg.clone()));
         }

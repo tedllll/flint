@@ -329,10 +329,24 @@ ending is worse: a caller promised JSON gets prose, after a model switch, with n
 
 Two placements fell out of fixing it, and both are decisions rather than tidiness. The **reasoning level
 and the answer shape** are carried in the funnel function, because only the three commands that keep the
-conversation come through it — `/new` and `/resume` really do move, and the shape belongs to the
-conversation, so the new one's own file decides (`/new` correctly drops it). The **peer-relay decision**
-is carried one level up, in the REPL's rebuild arm, because `--hear-peers` is about the process and
-`/new` does not end it: two homes for one carry is how one of them comes to be missing a door.
+conversation come through it. The **peer-relay decision** is carried one level up, in the REPL's rebuild
+arm, because `--hear-peers` is about the process and `/new` does not end it: two homes for one carry is
+how one of them comes to be missing a door.
+
+**The doors that move to another conversation decide the two by the file they moved to.** `/new` drops
+the shape and takes the config's level, which is what a conversation that has decided nothing means —
+the shape belongs to a conversation and the level is the run's only until a file says otherwise.
+`/resume` and `/import` do the opposite of dropping: the conversation's own last `thinking` and `schema`
+lines are what the run is held at afterwards, which is the rule the startup path already applied through
+`resolve_thinking` and `resolve_output_schema`. A person who chose `high` in the conversation they are
+going back to is not asking for whatever the one they left was at, and nothing on screen would have said
+which of the two they got. `/fork` is the third shape: a branch of *this* conversation, whose own file
+has neither line in it yet, is held at what the run is at — exactly what the funnel hands over. All
+three were wrong in this same way when the level was first measured, so each is now one call to one of
+two functions (`carry_the_runs_decisions`, `hold_to_what_the_file_says`) rather than two lines an arm
+could forget: the rule at the top of this section, one door further out. The two are separate functions
+because they answer different questions — what the run decided, and what the file says — and a single
+helper taking either would be a place for the two to be confused.
 
 The level carries and the *field* does not — the same split as the section above, one layer down.
 `thinking = "medium"` surviving a `/provider` switch means the run still asks for medium; the key it

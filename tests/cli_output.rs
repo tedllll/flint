@@ -3174,6 +3174,225 @@ async fn a_resumed_conversation_is_drawn_and_not_only_loaded() {
     );
 }
 
+/// A stub home whose provider says where a reasoning level goes.
+///
+/// `test_home`'s config with one line added, because the two facts these tests are about are only
+/// visible in a *request*: `response_format` for the answer shape, and the level in whatever field the
+/// endpoint names. With no `thinking_field` flint sends no reasoning at all whatever the level is, so
+/// a test that means to observe a level has to give the endpoint one.
+fn home_with_a_thinking_field(tag: &str, base_url: &str) -> std::path::PathBuf {
+    let home = test_home(tag, base_url);
+    std::fs::write(
+        home.join("config.toml"),
+        format!(
+            "default_provider = \"stub\"\n\n\
+             [[providers]]\n\
+             name = \"stub\"\n\
+             base_url = \"{base_url}\"\n\
+             model = \"stub-model\"\n\
+             api_key = \"not-a-real-key\"\n\
+             thinking_field = \"reasoning_effort\"\n"
+        ),
+    )
+    .expect("the test config");
+    home
+}
+
+/// Run the REPL in `home`, type `input` at it, and hand back what it printed and the first request
+/// body it sent.
+///
+/// One command and then one question is the shape this is for, and the order matters: a command that
+/// arrives while a turn is in flight is run as the command it is, so a longer input would make the
+/// request order a matter of timing rather than of the input.
+async fn one_command_then_one_question(
+    server: &MockServer,
+    home: &std::path::Path,
+    input: &str,
+) -> (String, serde_json::Value) {
+    let work = home.join("work");
+    std::fs::create_dir_all(&work).expect("working directory");
+    let mut child = binary()
+        .current_dir(&work)
+        .env("FLINT_HOME", home)
+        .env("FLINT_TERM_CAPTURE", "1")
+        .env("FLINT_TERM_SIZE", "100x24")
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to run flint");
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().expect("no stdin handle");
+        stdin
+            .write_all(input.as_bytes())
+            .expect("failed to write stdin");
+    }
+    let out = child.wait_with_output().expect("flint did not finish");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let requests = server.received_requests().await.expect("requests");
+    let body: serde_json::Value = requests
+        .first()
+        .map(|r| serde_json::from_slice(&r.body).expect("the request body is JSON"))
+        .expect("no request was made, so the turn never ran");
+    (stdout, body)
+}
+
+/// A conversation switched to inside a run brings its own reasoning level and answer shape.
+///
+/// The rule at startup is that the conversation's own file has the last word: `resolve_thinking` and
+/// `resolve_output_schema` read the last `thinking` and `schema` lines, and the run holds at what they
+/// say. `/resume` is the same switch by another door, and it kept the level and the shape of the
+/// conversation being *left* -- so a person who had chosen `high` in the one they were going back to
+/// watched the run ask for whatever the other one was at, with nothing saying so. Measured
+/// 2026-09-23, while hunting the report that the page's settings screen opens on values that are not
+/// the ones in force: this is a second way for the level to disagree with the file that chose it.
+#[tokio::test]
+async fn a_resumed_conversation_brings_its_own_level_and_shape() {
+    let server = MockServer::start().await;
+    answer_once(&server).await;
+    let home = home_with_a_thinking_field("resume-keeps-its-own", &server.uri());
+    let shape = r#"{"type":"object","properties":{"day":{"type":"string"}},"required":["day"]}"#;
+    write_session(
+        &home.join("sessions"),
+        "111-1.jsonl",
+        &[
+            &meta_line("111-1"),
+            r#"{"type":"thinking","level":"high"}"#,
+            &format!(r#"{{"type":"schema","schema":{shape}}}"#),
+            r#"{"type":"chat","message":{"role":"user","content":"the socket question"}}"#,
+            r#"{"type":"chat","message":{"role":"assistant","content":"the socket answer"}}"#,
+        ],
+        10,
+    );
+
+    let (stdout, body) = one_command_then_one_question(
+        &server,
+        &home,
+        "/resume 111-1\nand what about the write end\n",
+    )
+    .await;
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(
+        stdout.contains("the socket question"),
+        "the switch drew nothing, so the level below is about a conversation nobody resumed: \
+         {stdout:?}"
+    );
+    assert_eq!(
+        body["reasoning_effort"], "high",
+        "the resumed conversation's own level was not the one in force, so the run asks for \
+         something the person did not choose: {body}"
+    );
+    assert!(
+        body["response_format"].is_object(),
+        "the resumed conversation's own answer shape was dropped, so a caller promised JSON is sent \
+         prose: {body}"
+    );
+}
+
+/// A branch starts where the conversation it was cut from is, level and shape included.
+///
+/// `/fork` exists so that one question can be asked again, differently. A branch is *this*
+/// conversation cut short -- its own file has no `thinking` line and no `schema` line, because nobody
+/// decided either in it -- so a rebuild that does not hand the two over silently drops what the person
+/// asked for, which is the same fault `/model` and `/resume` had. Measured 2026-09-23.
+///
+/// The cut is at the *second* question on purpose: `/fork 1` on a conversation holding one question is
+/// refused ("nothing to keep"), and a refused fork leaves the run where it was -- which is a way for
+/// this test to pass while testing nothing, which is what it did before the `forked:` assertion below
+/// was added.
+#[tokio::test]
+async fn a_forked_branch_is_held_at_what_the_run_is_at() {
+    let server = MockServer::start().await;
+    answer_once(&server).await;
+    let home = home_with_a_thinking_field("fork-keeps-its-own", &server.uri());
+    let shape = r#"{"type":"object","properties":{"day":{"type":"string"}},"required":["day"]}"#;
+    write_session(
+        &home.join("sessions"),
+        "111-1.jsonl",
+        &[
+            &meta_line("111-1"),
+            r#"{"type":"thinking","level":"high"}"#,
+            &format!(r#"{{"type":"schema","schema":{shape}}}"#),
+            r#"{"type":"chat","message":{"role":"user","content":"the socket question"}}"#,
+            r#"{"type":"chat","message":{"role":"assistant","content":"the socket answer"}}"#,
+            r#"{"type":"chat","message":{"role":"user","content":"and the write end"}}"#,
+            r#"{"type":"chat","message":{"role":"assistant","content":"it closes too"}}"#,
+        ],
+        10,
+    );
+
+    let (stdout, body) =
+        one_command_then_one_question(&server, &home, "/resume 111-1\n/fork 2\nask it again\n").await;
+    let _ = std::fs::remove_dir_all(&home);
+
+    // Checked first, because a `/fork` that was refused leaves the run in the conversation it was
+    // already in -- where the level is right for a reason that has nothing to do with this door, and
+    // the test would pass while testing nothing.
+    assert!(
+        stdout.contains("forked:"),
+        "the branch was never made, so the two facts below are about the conversation `/fork` was \
+         supposed to leave: {stdout:?}"
+    );
+    // `high` is also the proof that `/resume` handed the level over -- the branch was cut from the
+    // conversation it made -- and the shape is the half a branch can lose with nothing on screen to
+    // say so, which is why both are asserted rather than the one the fork is more obviously about.
+    assert_eq!(
+        body["reasoning_effort"], "high",
+        "the branch was not held at the level the conversation it was cut from was at: {body}"
+    );
+    assert!(
+        body["response_format"].is_object(),
+        "the branch lost the answer shape its conversation was being held to: {body}"
+    );
+}
+
+/// An imported conversation brings its own level and shape, as a resumed one does.
+///
+/// `/import` and `/resume` differ in who owns the file afterwards, not in what the file says about the
+/// run: an imported conversation is the one the person is now in, so its last `thinking` and `schema`
+/// lines are what this run asks for. The file here is `low` with a shape of its own, which is what
+/// makes the assertion about the import rather than about what was in force before it.
+#[tokio::test]
+async fn an_imported_conversation_brings_its_own_level_and_shape() {
+    let server = MockServer::start().await;
+    answer_once(&server).await;
+    let home = home_with_a_thinking_field("import-keeps-its-own", &server.uri());
+    let shape = r#"{"type":"object","properties":{"why":{"type":"string"}},"required":["why"]}"#;
+    let given = home.join("given-to-me.jsonl");
+    let schema_line = format!(r#"{{"type":"schema","schema":{shape}}}"#);
+    std::fs::write(
+        &given,
+        format!(
+            "{}\n{}\n{}\n{}\n",
+            r#"{"type":"thinking","level":"low"}"#,
+            schema_line,
+            r#"{"type":"chat","message":{"role":"user","content":"why does the socket close early"}}"#,
+            r#"{"type":"chat","message":{"role":"assistant","content":"because the peer went away"}}"#,
+        ),
+    )
+    .expect("the given file");
+
+    let (_stdout, body) = one_command_then_one_question(
+        &server,
+        &home,
+        &format!("/import {}\nand what about the write end\n", given.display()),
+    )
+    .await;
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert_eq!(
+        body["reasoning_effort"], "low",
+        "the imported conversation's own level was not the one in force: {body}"
+    );
+    assert!(
+        body["response_format"].is_object(),
+        "the imported conversation's answer shape was dropped: {body}"
+    );
+}
+
 /// A conversation somebody handed you becomes one of yours, and their file is left alone.
 ///
 /// `/import` is `--fork`'s act for a file this run did not start from: the conversation is *copied*
