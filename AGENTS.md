@@ -35,7 +35,7 @@ whoever is changing the code — a person or a model driving it.
 | `src/event.rs` | the one enum a turn's events go through — provider deltas and agent activity alike — so the UI knows one vocabulary |
 | `src/sink.rs` | what a turn's events *become*: the transcript, the status line and the page's stream, shared by the REPL and `examples/live_turn.rs` rather than copied |
 | `src/attach.rs` | `@path` in a one-shot prompt: which names are files, the inline block the model reads, and the 256 KB cap |
-| `src/provider.rs` | the OpenAI-compatible client, streaming, retries, usage — including `usage_from`, which collapses the two cache-split shapes endpoints use into one number, and `Thinking`, the split that keeps the *level* flint's (`off`/`low`/`medium`/`high`, state on the provider so `/thinking` can move it) and the JSON *field* the endpoint's (`thinking_field`, from the provider table) — nothing is sent unless both are set, because a field guessed wrong is a request an endpoint may refuse |
+| `src/provider.rs` | the OpenAI-compatible client, streaming, retries, usage — including `usage_from`, which collapses the two cache-split shapes endpoints use into one number, and `Thinking`, the split that keeps the *level* flint's (`off`/`low`/`medium`/`high`, state on the provider so `/thinking` can move it), the JSON *field* the endpoint's (`thinking_field`, from the provider table) and that field's own word for *no reasoning* (`thinking_off`, also the endpoint's) — nothing is sent unless the field and a word for the level are both set, because a field or a value guessed wrong is a request an endpoint may refuse, and `off` with no word of its own is silence rather than a guess at `"none"` |
 | `src/engine.rs` | bringing a *local* model engine up and letting it go: a provider's `start`/`stop` commands, and the derived command for the three engines flint knows |
 | `src/tools.rs` | the tool set (`task`/`tasks` for children — a handle at once, `background: false` when the next step needs the answer — `bash`/`pwsh`/`exec` with `background: true` for a command nobody waits for, `job_op` for either kind of job, and the notice a job that ends leaves behind), `JobMoment` (when a job started and ended, recorded once in both clocks rather than derived from the clock at each look, because a start that can move by a second between two glances is not a start), `jobs_report`/`stop_job` (the same listing and the same stop for a person, a page and a model — one answer, three doors, with `ended_by_us` recording that *this* run ended a job so a kill never reads as a failure, and `stopping` — a flag set where the stop is asked for and read against `finished` — so a row can say "on its way out" instead of "still working"), `RunEnv`/`apply_child_env` (what a command a run starts is told about the run — `FLINT_SESSION`, `FLINT_PROVIDER`, `FLINT_MODEL`, and the proxy variables, on both spawn sites; a run that is not a conversation takes them away instead of leaving what it inherited), `task_argv` (a `task` child's whole command line, which is where a run hands its own properties down — the endpoint, and `--no-session`, so a run that keeps no conversation starts children that keep none), and the read-before-mutate gate |
 | `src/patch.rs` | the `apply_patch` format, parsed and applied — pure functions |
@@ -126,6 +126,12 @@ thinking_field = ""             # the JSON key a reasoning level goes in, e.g. "
                                 # Empty (or absent) = this endpoint is never asked for reasoning,
                                 # whatever level the run is at: vendors disagree about this field
                                 # and a wrong guess is a request an endpoint may refuse
+thinking_off = ""               # ...and the value that field takes for *no reasoning*, e.g. "none".
+                                # Empty (or absent) = `off` sends nothing and the endpoint's own
+                                # default applies, which for some models is reasoning ON -- measured
+                                # on DeepSeek: nothing sent, 91 characters of thinking;
+                                # reasoning_effort "none", none. flint ships it only for the provider
+                                # it configures and measures; a wrong word is a refused request
 ```
 
 ```toml
@@ -152,8 +158,10 @@ eager_tools = []                # tools to declare on every request anyway. Abse
                                 # Declaring those eight costs 4,355 characters on every request
 instructions = "hint"           # AGENTS.md: "hint" (name them), "paste", "off"
 skill_dirs = []                 # extra skill directories, after the standard two
-thinking = "off"                # off|low|medium|high: reasoning to ask for. "off" sends no
-                                # reasoning parameter at all (the endpoint's own default applies).
+thinking = "off"                # off|low|medium|high: reasoning to ask for. "off" sends the
+                                # provider's `thinking_off` word where it has one, and otherwise
+                                # sends no reasoning parameter at all (the endpoint's own default
+                                # applies, and for some models that default is reasoning ON).
                                 # The conversation's file has the last word over this key, and
                                 # --thinking / /thinking over both. `/thinking <level>` writes this
                                 # key back, so the next run starts there; `--thinking` does not.

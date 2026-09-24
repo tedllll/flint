@@ -2410,6 +2410,11 @@ async fn provider_wizard(
             .as_ref()
             .map(|e| e.thinking_field.clone())
             .unwrap_or_default(),
+        // The word for `off` travels with the field, for the same reason and by the same rule: a
+        // vendor's own word for *do not reason* is knowledge about that endpoint, and this form is
+        // re-saving one that already has it. A new provider starts with none, which is the behaviour
+        // every config written before the key has -- see `ProviderConfig::thinking_off`.
+        thinking_off: existing.as_ref().and_then(|e| e.thinking_off.clone()),
     };
 
     save_provider(cfg, &p, printer)?;
@@ -3739,6 +3744,11 @@ async fn handle_command(
                         // the field nearly every OpenAI-compatible endpoint takes. A vendor that
                         // wants another one is one edit away, and `/config` prints which is in force.
                         thinking_field: "reasoning_effort".to_string(),
+                        // ...but *not* a word for `off`, which is the one thing here that must not be
+                        // guessed: a provider added in one line is an endpoint nobody has measured,
+                        // and a wrong word is a refused request on every turn rather than one turn.
+                        // It says nothing at `off` until somebody who knows the endpoint adds it.
+                        thinking_off: None,
                     };
                     save_provider(cfg, &p, printer)?;
                     // Switching is what the wizard offers as its default, and it is what makes the
@@ -4039,21 +4049,28 @@ async fn handle_command(
             }
             let level = agent.thinking().to_string();
             let field = agent.thinking_field().to_string();
+            let off = agent.thinking_off().to_string();
             // The meaning of the level, from the one place that says it: the page's row is handed the
             // same sentence (`thinking_note`), so the two readers of this setting cannot disagree.
-            let note = thinking_note(&level, &field);
-            if field.is_empty() {
-                // ...and how to make it live, which is the terminal's to say: this is where a person
-                // reads the key to set, and the page's row is deliberately free of config keys.
-                printer.term().line(format_args!(
-                    "thinking {bold}{level}{reset} {dim}({note}; set `thinking_field` in [providers] to \
-                     the field it wants — `reasoning_effort` is the common one){reset}"
-                ));
+            let note = thinking_note(&level, &field, &off);
+            // ...and what is missing to make it live, which is the terminal's to say: this is where a
+            // person reads the keys to set, and the page's row is deliberately free of config keys.
+            // Both halves are named because both are needed for `off` to mean anything, and the pair is
+            // the one that was measured -- a person whose level does nothing needs the whole answer, not
+            // half of it.
+            let missing = if field.is_empty() {
+                " set `thinking_field` in [providers] to the field this endpoint wants, and \
+                 `thinking_off` to the word it takes for *no reasoning* — `reasoning_effort` and \
+                 `\"none\"` are the pair measured to work on DeepSeek"
+            } else if off.is_empty() && level == "off" {
+                " set `thinking_off` in [providers] to the word this endpoint takes for *no \
+                 reasoning* — `\"none\"` is the common one, and the one measured on DeepSeek"
             } else {
-                printer.term().line(format_args!(
-                    "thinking {bold}{level}{reset} {dim}({note}){reset}"
-                ));
-            }
+                ""
+            };
+            printer.term().line(format_args!(
+                "thinking {bold}{level}{reset} {dim}({note}{missing}){reset}"
+            ));
         }
 
         // Leave a message for whoever else is working here, without a second terminal.
@@ -6222,25 +6239,36 @@ impl OnPage {
 
 /// What a reasoning level *means* for the endpoint in force, in one sentence.
 ///
-/// Three cases, and the first is the one that was reported: a provider that names no `thinking_field`
-/// is never asked, whatever level the run is holding. The level is still kept -- the field belongs to
-/// whichever provider a person switches to, which is the whole reason the two halves are separate --
-/// which is why a row showing `high` beside an endpoint that was never told is the worse half of the
-/// same confusion.
+/// Four cases, and the middle two are the same word doing two different things. A provider that
+/// names no `thinking_field` is never asked, whatever level the run is holding (the level is still
+/// kept -- the field belongs to whichever provider a person switches to, which is the whole reason
+/// the two halves are separate). That was the first report, on 2026-09-24. The second report, the
+/// same afternoon, was `off` itself: it meant "ask for nothing", which an endpoint that reasons
+/// unless it is told not to reads as *no instruction* -- the screen said `off` and the model was
+/// thinking. So a provider may now name its own word for *do not reason* (`thinking_off`), and the
+/// two `off` sentences are the two truths a person needs told apart: the word goes out, or nothing
+/// does and the endpoint decides.
 ///
 /// One sentence rather than two, because the terminal's answer to `/thinking` and the page's row are
 /// two readers of one fact: a level that reads one way in the terminal and another on the screen is
 /// the fault `state_frame`'s own comment exists to prevent.
-fn thinking_note(level: &str, field: &str) -> String {
+fn thinking_note(level: &str, field: &str, off: &str) -> String {
     let field = field.trim();
     if field.is_empty() {
         "this endpoint is never asked for a reasoning level, so flint sends none — a model that \
          reasons on its own still will"
             .to_string()
     } else if level == "off" {
-        "no reasoning parameter is sent — the endpoint's own default, which for some models is \
-         reasoning on"
-            .to_string()
+        let off = off.trim();
+        if off.is_empty() {
+            "no reasoning parameter is sent — the endpoint's own default, which for some models is \
+             reasoning on"
+                .to_string()
+        } else {
+            // The word is named because it is not the level: the row reads `off` and the request
+            // says `none`, and a person reading a config or a trace needs both halves.
+            format!("off is sent as {field}=\"{off}\" on every request")
+        }
     } else {
         format!("sent as {field} on every request")
     }
@@ -6353,6 +6381,7 @@ fn settings(
         {
             let level = agent.thinking().to_string();
             let field = agent.thinking_field().to_string();
+            let off = agent.thinking_off().to_string();
             let mut row = one(
                 "model",
                 "thinking",
@@ -6367,7 +6396,7 @@ fn settings(
                 "/thinking",
                 help_of("/thinking", OnPage::Toggles, provider_cfg),
             );
-            row["note"] = serde_json::json!(thinking_note(&level, &field));
+            row["note"] = serde_json::json!(thinking_note(&level, &field, &off));
             row
         },
         // ---- how this run behaves: `run` ------------------------------------------------------
@@ -8040,6 +8069,8 @@ mod tests {
             start_timeout_secs: 0,
             proxy: None,
             thinking_field: "reasoning_effort".to_string(),
+            // A word for `off` as well, so the rebuild is exercised with all three halves in play.
+            thinking_off: Some("none".to_string()),
         };
         cfg.providers.push(target.clone());
         cfg.default_provider = target.name.clone();
@@ -8271,6 +8302,7 @@ mod tests {
                 start_timeout_secs: 0,
                 proxy: None,
                 thinking_field: "reasoning_effort".to_string(),
+                thinking_off: Some("none".to_string()),
             }],
             ..config::Config::default()
         };
@@ -8350,6 +8382,7 @@ mod tests {
                 start_timeout_secs: 0,
                 proxy: None,
                 thinking_field: String::new(),
+                thinking_off: None,
             }],
             ..config::Config::default()
         };

@@ -2621,41 +2621,82 @@ async fn a_thinking_level_rides_in_the_field_the_provider_names() {
     );
 }
 
-/// Nothing is asked for unless a level was asked for.
+/// Nothing is asked for unless a provider has said what to ask with.
 ///
 /// The default is the request body flint has always sent, and it has to stay that way: a provider
-/// whose `thinking_field` is written down is a provider that *can* be asked, not one that is. A
-/// flint that sent `reasoning_effort: "off"` on its own would be inventing a word for a vendor it
-/// knows nothing about, and the endpoints that refuse an unknown effort value refuse the turn.
+/// whose `thinking_field` is written down is a provider that *can* be asked, not one that is. A flint
+/// that sent `reasoning_effort: "off"` on its own would be inventing a word for a vendor it knows
+/// nothing about, and the endpoints that refuse an unknown effort value refuse the turn.
+///
+/// The second half is the other side of that rule, and it is a bug fix rather than a feature
+/// (2026-09-24): `off` used to mean *ask for nothing*, which an endpoint that reasons unless it is
+/// told not to reads as no instruction at all -- reported as "the settings screen says off and the
+/// conversation still has thinking". So the word for *no* is the endpoint's, exactly like the field,
+/// and a provider that names one (`thinking_off`) has it sent at `off`. Measured on the endpoint
+/// flint ships configured (`deepseek-flash`): 91 characters of reasoning with nothing sent, 0 with
+/// `reasoning_effort: "none"`. Both halves are asserted here, one against the other, because a test
+/// for either alone would pass on a flint that always sent something or never did.
 #[tokio::test]
-async fn no_reasoning_is_asked_for_until_somebody_asks() {
-    let server = MockServer::start().await;
-    let cwd = cwd_for("thinking-default");
-    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+async fn a_reasoning_word_goes_out_only_when_the_provider_named_one() {
+    // The first config names the field and not the word: `off` is silence, as it always was.
+    let unnamed = MockServer::start().await;
+    let quiet = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     Mock::given(method("POST"))
         .respond_with(Scripted {
             answers: vec![sse_text("plain.")],
-            seen: std::sync::Arc::clone(&seen),
+            seen: std::sync::Arc::clone(&quiet),
         })
-        .mount(&server)
+        .mount(&unnamed)
         .await;
-
     let home = home_configured(
         "thinking-default",
         "",
         &format!(
             "name = \"stub\"\nbase_url = \"{}\"\napi_key = \"test\"\nmodel = \"stub-model\"\n\
              thinking_field = \"reasoning_effort\"\n",
-            server.uri()
+            unnamed.uri()
         ),
     );
+    let cwd = cwd_for("thinking-default");
     let (code, _lines, stderr) = run_json(&home, &cwd, &["-p", "say hello", "--json"]);
     assert_eq!(code, 0, "the run failed: {stderr}");
 
-    let bodies = recorded(&seen);
+    let bodies = recorded(&quiet);
     assert!(
         bodies[0].get("reasoning_effort").is_none(),
         "a level nobody asked for was sent: {}",
+        bodies[0]
+    );
+
+    // The second names the word as well, and the default level -- `off` -- is then a level that says
+    // something instead of a level that says nothing.
+    let named = MockServer::start().await;
+    let told = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    Mock::given(method("POST"))
+        .respond_with(Scripted {
+            answers: vec![sse_text("plain.")],
+            seen: std::sync::Arc::clone(&told),
+        })
+        .mount(&named)
+        .await;
+    let home = home_configured(
+        "thinking-off-word",
+        "",
+        &format!(
+            "name = \"stub\"\nbase_url = \"{}\"\napi_key = \"test\"\nmodel = \"stub-model\"\n\
+             thinking_field = \"reasoning_effort\"\nthinking_off = \"none\"\n",
+            named.uri()
+        ),
+    );
+    let cwd = cwd_for("thinking-off-word");
+    let (code, _lines, stderr) = run_json(&home, &cwd, &["-p", "say hello", "--json"]);
+    assert_eq!(code, 0, "the run failed: {stderr}");
+
+    let bodies = recorded(&told);
+    assert_eq!(
+        bodies[0]["reasoning_effort"], "none",
+        "`off` is not a level at all on an endpoint whose word for it was named, and the request did \
+         not carry it -- which is the report this exists for: {}",
         bodies[0]
     );
 }

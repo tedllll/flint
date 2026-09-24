@@ -76,6 +76,22 @@ pub struct ProviderConfig {
     /// an endpoint may refuse outright, which reads as flint being broken.
     #[serde(default)]
     pub thinking_field: String,
+
+    /// The value [`Self::thinking_field`] takes to mean *do not reason*.
+    ///
+    /// A third fact because the value is not standard either, and because `off` without it was a
+    /// level that did nothing at all: it meant "ask for nothing", and an endpoint that reasons
+    /// unless it is told not to simply reasoned on. Reported 2026-09-24 -- *"the settings screen
+    /// says off and the conversation still has thinking"* -- and measured on the endpoint flint
+    /// ships configured (`deepseek-flash` over `https://api.deepseek.com/v1`): **91** characters of
+    /// reasoning with nothing sent, **0** with `reasoning_effort: "none"`; the same endpoint ignores
+    /// `enable_thinking` and still reasons at `"minimal"`.
+    ///
+    /// Absent or empty (the default, and every config written before this key) sends nothing at
+    /// `off` -- the endpoint's own default applies, and the terminal and the settings row say
+    /// exactly that. Setting it is how a person says *this* endpoint's word for no.
+    #[serde(default, deserialize_with = "de_opt_string")]
+    pub thinking_off: Option<String>,
 }
 
 /// Web search: where a `search` tool gets its answers.
@@ -508,6 +524,13 @@ impl Default for Config {
                     // configured. Nothing is sent until a level is asked for, so this is not a change
                     // for anyone who has not: the two halves are deliberately independent.
                     thinking_field: "reasoning_effort".to_string(),
+                    // ...and the word that turns it off, which is what `off` -- the *default* level --
+                    // was missing: the measured endpoint reasons unless it is told not to (91
+                    // characters of thinking with nothing sent, 0 with this). It is shipped here and
+                    // nowhere else, because this is the endpoint flint configured *and* measured; a
+                    // hand-added provider keeps saying nothing at `off` until somebody who knows that
+                    // endpoint says otherwise.
+                    thinking_off: Some("none".to_string()),
                 },
                 // A local fallback costs nothing to configure and still works
                 // when every hosted provider is unreachable.
@@ -526,6 +549,7 @@ impl Default for Config {
                     // of asking (a `think` field on newer builds) and flint will not guess at it. The
                     // cost of being wrong here is a refused request, so silence is the default.
                     thinking_field: String::new(),
+                    thinking_off: None,
                 },
             ],
         }

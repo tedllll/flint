@@ -293,11 +293,18 @@ level). A field flint guessed wrong is not a preference that gets ignored: it is
 may refuse outright, in the middle of a turn, for a reason nobody watching could connect to a config
 key. Guessing is therefore the one thing this does not do.
 
-`off` is the default and it means *ask for nothing*, which is not the same as telling an endpoint to
-reason less. flint does not know the word for that on any given server, and a wrong word is worse than
-silence — so `off` is documented for what it is: the endpoint's own default applies, and for some models
-that default is reasoning *on*. Naming the limit is the honest version of the feature; inventing a
-`"none"` that half the servers reject is not.
+`off` is the default, and for a long time it meant *ask for nothing* — which is not the same as telling
+an endpoint to reason less. flint does not know the word for that on any given server, and a wrong word
+is worse than silence: inventing a `"none"` that half the servers reject would have been the guess this
+decision refuses. Silence was the honest version, and it was **wrong in a way a person found**: on
+2026-09-24 the report was *"the settings screen says off and the conversation still has thinking"* — and
+the screen was telling the truth about flint and nothing about the endpoint, whose own default for that
+model is reasoning *on*. So the third fact joined the other two, on the same rule: the word for *no* is
+the endpoint's, written in that endpoint's provider table as `thinking_off` (`"none"` in the case that
+was measured), and `off` sends it where it is written and stays silent where it is not. flint ships that
+word for exactly one provider — the one it ships configured — because that is the one it could measure:
+nothing sent, **91** characters of reasoning; `reasoning_effort: "none"`, none. A hand-added provider
+starts with none, which is the behaviour every config written before this key keeps.
 
 Three smaller decisions came with it. The level **travels with the conversation** (an appended
 `thinking` line, last one wins) rather than living only in the config, because a choice made in a

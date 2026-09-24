@@ -58,12 +58,12 @@ re-measured a **thirteenth** time the same day, after the round at the top of th
 dialog that said what to type (the five `web_view` byte-claims that named `command.label` or carried
 `askReport`'s old signature, one of them gaining a new assertion that the drawing code never mentions the
 line, one new headless claim about the dialog drawing no syntax at all with the palette as its control,
-and three browser claims, one of which had gone quietly vacuous), and re-measured a **fourteenth** time
-the same day, after the round at the top of this section — the settings row that says `off` beside a model
-that reasons (one new `cli_output` test over a real `--web` run and three frames, watched red first, one
-new headless claim with its own mutation control, and one new browser claim):
+and three browser claims, one of which had gone quietly vacuous), and re-measured a **fifteenth** time
+the same day, after the round at the top of this section — `off` made a level that says something (one
+new `json_output` test with its own two-run control, shown red by mutation, one new unit test for the
+three-fact table, a fourth case added to the `--web` test, and the terminal's missing-key hint):
 `cargo test`
-**703 passing, 1 ignored** across the 14 suites (lib **388**, bin **9**, `agent_loop` 34,
+**704 passing, 1 ignored** across the 14 suites (lib **389**, bin **9**, `agent_loop` 34,
 `balance` 7, `cli_output` **125**, `json_output` 41, `say` 6,
 `search_tool` 4, `task` 17, `term_capture` 20 + 1 ignored, `tty_hangup` **0 on Windows** and 3 on Unix
 — the suite is `#![cfg(unix)]`, and the library carries a few `#[cfg(unix)]` tests of its own, so the
@@ -1844,6 +1844,67 @@ picker, type `/config` into the composer, and see whether the answer lands in th
 the block is drawn — then open the `commands` panel and read it against `/help` in the terminal.
 
 ## What was just done
+
+### `off` was a level that did nothing, and the endpoint's word for *no* is now written down — 2026-09-24
+
+**Reported directly, one round after the settings row learned to explain itself: "still thinking at
+off, the conversation still has thinking, open settings and it still says thinking off — whatever you
+say, your setting has a problem."** It did, and the previous round had only *documented* it: the row
+said, correctly, that nothing was sent — and nothing sent is not the same as *no reasoning*, on an
+endpoint that reasons unless it is told not to.
+
+The defect was in `Thinking::asked()`, and it was one line's worth: `if self.level == "off" || field
+.is_empty() { None }`. `off` meant "ask for nothing", so on a provider that reasons by default the
+default level did nothing whatsoever, and the honest note the round before had added was the shape of
+the bug rather than a fix for it. `docs/decisions.md` had argued for that silence on purpose ("inventing
+a `"none"` that half the servers reject is not [honest]"), and the argument was right about *guessing*
+and wrong about *scope*: the word is not flint's to invent, but it is the person's to write down, the
+same way the field is.
+
+**Measured before it was written, on the endpoint flint ships configured** (`deepseek-flash` over
+`https://api.deepseek.com/v1`, six requests, the model's own config read and its key taken from the
+environment it names — never printed, never written into the tree):
+
+| request | reasoning produced |
+|---|---|
+| nothing sent — what flint did at `off` | **91** characters |
+| `reasoning_effort: "none"` | **0** |
+| `thinking: {"type": "disabled"}` | 0 |
+| `reasoning_effort: "minimal"` | 83 (still reasons) |
+| `enable_thinking: false` | 82 (ignored by this endpoint) |
+
+So `none` is this endpoint's word, and it is now a third fact in the provider table beside the field:
+`thinking_off`. `Thinking` carries it, `asked()` returns it for `off` when it is written and `None` when
+it is not, the shipped `deepseek` provider ships it (the one endpoint flint configures *and* has
+measured), and a provider added with `/provider add` deliberately does **not** — an endpoint nobody has
+measured gets no guessed word, which keeps the old, safe behaviour exactly. Every config written before
+this key keeps it too: silence at `off`, and a note that says so.
+
+**Four readers, one sentence, and one of them got longer.** `thinking_note` gained the fourth case
+(`off is sent as reasoning_effort="none" on every request`), the page draws whatever the frame carries,
+and the terminal's answer to `/thinking` now names what is missing when the level cannot reach the
+endpoint at all — `thinking_field` *and* `thinking_off`, with the measured pair in the sentence, because
+a person whose level does nothing needs the whole answer rather than half of it.
+
+**The tests, and one of them is a pair on purpose.** `tests/json_output.rs` gained a test with two stub
+runs: the same field and the same level, where the config that names the word produces
+`reasoning_effort: "none"` in the body and the config that does not produces no such key. Neither half
+passes alone on a flint that always sends a word or never does. It was shown red by mutation rather than
+by being written first — the implementation was already in place when the test was added, so the
+behaviour was reverted (`self.off.trim()` → `""`) and the assertion failed with `left: Null`, which is
+the same evidence in the other order. The `--web` test from the round before grew its fourth case
+(config rewritten with the word, `/reload`, a new frame, `/thinking` again), and its terminal half waits
+on the **transcript** rather than on a frame, because `/thinking` with no argument changes nothing and
+`Live::state` drops a frame identical to the one before it — waiting for a frame there cost twenty
+seconds and proved nothing. `src/provider.rs` gained the three-fact table as a unit test, with the
+control inside it.
+
+**What the reporter has to do, and why flint cannot do it for them.** Their `~/.flint/config.toml` (read,
+never written — it is theirs and it is outside this repository) names `thinking_field = ""` for both
+providers, so nothing was ever sent whatever the ladder said: their level, their conversation and their
+screen were all telling the truth about a request that carried no reasoning parameter at all. Adding
+`thinking_field = "reasoning_effort"` and `thinking_off = "none"` under that provider, then `/reload`,
+is what makes `off` reach the endpoint — measured on their own endpoint and model, in the table above.
 
 ### A setting's row says what its value means, not only what its name means — 2026-09-24
 

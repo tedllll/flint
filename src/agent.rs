@@ -443,6 +443,14 @@ impl Agent {
         self.provider.thinking_field()
     }
 
+    /// This endpoint's own word for *do not reason*, empty when it was not given one.
+    ///
+    /// The half of the reasoning setting a person has to be told to understand `off`: with no word,
+    /// `off` sends nothing and the endpoint's own default applies; with one, it is what goes out.
+    pub fn thinking_off(&self) -> &str {
+        self.provider.thinking_off()
+    }
+
     /// Where a compaction would cut this conversation: the newest question, when there is something
     /// above it to fold.
     ///

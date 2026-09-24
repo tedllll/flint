@@ -7704,10 +7704,54 @@ fn the_settings_screen_says_what_a_reasoning_level_means_for_this_endpoint() {
     let reloaded = post_message(port, &token, "/reload");
     let asked = read_until(&mut watching, "\"type\":\"state\"", 20);
 
-    // The third case: `off` on an endpoint that could be asked. This is the sentence that answers "then
-    // why is my model thinking".
+    // The third case: `off` on an endpoint that *could* be asked -- the sentence that answers "then
+    // why is my model thinking", and the behaviour every config written before `thinking_off` has.
     let set_off = post_message(port, &token, "/thinking off");
     let off = read_until(&mut watching, "\"type\":\"state\"", 20);
+
+    // The fourth case, and the one that closes the report: the endpoint named its own word for *do
+    // not reason*, so `off` is now a request that says something instead of a request that says
+    // nothing. Measured on the endpoint flint ships configured, 2026-09-24: nothing sent, 91
+    // characters of reasoning; `reasoning_effort: "none"`, none.
+    std::fs::write(
+        home.join("config.toml"),
+        "default_provider = \"stub\"\n\n\
+         thinking = \"off\"\n\n\
+         [[providers]]\n\
+         name = \"stub\"\n\
+         base_url = \"http://127.0.0.1:9/v1\"\n\
+         model = \"stub-model\"\n\
+         api_key = \"not-a-real-key\"\n\
+         thinking_field = \"reasoning_effort\"\n\
+         thinking_off = \"none\"\n",
+    )
+    .expect("the config with a word for off");
+    let reloaded_word = post_message(port, &token, "/reload");
+    let silent = read_until(&mut watching, "\"type\":\"state\"", 20);
+    // ...and the terminal, asked the same question again, so the two readers are held to one sentence
+    // rather than to two that happen to agree today. The wait is on the *transcript* rather than on a
+    // frame: `/thinking` with no argument changes nothing, and `Live::state` drops a frame identical to
+    // the one before it, so waiting for a frame here would wait the whole timeout and prove nothing.
+    let asked_again = post_message(port, &token, "/thinking");
+    assert!(
+        asked_again.starts_with("HTTP/1.1 202"),
+        "the page's own row was refused: {asked_again:?}"
+    );
+    let mut answered = false;
+    for _ in 0..200 {
+        if std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .contains("off is sent as reasoning_effort=\"none\" on every request")
+        {
+            answered = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        answered,
+        "the terminal never answered `/thinking` after the word for `off` was added: {log:?}"
+    );
 
     drop(watching);
     drop(child.stdin.take());
@@ -7722,8 +7766,10 @@ fn the_settings_screen_says_what_a_reasoning_level_means_for_this_endpoint() {
     assert!(
         set_high.starts_with("HTTP/1.1 202")
             && reloaded.starts_with("HTTP/1.1 202")
-            && set_off.starts_with("HTTP/1.1 202"),
-        "a command the page's own rows send was not accepted: {set_high:?} {reloaded:?} {set_off:?}"
+            && set_off.starts_with("HTTP/1.1 202")
+            && reloaded_word.starts_with("HTTP/1.1 202"),
+        "a command the page's own rows send was not accepted: {set_high:?} {reloaded:?} {set_off:?} \
+         {reloaded_word:?}"
     );
     assert!(
         opening.contains("\"key\":\"thinking\"")
@@ -7753,6 +7799,15 @@ fn the_settings_screen_says_what_a_reasoning_level_means_for_this_endpoint() {
          endpoint's own default still applies: {said}",
         said = only_settings(&off)
     );
+    // The word is not the level, so the sentence names both: the row reads `off` and the request says
+    // `none`. The quotes in it are escaped, because the sentence lives inside a JSON string.
+    assert!(
+        silent.contains("\"value\":\"off\"")
+            && silent.contains("off is sent as reasoning_effort=\\\"none\\\" on every request"),
+        "a provider that named its own word for *do not reason* is still reported as sending nothing, \
+         which is the difference between `off` working and `off` being a word that does nothing: {said}",
+        said = only_settings(&silent)
+    );
     // The transcript is the other reader of the same fact, and it is quoted in the failure of the first
     // assertion above; this keeps the two from drifting apart in the other direction -- a run whose
     // terminal says one thing and whose page says another would have two readers disagreeing about one
@@ -7761,6 +7816,12 @@ fn the_settings_screen_says_what_a_reasoning_level_means_for_this_endpoint() {
         transcript.contains("never asked for a reasoning level"),
         "the terminal's own answer to `/thinking` does not use the sentence the page is handed: \
          {transcript:?}"
+    );
+    // ...and once the endpoint has a word, the terminal says the same new sentence, so `off` reads the
+    // same in both places in *every* case rather than only in the easy one.
+    assert!(
+        transcript.contains("off is sent as reasoning_effort=\"none\" on every request"),
+        "the terminal's own answer to `/thinking` did not follow the word into the request: {transcript:?}"
     );
 }
 

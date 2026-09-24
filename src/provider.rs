@@ -60,15 +60,26 @@ pub struct Provider {
 /// reading it is the opposite of copying it: the value is standard, the field is not, so the person
 /// says which field their endpoint wants and flint asks in that one.
 ///
-/// Nothing is sent unless *both* are set. A run at `off`, or a provider with no `thinking_field`, has
-/// exactly the request body it had before this existed -- which is what keeps a wrong guess about
-/// somebody's endpoint from arriving as a 400 in the middle of a turn.
+/// Nothing is sent unless the field *and* a word for the level are both set. A provider with no
+/// `thinking_field` has exactly the request body it had before this existed -- which is what keeps a
+/// wrong guess about somebody's endpoint from arriving as a 400 in the middle of a turn.
+///
+/// Three facts rather than two, and the third was a bug: `off` used to mean "ask for nothing", which
+/// on an endpoint that reasons unless it is told not to is not a level at all. Reported 2026-09-24 --
+/// *"the settings screen says off and the conversation still has thinking"* -- and measured on
+/// `deepseek-flash`: nothing sent, 91 characters of reasoning; `reasoning_effort: "none"`, none. So
+/// the endpoint's word for *no* is named by the provider's config (`thinking_off`), exactly as the
+/// field is, and `off` with no such word keeps the old, honest behaviour: silence, and a note that
+/// says so.
 #[derive(Clone, Debug)]
 pub struct Thinking {
     /// `off`, `low`, `medium` or `high`.
     pub level: String,
     /// The field name from the provider's config. Empty means "do not ask".
     pub field: String,
+    /// That field's own word for *do not reason*, from the provider's config. Empty means "say
+    /// nothing at `off`", which is what every config written before this key does.
+    pub off: String,
 }
 
 impl Thinking {
@@ -84,13 +95,23 @@ impl Thinking {
         Self::LEVELS.contains(&word)
     }
 
-    /// The field and the level to put in the request, or `None` when nothing is asked for.
+    /// The field and the word to put in it, or `None` when this request asks for nothing.
     pub fn asked(&self) -> Option<(&str, &str)> {
         let field = self.field.trim();
-        if self.level == "off" || field.is_empty() {
+        if field.is_empty() {
+            return None;
+        }
+        // `off` is the one level whose word is not the level: it is the endpoint's, and where the
+        // provider named none there is nothing to send rather than a guess at `"none"`.
+        let word = if self.level == "off" {
+            self.off.trim()
+        } else {
+            self.level.trim()
+        };
+        if word.is_empty() {
             None
         } else {
-            Some((field, self.level.trim()))
+            Some((field, word))
         }
     }
 }
@@ -447,6 +468,7 @@ impl Provider {
             start_timeout_secs: 0,
             proxy: None,
             thinking_field: String::new(),
+            thinking_off: None,
         }
     }
 
@@ -632,10 +654,12 @@ impl Provider {
         // Read before `config` is moved into the struct. The *level* starts at `off` and is set by the
         // run that owns this provider (`Agent::hold_to_thinking`), because it is a choice about the
         // conversation rather than a fact about the endpoint -- which is exactly what the split
-        // between this and `thinking_field` is for.
+        // between this and `thinking_field` is for. The field and the word for `off` are both the
+        // endpoint's, so both come from the config.
         let thinking = Thinking {
             level: "off".to_string(),
             field: config.thinking_field.clone(),
+            off: config.thinking_off.clone().unwrap_or_default(),
         };
         Ok(Provider {
             config,
@@ -684,6 +708,14 @@ impl Provider {
     /// The field this provider carries a level in, empty when it carries none.
     pub fn thinking_field(&self) -> &str {
         self.thinking.field.trim()
+    }
+
+    /// This endpoint's own word for *do not reason*, empty when it was not given one.
+    ///
+    /// Read by the two things that have to tell a person what `off` actually does: the terminal's
+    /// answer to `/thinking` and the settings row the page draws (`main::thinking_note`).
+    pub fn thinking_off(&self) -> &str {
+        self.thinking.off.trim()
     }
 
     /// The level and the field together, for the one caller that builds a body without sending it
@@ -1154,7 +1186,11 @@ mod tests {
             },
             Message::user("and 3+3"),
         ];
-        let thinking = Thinking { level: "off".to_string(), field: String::new() };
+        let thinking = Thinking {
+            level: "off".to_string(),
+            field: String::new(),
+            off: String::new(),
+        };
         let body = request_body("m", &turn, &[], false, &thinking);
         let sent = serde_json::to_string(&body["messages"]).unwrap();
         assert!(
@@ -1165,6 +1201,39 @@ mod tests {
         assert!(sent.contains("2+2"), "the question was dropped: {sent}");
         assert!(sent.contains("\"4\""), "the answer was dropped: {sent}");
         assert!(sent.contains("and 3+3"), "the history was dropped: {sent}");
+    }
+
+    /// The three facts, and the two that make `off` mean something.
+    ///
+    /// The middle pair is the whole point: the same level, the same field, and two different requests
+    /// depending on whether the endpoint's word for *no* was written down. Both are asserted together,
+    /// because a check for either alone passes on a flint that always sends a word or never does.
+    #[test]
+    fn off_is_a_level_only_when_its_word_is_written_down() {
+        let of = |level: &str, field: &str, off: &str| Thinking {
+            level: level.to_string(),
+            field: field.to_string(),
+            off: off.to_string(),
+        };
+
+        assert_eq!(
+            of("off", "reasoning_effort", "none").asked(),
+            Some(("reasoning_effort", "none")),
+            "`off` with the endpoint's own word for it is a request that says something"
+        );
+        assert_eq!(
+            of("off", "reasoning_effort", "").asked(),
+            None,
+            "`off` without one is silence, which is what every config written before `thinking_off` \
+             gets -- and inventing `\"none\"` is the one thing this must not do"
+        );
+        // The ladder itself is untouched: the word sent is the level, whatever the endpoint's word for
+        // `off` happens to be.
+        assert_eq!(
+            of("high", "reasoning_effort", "none").asked(),
+            Some(("reasoning_effort", "high"))
+        );
+        assert_eq!(of("high", "", "none").asked(), None, "no field, no request");
     }
 
     use super::*;

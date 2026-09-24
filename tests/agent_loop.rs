@@ -94,6 +94,12 @@ fn test_config(base_url: &str) -> Config {
             // This endpoint *can* be asked for reasoning, so a test that sets a level exercises
             // the sending rather than the "no field for this provider" path.
             thinking_field: "reasoning_effort".to_string(),
+            // ...and it names its own word for *do not reason*, because this is the endpoint flint
+            // ships configured and that word was measured on it (2026-09-24): nothing sent, 91
+            // characters of reasoning; `reasoning_effort: "none"`, none. The fixture carries it so
+            // that `off` -- the default -- is a level that says something, which is what it is not
+            // on an endpoint whose word nobody has named.
+            thinking_off: Some("none".to_string()),
         }],
         thinking: "off".to_string(),
     }

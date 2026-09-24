@@ -799,7 +799,10 @@ reason the field exists — `off` says what flint asks for and nothing about whe
 a run at `off` against an endpoint that reasons on its own printed thinking while the screen read `off`,
 and that was reported as the screen lying about the run (2026-09-24). The words are the process's, the
 same ones the terminal's answer to `/thinking` prints, so the two readers of that setting cannot
-disagree.
+disagree. The report had a second half, and it is the one that made `off` work: the word the endpoint
+takes for *no reasoning* is now written down too (`thinking_off`, `"none"` for the provider flint ships,
+measured on it), so `off` is a level that goes out instead of a level that says nothing — and the note
+says which of the two it is, in every case.
 
 | Area | Control | What pressing it does |
 |---|---|---|
@@ -809,7 +812,7 @@ disagree.
 | settings | `#settings-close`, the mask, `Escape` | three ways out of the same dialog: its own `close` button, a press anywhere on the mask, and `Escape`. Closing returns the keyboard to `#settings-open`, and opening moves it to `#settings-close` |
 | settings | the rail (`model`, `this run`, `limits`, `tools`, `this conversation`, `background work`) | one screen at a time, built from the page's own list when the dialog opens; the one in force is marked `aria-current="true"` and the others are `hidden`, so a row on another screen cannot be pressed at all. A screen name is the page's own word for *a place it put things* — what is inside it still comes from the frame |
 | settings | any setting whose values are words (`model`, `this run`) | one **button per word the frame listed**, with the one in force pressed (`aria-pressed="true"`); a press sends the frame's own line — `/provider <name>`, `/model <name>`, `/thinking <level>`, `/<switch> <value>`. A word the frame did not list but reports as the value in force is drawn as one more button and pressed, never silently replaced by the first of the others. A setting with a single word is one dead button. There is no `<select>` in a setting: the words *are* the control |
-| settings | a setting the frame gives a `note` (today the reasoning level) | a second dim line under the row's name, in the frame's own words, saying what the value **in force** means for the endpoint. `off` is a statement about what flint asks for, not about whether the model reasons: a provider that names no `thinking_field` is never asked (and a level set on one is kept for a provider that has the field, while nothing is sent), and an endpoint that reasons on its own keeps doing so at any level. The terminal's answer to the same command prints the same sentence |
+| settings | a setting the frame gives a `note` (today the reasoning level) | a second dim line under the row's name, in the frame's own words, saying what the value **in force** means for the endpoint. `off` is a statement about what flint asks for, not about whether the model reasons: a provider that names no `thinking_field` is never asked (and a level set on one is kept for a provider that has the field, while nothing is sent); a provider that names its own word for *no reasoning* (`thinking_off`, e.g. `"none"`) has exactly that sent, so `off` is a level that goes out rather than silence. The terminal's answer to the same command prints the same sentence |
 | settings | a setting whose value is a line (`shell`, `shell_args`, `max_steps`, `proxy`) | a one-line form whose input type is the frame's own `kind`, and a `save` button that is disabled until the value differs from the one in force |
 | settings | one action button, on the screen the frame filed it on | sends the frame's own line — `/reload` and `/say` on `this run`, `/new` and the rest on `this conversation` |
 | settings | the dialog's foot (`#meta`) | not a control: the loaded conversation's model, `cwd`, provider, id, creation time and last usage — the line the header used to carry, under every screen rather than on one |

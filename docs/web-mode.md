@@ -2260,16 +2260,28 @@ like that is a screen reporting a run that does not exist — §8's fault, in th
 cannot fix it, because *what the endpoint does with a level* is not something a control can display.
 
 So a setting row may carry a **`note`**, and the frame decides it rather than the page: `thinking_note`
-in `src/main.rs` is one function with three cases (no field; `off` on an endpoint that has one; a level
-in force), the terminal's answer to `/thinking` and `/config`'s line print it, and the page draws it as
-`.setting-note` under the row's name. The trap the second case covers is the one a person walks into by
-using the screen: a level set on a provider with no field is *kept* — it is the run's level, and it is
-what the next provider, the one with a field, will be asked for — so a row reading `high` while nothing
-is sent is the same confusion in its worse form, and the note stays the "never asked" one either way.
+in `src/main.rs` is one function with four cases (no field; `off` with no word for it; `off` with one;
+a level in force), the terminal's answer to `/thinking` and `/config`'s line print it, and the page
+draws it as `.setting-note` under the row's name. The trap the second case covers is the one a person
+walks into by using the screen: a level set on a provider with no field is *kept* — it is the run's
+level, and it is what the next provider, the one with a field, will be asked for — so a row reading
+`high` while nothing is sent is the same confusion in its worse form, and the note stays the "never
+asked" one either way.
+
+**And the third case is the one where the screen was not merely silent but wrong about itself — same
+report, one round later, 2026-09-24.** `off` had never meant *do not reason*: it meant "ask for
+nothing", so on an endpoint that reasons unless it is told not to, choosing `off` changed nothing at
+all. The endpoint's word for *no* is a third fact about it, and it is now written in the provider table
+as `thinking_off` — the same rule as the field's (the person who knows the endpoint says the word;
+flint ships it only for the provider it ships *and* measured, where nothing sent produced 91 characters
+of reasoning and `reasoning_effort: "none"` produced none). With the word written, `off` is a request
+that says something; without it, it is silence and the note says so, which is exactly what every config
+written before the key keeps.
 
 | Claim | How | Result |
 |---|---|---|
-| The frame says, in the frame's own words, what a reasoning level means for the endpoint in force | `tests/cli_output.rs`, over a real `--web` run, in all three cases, with the frame read to its **last** key (`"type":"state"`) so a partial frame cannot answer for a whole one | an endpoint with no field, a level kept on it, the same level after the field is added to the file and `/reload` (the note changes with it), and `off` on an endpoint that has one. Written red first: the frame's thinking row carried no note at all, which is the report |
+| The frame says, in the frame's own words, what a reasoning level means for the endpoint in force | `tests/cli_output.rs`, over a real `--web` run, in all four cases, with the frame read to its **last** key (`"type":"state"`) so a partial frame cannot answer for a whole one | an endpoint with no field, a level kept on it, the same level after the field is added to the file and `/reload` (the note changes with it), `off` on an endpoint that has a field, and `off` after the endpoint's own word for it is added and `/reload` again — where the note stops saying "nothing is sent" and starts naming what goes out. Written red first: the frame's thinking row carried no note at all, which is the first report; the second (the settings screen saying `off` beside a model that reasons) is what the last case closes |
+| The word that turns reasoning off is a request, not a comment | `tests/json_output.rs`, two stub runs in one test | the same field, the same level, and two bodies: with `thinking_off` named the request carries `reasoning_effort: "none"`; with it absent the key is not there at all. Asserted together because either half alone passes on a flint that always sends a word or never does — and shown red by mutation (with `off` made silent again the second assertion fails with `left: Null`) |
 | The terminal and the page cannot disagree about that setting | the same test, which holds the terminal's own answer to `/thinking` to the sentence the page is handed | one function feeds both, and the assertion is what keeps a later edit from writing a second sentence |
 | The page draws a note the frame carries, in the row's own text | `scripts/web-view-test.js`, with a frame that has one row with a note and one without | the note is the row's second line (`.setting-note`, under `.setting-name`), a row the frame gave none draws exactly one line, and the **control** is still the row's second child — the note must not push the press out of the place the page and the browser harness both read it from. Shown red by mutation: with the `setting-note` append removed the claim fails with `["setting-name"]` against `["setting-name","setting-note"]` |
 | A real browser draws it on the reasoning row | the browser harness, on the model screen | the note is one of the three sentences the frame can carry, so a claim that only asked "is a note drawn" cannot pass on a page that invented one of its own |
