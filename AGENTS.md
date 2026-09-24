@@ -155,8 +155,10 @@ skill_dirs = []                 # extra skill directories, after the standard tw
 thinking = "off"                # off|low|medium|high: reasoning to ask for. "off" sends no
                                 # reasoning parameter at all (the endpoint's own default applies).
                                 # The conversation's file has the last word over this key, and
-                                # --thinking / /thinking over both. Needs the provider's
-                                # `thinking_field` to be set, or nothing is sent and flint says so
+                                # --thinking / /thinking over both. `/thinking <level>` writes this
+                                # key back, so the next run starts there; `--thinking` does not.
+                                # Needs the provider's `thinking_field` to be set, or nothing is
+                                # sent and flint says so
 ```
 
 ```toml

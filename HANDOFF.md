@@ -50,10 +50,13 @@ above it found the sidebar's menu collapsing to a 10px bar (one `web_view` test,
 conversations in the browser harness and three new browser claims, one of which carries its own control),
 and re-measured an **eleventh** time the same day, after the round above that — deleting the conversation
 the run is in (the refusal test rewritten into two `cli_output` tests, two more `--web` tests for the
-frames a delete and a turn push, and seven new browser claims):
+frames a delete and a turn push, and seven new browser claims), and re-measured a **twelfth** time the
+same day, after the round at the top of that section — the reasoning level that went back to `off` and
+the row menu that left the window (two `cli_output` tests, one of them rewritten twice before it failed
+for the right reason, and two new browser claims, one of which carries its own control):
 `cargo test`
-**700 passing, 1 ignored** across the 14 suites (lib **388**, bin **9**, `agent_loop` 34,
-`balance` 7, `cli_output` **122**, `json_output` 41, `say` 6,
+**702 passing, 1 ignored** across the 14 suites (lib **388**, bin **9**, `agent_loop` 34,
+`balance` 7, `cli_output` **124**, `json_output` 41, `say` 6,
 `search_tool` 4, `task` 17, `term_capture` 20 + 1 ignored, `tty_hangup` **0 on Windows** and 3 on Unix
 — the suite is `#![cfg(unix)]`, and the library carries a few `#[cfg(unix)]` tests of its own, so the
 ubuntu job's total is larger and is *not* quoted here as if it were this number — `web_view` **42**,
@@ -63,7 +66,7 @@ ubuntu job's total is larger and is *not* quoted here as if it were this number 
 more step of that same CI job** — `examples/python/test_call.py` and `examples/mcp/test_mcp.py`, each
 resolving the binary `cargo test` just built for itself and refusing a pass that came from an installed
 `flint` on `PATH`; the
-browser harness run by hand at **130/130 claims held**, printing the list of drives and not-drives it is
+browser harness run by hand at **134/134 claims held**, printing the list of drives and not-drives it is
 bounded by. The release binary on `PATH` is the tree's (`flint --version` → `flint 0.1.0`, exit 0, and
 its SHA-256 is the one `target/release/flint.exe` was built with).
 
@@ -1833,6 +1836,62 @@ picker, type `/config` into the composer, and see whether the answer lands in th
 the block is drawn — then open the `commands` panel and read it against `/help` in the terminal.
 
 ## What was just done
+
+### The reasoning level stops going back to `off`, and the row's menu stops leaving the window — 2026-09-23
+
+**Reported directly, after the delete round below was confirmed working: "two problems. First, open
+settings — the thinking strength is still `off`. Second, clicking a conversation's three dots, the little
+window is too close to the left, it is off the screen."** Two unrelated defects, both found by using the
+page rather than by reading it, and both fixed in one round because the second one arrived in the same
+breath.
+
+**The level: two paths to the same loss.** `Provider::new` deliberately starts at `off` — the *run* that
+owns the provider is what sets the level, which is exactly what makes `/model`, `/provider` and `/reload`
+carry it (they replace the agent around the conversation it is already in, through `continue_conversation`
+and `carry_the_runs_decisions`). A conversation opened *afterwards* is a new agent, and `/new` built one
+without handing the level over: the fresh conversation came back at `off`, for a run somebody had set to
+`high` a moment earlier. `/delete` on the conversation being written is the same door since the round
+below, which is why the report arrived one press after it — the user's exact sequence. The fix is
+`fresh_conversation` handing the new agent what the old one was at, through `carry_the_runs_decisions`,
+the same function the funnel and `/fork` use.
+
+The second path outlives the process, and it is the one a restart exposes: `/thinking <level>` held the
+level in the run and wrote it into the *conversation's* file, and never into `config.toml` — so the next
+run started at the config's `off` however recently the level had been chosen. `/verbose`, `/detail` and
+`/readonly` all save the config; `/thinking` now does too, and both places are written on purpose: the
+conversation's line is what a *resumed* conversation comes back at (`hold_to_what_the_file_says`), and the
+key is what the next conversation starts at. `/hear-peers` is the one switch that keeps nothing, and it
+says so where it is set — this arm said nothing, which is what made the loss look like a bug in the
+screen.
+
+Four tests, and the two that had to be rewritten are the part worth reading. `cli_output`'s
+`a_new_conversation_keeps_the_reasoning_level_the_run_was_at` (uses `/new`, then a second command whose
+*printed answer* is the fence, then reads a subscriber opened after it) and
+`the_reasoning_level_a_person_sets_is_kept_for_the_next_run` (two real processes in one home). The first
+version of the first test was **vacuous twice over**: it set the level in `config.toml`, where a config
+that already said `high` and a run carrying `high` produce the same frame — so it passed against the bug
+— and then read a *new* subscriber, which `Live::state` may answer with the frame from before the move,
+because a frame identical to the last is dropped. Both were rewritten until the test failed for the
+reason it exists: it now sets the level **with the command** and fences the frame read on a second
+command's printed answer. Red before the fix, with the run's own report saying `thinking off` after the
+move.
+
+**The menu: arithmetic, not taste.** The sidebar can be dragged down to 160px, and `#sessions li
+.session-menu` carried `min-width: 150px` against `max-width: 100%` — a used width is never below its own
+floor, so at the narrow end the box took the whole row; and the `8px` it is offset by is measured from the
+row's *right*, so a box as wide as its row hangs 8px past the row's left, which on the grid's first
+column is the window's edge. The floor is now the row's own width and the max is `calc(100% - 8px)`, so
+the sentences wrap instead: a narrow menu is readable, a menu with its left edge outside the window is
+not. Measured with the old rule in place, on a 160px sidebar in a 1374px window: the box at `left: -6`,
+157px wide, its three rows inside it — the rows were never the problem, the box's left edge was.
+
+Two new browser claims, run by hand: the geometry one (the grip dragged to its own floor; the box must be
+inside the sidebar *and* the viewport) with its own control — the old rule put back, which must put it
+outside again, and which is why the control restores **both** halves of that rule: the new `max-width`
+caps the box whatever `min-width` says, and the first version of the control restored only the floor and
+therefore measured the fix. And, in the delete phase, the run's own screen read back after the level is
+pressed and the conversation holding it is thrown away — `133/134` on the first run of the pair, with the
+geometry claim red and its control green, then `134/134`.
 
 ### The conversation you are in can be deleted, and the right side goes back to its page — 2026-09-23
 

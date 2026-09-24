@@ -930,6 +930,7 @@ answer is the CSS default (below the row).
 | The sidebar's menu is not the composer's menu | `tests/web_view.rs` over the page's bytes | the drawer creates `session-menu`, the CSS has rules under that name, and no CSS rule styles the sidebar's menu under `#sessions li .menu` |
 | The menu is a box its rows fit in | the browser harness | every action row's rectangle is inside the menu's own rectangle; red before this round, when the box was 10px and its rows were at `y=976` and `y=1011` inside a box ending at `y=981` |
 | A menu on the last conversation opens where it can be read, and only the flip puts it there | the browser harness, in a shortened window with the list scrolled to its bottom | the claim carries its own control: it requires the menu to be inside the list's box *and* requires that removing the flip puts it outside, so it cannot pass over a menu that merely happened to fit. Red with the flip removed from the page: `up:false, flipped:false`, menu at `y=243`, list box ending at `y=243` |
+| A menu on a sidebar dragged narrow stays on the screen, inside the row it belongs to | the browser harness, with the grip dragged to its own floor and the box's old floor put back as the control | reported directly on 2026-09-23 — *the three dots' little window is too close to the left, it is off the screen* — and measured on a 160px sidebar in a 1374px window, with the old rule in place: the box at `left: -6`, so 6px of it outside the window, with its three rows inside it and 157px wide. The cause is arithmetic rather than taste: `min-width: 150px` beats `max-width: 100%` (a used width is never below its own floor), and the 8px the box is offset by is measured from the row's *right*, so a box as wide as its row hangs 8px past the row's left — which, on the first column of the grid, is the window's edge. The floor is now the row's own width, so the sentences wrap; the claim's control requires that putting the old floor back puts the box outside again, so it cannot pass on a sidebar that merely happened to be wide |
 
 
 **A row acts on the conversation it was opened from, the run's own included — asked for 2026-09-23.**
@@ -979,6 +980,35 @@ the message, so a frame arriving for some other reason cannot make the claim pas
 | The same rule for `/archive`, and the file really is in the archive | `tests/cli_output.rs` | `archiving_the_open_session_files_it_away_and_starts_a_fresh_one`: the archived file holds the name, and the sessions root holds one file — the new conversation — so the archived one is not still being written |
 | The page is told both halves, and the list really is empty | `tests/cli_output.rs`, a real `--web` process | `event: sessions` **and** `event: reset` on the feed after the delete, and `GET /sessions` answers `"sessions":[]` with no title in it. Asserting the frames alone would pass over a route that went on listing the file it had just removed |
 | A turn tells the page the list may have moved | `tests/cli_output.rs`, a real `--web` process | `saying_something_tells_the_page_the_list_may_have_changed`: red first, with `turn.started` on the feed and no `sessions` frame. It carries its own control — the same test asserts that **no** `sessions` frame arrived before the message — and it also asserts the file holds the question and `GET /sessions` shows it, which is the row the page is about to draw |
+
+
+**The reasoning level a person sets is not quietly lost — reported 2026-09-23.**
+*"Two problems. First: open settings, the thinking strength is still off."* Two different paths to the
+same loss, and the delete above is what made the first one visible, so they are one entry.
+
+The level is the **run's**: `Provider::new` deliberately starts at `off` and the run that owns the
+provider is the thing that sets it, which is what makes `/model`, `/provider` and `/reload` carry it —
+they replace the agent around the conversation it is already in, through `continue_conversation`. A
+conversation opened afterwards is a *new* agent, and `/new` built one without handing the level over, so
+the fresh conversation came back at the provider's starting word: `off`, for a run somebody had set to
+`high` a moment earlier. `/delete` on the conversation being written is the same door since the round
+above, which is why the report arrived one press after it. The fix is `fresh_conversation` handing the
+new agent what the old one was at (`carry_the_runs_decisions`, the same function the funnel and `/fork`
+use) rather than inventing a third rule.
+
+The second path outlives the process: `/thinking <level>` held the level in the run and wrote it into
+the conversation's file, and never into `config.toml` — so the *next* run started at the config's `off`
+however recently the level had been chosen, and the settings screen is where that reads as reasoning
+turning itself off. `/verbose`, `/detail` and `/readonly` all save the config; this one now does too, and
+both places are written on purpose: the conversation's line is what a *resumed* conversation comes back
+at (`hold_to_what_the_file_says`), and the key is what the next conversation starts at. `/hear-peers` is
+the one switch that keeps nothing, and it says so where it is set.
+
+| Claim | How | Result |
+|---|---|---|
+| A conversation opened after the one a level was set in starts at that level | `tests/cli_output.rs`, a real `--web` process | `a_new_conversation_keeps_the_reasoning_level_the_run_was_at`: red first, with the run's own report saying `thinking off` after the move. Two things about how it is written are the point. The level is set **by the command** rather than in the file, because a config that already said `high` and a run carrying `high` are the same frame — the first version of this test passed for exactly that reason and had to be thrown away. And the frame is read from a subscriber opened after a second command whose *printed answer* is the fence, because `Live::state` drops a frame identical to the last: a level that was kept says nothing, which is the same silence as a bug that keeps quiet |
+| The level survives the conversation it was set in being deleted, from the page | the browser harness, which presses `high` on the settings screen and then deletes the run's own conversation | the same screen reads `high` afterwards. This is the claim that closes the loop the report came through: the screen, the press and the delete, with the run's own words as the witness |
+| The level is written where the next run reads it | `tests/cli_output.rs`, two real runs in one home | `the_reasoning_level_a_person_sets_is_kept_for_the_next_run`: red first on the config file, and then a second process reports the level in force — the config's own key is what a run that keeps no conversation of its own comes back at |
 
 
 **The open conversation's name is edited in the same menu — added 2026-09-17.** The name is the one

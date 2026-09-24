@@ -2614,7 +2614,14 @@ fn fresh_conversation(
         &target.model,
         parent_session().as_deref(),
     )?);
-    let agent = agent::Agent::new(cfg, provider, old.readonly(), cwd, writer);
+    let mut agent = agent::Agent::new(cfg, provider, old.readonly(), cwd, writer);
+    // The level and the answer shape are the *run's* decisions, and they are handed over by the same
+    // function the funnel and `/fork` use, so a conversation that begins here begins the way this run
+    // is asking rather than at `Provider::new`'s starting word. Without it `/new` -- and a destructive
+    // row on the conversation being written, which is now the same door -- quietly turned reasoning
+    // back to `off` for somebody who had set a level, and the settings screen then said so: reported
+    // directly on 2026-09-23, one press after the conversation it was in was deleted.
+    carry_the_runs_decisions(&mut agent, old);
     Ok((agent, target.clone()))
 }
 
@@ -4018,6 +4025,17 @@ async fn handle_command(
                 // this run, which is the same order `record_schema` writes in.
                 agent.hold_to_thinking(word);
                 agent.record_thinking(word)?;
+                // ...and the config, because this is a *setting* and not only a word about the
+                // conversation in front of you. `/verbose`, `/detail` and `/readonly` are written down
+                // by their own commands; a level that was gone from the next run read as the settings
+                // screen turning reasoning off by itself, which is how it was reported on 2026-09-23.
+                // The two places are both written on purpose and neither is redundant: the
+                // conversation's own line is what a *resumed* conversation comes back at
+                // (`hold_to_what_the_file_says`), and this key is what the next conversation starts at
+                // until somebody says otherwise. `/hear-peers` is the one switch here that keeps
+                // nothing, and it says so where it is set.
+                cfg.thinking = word.to_string();
+                cfg.save()?;
             }
             let level = agent.thinking().to_string();
             let field = agent.thinking_field().to_string();

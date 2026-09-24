@@ -1259,6 +1259,73 @@ async function main() {
     await page.send("Emulation.clearDeviceMetricsOverride");
     await sleep(400);
 
+    // A menu is a box the *row* holds, sideways as well as downward. The sidebar can be dragged down
+    // to 160px, and this box carried `min-width: 150px` against `max-width: 100%` -- a used width is
+    // never below its own floor, so on a sidebar dragged to the narrow end the box grew past the row's
+    // left edge and out of the window. Reported directly, 2026-09-23: *the three dots' little window is
+    // too close to the left, it is off the screen*. The width is made with the grip, which is the door
+    // a person has for it, and the geometry is measured against the sidebar and the viewport rather
+    // than against what the page meant to do.
+    {
+      const dragged = await page.drag("#grip", -120);
+      const side = await page.js(
+        `(() => { const r = document.getElementById("sidebar").getBoundingClientRect();
+          return { left: Math.round(r.left), right: Math.round(r.right), width: Math.round(r.width),
+                   win: window.innerWidth }; })()`
+      );
+      const narrow = await page.js(
+        `(() => { const items = () => Array.from(document.querySelectorAll("#sessions li"));
+          const first = items()[0]; if (!first) return null;
+          const title = first.title;
+          // Found again by title after the press, because the press repaints the list and the row it
+          // was on is a new node afterwards -- the same reason the flip claim above re-finds its row.
+          first.querySelector("button.more").click();
+          const li = items().find((r) => r.title === title);
+          const m = li && li.querySelector(".session-menu"); if (!m) return null;
+          const box = m.getBoundingClientRect();
+          const rows = Array.from(m.querySelectorAll("button.row, form.field"));
+          return { left: Math.round(box.left), right: Math.round(box.right),
+                   width: Math.round(box.width), height: Math.round(box.height),
+                   rows: rows.length,
+                   rowsHaveWidth: rows.every((r) => r.getBoundingClientRect().width > 0),
+                   win: window.innerWidth }; })()`
+      );
+      check(
+        "a menu on a sidebar dragged narrow stays on the screen, inside the row it belongs to",
+        dragged === true && !!narrow && narrow.rows > 0 && narrow.rowsHaveWidth === true &&
+          narrow.width > 40 && narrow.height > 10 &&
+          narrow.left >= side.left - 1 && narrow.right <= side.right + 1 &&
+          narrow.left >= 0 && narrow.right <= narrow.win,
+        `sidebar: ${JSON.stringify(side)}, menu: ${JSON.stringify(narrow)}`
+      );
+      // The control: the rule put back on the same box, which is where it was being drawn. Both halves
+      // of it, because the floor alone no longer decides anything -- `max-width: calc(100% - 8px)` caps
+      // the box whatever `min-width` says, which *is* the fix, so a control that restored only the
+      // floor would be measuring the fix. A claim that only measured the page as it stands could pass
+      // on a sidebar that happened to be wide enough; this one cannot, because it also requires that
+      // the old rule does *not* fit.
+      const withFloor = await page.js(
+        `(() => { const m = document.querySelector("#sessions li .session-menu"); if (!m) return null;
+          m.style.minWidth = "150px"; m.style.maxWidth = "100%";
+          const r = m.getBoundingClientRect();
+          return { left: Math.round(r.left), right: Math.round(r.right), win: window.innerWidth }; })()`
+      );
+      check(
+        "and the rule it used to carry is what put it off the screen",
+        !!withFloor && withFloor.left < 0,
+        `menu with the old rule: ${JSON.stringify(withFloor)}`
+      );
+      // Put back the way a person puts it back, and the menu closed by the press that opened it.
+      await page.js(
+        `(() => { const li = document.querySelector("#sessions li");
+          const m = li && li.querySelector(".session-menu");
+          if (m) { m.style.minWidth = ""; m.style.maxWidth = ""; }
+          const b = li && li.querySelector("button.more"); if (b) b.click(); return true; })()`
+      );
+      await page.doubleClick("#grip");
+      await sleep(300);
+    }
+
     // The second press is the one that sends, and it sends *this row's* number: the fixture session
     // is removed by the menu on its own row, and the file is the witness (the terminal would agree
     // with a menu that had sent the wrong conversation's number and been refused).
@@ -2842,6 +2909,35 @@ async function main() {
     // In a block of its own: `held` and `closed` are names the phases above already use for other
     // things, and one `main` is one scope.
     {
+    // The level a person sets in the settings screen belongs to the run, and this phase's move -- a
+    // fresh conversation started, then the old file thrown away -- is where it used to be dropped: the
+    // new agent was built at the provider's starting word rather than at the level the run was asking
+    // for, so the screen somebody had just used to set `high` read `off` again. Reported directly on
+    // 2026-09-23, in this sequence and through this door, which is why the claim is made here rather
+    // than beside the settings screen's own claims above.
+    await openSettings("model");
+    const levelBefore = await page.js(CHOICES_OF("model", "thinking"));
+    const pressLevel = await page.js(
+      `(() => { const row = Array.from(document.querySelectorAll("#fields-model .setting"))
+          .find((s) => { const n = s.querySelector(".setting-name");
+            return n && n.textContent.trim() === "thinking"; });
+        if (!row) return null;
+        const b = Array.from(row.querySelectorAll(".choices button"))
+          .find((x) => x.textContent.trim() === "high");
+        if (!b) return null; b.id = "harness-level"; return b.textContent; })()`
+    );
+    if (pressLevel === "high") await page.click("#harness-level");
+    const levelSet = await page
+      .waitFor(`${VALUE_OF("model", "thinking")} === "high" && "high"`, "the level to be set", 25)
+      .catch(() => null);
+    check(
+      "the reasoning level is a word a person presses, on the screen the run's own state draws it on",
+      !!levelBefore && Array.isArray(levelBefore.words) && levelBefore.words.includes("high") &&
+        pressLevel === "high" && levelSet === "high",
+      `thinking: ${JSON.stringify(levelBefore)} -> ${JSON.stringify(levelSet)}`
+    );
+    await closeSettings();
+
     const held = await page.js(
       `(() => { const li = document.querySelector("#sessions li.current");
         if (!li) return null;
@@ -2893,6 +2989,20 @@ async function main() {
       "the second press deletes the conversation the run is in and starts a fresh one",
       !!held && closed.includes("deleted ") && closed.includes("started a new session"),
       `run printed: ${JSON.stringify(closed.slice(0, 300))}`
+    );
+
+    // ...and what the run was asking with is not one of the things the move threw away. Read back off
+    // the same screen it was set on, because that screen is where the loss was reported: a fresh
+    // conversation is a new file and a new agent, and the level belongs to the run rather than to
+    // either. The provider starts at `off` in `Provider::new`, so this is the claim that says the run's
+    // decision is handed over rather than lost with the file.
+    await openSettings("model");
+    const levelAfter = await page.js(CHOICES_OF("model", "thinking"));
+    await closeSettings();
+    check(
+      "and the level the run was at survives the conversation it was set in being thrown away",
+      !!levelAfter && levelAfter.on === "high",
+      `thinking after the move: ${JSON.stringify(levelAfter)}`
     );
 
     const swept = await page

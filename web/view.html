@@ -507,7 +507,14 @@
      no height. Every claim about this menu was reading `textContent` and could not see it. */
   #sessions li .session-menu {
     position: absolute; right: 8px; top: 100%; z-index: 5;
-    min-width: 150px; max-width: 100%;
+    /* Never wider than the row it hangs off, and never past that row's own left edge. `min-width:
+       150px` used to sit here against `max-width: 100%`, and a used width is never below its own
+       floor -- so on a sidebar dragged to the narrow end of its range (160px) the box took the whole
+       row and then stuck 8px out of the window, because `right: 8px` is measured from the row's right.
+       Reported directly, 2026-09-23: *the three dots' little window is too close to the left, it is off
+       the screen*. The floor is now the row's own width and the sentences wrap instead: a menu that is
+       narrow is readable, a menu with its left edge outside the window is not. */
+    min-width: 0; max-width: calc(100% - 8px);
     background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px;
     box-shadow: 0 6px 18px rgba(0, 0, 0, .35);
     font-size: 12.5px;

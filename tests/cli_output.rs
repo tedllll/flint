@@ -7482,6 +7482,148 @@ fn a_command_that_fails_does_not_end_the_session() {
     );
 }
 
+/// The reasoning level belongs to the run, so a conversation opened afterwards starts at it.
+///
+/// The level is held on the provider rather than in a local, which is what makes it survive the
+/// rebuilds that *keep* a conversation (`/model`, `/provider`, `/reload`). A conversation opened
+/// after one of those is still this run, and the level is a decision about how this run asks -- so
+/// opening another conversation must not look the level up in the config again. Reported directly,
+/// 2026-09-23, one press after the conversation the run was in was deleted: the settings screen said
+/// `off`, because the fresh conversation had been built without the level the run was at.
+///
+/// The level is set *by the command* and not in the file, which is what makes this test able to fail:
+/// a config that already said `high` and a run carrying `high` are the same frame, so a test written
+/// that way passes whether the level is carried or re-read. What a person does is press the word in
+/// the settings screen, which is this.
+#[tokio::test]
+async fn a_new_conversation_keeps_the_reasoning_level_the_run_was_at() {
+    // `test_home`'s file names no level, so the run opens at the default and the setting is the
+    // person's rather than the file's -- which is the whole subject here.
+    let home = test_home("thinking-new", "http://127.0.0.1:9/v1");
+
+    let log = home.join("transcript.txt");
+    let errors = home.join("stderr.txt");
+    let mut child = binary()
+        .arg("--web")
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::fs::File::create(&log).expect("transcript file"))
+        .stderr(std::fs::File::create(&errors).expect("stderr file"))
+        .spawn()
+        .expect("failed to run flint");
+
+    let (port, token) = port_and_token(&wait_for_url(&log));
+    let mut watching = http_stream(port, "/events", &token);
+    // The value rather than the key: `"value":"off"` is the thinking setting's own value and nothing
+    // else in the frame spells it -- the ladder itself is offered as a list of choices.
+    let opening = read_until(&mut watching, "\"value\":\"off\"", 20);
+
+    let set = post_message(port, &token, "/thinking high");
+    let raised = read_until(&mut watching, "\"value\":\"high\"", 20);
+
+    let started = post_message(port, &token, "/new");
+    // A second command whose *printed answer* is the fence. The loop pushes the state frame at the top
+    // of every turn, so once the terminal has answered this one, the frame `/new` produced exists --
+    // and a page opening its settings screen now is handed that frame rather than the one from before
+    // the move. The already-open stream cannot carry this claim: `Live::state` drops a frame identical
+    // to the last, so a level that was *kept* says nothing there, which is the same silence as a bug
+    // that keeps quiet. What a person does is open the screen afterwards, which is this read.
+    let fence = post_message(port, &token, "/thinking");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut transcript = String::new();
+    while std::time::Instant::now() < deadline {
+        transcript = std::fs::read_to_string(&log).unwrap_or_default();
+        // Two reports and the line about the move: the level was set, and the run is in a conversation
+        // that began after it. Both are the terminal's own words rather than an inference.
+        if transcript.matches("thinking ").count() >= 2 && transcript.contains("started a new session") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let mut after = http_stream(port, "/events", &token);
+    let kept = read_until(&mut after, "\"key\":\"thinking\"", 20);
+
+    drop(after);
+    drop(watching);
+    drop(child.stdin.take());
+    let exited = wait_for_exit(&mut child, 20);
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit");
+    assert!(
+        opening.contains("\"value\":\"off\""),
+        "the run did not open at the default level, so the claim below has no subject: {opening:?}"
+    );
+    assert!(
+        set.starts_with("HTTP/1.1 202") && raised.contains("\"value\":\"high\""),
+        "the level was not set, so a conversation opened afterwards could not have kept it: \
+         {set:?} {raised:?}"
+    );
+    assert!(
+        started.starts_with("HTTP/1.1 202") && fence.starts_with("HTTP/1.1 202"),
+        "a command this test needs to have happened was refused: {started:?} {fence:?}"
+    );
+    assert!(
+        transcript.matches("thinking ").count() >= 2 && transcript.contains("started a new session"),
+        "the run did not open a new conversation, so nothing was carried or dropped: {transcript:?}"
+    );
+    // The report the fence asked for, which is the same fact as the frame below and needs no timing:
+    // `started a new session` came before a `thinking` line that still names the level.
+    let after_the_move = transcript
+        .split_once("started a new session")
+        .map(|(_, rest)| rest.to_string())
+        .unwrap_or_default();
+    assert!(
+        after_the_move.contains("thinking high"),
+        "the run's own report says it is no longer at the level that was set: {after_the_move:?}"
+    );
+    assert!(
+        kept.contains("\"value\":\"high\""),
+        "a conversation opened after the one the level was set in came back at the provider's default \
+         instead of the run's: a person who sets a level and opens another conversation loses it, and \
+         the settings screen is where they see that. Frame: {kept:?}"
+    );
+}
+
+/// The level a person sets is kept where the next run reads it, as the other switches on that screen are.
+///
+/// `/verbose`, `/detail` and `/readonly` write the config; `/thinking` wrote only the conversation's
+/// file, so the level somebody chose in the settings dialog was gone from the next run -- and the
+/// settings screen, which is where they set it, opened on `off`. Reported directly, 2026-09-23. Both
+/// places are written on purpose: the conversation's own line is what a *resumed* conversation comes
+/// back at (`resolve_thinking`), and the config key is what the next conversation starts at, which is
+/// the rule the other switches already follow. `/hear-peers` is the one that does not persist, and it
+/// says so out loud -- this arm said nothing, which is what made the loss look like a bug in the screen.
+#[test]
+fn the_reasoning_level_a_person_sets_is_kept_for_the_next_run() {
+    // `test_home`'s file names no level, so this is a run at the default: the state the complaint
+    // describes, and the one a person who has just set a level is looking at afterwards.
+    let home = test_home("thinking-kept", "http://127.0.0.1:9/v1");
+
+    let first = repl(&home, &["/thinking high", "/exit"]);
+    let written = std::fs::read_to_string(home.join("config.toml")).unwrap_or_default();
+    // A second process in the same home, which is the only thing that says what the *next* run does:
+    // `/thinking` with no argument reports the level in force, and a run that keeps no conversation of
+    // its own comes back at the config's.
+    let next = repl(&home, &["/thinking", "/exit"]);
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(
+        first.contains("thinking high"),
+        "the level was not set in the run that was asked for it, so nothing was kept either: {first:?}"
+    );
+    assert!(
+        written.contains("thinking = \"high\""),
+        "the level never reached the file the next run reads: {written:?}"
+    );
+    assert!(
+        next.contains("thinking high"),
+        "the next run came back at the config's word instead of the level that was set -- which is \
+         what a person sees as the settings screen turning reasoning off by itself: {next:?}"
+    );
+}
+
 /// The page is told what its controls could offer, and told again when that changes.
 ///
 /// §8's read channel, and it comes before any control because a picker cannot be drawn without

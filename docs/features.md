@@ -332,7 +332,7 @@ press; `terminal` is not offered on the page at all.
 | `/config` | show shell, steps, proxy | a listing of the settings that matter, plus the config path | panel | — |
 | `/config edit` | change shell, steps, proxy | interactive questions | form | — |
 | `/config set <key> <value>` | change one setting **and use it now** | `key = value` | form | an unknown key is refused by name, listing the keys it takes; `max_steps = 0` is refused; the running tools are rebuilt |
-| `/thinking [off\|low\|medium\|high]` | how much reasoning to ask for | the level, and whether the endpoint has a field for it | toggle | a level with no `thinking_field` on the provider says nothing is sent. The level is the run's rather than the agent object's: `/model`, `/provider` and `/reload` replace the agent around the conversation and keep it — `thinking = "medium"` in the config survives picking another model |
+| `/thinking [off\|low\|medium\|high]` | how much reasoning to ask for | the level, and whether the endpoint has a field for it | toggle | a level with no `thinking_field` on the provider says nothing is sent. The level is the run's rather than the agent object's: `/model`, `/provider` and `/reload` replace the agent around the conversation and keep it — `thinking = "medium"` in the config survives picking another model. A conversation opened afterwards — `/new`, or a destructive row on the conversation being written — starts at the level the run is at rather than at the provider's starting word, and `/thinking <level>` **saves** the config key, so the next run starts there too |
 | `/readonly [on\|off]` | toggle the write guard | the new state | toggle | bare toggles; the guard is all-or-nothing (§7.6) |
 | `/verbose [off\|on\|full]` | how much of the agent's activity to narrate | the new level | toggle | — |
 | `/detail [on\|off]` | print tool output, or one line per result | the new level | toggle | — |
@@ -378,7 +378,7 @@ press; `terminal` is not offered on the page at all.
 | `/name [text]` | name this conversation | bare: `name: <title>` or `(unnamed)` — including for a conversation that has said nothing yet, which has no file to read a title from; with text: `named: <text>` | form | the page's sidebar is told, so a rename shows up there |
 | `/archive <n\|id>` | file one away, out of the list | `archived <path>` — and `started a new session` when it was the conversation you are in | danger | on the conversation being written the run closes it first: a fresh conversation is started, then the old file is filed away, so nothing is writing to the path that moved. The page's list is refreshed and its pane follows the new conversation |
 | `/delete <n\|id>` | delete one | `deleted <path>` — and `started a new session` when it was the conversation you are in | danger | the same rule, because removing the file under the writer is the same problem with no `mv` to hide it; the run is left in a conversation nothing has been said in, so it has no file and the page's right side goes back to the page it opens with; irreversible |
-| `/new` | start a fresh conversation | `started a new session` | button | `--no-session` refuses it with the one sentence every such door uses |
+| `/new` | start a fresh conversation | `started a new session` | button | `--no-session` refuses it with the one sentence every such door uses. The run's reasoning level and answer shape are carried into the new conversation, because they are decisions about the run rather than about the file it was writing |
 
 ### 5.6 The terminal's own
 
@@ -915,7 +915,7 @@ documentation says missing keys take their default. Inside a `[[providers]]` tab
 | `tool_detail` | false | whether tool output is printed | `/detail on\|off` (**saves**) |
 | `instructions` | `hint` | how `AGENTS.md` reaches the prompt (`hint`, `paste`, `off`) | **file only** |
 | `skill_dirs` | none | extra skill directories, after the standard two | **file only** |
-| `thinking` | `off` | the level to ask for | **file only** — `--thinking` and `/thinking` write the *session*, not this key |
+| `thinking` | `off` | the level to ask for | `--thinking` for one run; `/thinking <level>` **saves** this key, and writes the level into the conversation as well, because a resumed conversation comes back at its own |
 | `search` | absent | the `search` tool's credential and endpoint | **file only** |
 | per provider: `name`, `base_url` | **required** | the endpoint | `/provider add`, `/provider edit` |
 | per provider: `model` | `""`, and an empty one is refused at startup | the model | `/model <name>` (**saves**) |
