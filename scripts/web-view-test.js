@@ -266,15 +266,13 @@ const kinds = (d) => d.blocks.map((b) => b.kind);
 // The dialog's shape, in one place. It has moved twice under these checks -- the settings rows became
 // a text block with a control beside them, and a screen's command rows moved inside a group per class
 // -- and a check that spells the walk out has to be edited every time, which is how an assertion
-// quietly ends up examining nothing. So: a setting row is a name, what changing it means, and the
-// control; a screen's rows are the groups in `#row-list-<screen>`, and a group holds its rows in a
+// quietly ends up examining nothing. So: a setting row is what changing it means, and the control; a
+// screen's rows are the groups in `#row-list-<screen>`, and a group holds its rows in a
 // `group-rows` box under a heading it may not have.
 const settingsOf = (page, screen) => page.__node("fields-" + screen).children;
 const controlOf = (row) => row.children[1];
 const namesOf = (page, screen) =>
   settingsOf(page, screen).map((row) => row.children[0].children[0].textContent);
-const helpsOf = (page, screen) =>
-  settingsOf(page, screen).map((row) => row.children[0].children[1].textContent);
 const wordsOf = (control) => control.children.map((choice) => choice.textContent);
 const chosenOf = (control) => {
   const on = control.children.find((choice) => choice.getAttribute("aria-pressed") === "true");
@@ -538,10 +536,13 @@ check("a state frame becomes a control per setting, on the screen the frame name
     ],
   }));
 
-  eq(namesOf(page, "model"), ["provider", "model"],
-     "the settings the frame filed on that screen, in the frame's order");
-  eq(helpsOf(page, "model"), ["switch endpoint", "switch model"],
-     "each row says what changing it means");
+  eq(namesOf(page, "model"), ["switch endpoint", "switch model"],
+     "the settings the frame filed on that screen, in the frame's order, each named by what it does");
+  eq(
+    settingsOf(page, "model").map((row) => row.getAttribute("data-key")),
+    ["provider", "model"],
+    "and addressed by the frame's key, which is the config file's own word for it"
+  );
   // The control is the words themselves: one press per value the frame named, with the one in force
   // filled in. A `<select>` was the same fact behind a control the OS drew, which is why no setting
   // is drawn with one any more.
@@ -552,7 +553,7 @@ check("a state frame becomes a control per setting, on the screen the frame name
   eq(providers.children[0].disabled, false, "two providers is a choice");
   eq(providers.children[0].tag, "button", "and each word is pressable");
   eq(providers.title, "switch endpoint", "and the control explains itself on hover");
-  eq(namesOf(page, "run"), ["verbose"],
+  eq(namesOf(page, "run"), ["how much to narrate"],
      "a setting goes on the screen the frame named, not on the first one");
   eq(chosenOf(controlOf(settingsOf(page, "run")[0])), "full", "showing what is in force");
 
@@ -673,12 +674,12 @@ check("the frame's rows are drawn on the screens it names, and only there", () =
     ],
   }));
   eq(page.__node("row-list-limits").hidden, false, "a screen with rows on it is offered");
-  eq(rowsOf(page, "limits").map((r) => r.children[0].textContent), ["/config"],
-     "a report row is on the screen the frame filed it on");
-  eq(rowsOf(page, "run").map((r) => r.children[0].textContent), ["/reload"],
+  eq(rowsOf(page, "limits").map((r) => r.children[0].textContent), ["show shell, steps, proxy"],
+     "a report row is on the screen the frame filed it on, saying what it does rather than what to type");
+  eq(rowsOf(page, "run").map((r) => r.children[0].textContent), ["re-read the config file"],
      "and an action on its own");
   eq(rowsOf(page, "conversation").map((r) => r.children[0].textContent),
-     ["/resume <n|id>", "/name [text]", "/delete <n|id>"],
+     ["switch to one of them", "name this conversation", "delete one"],
      "the frame's order, kept inside the screen");
   eq(page.__node("row-list-model").hidden, true, "a screen the frame filed nothing on is not offered");
   eq(rowsOf(page, "tools").length, 0, "and holds no row of somebody else's");
@@ -693,6 +694,72 @@ check("the frame's rows are drawn on the screens it names, and only there", () =
   for (const [key] of page.SETTINGS_PANES) {
     eq(page.__node("row-list-" + key).hidden, true, "a row with no screen is shown on none of them: " + key);
   }
+});
+
+// The panel is a setting screen, not a reference card. Reported directly, 2026-09-23: "the command
+// syntax does not need to be shown at all -- a purely UI settings screen is good." So nothing in the
+// dialog says what to type: a row says what it *does*, in the frame's own sentence for it, and what a
+// person presses is a word, a box or a button. The commands are still there for whoever wants them,
+// which is the `/` menu -- so this claim carries its own control: the same frame draws `/delete` in
+// the palette while the dialog never says it.
+check("the settings dialog shows no command syntax at all", () => {
+  const page = loadViewer();
+  const d = page.newDoc();
+  page.applyState(d, JSON.stringify({
+    type: "state", provider: "stub", model: "m", providers: [{ name: "stub", models: ["m", "other"] }],
+    settings: [
+      { key: "thinking", value: "off", kind: "select", choices: ["off", "high"], group: "model",
+        help: "how much reasoning to ask the provider for", send: "/thinking" },
+      { key: "max_steps", value: "100", kind: "number", group: "limits",
+        help: "runaway-loop guard, not a work ration", send: "/config set max_steps" },
+    ],
+    commands: [
+      { label: "/reload", send: "/reload", help: "re-read the config file (after editing it yourself)",
+        class: "button", group: "run" },
+      { label: "/provider key <key>", send: "/provider key", help: "set the API key for the active provider",
+        class: "form", group: "model", fields: [{ field: "password", name: "key", optional: false }] },
+      { label: "/model <name>", send: "/model", help: "switch to one", class: "selector",
+        group: "model", values: ["m", "other"] },
+      { label: "/delete <n|id>", send: "/delete", help: "delete one", class: "danger",
+        group: "conversation", from: "providers" },
+      { label: "/resume <n|id>", send: "/resume", help: "switch to one of them", class: "selector",
+        group: "conversation" },
+    ],
+  }));
+  // Every leaf of the dialog's own text, plus any element drawn as code, which is how the syntax used
+  // to be set apart from the sentence beside it.
+  const said = [];
+  const walk = (node) => {
+    if (!node) return;
+    if (String(node.className) === "code") said.push("code: " + node.textContent);
+    if (node.children.length === 0) said.push(String(node.textContent));
+    node.children.forEach(walk);
+  };
+  walk(page.__node("settings"));
+  eq(said.filter((line) => /^\s*\//.test(line)), [], "nothing on the screen says what to type");
+  const names = page
+    .__node("fields-model")
+    .children.map((row) => row.children[0].children[0].textContent);
+  eq(
+    names.filter((name) => name !== "how much reasoning to ask the provider for"),
+    [],
+    "and a setting is named by what it does rather than by the key in the config file"
+  );
+  // The control: the commands are where a person types commands, and there they still are. Read off
+  // the leaves, because the stub DOM's `textContent` does not aggregate a subtree the way a browser's
+  // does -- the same reason the walk above is written the long way.
+  page.showMenu(d, "delete");
+  const palette = [];
+  const leaves = (node) => {
+    if (node.children.length === 0) palette.push(String(node.textContent));
+    node.children.forEach(leaves);
+  };
+  leaves(page.__node("menu"));
+  eq(
+    palette.some((line) => line.includes("/delete")),
+    true,
+    "while the palette still offers the command itself"
+  );
 });
 
 // A report is *read* here rather than sent into the transcript, because the terminal is where
@@ -719,8 +786,8 @@ check("a report row is pressable on its screen and the other rows are not", () =
   eq(reports[0].className, "row", "and is not marked as reference");
   eq(
     reports[0].children.map((c) => c.textContent),
-    ["/config", "show shell, steps, proxy"],
-    "it still says what to type and what it does"
+    ["show shell, steps, proxy"],
+    "and its one line is what it does, in the frame's own words"
   );
   eq(
     rowsOf(page, "conversation")[0].tag,
@@ -745,11 +812,16 @@ check("a row that carries values offers one line per value", () => {
   const reports = rowsOf(page, "tools");
   eq(
     reports.map((r) => r.children[0].textContent),
-    ["/skills [name]", "/skills alpha", "/skills beta", "/config"],
-    "the row itself, then one line per value, then the next row"
+    ["list skills", "alpha", "beta", "show shell"],
+    "the row itself, then one line per value under its own name, then the next row"
   );
   eq(reports.map((r) => r.tag), ["button", "button", "button", "button"], "all of them are controls");
   eq(reports[1].title, "list skills", "a value row carries the row's own help");
+  eq(
+    reports.map((r) => (r.children[1] ? r.children[1].textContent : "")),
+    ["", "list skills", "list skills", ""],
+    "and what the row does is said beside a value, where the value alone would not say it"
+  );
 });
 
 check("a row that takes a field gets one, and only the rows the frame marks", () => {
@@ -774,16 +846,25 @@ check("a row that takes a field gets one, and only the rows the frame marks", ()
   const named = rowsOf(page, "model");
   eq(named.map((n) => n.tag), ["form"], "on the screen the frame filed it on");
   eq(
-    [forms[0], named[0]].map((f) => f.children[0].tag + ":" + f.children[0].type),
+    [forms[0], named[0]].map((f) => f.children[1].tag + ":" + f.children[1].type),
     ["input:text", "input:password"],
     "the frame's word is the input's type, so a credential is masked because the process said so"
   );
   eq(
-    [forms[0], named[0]].map((f) => f.children[1].textContent),
-    ["/name", "/provider key"],
-    "the button sends the row's own `send`, which is also what it says"
+    [forms[0], named[0]].map((f) => f.children[0].textContent),
+    ["name this conversation", "set the API key"],
+    "a form says what it does, in the frame's words, rather than the line it sends"
   );
-  eq(forms[0].children[0].placeholder, "name this conversation", "one answer, so the help is what the field suggests");
+  eq(
+    [forms[0], named[0]].map((f) => f.children[2].textContent),
+    ["send", "send"],
+    "and the press is a word a person presses rather than a command"
+  );
+  eq(
+    forms[0].children[1].placeholder,
+    "",
+    "one answer, and the row's own sentence above the box is the question it asks"
+  );
   // A form row the frame does *not* mark is a row of reference, which is the half that says the field
   // comes from the frame rather than from the class: `/config edit` asks its questions at the
   // terminal, and a page that drew it a box would send a line nobody there can answer.
@@ -816,15 +897,15 @@ check("a row that takes several answers asks for each of them", () => {
   const add = forms[1];
   eq(
     add.children.map((n) => n.tag),
-    ["input", "input", "input", "button"],
-    "one input per answer the frame names, and the button last"
+    ["span", "input", "input", "input", "button"],
+    "what the row does, then one input per answer the frame names, and the button last"
   );
   eq(
-    add.children.slice(0, 3).map((n) => n.placeholder),
+    add.children.slice(1, 4).map((n) => n.placeholder),
     ["name", "base_url", "model (optional)"],
     "each input says which answer it wants, and which one may be left empty"
   );
-  eq(add.children[3].textContent, "/provider add", "the button says the row's own `send`");
+  eq(add.children[4].textContent, "send", "and the button is a word a person presses");
 
   // What the answers become. The optional one missing is not a hole: the line simply ends.
   eq(
@@ -849,8 +930,8 @@ check("a row that takes several answers asks for each of them", () => {
 
 check("a destructive row opens its choices rather than sending", () => {
   const page = loadViewer();
-  // A row is a `code` child and the back button is its own text, so "what this row says" is one or
-  // the other.
+  // Every row's first child is the row's own name -- the sentence the process wrote for what the row
+  // does -- and the back button is its own text, so "what this row says" is one or the other.
   const says = (n) => (n.children[0] ? n.children[0].textContent : n.textContent);
   const d = page.newDoc();
   page.applyState(d, JSON.stringify({
@@ -867,14 +948,14 @@ check("a destructive row opens its choices rather than sending", () => {
   eq(closed.map((n) => n.tag), ["button"], "the row is pressable");
   eq(
     closed.map(says),
-    ["/provider rm <name>"],
-    "and closing the choices sends nothing: the line is not on any row yet"
+    ["delete one"],
+    "and closing the choices says what it does, not the line it would send"
   );
 
-  // Opened, on the list this page already holds in `state`. The row being pressed says the whole
-  // line, which is the point of two presses rather than one: the second press is the one that can
-  // be read before it is made. The opened row's candidates *replace* that screen's rows, and the
-  // other destructive row is untouched on its own screen -- one row being open is not a reason to
+  // Opened, on the list this page already holds in `state`. The second press is the one that can be
+  // read before it is made, and what it offers is the *thing* rather than the line: a provider by
+  // name, a conversation by its title. The opened row's candidates *replace* that screen's rows, and
+  // the other destructive row is untouched on its own screen -- one row being open is not a reason to
   // disturb the rest of the dialog.
   d.confirm = { send: "/provider rm" };
   page.paintSettings(d);
@@ -882,14 +963,14 @@ check("a destructive row opens its choices rather than sending", () => {
   eq(open.map((n) => n.tag), ["button", "button", "button"], "a way back and two candidates");
   eq(
     open.map(says),
-    ["\u2039 back", "/provider rm stub", "/provider rm other"],
-    "each candidate is the line that would be sent"
+    ["\u2039 back", "stub", "other"],
+    "each candidate is the thing itself, under the sentence that says what pressing it does"
   );
   eq(open[0].className, "back", "the way back is marked as one");
   eq(open[1].className, "row danger", "and the ones that send are marked as destructive");
   eq(
     rowsOf(page, "conversation").map(says),
-    ["/delete <n|id>"],
+    ["delete one"],
     "the other screen still has its own rows"
   );
 
@@ -928,11 +1009,12 @@ check("a row this page cannot press says where its control is", () => {
   eq(offered[0].tag, "button", "a switch with values is a control");
   eq(offered[0].className, "row", "not a reference row");
   eq(offered[0].title, "switch to one", "and keeps the frame's own help");
-  eq(offered[0].children.map((n) => n.textContent), ["/model stub-model", "switch to one"], "the first value, as the line it sends");
-  eq(offered[1].children.map((n) => n.textContent), ["/model stub-other", "switch to one"], "and the second");
+  eq(offered[0].children.map((n) => n.textContent), ["stub-model", "switch to one"], "the first value under the row's own sentence");
+  eq(offered[1].children.map((n) => n.textContent), ["stub-other", "switch to one"], "and the second");
 
-  // Everything else is reference: a row that says what the command is, dressed so that it cannot be
-  // mistaken for the control it is not -- and saying, on hover, where that control actually is.
+  // Everything else is reference: a row that says what it does, dressed so that it cannot be
+  // mistaken for the control it is not -- and saying, on the row itself and on hover, where that
+  // control actually is.
   const conversation = rowsOf(page, "conversation")[0];
   eq(conversation.tag, "div", "the selector with nothing to offer is not pressable");
   eq(conversation.className, "row reference", "it is marked as reference");
@@ -950,8 +1032,8 @@ check("a row this page cannot press says where its control is", () => {
   );
   eq(
     rowsOf(page, "tools")[0].children.map((n) => n.textContent),
-    ["/something <x>", "a row of a class this page has not met"],
-    "and it still reads like a row"
+    ["a row of a class this page has not met", "typed in the terminal"],
+    "and it says what it does, and where the control for it is instead"
   );
 });
 
@@ -967,11 +1049,12 @@ check("a listing being read replaces its own screen's rows, and the way back res
   }));
   d.reading = "/config";
   d.readingGroup = "limits";
+  d.readingName = "show shell";
   d.readingText = "config: /tmp/config.toml\n  verbose          = on";
   page.paintSettings(d);
   const drawn = listOf(page, "limits");
   eq(drawn[0].tag, "button", "the way back is a control");
-  eq(drawn[1].textContent, "/config", "the heading is what was asked for");
+  eq(drawn[1].textContent, "show shell", "the heading says what was being read, in the frame's words");
   eq(drawn[2].textContent.includes("config.toml"), true, "and the listing is the process's own text");
   // One surface, one reading -- and the answer that arrives later is put there by the frame, not
   // appended to a list nobody is looking at. The other screen is untouched: a reading belongs to the
@@ -983,7 +1066,7 @@ check("a listing being read replaces its own screen's rows, and the way back res
   page.paintSettings(d);
   const back = rowsOf(page, "limits");
   eq(back.length, 1, "going back draws the rows again");
-  eq(labelsOf(page, "limits"), ["/config"], "with the report row in it, under its class again");
+  eq(labelsOf(page, "limits"), ["show shell"], "with the report row in it, under its class again");
   eq(headingsOf(page, "limits"), ["reports"], "and the grouping is back with it");
 });
 
@@ -1033,7 +1116,7 @@ check("the frame's action rows become buttons on the screen it names", () => {
     ],
   }));
   const buttons = rowsOf(page, "run");
-  eq(buttons.map((b) => b.children[0].textContent), ["/reload"], "one button per action on that screen");
+  eq(buttons.map((b) => b.children[0].textContent), ["re-read the config file"], "one button per action on that screen, in the frame's words");
   eq(buttons[0].title, "re-read the config file", "the help is the tooltip");
   eq(buttons[0].type, "button", "a button that cannot submit anything");
   eq(buttons[0].className, "row action", "marked as an action rather than a report");
@@ -1042,7 +1125,7 @@ check("the frame's action rows become buttons on the screen it names", () => {
   // teaching a person both. The frame's order is kept *inside* a group -- the groups are the classes,
   // in the menu's order, which is what puts the destructive pair at the bottom of a long screen.
   eq(headingsOf(page, "run"), ["actions"], "under the class's own word");
-  eq(labelsOf(page, "conversation"), ["/new", "/delete <n|id>"],
+  eq(labelsOf(page, "conversation"), ["start a fresh conversation", "delete one"],
      "a screen of two classes reads as its classes, each in the frame's order");
   eq(headingsOf(page, "conversation"), ["actions", "destructive"],
      "with the rows that destroy work last, under their own word");
@@ -2917,14 +3000,21 @@ check("a question's number is labelled with the question, in the settings list t
   const d = forkFrame(page, null, ["why does the socket close early", "what about the retry path"]);
   page.showState(d);
   const rows = rowsOf(page, "conversation");
-  eq(labelsOf(page, "conversation"), ["/fork 1", "/fork 2"], "one row per question, by number");
-  // The second half of the row is the question itself rather than the help printed twice: "start a
-  // new conversation cut at question n" under `/fork 1` and again under `/fork 2` says nothing about
-  // which question is which, which is the whole of what this row is for.
+  eq(
+    labelsOf(page, "conversation"),
+    ["why does the socket close early", "what about the retry path"],
+    "one row per question, in the question's own words"
+  );
+  // The row reads as the question itself rather than as a number to remember, and what the row *does*
+  // is the help beside it -- "start a new conversation cut at question n" is the same sentence under
+  // both rows, because it is the same act.
   eq(
     rows.map((row) => String(row.children[1].textContent)),
-    ["why does the socket close early", "what about the retry path"],
-    "each value says what it is of"
+    [
+      "start a new conversation cut at question n",
+      "start a new conversation cut at question n",
+    ],
+    "with what the row does beside it"
   );
 });
 

@@ -312,17 +312,16 @@
   #settings-panes .setting-text {
     flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px;
   }
-  #settings-panes .setting-name, #settings-panes .row code { color: var(--fg); }
-  #settings-panes .setting-help, #settings-panes .row span {
+  #settings-panes .setting-name, #settings-panes .row-name { color: var(--fg); }
+  #settings-panes .row-note {
     color: var(--dim); font-size: 12.5px; min-width: 0;
   }
   /* A row this page has no control for, and the row that says where the control is instead. */
   #settings-panes .row.reference { cursor: help; }
-  #settings-panes .row.reference code, #settings-panes .row.reference span { color: var(--dim); opacity: .75; }
+  #settings-panes .row.reference .row-name, #settings-panes .row.reference .row-note { color: var(--dim); opacity: .75; }
   #settings-panes button.row { cursor: pointer; }
   #settings-panes button.row:hover { background: rgba(255, 255, 255, .04); }
-  #settings-panes button.row:hover code, #settings-panes button.row:hover span { color: var(--user); }
-  #settings-panes button.row.danger:hover code,
+  #settings-panes button.row:hover span { color: var(--user); }
   #settings-panes button.row.danger:hover span { color: var(--bad); }
   /* A choice, as the words themselves: one small press per value the frame named, the one in force
      filled in. A `<select>` is the same fact behind a control the OS draws, at the OS's size and in
@@ -2021,19 +2020,27 @@ function drawSettings(doc, key, box) {
   box.hidden = drawn === 0;
 }
 
-/// One setting, as a row: its name, what changing it means under it, and the control on the right.
+/// One setting, as a row: what changing it means, and the control on the right.
+///
+/// The row is *named* by the frame's own sentence and addressed by the frame's key, and that split is
+/// the whole of this function's shape.
+///
+/// Reported directly, 2026-09-23: *"the command syntax does not need to be shown at all -- a purely UI
+/// settings screen is good."* A config key is the file's word for a setting and a command is how a
+/// terminal reaches it; neither is what a person is doing when they press a word on a screen, and a row
+/// that reads `thinking` over `off|low|medium|high` was asking them to hold both. So the key stays on
+/// the row as `data-key` -- the page's own tests and the browser harness find the control by it, and
+/// nothing about the file is hidden from a reader who wants it (`/config` prints it, and so do the
+/// docs) -- while what is *drawn* is the sentence the process already wrote for what changing it means.
+/// There is no second description here to drift from that sentence.
 function settingRow(doc, setting) {
   const send = typeof setting.send === "string" ? setting.send : "";
   const help = typeof setting.help === "string" ? setting.help : "";
   const value = setting.value === undefined || setting.value === null ? "" : String(setting.value);
   const row = el("div", "setting");
-  // The name and its sentence are one box rather than two cells of the row, so they stack: a fixed
-  // name column is a width guessed for the longest name, and the sentence beside it is prose that then
-  // has to fit whatever is left. Stacked, every row is two lines and every control is at the same
-  // place down the page.
+  row.setAttribute("data-key", setting.key);
   const text = el("div", "setting-text");
-  text.appendChild(el("span", "setting-name", setting.key));
-  text.appendChild(el("span", "setting-help", help));
+  text.appendChild(el("span", "setting-name", help));
   row.appendChild(text);
   if (setting.kind === "select") {
     row.appendChild(choiceControl(doc, send, help, setting.choices, value));
@@ -2103,8 +2110,9 @@ function drawRows(doc, key, list) {
   list.hidden = rows.length === 0 && !(doc.reading && doc.readingGroup === key);
   if (doc.reading && doc.readingGroup === key) {
     // A listing being read, which replaces this screen's rows until the reader goes back. The name
-    // comes from what was asked for rather than from the answer's own first line, so the heading is
-    // the same whether the process has answered yet or not.
+    // comes from the row that was pressed rather than from the answer's own first line -- the frame's
+    // sentence for what the row does, so the heading is a thing a person asked for in their own terms
+    // ("show shell, steps, proxy") and never the command that was sent for them.
     const back = el("button", "back", "\u2039 back");
     back.type = "button";
     back.addEventListener("click", () => {
@@ -2112,7 +2120,7 @@ function drawRows(doc, key, list) {
       paintSettings(doc);
     });
     list.appendChild(back);
-    list.appendChild(el("div", "row", doc.reading));
+    list.appendChild(el("div", "row", doc.readingName || doc.reading));
     list.appendChild(el("div", "reading", doc.readingText || "reading\u2026"));
     return;
   }
@@ -2153,6 +2161,17 @@ function drawCommandRow(doc, key, command, list) {
   const send = typeof command.send === "string" ? command.send : "";
   const help = typeof command.help === "string" ? command.help : "";
   const className = command.class;
+  // The line this row would send, carried as an attribute and never as text.
+  //
+  // A row is named by what it *does* now, so nothing on the screen says what to type any more -- and
+  // two things still have to find a row by the line it sends: `markCommandRow`, which is how a row
+  // taken from the `/` menu is handed over, and the browser harness, which presses a named row. The
+  // row's own field is the honest place for that, and it keeps the rule the rest of this file follows:
+  // the page may know the line, but what it *says* is the frame's sentence.
+  const tag = (row) => {
+    if (send) row.setAttribute("data-send", send);
+    return row;
+  };
   // A row the frame says takes answers gets one input each. It is a *form*, not a report: the
   // answers go on `/message` with the rest of what a person sends, because a form changes
   // something and its answer belongs in the transcript where the change is. Each answer's
@@ -2163,6 +2182,11 @@ function drawCommandRow(doc, key, command, list) {
   const fields = Array.isArray(command.fields) ? command.fields : [];
   if (fields.length > 0) {
     const form = el("form", "field");
+    // What the form is *for*, in the frame's own sentence: the answers alone do not say it, because a
+    // box asking for a key looks the same whatever the key is for. The placeholder then only has to
+    // name the answer itself, which is why a one-answer form has none -- the sentence above it is
+    // already the question, and repeating it in the box is one line saying the same thing twice.
+    form.appendChild(el("span", "row-name", help));
     const inputs = fields.map((spec) => {
       // An answer the frame says comes from a list is a picker, not a field: a pid typed into a
       // text box would be prose, and a message that quietly went to whoever the sentence named is
@@ -2170,13 +2194,15 @@ function drawCommandRow(doc, key, command, list) {
       if (spec && spec.from === "peers") return peerPicker();
       const input = el("input", "value");
       input.type = spec && spec.field === "password" ? "password" : "text";
-      // One answer says what the command is for; several have to say which answer each wants,
-      // because there is no room to explain three of them one at a time.
+      // One answer says what the command is for, and the row's own sentence above it has already said
+      // that; several have to say which answer each wants, because there is no room to explain three
+      // of them one at a time.
       input.placeholder =
-        fields.length === 1 ? help : ((spec && spec.name) || "") + (spec && spec.optional ? " (optional)" : "");
+        fields.length === 1 ? "" : ((spec && spec.name) || "") + (spec && spec.optional ? " (optional)" : "");
       return input;
     });
-    const submit = el("button", "send", send);
+    // A word rather than the line: the composer is where a command is typed, and this is a control.
+    const submit = el("button", "send", "send");
     submit.type = "submit";
     form.addEventListener("submit", (event) => {
       if (event && typeof event.preventDefault === "function") event.preventDefault();
@@ -2193,12 +2219,14 @@ function drawCommandRow(doc, key, command, list) {
     });
     for (const input of inputs) form.appendChild(input);
     form.appendChild(submit);
-    list.appendChild(form);
+    list.appendChild(tag(form));
     return;
   }
   // An action: a line with no argument to ask for. A press sends the row's own `send` string, put
   // together by the process, so there is no command name in this file to go stale -- and a press
-  // that is refused puts the screen back to what is in force.
+  // that is refused puts the screen back to what is in force. What the row *says* is the frame's
+  // sentence for what it does, and never the line it sends: the same rule the sidebar's `...` menu
+  // follows, and for the same report (see `sessionMenu`).
   if (className === "button" && send) {
     const row = el("button", "row action");
     row.type = "button";
@@ -2206,9 +2234,8 @@ function drawCommandRow(doc, key, command, list) {
     row.addEventListener("click", async () => {
       if (!(await sendText(send))) showState(doc);
     });
-    row.appendChild(el("code", "", command.label));
-    row.appendChild(el("span", "", help));
-    list.appendChild(row);
+    row.appendChild(el("span", "row-name", help));
+    list.appendChild(tag(row));
     return;
   }
   // A destructive row is the one class where a single press could destroy work, so it takes two
@@ -2244,18 +2271,22 @@ function drawCommandRow(doc, key, command, list) {
         paintSettings(doc);
       });
       list.appendChild(back);
+      // The second press, and what it shows is the *thing* the press acts on rather than the line it
+      // sends: a conversation under its own title, a provider under its name. The frame's sentence
+      // rides beside each one, because a title alone does not say whether it is about to be deleted or
+      // filed away -- and the two rows that share the word "delete one" are on different screens.
       for (const choice of choices) {
         const row = el("button", "row danger");
         row.type = "button";
         row.title = help;
         row.addEventListener("click", () => {
-          // The second press: the row says the line, and the line is what goes.
+          // The second press: the press goes, with the value the choice carried.
           doc.confirm = null;
           sendText(send + " " + choice.value);
         });
-        row.appendChild(el("code", "", send + " " + choice.value));
-        row.appendChild(el("span", "", choice.label));
-        list.appendChild(row);
+        row.appendChild(el("span", "row-name", choice.label));
+        row.appendChild(el("span", "row-note", help));
+        list.appendChild(tag(row));
       }
       if (choices.length === 0) list.appendChild(el("div", "row", "nothing to choose from"));
     } else {
@@ -2266,40 +2297,41 @@ function drawCommandRow(doc, key, command, list) {
         doc.confirm = { send: send };
         paintSettings(doc);
       });
-      row.appendChild(el("code", "", command.label));
-      row.appendChild(el("span", "", help));
-      list.appendChild(row);
+      row.appendChild(el("span", "row-name", help));
+      list.appendChild(tag(row));
     }
     return;
   }
   const values = Array.isArray(command.values) ? command.values : [];
   // What each value is *of*, for the one row that needs it: a question's number says where a cut falls
-  // and nothing about what is being cut, so `/fork`'s buttons carry the question's own first line. The
-  // lists are index-aligned by the process (`page_rows` builds them from one read), and a row whose
-  // labels are short of its values simply says the help twice.
+  // and nothing about what is being cut, so `/fork`'s buttons carry the question's own first line --
+  // which is now the button's own words rather than a caption under a number. The lists are
+  // index-aligned by the process (`page_rows` builds them from one read), and a value with no label of
+  // its own is simply its own name, which is what a model's or a skill's name already is.
   const labels = Array.isArray(command.labels) ? command.labels : [];
   const offered = [];
-  if (className === "panel" && send) offered.push({ label: command.label, line: send, note: "" });
+  if (className === "panel" && send) offered.push({ name: help, note: "", line: send });
   values.forEach((value, at) => {
     if (typeof value !== "string" || !value.trim()) return;
     offered.push({
-      label: send + " " + value,
+      name: labels[at] || value,
+      note: help,
       line: send + " " + value,
-      note: labels[at] || "",
     });
   });
   if (offered.length === 0) {
     // Nothing this page can send: a row of reference, marked and dimmed so that it cannot be
-    // mistaken for the control it is not, and carrying the one thing it can usefully say --
-    // where that control is (see `COMMAND_HOMES`). It used to be drawn to look exactly like a
+    // mistaken for the control it is not, and carrying the two things it can usefully say -- what it
+    // does, and where that control is (see `COMMAND_HOMES`). It used to be drawn to look exactly like a
     // pressable row, on the theory that no command should look different from the others. That
     // reads well and does not work: the first person to use the panel asked why some rows press
     // and others do not, which is a puzzle rather than a list.
+    const home = COMMAND_HOMES[className] || COMMAND_HOME_FALLBACK;
     const row = el("div", "row reference");
-    row.title = "this one is " + (COMMAND_HOMES[className] || COMMAND_HOME_FALLBACK);
-    row.appendChild(el("code", "", command.label));
-    row.appendChild(el("span", "", help));
-    list.appendChild(row);
+    row.title = "this one is " + home;
+    row.appendChild(el("span", "row-name", help));
+    row.appendChild(el("span", "row-note", home));
+    list.appendChild(tag(row));
     return;
   }
   for (const item of offered) {
@@ -2313,12 +2345,12 @@ function drawCommandRow(doc, key, command, list) {
       // is the only thing that tells the two apart: sending a switch through the report route
       // would run it with the terminal quiet, which for a provider that starts a local engine
       // means starting one without printing a word anywhere.
-      if (className === "panel") askReport(doc, item.line, key);
+      if (className === "panel") askReport(doc, item.line, key, item.name);
       else sendText(item.line);
     });
-    row.appendChild(el("code", "", item.label));
-    row.appendChild(el("span", "", item.note || help));
-    list.appendChild(row);
+    row.appendChild(el("span", "row-name", item.name));
+    if (item.note) row.appendChild(el("span", "row-note", item.note));
+    list.appendChild(tag(row));
   }
 }
 
@@ -2354,10 +2386,13 @@ function paintSettings(doc) {
 /// A refusal puts the screen back to its rows and says so, the way a refused switch puts the controls
 /// back to what is in force: a panel left saying "reading..." for an answer that is not coming is
 /// the one way this could look like it worked.
-async function askReport(doc, input, key) {
+async function askReport(doc, input, key, name) {
   if (!canSend || typeof input !== "string" || !input.trim()) return false;
   doc.reading = input;
   doc.readingGroup = key;
+  // What to call the reading on the screen, which is the row's own sentence rather than the line that
+  // was sent: the reader asked for "list past sessions, numbered", not for `/sessions`.
+  doc.readingName = typeof name === "string" ? name : "";
   doc.readingText = "";
   paintSettings(doc);
   try {
@@ -2658,7 +2693,8 @@ async function takeMenuRow(doc, row) {
     // was happening.
     openSettings();
     showSettingsPane(screenOf(command));
-    return askReport(doc, send, screenOf(command));
+    // The row's own sentence names the reading, exactly as it names the row on the screen it came from.
+    return askReport(doc, send, screenOf(command), command.help || "");
   }
   if (dispatch === "dialog") {
     // Never the line: a form row would put a credential in the composer, and the composer's text is
@@ -2707,18 +2743,6 @@ function setComposerText(text) {
   if (typeof sizeComposer === "function") sizeComposer();
 }
 
-/// The text of a row, read from its own children rather than from `textContent`.
-///
-/// `textContent` aggregates a whole subtree in a browser and does not in the Node harness's stub DOM,
-/// and a mark that can only be found in a browser is a mark that is not checked. Every row this page
-/// draws is one level deep -- a `code` and a `span`, or a field and a `button.send` -- so reading the
-/// children is the same answer in both places.
-function rowText(row) {
-  return Array.from(row.children || [])
-    .map((child) => String(child.textContent || ""))
-    .join(" ");
-}
-
 /// Draw attention to one row of the dialog's command list -- how a `form` row taken from the menu is
 /// handed over. The mark is transient and the page's own: a class on the row, and a scroll to it.
 ///
@@ -2733,11 +2757,11 @@ function markCommandRow(command) {
   for (const group of Array.from(list.children || [])) {
     const box = Array.from(group.children || []).find((child) => child.className === "group-rows");
     if (!box) continue;
-    // Every row this page draws carries the line it would send as its first child's text -- a `code`
-    // and a `span`, a field and a `button.send`, an answer and a `save` -- so reading the children is
-    // the same answer in a browser and under the stub DOM.
+    // Found by the line the row would send, which every row carries as `data-send` rather than as
+    // text: the rows are named by what they do now, so looking for the command among the words on
+    // screen would find nothing at all -- which is exactly how this broke when the syntax came off.
     for (const row of Array.from(box.children || [])) {
-      if (!rowText(row).includes(command.send)) continue;
+      if (!row.getAttribute || row.getAttribute("data-send") !== command.send) continue;
       row.className = String(row.className || "") + " pointed";
       if (typeof row.scrollIntoView === "function") row.scrollIntoView({ block: "center" });
       return;

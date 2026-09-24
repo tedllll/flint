@@ -905,12 +905,12 @@ fn the_command_panel_is_drawn_from_the_frame() {
             "the rows are not drawn from the frame's `{needed}` ({why}): {drawn}"
         );
     }
-    // Wide enough to reach the branches that actually draw a label: the form branch comes first, and
-    // the rows that say what to type are below it.
-    let row = from("function drawCommandRow(doc, key, command, list)", 90);
+    // Wide enough to reach the branches that actually draw a row: the form branch comes first, and the
+    // rows that say what they do are below it. `command.label` is deliberately *not* here, and the
+    // assertion below is what holds that: the row used to say what to type.
+    let row = from("function drawCommandRow(doc, key, command, list)", 120);
     for (needed, why) in [
-        ("command.label", "what the row says to type"),
-        ("command.help", "what the row says it does"),
+        ("command.help", "what the row says it does, which is now the whole of what it says"),
         ("command.class", "which kind of control the row gets"),
     ] {
         assert!(
@@ -918,6 +918,11 @@ fn the_command_panel_is_drawn_from_the_frame() {
             "a row is not drawn from the frame's `{needed}` ({why}): {row}"
         );
     }
+    assert!(
+        !row.contains("command.label"),
+        "the dialog draws the line a command would send, so a setting screen is teaching a person \
+         syntax they do not need: {row}"
+    );
 
     // And the page holds no copy of the command list. These are the strings that would be in it if it
     // did; the screen *names* are the page's own, and the test below holds those to the process's.
@@ -999,7 +1004,7 @@ fn the_action_buttons_send_the_frames_own_line() {
         ("el(\"button\", \"row action\")", "an action drawn as the control it is"),
         ("sendText(send)", "the line, taken from the frame rather than rebuilt here"),
         ("showState(doc)", "putting the screen back when the send is refused"),
-        ("command.label", "the button's own words"),
+        ("row-name", "the button's own words, which are the frame's sentence for what it does"),
     ] {
         assert!(
             drawn.contains(needed),
@@ -1029,7 +1034,7 @@ fn the_panel_reads_a_report_rather_than_sending_it() {
     for (needed, why) in [
         ("className === \"panel\"", "the class that makes a row readable"),
         ("command.send", "the line to ask for, taken from the frame rather than rebuilt here"),
-        ("askReport(doc, item.line, key)", "asking the process for the line the row offers, on the screen it is on"),
+        ("askReport(doc, item.line, key, item.name)", "asking the process for the line the row offers, on the screen it is on, under the row's own name"),
         ("command.values", "the values the frame says this row may be given"),
         ("send + \" \" + value", "the line for one of them, composed from the frame's own strings"),
     ] {
@@ -1043,12 +1048,13 @@ fn the_panel_reads_a_report_rather_than_sending_it() {
     // `/message` here would be a panel that printed into the terminal -- the exact thing §8's class
     // exists to prevent. The screen travels with the request because the answer belongs where the row
     // was pressed, and a frame arriving in between must not move it under another heading.
-    let asked = from("async function askReport(doc, input, key)", 30);
+    let asked = from("async function askReport(doc, input, key, name)", 30);
     for (needed, why) in [
         ("fetch(\"/report\"", "the route that answers without printing"),
         ("messageBody(input)", "the line, in the same body shape the composer sends"),
         ("doc.reading = input", "the screen showing what is being read"),
         ("doc.readingGroup = key", "which screen that reading belongs to"),
+        ("doc.readingName", "what to call it on the screen, which is the row's sentence and not the line"),
         ("paintSettings(doc)", "redrawing the dialog rather than the transcript"),
     ] {
         assert!(
@@ -1314,9 +1320,9 @@ fn a_destructive_row_opens_its_choices_and_sends_on_the_second_press() {
 /// the process enforcing it.
 #[test]
 fn a_switch_value_is_typed_rather_than_read() {
-    let offered = from("for (const item of offered) {", 22);
+    let offered = from("for (const item of offered) {", 24);
     assert!(
-        offered.contains("if (className === \"panel\") askReport(doc, item.line, key);")
+        offered.contains("if (className === \"panel\") askReport(doc, item.line, key, item.name);")
             && offered.contains("else sendText(item.line);"),
         "the route a value takes is not the row's class, so a switch could be run with the terminal \
          quiet: {offered}"
@@ -1647,7 +1653,8 @@ fn the_slash_menu_is_a_launcher_drawn_from_the_frame() {
     let take = from("async function takeMenuRow(doc, row)", 60);
     let sends = sites(&take, "fetch(");
     assert!(
-        sends.is_empty() && take.contains("askReport(doc, send, screenOf(command))"),
+        sends.is_empty()
+            && take.contains("askReport(doc, send, screenOf(command), command.help || \"\")"),
         "the menu may only send what a report row asks for, and only through the report's own \
          function: {sends:?}"
     );

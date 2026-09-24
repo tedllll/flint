@@ -422,7 +422,12 @@ async function attach(target) {
   return { send, js, waitFor, click, key, drag, doubleClick, close: () => ws.close() };
 }
 
-/// A row of one screen of the dialog, by the line it would send -- which is what the frame put in it.
+/// A row of one screen of the dialog, by the line it would send -- which is the frame put in it.
+///
+/// Found by the row's own `data-send` rather than by the words on it, and that is the round's change:
+/// a row is *named* by what it does now ("delete one"), so the line is nowhere on the screen for a
+/// query to match. The attribute is the page's own field for exactly this -- a row is still addressed
+/// by the line it sends, and the person is still shown a sentence.
 ///
 /// The screen is the caller's, and it has to be: the dialog is six short screens now rather than one
 /// long list, so a row is only in the document while the screen it was filed on is on top. Pressing a
@@ -430,14 +435,16 @@ async function attach(target) {
 /// it expects the row on -- and a row that moved to a different screen fails the claim rather than
 /// being found wherever it went.
 const ROW = (line, screen) =>
-  `(() => { const rows = Array.from(document.querySelectorAll("#row-list-${screen} button.row code"));
-     const found = rows.find((c) => c.textContent.trim() === ${JSON.stringify(line)});
+  `(() => { const rows = Array.from(document.querySelectorAll("#row-list-${screen} button.row[data-send]"));
+     const found = rows.find((c) => c.getAttribute("data-send") === ${JSON.stringify(line)});
      if (!found) return null;
-     found.closest("button").id = "harness-target"; return true; })()`;
+     found.id = "harness-target"; return true; })()`;
 
-/// The rows of one screen, as text: what a claim about "the run's own list" reads.
-const ROWS_OF = (screen) =>
-  `(document.getElementById("row-list-${screen}") || {}).textContent || ""`;
+/// The setting named `key` on the screen `screen`, which the frame files under that key -- the page
+/// carries it as `data-key` and *draws* the frame's sentence for what changing it means.
+const SETTING = (screen, key) =>
+  `Array.from(document.querySelectorAll("#fields-${screen} .setting"))
+     .find((r) => r.getAttribute("data-key") === ${JSON.stringify(key)})`;
 
 /// The value of the setting named `key` on the screen `screen`.
 ///
@@ -445,20 +452,18 @@ const ROWS_OF = (screen) =>
 /// one, so this reads `aria-pressed` rather than a `<select>`'s `value` -- the select is gone, because
 /// a native one is the operating system's control (its size, its colours, and a list that opens *over*
 /// the dialog) and the page has no business handing a person one when the frame already named every
-/// word it takes. By name rather than by id, and that is the point: a change sends a line, the run
+/// word it takes. By key rather than by id, and that is the point: a change sends a line, the run
 /// answers with a new state frame, and `paintSettings` rebuilds the rows -- so the node an id was
 /// tagged on is *gone* by the time the answer arrives. Measured the hard way: a claim that read the id
 /// back saw `Cannot read properties of null` and read it as "the picker never moved".
 const VALUE_OF = (screen, key) =>
-  `(() => { const row = Array.from(document.querySelectorAll("#fields-${screen} .setting"))
-       .find((r) => (r.querySelector(".setting-name") || {}).textContent === ${JSON.stringify(key)});
+  `(() => { const row = ${SETTING(screen, key)};
      const on = row ? row.querySelector(".choices button[aria-pressed='true']") : null;
      return on ? on.textContent.trim() : null; })()`;
 
 /// The words a setting offers, and which of them is in force; the words are the frame's.
 const CHOICES_OF = (screen, key) =>
-  `(() => { const row = Array.from(document.querySelectorAll("#fields-${screen} .setting"))
-       .find((r) => (r.querySelector(".setting-name") || {}).textContent === ${JSON.stringify(key)});
+  `(() => { const row = ${SETTING(screen, key)};
      if (!row) return null;
      const words = Array.from(row.querySelectorAll(".choices button"));
      return { words: words.map((b) => b.textContent.trim()),
@@ -471,8 +476,7 @@ const CHOICES_OF = (screen, key) =>
 /// claim must not do is set `aria-pressed` or call the page's own handler, because then it would be
 /// asserting that the page agrees with itself rather than that the run was told.
 const NEXT_CHOICE = (screen, key) =>
-  `(() => { const row = Array.from(document.querySelectorAll("#fields-${screen} .setting"))
-       .find((r) => (r.querySelector(".setting-name") || {}).textContent === ${JSON.stringify(key)});
+  `(() => { const row = ${SETTING(screen, key)};
      if (!row) return null;
      const words = Array.from(row.querySelectorAll(".choices button"));
      const at = words.findIndex((b) => b.getAttribute("aria-pressed") === "true");
@@ -770,14 +774,24 @@ async function main() {
     // ---- a switch, which is one setting among the others ---------------------
     // The five switches are settings now, filed on the `run` screen with the words they take: the
     // claim is the same one it always was -- the names come from the run, not from the page -- and it
-    // is made by reading the names off the rows rather than off a container of its own.
+    // is made by reading the sentences off the rows rather than off a container of its own. Since the
+    // round that took the syntax off the dialog those sentences are what a row *says*, while the key
+    // it is filed under is the row's `data-key` (see `SETTING`).
     const names = await page.js(
       `Array.from(document.querySelectorAll("#fields-run .setting-name")).map((n) => n.textContent)`
     );
+    const keys = await page.js(
+      `Array.from(document.querySelectorAll("#fields-run .setting")).map((n) => n.getAttribute("data-key"))`
+    );
     check(
       "the switches are drawn from the run's own state",
-      Array.isArray(names) && names.includes("readonly") && names.includes("verbose"),
-      `names: ${JSON.stringify(names)}`
+      Array.isArray(names) && Array.isArray(keys) && keys.includes("readonly") && keys.includes("verbose"),
+      `names: ${JSON.stringify(names)}, keys: ${JSON.stringify(keys)}`
+    );
+    check(
+      "and a setting is named by what changing it means, not by the key in the config file",
+      Array.isArray(names) && names.length > 0 && !keys.some((key) => names.includes(key)),
+      `names: ${JSON.stringify(names)}, keys: ${JSON.stringify(keys)}`
     );
     const started = before();
     // Read before the press, for the claim under it: what the sidebar holds is conversations, and a
@@ -850,11 +864,24 @@ async function main() {
     // drawn on the screen the frame filed it on and nowhere else. `/reload` is the run's; `/new`
     // belongs to this conversation, and a page that put every action on one screen would pass a claim
     // that only looked for `/reload`.
+    //
+    // The rows are read two ways, and the pair is the round's claim: by their `data-send` (which is how
+    // a row is addressed now) and by what they *say* (which is the frame's sentence, never the line).
     const actions = await page.js(
       `Array.from(document.querySelectorAll("#row-list-run button.row.action"))
-         .map((b) => ((b.querySelector("code") || {}).textContent || "").trim())`
+         .map((b) => b.getAttribute("data-send"))`
     );
-    const elsewhere = await page.js(`(${ROWS_OF("conversation")}).includes("/reload")`);
+    const actionWords = await page.js(
+      `Array.from(document.querySelectorAll("#row-list-run button.row.action .row-name"))
+         .map((n) => n.textContent.trim())`
+    );
+    // Read as the rows' lines rather than as the screen's text, and that is the round's lesson: the
+    // text no longer contains a command at all, so a claim that asked the *text* whether `/reload` was
+    // on this screen would pass no matter which screen the row was drawn on.
+    const elsewhere = await page.js(
+      `Array.from(document.querySelectorAll("#row-list-conversation [data-send]"))
+         .some((r) => r.getAttribute("data-send") === "/reload")`
+    );
     check(
       "the run's actions are buttons on the run's own screen",
       Array.isArray(actions) && actions.includes("/reload"),
@@ -864,6 +891,20 @@ async function main() {
       "and an action is not also drawn on another screen's rows",
       elsewhere === false,
       `the conversation screen carries /reload: ${JSON.stringify(elsewhere)}`
+    );
+    // The whole dialog, in one claim with its own control: nothing a person reads says what to type,
+    // and the commands are exactly where commands belong -- the palette and the sidebar's own menu.
+    const syntax = await page.js(
+      `(() => { const panes = document.getElementById("settings-panes");
+         const codes = panes.querySelectorAll("code").length;
+         const slashes = Array.from(panes.querySelectorAll(".row-name, .setting-name"))
+           .filter((n) => n.textContent.trim().startsWith("/")).length;
+         return { codes: codes, slashes: slashes, rows: panes.querySelectorAll(".row-name").length }; })()`
+    );
+    check(
+      "the settings screen says what a row does and never what to type",
+      !!syntax && syntax.codes === 0 && syntax.slashes === 0 && syntax.rows > 5,
+      `the dialog: ${JSON.stringify(syntax)}`
     );
 
     // ---- the screens: one at a time, and each holds its own rows ------------
@@ -887,18 +928,36 @@ async function main() {
       !!section && section.run === true && section.marked === 1 && section.rail === 6,
       `screens: ${JSON.stringify(section)}`
     );
-    const listed = await page.js(ROWS_OF("conversation"));
-    const foreign = await page.js(ROWS_OF("limits"));
+    // The rows read two ways at once, because since the syntax came off the dialog those are two
+    // different facts about one row: which line it would *send* (`data-send`, which is how a row is
+    // addressed now) and what it *says* (`.row-name`, which is the frame's sentence). The claim needs
+    // both -- a row that lost its line is dead, and a row that lost its sentence is a blank button.
+    const listed = await page.js(
+      `Array.from(document.querySelectorAll("#row-list-conversation [data-send]"))
+         .map((r) => r.getAttribute("data-send")).join(" ")`
+    );
+    const rowWords = await page.js(
+      `(() => { const rows = Array.from(document.querySelectorAll("#row-list-conversation [data-send]"));
+         return rows.map((r) => ((r.querySelector(".row-name") || {}).textContent || "").trim()); })()`
+    );
+    const foreign = await page.js(
+      `Array.from(document.querySelectorAll("#row-list-limits [data-send]"))
+         .map((r) => r.getAttribute("data-send")).join(" ")`
+    );
     // Named rows from four of the classes, because "the rows are there" is not the claim: the claim is
     // that they are the *run's* rows, drawn from the frame -- and a screen with rows in it that had
-    // lost a class would still look like a list. Read as the screen's text rather than as `code`
-    // elements, because a form row's own line is its submit button, not a label.
-    const wanted = ["/delete <n|id>", "/name", "/sessions", "/resume <n|id>"];
+    // lost a class would still look like a list.
+    const wanted = ["/delete", "/name", "/sessions", "/resume"];
     check(
       "the conversation screen lists the run's rows, across the classes",
       wanted.every((line) => String(listed).includes(line)),
       `missing: ${JSON.stringify(wanted.filter((line) => !String(listed).includes(line)))}, ` +
         `screen: ${JSON.stringify(String(listed).slice(0, 200))}`
+    );
+    check(
+      "and every one of them says what it does rather than what to type",
+      Array.isArray(rowWords) && rowWords.length >= wanted.length && !rowWords.some((name) => name === ""),
+      `rows say: ${JSON.stringify(rowWords)}`
     );
     check(
       "and the rows filed on another screen are not on this one",
@@ -943,7 +1002,7 @@ async function main() {
     await openSettings("this run");
     const beforeAction = before();
     await page.js(`(() => { const b = Array.from(document.querySelectorAll("#row-list-run button.row.action"))
-      .find((b) => ((b.querySelector("code") || {}).textContent || "").trim() === "/reload");
+      .find((b) => b.getAttribute("data-send") === "/reload");
       if (!b) return null; b.id = "harness-action"; return true; })()`);
     await page.click("#harness-action");
     // Waited for rather than slept on, like the composer below it: how long a run takes to print a
@@ -965,7 +1024,7 @@ async function main() {
     // ---- the masked credential field --------------------------------------
     const secret = "sk-not-a-real-key-0000";
     const form = `(() => { const f = Array.from(document.querySelectorAll("#row-list-model form.field"))
-        .find((f) => (f.querySelector("button.send") || {}).textContent === "/provider key");
+        .find((f) => f.getAttribute("data-send") === "/provider key");
       if (!f) return null; f.querySelector("input").id = "harness-input";
       f.querySelector("button.send").id = "harness-submit"; return f.querySelector("input").type; })()`;
     const kind = await page.waitFor(form, "the credential field");
@@ -1008,7 +1067,7 @@ async function main() {
     await openSettings("this conversation");
     const sessionsBefore = fs.readdirSync(path.join(where.home, "sessions")).sort();
     const beforeDanger = before();
-    await page.waitFor(ROW("/delete <n|id>", "conversation"), "the /delete row");
+    await page.waitFor(ROW("/delete", "conversation"), "the /delete row");
     await page.click("#harness-target");
     const candidates = await page.waitFor(
       `document.querySelectorAll("#row-list-conversation button.row.danger").length`,
@@ -2095,27 +2154,32 @@ async function main() {
     // *background work* screen of the dialog -- opened here the way a person would, since the dialog
     // was shut after the geometry above.
     await openSettings("background work");
-    await page.waitFor(ROW("/jobs stop <pid>", "work"), "the /jobs stop row");
+    // `/jobs stop` is the line; what a candidate *says* is the job it would stop, so the row is found
+    // by its `data-send` and the candidate by the description the panel is showing.
+    await page.waitFor(ROW("/jobs stop", "work"), "the /jobs stop row");
     await page.click("#harness-target");
     const choice = await page
       .waitFor(
         `(() => { const rows = Array.from(document.querySelectorAll("#row-list-work button.row.danger"));
-           const row = rows.find((r) => /60000/.test((r.querySelector("span") || {}).textContent || ""));
+           const row = rows.find((r) => /60000/.test((r.querySelector(".row-name") || {}).textContent || ""));
            if (!row) return null;
            row.id = "harness-stop";
            row.scrollIntoView({ block: "center" });
-           return row.querySelector("code").textContent; })()`,
+           return { said: row.querySelector(".row-name").textContent,
+                    note: (row.querySelector(".row-note") || {}).textContent,
+                    line: row.getAttribute("data-send") }; })()`,
         "the running job's pid",
         25
       )
       .catch(() => null);
     check(
-      "the stop's candidates are the pids the jobs panel is showing",
-      typeof choice === "string" && /^\/jobs stop \d+$/.test(choice),
+      "the stop's candidates are the jobs the page is showing, named rather than numbered",
+      !!choice && typeof choice.said === "string" && choice.said.trim() !== "" &&
+        choice.said.trim() !== choice.line && /60000/.test(choice.said) && choice.line === "/jobs stop",
       `choice: ${JSON.stringify(choice)}`
     );
     const beforeStop = before();
-    if (typeof choice === "string") await page.click("#harness-stop");
+    if (choice) await page.click("#harness-stop");
     const stoppedRow = await page
       .waitFor(
         `(() => { const row = Array.from(document.querySelectorAll("#job-list .row")).find((r) =>
@@ -2918,9 +2982,7 @@ async function main() {
     await openSettings("model");
     const levelBefore = await page.js(CHOICES_OF("model", "thinking"));
     const pressLevel = await page.js(
-      `(() => { const row = Array.from(document.querySelectorAll("#fields-model .setting"))
-          .find((s) => { const n = s.querySelector(".setting-name");
-            return n && n.textContent.trim() === "thinking"; });
+      `(() => { const row = ${SETTING("model", "thinking")};
         if (!row) return null;
         const b = Array.from(row.querySelectorAll(".choices button"))
           .find((x) => x.textContent.trim() === "high");

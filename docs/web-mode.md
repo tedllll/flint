@@ -2202,6 +2202,47 @@ whichever screen happens to be first. A row the page does not group — `/help`,
 and the two picker lines that are already controls — is read on the first screen, which is the honest
 fallback rather than a silent nothing.
 
+**A row says what it does, never what to type — added 2026-09-23.** The same complaint that produced the
+sidebar's `...` menu one round earlier, made about the dialog itself: *"the command syntax does not need
+to be shown at all — a purely UI settings screen is good."* It was on every row of it. A command row was
+a bright `code` with the command and its arguments in it (`/verbose [off|on|full]`, `/delete <n|id>`)
+with the frame's sentence beside it, dimmed; a setting row was the **config key** over the sentence; the
+candidates of a destructive row were the whole line that would be sent (`/provider rm stub`); the press
+on a form said the command (`/provider add`); and the heading over a listing that had just been read said
+the line that was asked for rather than what was being read. Five shapes, one rule broken in each: the
+person is choosing an act, and the act has a name in words the process already wrote.
+
+The fix is one decision and its consequences, and no frame changed at all. Every row's first child is now
+its own name in the frame's words — `command.help` for a command row, and for a row that carries `values`
+the thing itself, which is already a name and not syntax (a conversation's title, a skill's name, a
+model's name, and for `/fork` the question the cut falls in front of). A destructive row's candidates are
+the things it would act on, with the sentence beside them saying what pressing does; a row this page has
+no control for says what it does *and* where its control is, in the page's own words for its own
+furniture (`COMMAND_HOMES`); a form says what it is for above its answers and its press is `send`; and
+the heading over a reading is the sentence of the row that was pressed (`doc.readingName`, carried beside
+the line for the same reason the line is carried at all). A **setting** is named by what changing it
+means and addressed by its key, which the row carries as `data-key`: the key is the config file's own
+word and a reader who wants it has `/config` and these docs, while what a screen shows is the sentence
+the process wrote for it. The frame's `label` is still in the frame and is still exactly what the `/`
+menu draws — the palette is where a person types a command, so it is where a command belongs — and it is
+what the page's own byte-claims forbid the dialog's drawing code to mention.
+
+One thing this broke that was not about words, and it is worth keeping because it is the second time the
+marking code has been the casualty of a wording change: `markCommandRow`, which is how a row handed off
+from the `/` menu is pointed at on its screen, found its row by looking for the command *in the row's
+text* — and there is no command in any row's text any more. Every row the dialog draws now carries the
+line it would send as `data-send`, and the mark is made by that field. The browser harness presses rows
+through the same attribute for the same reason: a row is addressed by its line and read by its sentence,
+and neither of those two has to be inferred from the other.
+
+| Claim | How | Result |
+|---|---|---|
+| The dialog draws no command syntax at all | `scripts/web-view-test.js`, over a frame carrying a row of every class, with a control | every leaf of the dialog's own text is inspected plus every element drawn as `code`, and the claim requires that no leaf starts with `/` and no `code` exists. Its own control is the palette: the same frame still offers the command there, so the claim cannot pass by the page having lost the commands |
+| A command row is drawn from the frame's sentence, and never from its `label` | `tests/web_view.rs`, over the page's bytes | `drawCommandRow` must contain `command.help` and must **not** contain `command.label`. Both halves are the claim: the first alone would pass with the syntax drawn beside the sentence, which is exactly what was there |
+| A setting is named by what changing it means, not by the key in the config file | the browser harness, in a real browser, on the run screen | the drawn names are read off `.setting-name` and the keys off `data-key`, and the claim requires that no name equals its key. A page's own claim could be stale; this is the screen a person reads |
+| A row handed off from the `/` menu is still pointed at on its screen | the browser harness, whose form rows are found by `data-send` | reported as a real defect while this round was being written: with the syntax off the screen, `markCommandRow`'s text search found nothing and a form row taken from the palette opened the dialog without marking anything. Found by the Node harness, not by reading the code |
+| A destructive row's candidates are the things themselves | `scripts/web-view-test.js`, and the browser harness for the stop row | `/provider rm`'s candidates read `stub` and `other`; the jobs row's reads the job's own description with the run's sentence beside it, and the pid it will stop is in the line it sends |
+
 **`hidden`, not `<dialog>`/`showModal`.** §10 already recorded why the page has no `<dialog>`: the stub
 DOM the Node harness runs cannot express `showModal`, and a control whose behaviour is only checkable in
 a browser is a control most of whose behaviour goes unchecked. The dialog is a `hidden`-toggled div with

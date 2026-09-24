@@ -779,6 +779,20 @@ which is all the header carries (§22 and §25 of `docs/web-mode.md` are the rea
 record). A header holding the raw controls is a header that takes the reading column's width for
 furniture, which is what this replaced.
 
+**Every row on those screens is named by what it does, never by the line it sends** — added 2026-09-23,
+when the person asked for exactly that: *"the command syntax does not need to be shown at all — a purely
+UI settings screen is good."* A row's words are the frame's own sentence for it (`command.help`), or, for
+a row that offers values, the thing itself — a conversation's title, a skill's name, a model's, the
+question a `/fork` cut falls in front of. A destructive row's candidates are what it would act on, with
+the sentence beside them saying what pressing does; a row the page has no control for says what it does
+*and* where its control is; a form says what it is for above its answers, and its press reads `send`. A
+**setting** is named by what changing it means and addressed by its key, which the row carries as
+`data-key` rather than showing, because the key is `config.toml`'s word for it and `/config` is where a
+reader goes for that. The command itself is still drawn in the one place a person types commands — the
+`/` menu below the composer — and the frame still carries `label` for it; `tests/web_view.rs` holds the
+dialog's drawing code to never mention it, and the rows carry the line they would send as `data-send` so
+that the page's own marks and the browser harness can still find a row by it (§22 of `docs/web-mode.md`).
+
 | Area | Control | What pressing it does |
 |---|---|---|
 | header | the conversation's name, above everything | not a control: the session file's own newest `title` event, else the label `GET /sessions` chose (the newest name, else the first thing said, else `(empty)`). Clipped with the whole of it in the tooltip |

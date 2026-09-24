@@ -53,7 +53,12 @@ the run is in (the refusal test rewritten into two `cli_output` tests, two more 
 frames a delete and a turn push, and seven new browser claims), and re-measured a **twelfth** time the
 same day, after the round at the top of that section — the reasoning level that went back to `off` and
 the row menu that left the window (two `cli_output` tests, one of them rewritten twice before it failed
-for the right reason, and two new browser claims, one of which carries its own control):
+for the right reason, and two new browser claims, one of which carries its own control), and
+re-measured a **thirteenth** time the same day, after the round at the top of that section — the settings
+dialog that said what to type (the five `web_view` byte-claims that named `command.label` or carried
+`askReport`'s old signature, one of them gaining a new assertion that the drawing code never mentions the
+line, one new headless claim about the dialog drawing no syntax at all with the palette as its control,
+and three browser claims, one of which had gone quietly vacuous):
 `cargo test`
 **702 passing, 1 ignored** across the 14 suites (lib **388**, bin **9**, `agent_loop` 34,
 `balance` 7, `cli_output` **124**, `json_output` 41, `say` 6,
@@ -66,7 +71,7 @@ ubuntu job's total is larger and is *not* quoted here as if it were this number 
 more step of that same CI job** — `examples/python/test_call.py` and `examples/mcp/test_mcp.py`, each
 resolving the binary `cargo test` just built for itself and refusing a pass that came from an installed
 `flint` on `PATH`; the
-browser harness run by hand at **134/134 claims held**, printing the list of drives and not-drives it is
+browser harness run by hand at **137/137 claims held**, printing the list of drives and not-drives it is
 bounded by. The release binary on `PATH` is the tree's (`flint --version` → `flint 0.1.0`, exit 0, and
 its SHA-256 is the one `target/release/flint.exe` was built with).
 
@@ -1836,6 +1841,58 @@ picker, type `/config` into the composer, and see whether the answer lands in th
 the block is drawn — then open the `commands` panel and read it against `/help` in the terminal.
 
 ## What was just done
+
+### The settings dialog says what a row does, not what to type — 2026-09-23
+
+**Asked for directly, with the housekeeping that came with it: "the test stuff can be deleted. Then carry
+on with the settings panel — I don't think the command syntax needs to be shown at all, a purely UI
+settings screen is good."**
+
+It was on every row of the dialog, in five shapes, and each was a different way of showing the same
+thing: a command row was a bright `code` holding the command and its arguments (`/verbose [off|on|full]`,
+`/delete <n|id>`) with the frame's sentence dimmed beside it; a **setting** row was the config *key*
+(`thinking`) over its sentence; a destructive row's candidates were the whole line that would be sent
+(`/provider rm stub`); the press on a form said the command (`/provider add`); and the heading over a
+listing that had just been read said the line that was asked for (`/config`) rather than what was being
+read. The person is choosing an act, and every one of those is the terminal's vocabulary rather than the
+act's.
+
+**The rule now, and no frame changed at all.** Every row's first child is its own name in the frame's
+words: `command.help` for a command row, and for a row that carries `values` the thing itself, which is
+already a name and not syntax (a conversation's title, a skill's name, a model's name, and for `/fork` the
+question the cut falls in front of). A destructive row's candidates are the things it would act on, with
+the sentence beside them saying what pressing does; a row this page has no control for says what it does
+*and* where its control is, in the page's own words for its own furniture (`COMMAND_HOMES`, which used to
+be a tooltip only); a form says what it is for above its answers and its press reads `send`; and the
+heading over a reading is the sentence of the row that was pressed (`doc.readingName`, carried beside the
+line for the same reason the line is carried). A **setting** is named by what changing it means and
+addressed by its key, which the row carries as `data-key`: the key is `config.toml`'s word for it, and a
+reader who wants it has `/config` and these docs, while what a screen shows is the sentence the process
+wrote for it. `command.label` stays in the frame because it is exactly what the `/` menu draws — the
+palette is where a person types commands, so it is where a command belongs — and `tests/web_view.rs` now
+asserts that the dialog's drawing function never mentions it.
+
+**The casualty was the marking code, and the Node harness found it rather than a reading of the diff.**
+`markCommandRow` — how a row taken from the `/` menu is pointed at on the screen it belongs to — found
+its row by looking for the command *in the row's text*, and there is no command in any row's text any
+more, so a form row taken from the palette opened the dialog at the right screen and marked nothing. Every
+row the dialog draws now carries the line it would send as `data-send`, and both the mark and the browser
+harness address a row by that field: a row is read by its sentence and addressed by its line, and neither
+has to be inferred from the other. `rowText` — the helper whose comment explained that the stub DOM does
+not aggregate `textContent` — went with it, because the field replaced the search.
+
+Two claims changed shape rather than wording, and both are about the two facts a row now carries: the
+browser harness reads a screen's rows by `data-send` *and* by `.row-name`, so a row that lost its line and
+a row that lost its sentence are two different failures; and the Node harness's claim about a setting
+reads the keys off `data-key` now that the key is no longer drawn.
+
+**The housekeeping, done in the same round because it was asked for in the same breath.** The four stray
+paths in the user profile (`config.toml`, `work/`, `sessions/`, `live/`) are gone, and one of them turned
+out to explain a mystery from an earlier round: `C:\Users\zhangzhuo\config.toml` was a **junction into
+`%TEMP%`**, which is why a recursive listing of it printed nineteen thousand test scratch directories
+instead of a file. The scratch directories themselves — `%TEMP%\flint-*`, one per `test_home` call, tens of
+thousands of them — were swept too. Nothing of the person's own was touched: their real home is
+`C:\Users\zhangzhuo\.flint`, and its `config.toml` (1,699 bytes, 2026-09-18) was left exactly as it was.
 
 ### The reasoning level stops going back to `off`, and the row's menu stops leaving the window — 2026-09-23
 
