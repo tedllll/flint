@@ -793,6 +793,14 @@ reader goes for that. The command itself is still drawn in the one place a perso
 dialog's drawing code to never mention it, and the rows carry the line they would send as `data-send` so
 that the page's own marks and the browser harness can still find a row by it (§22 of `docs/web-mode.md`).
 
+A row may also carry a **`note`**: the frame's sentence for what the value *in force* means for the
+endpoint, drawn dim under the row's name. The reasoning level is the one that has it, and it is the
+reason the field exists — `off` says what flint asks for and nothing about whether the model reasons, so
+a run at `off` against an endpoint that reasons on its own printed thinking while the screen read `off`,
+and that was reported as the screen lying about the run (2026-09-24). The words are the process's, the
+same ones the terminal's answer to `/thinking` prints, so the two readers of that setting cannot
+disagree.
+
 | Area | Control | What pressing it does |
 |---|---|---|
 | header | the conversation's name, above everything | not a control: the session file's own newest `title` event, else the label `GET /sessions` chose (the newest name, else the first thing said, else `(empty)`). Clipped with the whole of it in the tooltip |
@@ -801,6 +809,7 @@ that the page's own marks and the browser harness can still find a row by it (§
 | settings | `#settings-close`, the mask, `Escape` | three ways out of the same dialog: its own `close` button, a press anywhere on the mask, and `Escape`. Closing returns the keyboard to `#settings-open`, and opening moves it to `#settings-close` |
 | settings | the rail (`model`, `this run`, `limits`, `tools`, `this conversation`, `background work`) | one screen at a time, built from the page's own list when the dialog opens; the one in force is marked `aria-current="true"` and the others are `hidden`, so a row on another screen cannot be pressed at all. A screen name is the page's own word for *a place it put things* — what is inside it still comes from the frame |
 | settings | any setting whose values are words (`model`, `this run`) | one **button per word the frame listed**, with the one in force pressed (`aria-pressed="true"`); a press sends the frame's own line — `/provider <name>`, `/model <name>`, `/thinking <level>`, `/<switch> <value>`. A word the frame did not list but reports as the value in force is drawn as one more button and pressed, never silently replaced by the first of the others. A setting with a single word is one dead button. There is no `<select>` in a setting: the words *are* the control |
+| settings | a setting the frame gives a `note` (today the reasoning level) | a second dim line under the row's name, in the frame's own words, saying what the value **in force** means for the endpoint. `off` is a statement about what flint asks for, not about whether the model reasons: a provider that names no `thinking_field` is never asked (and a level set on one is kept for a provider that has the field, while nothing is sent), and an endpoint that reasons on its own keeps doing so at any level. The terminal's answer to the same command prints the same sentence |
 | settings | a setting whose value is a line (`shell`, `shell_args`, `max_steps`, `proxy`) | a one-line form whose input type is the frame's own `kind`, and a `save` button that is disabled until the value differs from the one in force |
 | settings | one action button, on the screen the frame filed it on | sends the frame's own line — `/reload` and `/say` on `this run`, `/new` and the rest on `this conversation` |
 | settings | the dialog's foot (`#meta`) | not a control: the loaded conversation's model, `cwd`, provider, id, creation time and last usage — the line the header used to carry, under every screen rather than on one |

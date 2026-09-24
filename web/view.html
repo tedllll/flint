@@ -313,6 +313,9 @@
     flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px;
   }
   #settings-panes .setting-name, #settings-panes .row-name { color: var(--fg); }
+  #settings-panes .setting-note {
+    color: var(--dim); font-size: 12.5px; min-width: 0; opacity: .85;
+  }
   #settings-panes .row-note {
     color: var(--dim); font-size: 12.5px; min-width: 0;
   }
@@ -2033,14 +2036,23 @@ function drawSettings(doc, key, box) {
 /// nothing about the file is hidden from a reader who wants it (`/config` prints it, and so do the
 /// docs) -- while what is *drawn* is the sentence the process already wrote for what changing it means.
 /// There is no second description here to drift from that sentence.
+///
+/// A row may also carry a `note`, which is not a second description but the frame's sentence for what
+/// the value *in force* means for the endpoint -- the one thing a control cannot show, and the reason
+/// this exists: a reasoning level of `off` on a provider that is never asked for one reads, on a screen
+/// with no note, exactly like a run that has turned reasoning off. Reported that way, 2026-09-24. The
+/// words are the frame's (`thinking_note` in `src/main.rs`), so the terminal's own answer to the
+/// command and this row cannot disagree about one setting.
 function settingRow(doc, setting) {
   const send = typeof setting.send === "string" ? setting.send : "";
   const help = typeof setting.help === "string" ? setting.help : "";
+  const note = typeof setting.note === "string" ? setting.note : "";
   const value = setting.value === undefined || setting.value === null ? "" : String(setting.value);
   const row = el("div", "setting");
   row.setAttribute("data-key", setting.key);
   const text = el("div", "setting-text");
   text.appendChild(el("span", "setting-name", help));
+  if (note) text.appendChild(el("span", "setting-note", note));
   row.appendChild(text);
   if (setting.kind === "select") {
     row.appendChild(choiceControl(doc, send, help, setting.choices, value));

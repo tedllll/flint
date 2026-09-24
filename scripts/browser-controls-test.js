@@ -793,6 +793,24 @@ async function main() {
       Array.isArray(names) && names.length > 0 && !keys.some((key) => names.includes(key)),
       `names: ${JSON.stringify(names)}, keys: ${JSON.stringify(keys)}`
     );
+    // The reasoning row carries the frame's sentence for what its level *means for this endpoint*, which
+    // is the fact its own control cannot show -- and the one whose absence made `off` beside a model
+    // that reasons on its own read as a run reporting itself wrongly (reported 2026-09-24). The claim
+    // requires one of the three sentences the frame can carry rather than any non-empty text, because
+    // the frame's own choice between them is what says whether a level goes anywhere at all; that
+    // choice is held against the frame itself in `tests/cli_output.rs`.
+    const levelNote = await page.js(
+      `(() => { const row = ${SETTING("model", "thinking")};
+         const said = row ? row.querySelector(".setting-note") : null;
+         return said ? said.textContent.trim() : null; })()`
+    );
+    check(
+      "the reasoning row says what its level means for the endpoint, not only what the level is",
+      typeof levelNote === "string" &&
+        /never asked for a reasoning level|no reasoning parameter is sent|sent as \S+ on every request/
+          .test(levelNote),
+      `note: ${JSON.stringify(levelNote)}`
+    );
     const started = before();
     // Read before the press, for the claim under it: what the sidebar holds is conversations, and a
     // switch is a decision about how to ask rather than something said.

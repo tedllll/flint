@@ -2243,6 +2243,37 @@ and neither of those two has to be inferred from the other.
 | A row handed off from the `/` menu is still pointed at on its screen | the browser harness, whose form rows are found by `data-send` | reported as a real defect while this round was being written: with the syntax off the screen, `markCommandRow`'s text search found nothing and a form row taken from the palette opened the dialog without marking anything. Found by the Node harness, not by reading the code |
 | A destructive row's candidates are the things themselves | `scripts/web-view-test.js`, and the browser harness for the stop row | `/provider rm`'s candidates read `stub` and `other`; the jobs row's reads the job's own description with the run's sentence beside it, and the pid it will stop is in the line it sends |
 
+**A setting's row says what its value means, not only what its name means — added 2026-09-24.** Reported
+one round later, and it is the same screen read one step further down:
+
+> "I open the web page, open settings, thinking is off — then I send a new conversation and the model
+> reasons and prints its thinking, and the settings screen still says off."
+
+Both halves were true and neither was wrong. The run's level *was* `off`; the model reasoned anyway,
+because that endpoint reasons on its own and flint never asked it for anything — this person's provider
+carries `thinking_field = ""`, so flint has no field to put a level in and sends none whatever the ladder
+says. The fact was already written down in two places: the terminal's answer to `/thinking` and
+`/config`'s line both distinguish "this provider sends no reasoning field" from "no reasoning parameter
+is sent — the endpoint's own default, which for some models is reasoning on". Neither is on the page, so
+the screen a person actually reads showed `off` beside a reply full of thinking, and a screen that reads
+like that is a screen reporting a run that does not exist — §8's fault, in the one place a control
+cannot fix it, because *what the endpoint does with a level* is not something a control can display.
+
+So a setting row may carry a **`note`**, and the frame decides it rather than the page: `thinking_note`
+in `src/main.rs` is one function with three cases (no field; `off` on an endpoint that has one; a level
+in force), the terminal's answer to `/thinking` and `/config`'s line print it, and the page draws it as
+`.setting-note` under the row's name. The trap the second case covers is the one a person walks into by
+using the screen: a level set on a provider with no field is *kept* — it is the run's level, and it is
+what the next provider, the one with a field, will be asked for — so a row reading `high` while nothing
+is sent is the same confusion in its worse form, and the note stays the "never asked" one either way.
+
+| Claim | How | Result |
+|---|---|---|
+| The frame says, in the frame's own words, what a reasoning level means for the endpoint in force | `tests/cli_output.rs`, over a real `--web` run, in all three cases, with the frame read to its **last** key (`"type":"state"`) so a partial frame cannot answer for a whole one | an endpoint with no field, a level kept on it, the same level after the field is added to the file and `/reload` (the note changes with it), and `off` on an endpoint that has one. Written red first: the frame's thinking row carried no note at all, which is the report |
+| The terminal and the page cannot disagree about that setting | the same test, which holds the terminal's own answer to `/thinking` to the sentence the page is handed | one function feeds both, and the assertion is what keeps a later edit from writing a second sentence |
+| The page draws a note the frame carries, in the row's own text | `scripts/web-view-test.js`, with a frame that has one row with a note and one without | the note is the row's second line (`.setting-note`, under `.setting-name`), a row the frame gave none draws exactly one line, and the **control** is still the row's second child — the note must not push the press out of the place the page and the browser harness both read it from. Shown red by mutation: with the `setting-note` append removed the claim fails with `["setting-name"]` against `["setting-name","setting-note"]` |
+| A real browser draws it on the reasoning row | the browser harness, on the model screen | the note is one of the three sentences the frame can carry, so a claim that only asked "is a note drawn" cannot pass on a page that invented one of its own |
+
 **`hidden`, not `<dialog>`/`showModal`.** §10 already recorded why the page has no `<dialog>`: the stub
 DOM the Node harness runs cannot express `showModal`, and a control whose behaviour is only checkable in
 a browser is a control most of whose behaviour goes unchecked. The dialog is a `hidden`-toggled div with

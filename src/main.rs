@@ -4039,20 +4039,19 @@ async fn handle_command(
             }
             let level = agent.thinking().to_string();
             let field = agent.thinking_field().to_string();
+            // The meaning of the level, from the one place that says it: the page's row is handed the
+            // same sentence (`thinking_note`), so the two readers of this setting cannot disagree.
+            let note = thinking_note(&level, &field);
             if field.is_empty() {
+                // ...and how to make it live, which is the terminal's to say: this is where a person
+                // reads the key to set, and the page's row is deliberately free of config keys.
                 printer.term().line(format_args!(
-                    "thinking {bold}{level}{reset} {dim}(this provider sends no reasoning field: set \
-                     `thinking_field` in [providers] to the field it wants — `reasoning_effort` is the \
-                     common one){reset}"
-                ));
-            } else if level == "off" {
-                printer.term().line(format_args!(
-                    "thinking {bold}off{reset} {dim}(no reasoning parameter is sent — the endpoint's \
-                     own default, which for some models is reasoning on){reset}"
+                    "thinking {bold}{level}{reset} {dim}({note}; set `thinking_field` in [providers] to \
+                     the field it wants — `reasoning_effort` is the common one){reset}"
                 ));
             } else {
                 printer.term().line(format_args!(
-                    "thinking {bold}{level}{reset} {dim}(sent as {field} on every request){reset}"
+                    "thinking {bold}{level}{reset} {dim}({note}){reset}"
                 ));
             }
         }
@@ -6221,6 +6220,32 @@ impl OnPage {
     }
 }
 
+/// What a reasoning level *means* for the endpoint in force, in one sentence.
+///
+/// Three cases, and the first is the one that was reported: a provider that names no `thinking_field`
+/// is never asked, whatever level the run is holding. The level is still kept -- the field belongs to
+/// whichever provider a person switches to, which is the whole reason the two halves are separate --
+/// which is why a row showing `high` beside an endpoint that was never told is the worse half of the
+/// same confusion.
+///
+/// One sentence rather than two, because the terminal's answer to `/thinking` and the page's row are
+/// two readers of one fact: a level that reads one way in the terminal and another on the screen is
+/// the fault `state_frame`'s own comment exists to prevent.
+fn thinking_note(level: &str, field: &str) -> String {
+    let field = field.trim();
+    if field.is_empty() {
+        "this endpoint is never asked for a reasoning level, so flint sends none — a model that \
+         reasons on its own still will"
+            .to_string()
+    } else if level == "off" {
+        "no reasoning parameter is sent — the endpoint's own default, which for some models is \
+         reasoning on"
+            .to_string()
+    } else {
+        format!("sent as {field} on every request")
+    }
+}
+
 /// The settings a page may change, each with the words that change it, the values it takes, and the
 /// value it is on.
 ///
@@ -6240,7 +6265,9 @@ impl OnPage {
 ///
 /// Built from the values *in force*: the printer's level, which is three-valued while the file's key
 /// is a word, the agent's guard rather than `cfg.readonly`, and the config this run loaded rather than
-/// the file on disk. Nothing secret goes in it.
+/// the file on disk. Nothing secret goes in it. A row may also carry a `note`, which is the one thing
+/// here that is about the *endpoint* rather than the setting: what the value in force means for it,
+/// said by `thinking_note` for the reasoning level and by nothing else so far.
 fn settings(
     cfg: &config::Config,
     provider_cfg: &config::ProviderConfig,
@@ -6319,21 +6346,30 @@ fn settings(
         ),
         // The reasoning ladder, whose values are the levels flint asks in, so the page offers exactly
         // what `/thinking` accepts. Whether the *endpoint* has the field is not something a control
-        // can show, and the command says it when the level is set.
-        one(
-            "model",
-            "thinking",
-            "select",
-            agent.thinking().to_string(),
-            Some(
-                crate::provider::Thinking::LEVELS
-                    .iter()
-                    .map(|l| l.to_string())
-                    .collect(),
-            ),
-            "/thinking",
-            help_of("/thinking", OnPage::Toggles, provider_cfg),
-        ),
+        // can show, so the row carries it as a note: a level is a statement about what flint asks for,
+        // and a model whose endpoint reasons on its own keeps reasoning at any level -- which is what
+        // a screen reading `off` beside a reply full of thinking looked like, and it was reported as
+        // exactly that on 2026-09-24.
+        {
+            let level = agent.thinking().to_string();
+            let field = agent.thinking_field().to_string();
+            let mut row = one(
+                "model",
+                "thinking",
+                "select",
+                level.clone(),
+                Some(
+                    crate::provider::Thinking::LEVELS
+                        .iter()
+                        .map(|l| l.to_string())
+                        .collect(),
+                ),
+                "/thinking",
+                help_of("/thinking", OnPage::Toggles, provider_cfg),
+            );
+            row["note"] = serde_json::json!(thinking_note(&level, &field));
+            row
+        },
         // ---- how this run behaves: `run` ------------------------------------------------------
         one(
             "run",

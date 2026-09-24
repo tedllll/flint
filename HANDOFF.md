@@ -58,10 +58,13 @@ re-measured a **thirteenth** time the same day, after the round at the top of th
 dialog that said what to type (the five `web_view` byte-claims that named `command.label` or carried
 `askReport`'s old signature, one of them gaining a new assertion that the drawing code never mentions the
 line, one new headless claim about the dialog drawing no syntax at all with the palette as its control,
-and three browser claims, one of which had gone quietly vacuous):
+and three browser claims, one of which had gone quietly vacuous), and re-measured a **fourteenth** time
+the same day, after the round at the top of this section — the settings row that says `off` beside a model
+that reasons (one new `cli_output` test over a real `--web` run and three frames, watched red first, one
+new headless claim with its own mutation control, and one new browser claim):
 `cargo test`
-**702 passing, 1 ignored** across the 14 suites (lib **388**, bin **9**, `agent_loop` 34,
-`balance` 7, `cli_output` **124**, `json_output` 41, `say` 6,
+**703 passing, 1 ignored** across the 14 suites (lib **388**, bin **9**, `agent_loop` 34,
+`balance` 7, `cli_output` **125**, `json_output` 41, `say` 6,
 `search_tool` 4, `task` 17, `term_capture` 20 + 1 ignored, `tty_hangup` **0 on Windows** and 3 on Unix
 — the suite is `#![cfg(unix)]`, and the library carries a few `#[cfg(unix)]` tests of its own, so the
 ubuntu job's total is larger and is *not* quoted here as if it were this number — `web_view` **42**,
@@ -71,7 +74,7 @@ ubuntu job's total is larger and is *not* quoted here as if it were this number 
 more step of that same CI job** — `examples/python/test_call.py` and `examples/mcp/test_mcp.py`, each
 resolving the binary `cargo test` just built for itself and refusing a pass that came from an installed
 `flint` on `PATH`; the
-browser harness run by hand at **137/137 claims held**, printing the list of drives and not-drives it is
+browser harness run by hand at **138/138 claims held**, printing the list of drives and not-drives it is
 bounded by. The release binary on `PATH` is the tree's (`flint --version` → `flint 0.1.0`, exit 0, and
 its SHA-256 is the one `target/release/flint.exe` was built with).
 
@@ -1841,6 +1844,59 @@ picker, type `/config` into the composer, and see whether the answer lands in th
 the block is drawn — then open the `commands` panel and read it against `/help` in the terminal.
 
 ## What was just done
+
+### A setting's row says what its value means, not only what its name means — 2026-09-24
+
+**Reported directly, one round after the settings screen stopped showing command syntax: "I open the web
+page, open settings, thinking is off — then I send a new conversation and the model reasons and prints
+its thinking, and the settings screen still says off."**
+
+The report was checked against the machine rather than guessed at, and both halves turned out to be true
+at once. The run's level really was `off` (the config's key and the session file agree, and no `thinking`
+event has ever been written into that conversation), and the model really did reason — because *this*
+provider carries `thinking_field = ""`, so flint has no field to put a level in and asks for nothing
+whatever the ladder says, while an endpoint that reasons on its own keeps doing so. Nothing was set
+wrongly and no level was lost. The fault was where the fact lived: the terminal's answer to `/thinking`
+and `/config`'s line both distinguish "this provider sends no reasoning field" from "no reasoning
+parameter is sent — the endpoint's own default, which for some models is reasoning on", and neither is on
+the page. So the screen a person actually reads showed `off` beside a reply full of thinking, which is a
+screen reporting a run that does not exist — the fault §8 exists to prevent, in the one place a control
+cannot fix it, since what an endpoint does with a level is not something a control can display.
+
+**One sentence, one function, two readers.** `thinking_note` in `src/main.rs` returns the frame's own
+words for the three cases the row can be in — an endpoint that names no field, `off` on one that has a
+field, and a level in force (which names the field it goes in) — the state frame's thinking row carries
+it as `note`, the page draws it as a dim `.setting-note` under the row's name, and the terminal's answer
+to `/thinking` prints the same sentence rather than a second one written beside it. `/config`'s line
+still says which of the two halves is missing, and the "set `thinking_field` in [providers] …" hint stays
+in the terminal, where a config key belongs. The middle case is the trap a person walks into by *using*
+the screen: a level set on a provider with no field is kept — it is this run's level, and it is what the
+next provider, the one with the field, will be asked for — so the row reads `high` while nothing is sent,
+and the note stays the "never asked" one either way.
+
+**Three claims, and the lesson is in how the first one is read.** `tests/cli_output.rs` gained a test that
+runs a real `--web` run, reads the frame in all three cases, and holds the terminal's own answer to the
+reasoning row's sentence. It was written first and failed for exactly the reported reason — the thinking
+row's object in the frame carried no note at all. Writing it also cost a false start worth recording: the
+first version fenced each frame read on a field the frame writes *early* (`"models"`, then a setting's
+`value`), and the stale frame a `Live` keeps for a new subscriber carries those same bytes — so the test
+read the frame from *before* the `/reload` and reported a fix that had already worked as broken. Every
+read now fences on `"type":"state"`, which is the frame's **last** key, and reads from one subscriber
+throughout, so what is left on the socket is only what has not been read. `scripts/web-view-test.js`
+gained the page's half (a row with a note draws it under the name, a row without one draws exactly one
+line, and the press stays the row's second child), shown red by mutation: with the append removed the
+claim fails with `["setting-name"]` against `["setting-name","setting-note"]`. The browser harness gained
+the claim that a real browser draws one of the three sentences on the reasoning row, which cannot pass on
+a page that invented a sentence of its own.
+
+**What this person's own setup reads now, and the one line that makes the ladder live.** Their
+`~/.flint/config.toml` (untouched — it is theirs, and it is outside this repository) names no
+`thinking_field` for either provider, so the reasoning row now says, in the process's own words, that
+this endpoint is never asked for a reasoning level and that a model which reasons on its own still will.
+Adding `thinking_field` to that provider — `reasoning_effort` is the common one, and the terminal's
+answer to `/thinking` names it — is what makes the ladder reach the endpoint at all; the shipped default
+config already writes that field for the provider it ships, which is why this only shows up on a file
+that predates it or was written by hand.
 
 ### The settings dialog says what a row does, not what to type — 2026-09-23
 

@@ -7624,6 +7624,146 @@ fn the_reasoning_level_a_person_sets_is_kept_for_the_next_run() {
     );
 }
 
+/// What a reasoning level *means* for the endpoint in force is on the settings screen, not only in the
+/// terminal.
+///
+/// Reported directly, 2026-09-24: *"I open the web page, open settings, thinking is off -- then I send a
+/// new conversation and the model reasons and prints its thinking, and the settings screen still says
+/// off."* Both halves were true and neither was wrong: the run's level **was** `off`, and this person's
+/// provider carries no `thinking_field`, so flint never asks for a level at all -- while the model
+/// reasons on its own, which is the endpoint's business rather than a setting. With `off` beside a
+/// reply full of thinking, the screen a person actually reads looked like it was lying about the run.
+/// The fact was already said in two places a person at the page does not read: the answer to
+/// `/thinking` and `/config`'s line. It belongs on the row too, because the row is where the level is
+/// read.
+///
+/// Held from the frame, because that is what the page draws, and in all three cases the row can be in:
+/// an endpoint that is never asked, a level in force, and `off` on an endpoint that *could* be asked.
+/// The first case is asked twice on purpose, once at `off` and once at `high`: a level set on a
+/// provider with no field is kept -- that is what the level is for, since the field belongs to
+/// whichever provider a person switches to -- while nothing is sent, and a row reading `high` with no
+/// note would be the original complaint in its worse form.
+#[test]
+fn the_settings_screen_says_what_a_reasoning_level_means_for_this_endpoint() {
+    // The reporter's own shape: the file names no level (so the run is at `off`) and the provider names
+    // no reasoning field (so there is nothing flint could send it).
+    let home = test_home("level-meaning", "http://127.0.0.1:9/v1");
+    std::fs::write(
+        home.join("config.toml"),
+        "default_provider = \"stub\"\n\n\
+         [[providers]]\n\
+         name = \"stub\"\n\
+         base_url = \"http://127.0.0.1:9/v1\"\n\
+         model = \"stub-model\"\n\
+         api_key = \"not-a-real-key\"\n",
+    )
+    .expect("the test config");
+
+    let log = home.join("transcript.txt");
+    let errors = home.join("stderr.txt");
+    let mut child = binary()
+        .arg("--web")
+        .env("FLINT_HOME", &home)
+        .env_remove("NO_COLOR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::fs::File::create(&log).expect("transcript file"))
+        .stderr(std::fs::File::create(&errors).expect("stderr file"))
+        .spawn()
+        .expect("failed to run flint");
+
+    let (port, token) = port_and_token(&wait_for_url(&log));
+    let mut watching = http_stream(port, "/events", &token);
+    // Every read fences on `"type":"state"`, which is the **last** key of the frame: a fence on a field
+    // the frame writes earlier (`"models"`, or a setting's `value`) stops as soon as those bytes
+    // arrive, which is a frame read in the middle -- and here that is worse than flaky, because the
+    // stale frame a `Live` keeps for a new subscriber carries the same field. Read from the one
+    // subscriber throughout for the same reason: what is left on this socket is only what has not been
+    // read yet, so a later frame cannot be confused with an earlier one.
+    let opening = read_until(&mut watching, "\"type\":\"state\"", 20);
+
+    // The trap, walked into on purpose, and the half the note has to survive: a level set on a provider
+    // that names no field.
+    let set_high = post_message(port, &token, "/thinking high");
+    let high = read_until(&mut watching, "\"type\":\"state\"", 20);
+
+    // ...and what a person does about it: name the field in the file and reload. The state follows the
+    // rebuild without anybody pressing anything, because the frame is pushed at the top of the loop
+    // every command comes back to.
+    std::fs::write(
+        home.join("config.toml"),
+        "default_provider = \"stub\"\n\n\
+         thinking = \"high\"\n\n\
+         [[providers]]\n\
+         name = \"stub\"\n\
+         base_url = \"http://127.0.0.1:9/v1\"\n\
+         model = \"stub-model\"\n\
+         api_key = \"not-a-real-key\"\n\
+         thinking_field = \"reasoning_effort\"\n",
+    )
+    .expect("the config with a field");
+    let reloaded = post_message(port, &token, "/reload");
+    let asked = read_until(&mut watching, "\"type\":\"state\"", 20);
+
+    // The third case: `off` on an endpoint that could be asked. This is the sentence that answers "then
+    // why is my model thinking".
+    let set_off = post_message(port, &token, "/thinking off");
+    let off = read_until(&mut watching, "\"type\":\"state\"", 20);
+
+    drop(watching);
+    drop(child.stdin.take());
+    let exited = wait_for_exit(&mut child, 20);
+    let transcript = std::fs::read_to_string(&log).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&home);
+
+    assert!(exited, "flint did not exit");
+    let only_settings = |frame: &str| -> String {
+        frame.rsplit("\"settings\":").next().unwrap_or(frame).to_string()
+    };
+    assert!(
+        set_high.starts_with("HTTP/1.1 202")
+            && reloaded.starts_with("HTTP/1.1 202")
+            && set_off.starts_with("HTTP/1.1 202"),
+        "a command the page's own rows send was not accepted: {set_high:?} {reloaded:?} {set_off:?}"
+    );
+    assert!(
+        opening.contains("\"key\":\"thinking\"")
+            && opening.contains("\"value\":\"off\"")
+            && opening.contains("never asked for a reasoning level"),
+        "the frame draws a level of `off` on an endpoint that cannot be asked for one and says nothing \
+         about it -- which is a screen reading `off` beside a model that reasons on its own, and the \
+         report this test exists for. Settings: {said} Terminal: {transcript:?}",
+        said = only_settings(&opening)
+    );
+    assert!(
+        high.contains("\"value\":\"high\"") && high.contains("never asked for a reasoning level"),
+        "a level set on a provider with no reasoning field is drawn as if the endpoint had heard about \
+         it: {said}",
+        said = only_settings(&high)
+    );
+    assert!(
+        asked.contains("\"value\":\"high\"")
+            && asked.contains("sent as reasoning_effort on every request"),
+        "the frame does not say which field the level it reports actually goes in, so `high` on two \
+         providers looks the same whichever one is in force: {said} Terminal: {transcript:?}",
+        said = only_settings(&asked)
+    );
+    assert!(
+        off.contains("\"value\":\"off\"") && off.contains("no reasoning parameter is sent"),
+        "`off` does not say what it means for the endpoint, which is that nothing is asked for and the \
+         endpoint's own default still applies: {said}",
+        said = only_settings(&off)
+    );
+    // The transcript is the other reader of the same fact, and it is quoted in the failure of the first
+    // assertion above; this keeps the two from drifting apart in the other direction -- a run whose
+    // terminal says one thing and whose page says another would have two readers disagreeing about one
+    // setting, which is the fault `state_frame`'s own comment exists to prevent.
+    assert!(
+        transcript.contains("never asked for a reasoning level"),
+        "the terminal's own answer to `/thinking` does not use the sentence the page is handed: \
+         {transcript:?}"
+    );
+}
+
 /// The page is told what its controls could offer, and told again when that changes.
 ///
 /// §8's read channel, and it comes before any control because a picker cannot be drawn without

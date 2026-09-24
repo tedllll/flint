@@ -532,7 +532,8 @@ check("a state frame becomes a control per setting, on the screen the frame name
       { group: "model", key: "model", kind: "select", value: "stub-other",
         choices: ["stub-model", "stub-other"], send: "/model", help: "switch model" },
       { group: "run", key: "verbose", kind: "select", value: "full", choices: ["off", "on", "full"],
-        send: "/verbose", help: "how much to narrate" },
+        send: "/verbose", help: "how much to narrate",
+        note: "this endpoint is never asked for a reasoning level, so flint sends none" },
     ],
   }));
 
@@ -542,6 +543,26 @@ check("a state frame becomes a control per setting, on the screen the frame name
     settingsOf(page, "model").map((row) => row.getAttribute("data-key")),
     ["provider", "model"],
     "and addressed by the frame's key, which is the config file's own word for it"
+  );
+  // The note, when the frame carries one: the row's name is what *changing* the setting means, and the
+  // note is what the value **in force** means for the endpoint -- the fact a control cannot show, and
+  // the one whose absence made a level of `off` on an endpoint that is never asked for one read as a
+  // run that had turned reasoning off (reported 2026-09-24).
+  const runRow = settingsOf(page, "run")[0];
+  eq(
+    runRow.children[0].children.map((n) => n.className),
+    ["setting-name", "setting-note"],
+    "the note is drawn under the row's name, in the row's own text rather than beside the control"
+  );
+  eq(
+    runRow.children[0].children[1].textContent,
+    "this endpoint is never asked for a reasoning level, so flint sends none",
+    "in the frame's own words"
+  );
+  eq(
+    settingsOf(page, "model")[0].children[0].children.length,
+    1,
+    "...and a row the frame gave no note draws exactly one line, rather than an empty second one"
   );
   // The control is the words themselves: one press per value the frame named, with the one in force
   // filled in. A `<select>` was the same fact behind a control the OS drew, which is why no setting
