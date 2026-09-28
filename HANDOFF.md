@@ -58,14 +58,15 @@ re-measured a **thirteenth** time the same day, after the round at the top of th
 dialog that said what to type (the five `web_view` byte-claims that named `command.label` or carried
 `askReport`'s old signature, one of them gaining a new assertion that the drawing code never mentions the
 line, one new headless claim about the dialog drawing no syntax at all with the palette as its control,
-and three browser claims, one of which had gone quietly vacuous), and re-measured a **fifteenth** time
-the same day, after the round at the top of this section — `off` made a level that says something (one
-new `json_output` test with its own two-run control, shown red by mutation, one new unit test for the
-three-fact table, a fourth case added to the `--web` test, and the terminal's missing-key hint):
+and three browser claims, one of which had gone quietly vacuous), and re-measured a **sixteenth** time
+the same day, after the round at the top of this section — a `task` child is started at the level its
+parent is at (one new `tests/task.rs` test with two levels and two request bodies per level, shown red by
+removing the argv push and reading the child's own body, plus the argv unit test and its
+says-nothing-when-empty control):
 `cargo test`
-**704 passing, 1 ignored** across the 14 suites (lib **389**, bin **9**, `agent_loop` 34,
+**705 passing, 1 ignored** across the 14 suites (lib **389**, bin **9**, `agent_loop` 34,
 `balance` 7, `cli_output` **125**, `json_output` 41, `say` 6,
-`search_tool` 4, `task` 17, `term_capture` 20 + 1 ignored, `tty_hangup` **0 on Windows** and 3 on Unix
+`search_tool` 4, `task` **18**, `term_capture` 20 + 1 ignored, `tty_hangup` **0 on Windows** and 3 on Unix
 — the suite is `#![cfg(unix)]`, and the library carries a few `#[cfg(unix)]` tests of its own, so the
 ubuntu job's total is larger and is *not* quoted here as if it were this number — `web_view` **42**,
 `who` 10, and the doc-tests 0);
@@ -1844,6 +1845,49 @@ picker, type `/config` into the composer, and see whether the answer lands in th
 the block is drawn — then open the `commands` panel and read it against `/help` in the terminal.
 
 ## What was just done
+
+### A child runs at the level its parent is at, not at the level the config would start at — 2026-09-24
+
+**Reported from another machine, as a comparison rather than a bug**: *"the same subagent task on two
+platforms, same model — one burned its whole loop before starting, the other finished quickly."* That is
+not slowness, it is a step budget spent before any work: a step is one model call, so a hundred of them
+gone with nothing done is spin. The cause found in this tree is one argv argument that was never passed.
+
+`task_argv` told a child the endpoint (`--provider`, `--model`), whether it may write, and whether to
+keep a conversation — and **not the reasoning level**. A child is a whole flint, so told nothing it read
+the config, which says what the *next* run should start at rather than what this one decided: a parent
+whose person had just typed `/thinking off`, or which was started with `--thinking high`, spawned a
+child at the config's level. On a provider whose `thinking_field` is unwritten — which is every provider
+a person added by hand, and the shipped `ollama` entry — that level is not even a level: nothing is sent
+at all, and for some models the endpoint's own default is reasoning *on*. Measured on `deepseek-flash`:
+nothing sent, 91 characters of reasoning; `reasoning_effort: "none"`, none. So a subagent could pay for
+thinking nobody asked for on every step, and reasoning tokens come out of the same completion budget as
+the tool call — which is how a child ends up spending its loop before it starts.
+
+The fix is small and in one place. `TaskConfig` gained `thinking`, `ToolBox::set_task_thinking` fills it,
+`task_argv` carries `--thinking <level>` beside `--provider`/`--model`, and the *caller* is
+`Agent::hold_to_thinking` — the one funnel a level becomes true in, which is what makes `--thinking`,
+`/thinking`, `/resume`, `/import` and a conversation's own last word all reach a child. It has to be a
+setter rather than a builder for the same reason the level cannot be read when the tool box is built:
+the conversation's file has the last word over the config, so the run only knows its level after
+`resolve_thinking` has read it.
+
+**The evidence is two request bodies per case, not one.** `tests/task.rs` gained a test that runs a real
+parent and a real child against the stub, twice — at `high` and at `off` — and asserts against each
+process's *own* body: the parent's (which proves the run really is at the level the flag named, so the
+child's assertion is not measuring a coincidence) and the child's. `off` is deliberate: it is the case
+that would have passed for the wrong reason on its own, because a child that inherited nothing would
+send the config's `off` word — `none` — which is the same answer. `high` is the case that fails, and it
+did: with the argv push removed the panic is `the child was not handed the level this run is at (high)`
+beside a body carrying `"reasoning_effort":"none"`, which is the defect stated exactly. The argv itself
+is held in `src/tools.rs`'s unit test, including that a run with no level says nothing rather than
+passing a level spelled `""`.
+
+**What this does not claim.** It is one cause found in this tree, and it is a real one; the other
+machine's child session file (`~/.flint/sessions/<dir>/children/*.jsonl`) is the artifact that would
+confirm it was *this* cause rather than an environment one, and the fingerprints are named in the
+session's notes — `invalid JSON arguments for tool`, the identical-call notes at 3/5/8, the
+read-before-write refusals, and a prompt that grows while nothing is produced.
 
 ### `off` was a level that did nothing, and the endpoint's word for *no* is now written down — 2026-09-24
 

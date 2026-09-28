@@ -356,6 +356,16 @@ worth reading:
 - **The endpoint is passed explicitly**, from the parent's resolved provider and model, because
   `--provider`/`--model` on the parent's command line appear nowhere in the config — a child resolving
   its own default would quietly be a different model.
+- **The reasoning level travels with the endpoint, and for the same reason.** `--thinking` on the
+  parent's command line, a `/thinking` typed at its prompt, and a conversation's own last word all live
+  in the *run*; a child told nothing reads the config, which says what the next run should start at
+  rather than what this one decided. So `task_argv` carries the level in force, told by
+  `Agent::hold_to_thinking` — the one funnel a level becomes true in — rather than guessed at spawn
+  time. Found the hard way: on an endpoint whose `thinking_field` is unwritten a child sends *no*
+  reasoning parameter at all, and some models then reason by their own default, so a subagent could
+  spend its whole step budget paying for thinking nobody asked for. That reads as "it burned the loop
+  before starting", which is exactly how it was reported. Measured on `deepseek-flash`: nothing sent,
+  91 characters of reasoning; `reasoning_effort: "none"`, none.
 - **A run that keeps no conversation starts children that keep none.** `--no-session` travels the same
   way the endpoint does, and for the same reason one step out: a child is a conversation *this* run
   asked for, so a parent that promised to write nothing would leave a file behind through the one door

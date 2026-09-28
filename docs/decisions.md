@@ -314,6 +314,18 @@ another provider asks in that provider's field with the level the person chose. 
 not have are **not** hidden: flint cannot know which rungs an endpoint supports without asking it, and a
 menu that quietly drops one is a menu that lies. Four words, offered as they are.
 
+And a fourth, added the next day because the same report had a second half: **a child run is started at
+the level this run is at.** A `task`/`tasks` child is a whole flint started from argv, and it was being
+told the endpoint and not the level — so it read the *config*, which says where the **next** run should
+start, and a run whose person had just typed `/thinking off` could spawn a child that reasoned. On a
+provider with no `thinking_field` written the child sent no reasoning parameter at all, which on some
+models means reasoning *on*: the subagent paid for thinking nobody asked for on every step, which is
+what "it burned the whole loop before starting" is made of. The level now travels the way the endpoint
+does — handed to `task_argv` from `Agent::hold_to_thinking`, the one funnel a level becomes true in, so
+`--thinking`, `/thinking`, `/resume` and `/import` all reach it — which is also the only place that can
+be right: the level is not known when the tool box is built, because the conversation's file has the
+last word over the config.
+
 ## A rebuild of the agent is not a new run
 
 Three commands replace the agent around a conversation that stays where it is: `/model` and `/provider`

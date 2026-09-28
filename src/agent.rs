@@ -416,6 +416,11 @@ impl Agent {
     /// the provider, so a switch re-reads it rather than carrying the old endpoint's name along.
     pub fn hold_to_thinking(&mut self, level: &str) {
         self.provider.set_thinking(level);
+        // And told to the tool box, because a child run is started from argv: this is the one place a
+        // level becomes true for *this* run, so it is the one place a child can be told to run at the
+        // same one. `/thinking`, `--thinking`, `/resume` and `/import` all arrive here, which is what
+        // keeps a `task` child from being the one door where the run's level stops mattering.
+        self.tools.set_task_thinking(level);
     }
 
     /// Write the reasoning level into this conversation's file.

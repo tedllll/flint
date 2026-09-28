@@ -205,6 +205,7 @@ impl ToolBox {
                     readonly,
                     provider: String::new(),
                     model: String::new(),
+                    thinking: String::new(),
                     agents: skill_dirs.agents.clone(),
                     parent: None,
                     no_session: false,
@@ -220,6 +221,7 @@ impl ToolBox {
                     readonly,
                     provider: String::new(),
                     model: String::new(),
+                    thinking: String::new(),
                     agents: skill_dirs.agents.clone(),
                     parent: None,
                     no_session: false,
@@ -364,6 +366,22 @@ impl ToolBox {
             }
         }
         self
+    }
+
+    /// Tell the `task` tool which reasoning level to hand to a child.
+    ///
+    /// A setter rather than a `with_*` builder, and told separately from the endpoint, because the
+    /// level is not known when the tool set is built: the conversation's file has the last word over
+    /// the config, so the run only knows its level once `resolve_thinking` has read it -- and
+    /// [`Agent::hold_to_thinking`] is the one place that happens, which is why the call lives there.
+    /// Every level change goes through that funnel (`--thinking`, `/thinking`, `/resume`, `/import`),
+    /// so a child is always started at the level in force rather than at the one the run began with.
+    pub fn set_task_thinking(&mut self, level: &str) {
+        for tool in &mut self.tools {
+            if let Some(config) = tool.task_config() {
+                config.thinking = level.to_string();
+            }
+        }
     }
 
     /// Tell the `task` tool that this run keeps no conversation, so its children keep none either.
@@ -4676,6 +4694,16 @@ pub struct TaskConfig {
     /// started with `--provider`/`--model` flags that appear nowhere in the config.
     provider: String,
     model: String,
+    /// The reasoning level this run is at, handed to the child for the same reason as the endpoint --
+    /// and because the *config* is not the same answer. A child left to resolve its own level reads
+    /// the file, which says what the next run should start at rather than what this one decided:
+    /// `--thinking high` and `/thinking off` live in the run and its conversation, so a fan-out of
+    /// children used to run at the config's level while the run that asked for them was somewhere
+    /// else. On a provider whose `thinking_field` is unwritten that is not even a level: nothing is
+    /// sent, and for some models the endpoint's own default is reasoning *on*, which is the cost
+    /// hidden in "the subagent burned its whole loop before starting" (measured on `deepseek-flash`:
+    /// nothing sent, 91 characters of reasoning; `reasoning_effort: "none"`, none).
+    thinking: String,
     /// What `.flint/agents/*.md` offered here, for a call that names one. Each carries the path it
     /// was found at, which is how its body is read when it is used -- the name is never turned back
     /// into a path.
@@ -4799,6 +4827,7 @@ pub fn task_argv(
     readonly: bool,
     provider: &str,
     model: &str,
+    thinking: &str,
     schema: Option<&Path>,
     no_session: bool,
 ) -> Vec<String> {
@@ -4823,6 +4852,15 @@ pub fn task_argv(
     if !model.is_empty() {
         argv.push("--model".to_string());
         argv.push(model.to_string());
+    }
+    // The level travels with the endpoint, and for the same reason: a child that resolved its own
+    // would not be the run the caller asked for. `off` is not "no reasoning" by itself -- it is the
+    // word the endpoint was given for it, or silence -- so leaving it out is not the safe default
+    // either: it hands the child the config's level and, on an endpoint that reasons by default, the
+    // reasoning nobody asked for.
+    if !thinking.is_empty() {
+        argv.push("--thinking".to_string());
+        argv.push(thinking.to_string());
     }
     if let Some(path) = schema {
         argv.push("--schema".to_string());
@@ -4977,6 +5015,7 @@ fn prepare_child(config: &TaskConfig, args: &Value, prompt: &str, index: usize) 
         readonly,
         &provider,
         &model,
+        &config.thinking,
         schema_file.as_deref(),
         config.no_session,
     );
@@ -6184,6 +6223,7 @@ mod task_tests {
             false,
             "deepseek",
             "deepseek-chat",
+            "high",
             None,
             false,
         );
@@ -6200,6 +6240,8 @@ mod task_tests {
                 "deepseek",
                 "--model",
                 "deepseek-chat",
+                "--thinking",
+                "high",
             ]
         );
         // One argument, not a command line: the prompt reaches the child as the bytes it is, which
@@ -6213,6 +6255,7 @@ mod task_tests {
             true,
             "p",
             "m",
+            "off",
             Some(Path::new("/tmp/s.json")),
             false,
         );
@@ -6220,16 +6263,18 @@ mod task_tests {
         assert_eq!(guarded.last().unwrap(), "/tmp/s.json");
 
         // An endpoint flint does not know is left unspoken rather than passed as an empty string,
-        // which the child would take as a provider named "".
-        let bare = task_argv(exe, "p", cwd, false, "", "", None, false);
+        // which the child would take as a provider named "". The level is the same kind of fact: a
+        // run told no level says nothing, rather than naming a level spelled "".
+        let bare = task_argv(exe, "p", cwd, false, "", "", "", None, false);
         assert!(!bare.iter().any(|a| a == "--provider"));
         assert!(!bare.iter().any(|a| a == "--model"));
+        assert!(!bare.iter().any(|a| a == "--thinking"));
         assert!(!bare.iter().any(|a| a == "--readonly"));
         assert!(!bare.iter().any(|a| a == "--no-session"));
 
         // A run that keeps no conversation says so to the child it starts: the child is a
         // conversation this run asked for, so it is the one file `--no-session` could still leave.
-        let keeping_nothing = task_argv(exe, "p", cwd, false, "p", "m", None, true);
+        let keeping_nothing = task_argv(exe, "p", cwd, false, "p", "m", "off", None, true);
         assert!(keeping_nothing.contains(&"--no-session".to_string()));
     }
 

@@ -1989,3 +1989,80 @@ async fn a_child_that_ends_while_its_parent_works_is_reported_to_it_once() {
     );
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// A child is asked for the reasoning level *this* run is at.
+///
+/// A child is a whole flint: told nothing about the level, it reads the config -- which says what the
+/// *next* run should start at, not what this one decided -- so `--thinking high`, `/thinking`, and a
+/// conversation's own last word all used to reach the parent's requests and stop there. The cost was
+/// invisible and large: on an endpoint whose `thinking_field` is unwritten a child sends no reasoning
+/// parameter at all, and some models then reason by their own default, so a subagent could spend its
+/// whole loop paying for thinking nobody asked for. The evidence is each process's own request body:
+/// the parent's (which proves the run really is at the level the flag named) and the child's.
+///
+/// Two levels, because one of them cannot pass by accident: a child that inherited nothing would send
+/// the *config's* level, which for `off` is the word `none` -- the same answer as a run at `off` -- so
+/// `high` is the case that fails, and `off` is the one that would have passed for the wrong reason if
+/// it were the only one.
+#[tokio::test]
+async fn a_child_is_asked_for_the_level_this_run_is_at() {
+    for (flag, expected) in [("high", "high"), ("off", "none")] {
+        let step = Arc::new(AtomicUsize::new(0));
+        let server = MockServer::start().await;
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(Watched {
+                step: step.clone(),
+                bodies: vec![
+                    // `background: false`, so the parent waits and the order of the requests is
+                    // parent, child, parent rather than a race with the handle.
+                    tool_call("task", r#"{"prompt":"do the thing","background":false}"#),
+                    prose("the child did it"),
+                    prose("the parent is done"),
+                ],
+                seen: seen.clone(),
+                delay: std::time::Duration::ZERO,
+            })
+            .mount(&server)
+            .await;
+
+        let home = scratch(&format!("thinking-{flag}"), &server.uri());
+        // The two keys that make a level a request rather than a comment. They belong to the provider
+        // table, which is why appending them to the file this helper wrote is where they land -- and
+        // the level itself is set on the command line, because that is the door under test.
+        let config = home.join("config.toml");
+        let mut text = std::fs::read_to_string(&config).expect("test config");
+        text.push_str("thinking_field = \"reasoning_effort\"\nthinking_off = \"none\"\n");
+        std::fs::write(&config, text).expect("test config");
+
+        let work = home.join("work");
+        std::fs::create_dir_all(&work).expect("work dir");
+        let (code, _stdout, stderr) = run_flint(&home, &work, &["--thinking", flag]);
+        assert_eq!(code, 0, "flint failed: {stderr}");
+
+        let requests = seen.lock().expect("seen lock").clone();
+        assert!(
+            requests.len() >= 3,
+            "expected a parent request, a child request and the parent again, got {}: {requests:?}",
+            requests.len()
+        );
+        let parent: serde_json::Value =
+            serde_json::from_str(&requests[0].0).expect("the parent's body is JSON");
+        let child: serde_json::Value =
+            serde_json::from_str(&requests[1].0).expect("the child's body is JSON");
+        assert_eq!(
+            parent.get("reasoning_effort").and_then(|v| v.as_str()),
+            Some(expected),
+            "the run's own request is not at {flag}: {}",
+            requests[0].0
+        );
+        assert_eq!(
+            child.get("reasoning_effort").and_then(|v| v.as_str()),
+            Some(expected),
+            "the child was not handed the level this run is at ({flag}): {}",
+            requests[1].0
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+}

@@ -484,7 +484,7 @@ machine can.
 
 | Tool | Arguments | What it does |
 |---|---|---|
-| `task` | `prompt` (required), `background`, `cwd`, `model`, `provider`, `readonly`, `schema`, `timeout_secs` | one whole other flint, in its own context, that cannot see this conversation |
+| `task` | `prompt` (required), `background`, `cwd`, `model`, `provider`, `readonly`, `schema`, `timeout_secs` | one whole other flint, in its own context, that cannot see this conversation. It inherits the endpoint **and the reasoning level this run is at** (`--provider`, `--model`, `--thinking`), because a child left to resolve its own reads the config -- which says what the next run should start at, not what this one decided |
 | `tasks` | `tasks[]` (required), `max_parallel`, `cwd`, `timeout_secs` | several of them at once, answers labelled in the order asked |
 
 The properties a child inherits and the ones it cannot escape:
